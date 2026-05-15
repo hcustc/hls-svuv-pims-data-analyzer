@@ -1,0 +1,12 @@
+fastapi
+numpy
+openpyxl
+pandas
+pydantic
+PyQt6
+pyqtgraph
+PyWavelets
+PyYAML
+scikit-learn
+scipy
+uvicorn

@@ -1,0 +1,11 @@
+database:
+  pics: database/species_database.sqlite
+paths:
+  output: output
+  examples: data/examples
+config:
+  calibration: config/calibration.yaml
+  calibration_points: config/calibration_points.yaml
+  peak_detection: config/peak_detection.yaml
+  peak_integration: config/peak_integration.yaml
+  normalization: config/normalization.yaml

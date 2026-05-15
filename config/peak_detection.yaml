@@ -1,0 +1,12 @@
+peak_detection:
+  detection_min_idx: 3000
+  threshold_end: 2.0
+  min_intensity: 3.0
+  nearby_peak_window: 30
+  duplicate_window: 20
+  weak_tail_early_window: 90
+  weak_tail_late_window: 50
+  weak_tail_ratio: 5.0
+  gaussian_window_max: 30
+  gaussian_boundary_scale: 1.5
+  boundary_padding: 2

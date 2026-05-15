@@ -1,0 +1,334 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HSL SVUV-PIMS Data Analyzer</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="site-header">
+    <div>
+      <h1>HSL SVUV-PIMS Data Analyzer</h1>
+    </div>
+  </header>
+
+  <nav class="top-nav" aria-label="Web tools">
+    <button class="nav-button active" type="button" data-page="pie-page">PIE / PICS 拟合</button>
+    <button class="nav-button" type="button" data-page="pics-page">PICS 查询</button>
+    <button class="nav-button" type="button" data-page="pics-upload-page">PICS 上传</button>
+  </nav>
+
+  <main id="pie-page" class="shell page active">
+    <section class="panel query-panel">
+      <div class="panel-heading">
+        <h2>输入</h2>
+        <span class="muted">提交后由服务器执行 core 计算</span>
+      </div>
+
+      <div class="source-switch" role="group" aria-label="PIE 输入方式">
+        <button class="source-button active" type="button" data-pie-source="folder">谱文件夹生成</button>
+        <button class="source-button" type="button" data-pie-source="upload">上传 PIE 曲线</button>
+      </div>
+
+      <form id="query-form" class="source-pane active">
+        <label>
+          PIE 扫描文件夹
+          <input id="folder" name="folder" value="tests/fixtures/C6F11O2H/PIE_Scan/1050" autocomplete="off">
+        </label>
+
+        <div class="field-row">
+          <label>
+            卡峰来源
+            <select id="peak-source" name="peak_source">
+              <option value="auto">自动寻峰</option>
+              <option value="manual">手动卡峰</option>
+            </select>
+          </label>
+          <label>
+            能量小数
+            <input id="energy-decimals" name="energy_decimals" type="number" min="0" max="6" value="1">
+          </label>
+        </div>
+
+        <label id="manual-peak-wrap" class="hidden">
+          手动卡峰文件
+          <input id="manual-peak-path" name="manual_peak_path" value="config/peak_integration.yaml" autocomplete="off">
+        </label>
+
+        <label>
+          目标 m/z
+          <input id="target-mz" name="target_mz" placeholder="留空则生成全部曲线，例如 15, 29, 44" autocomplete="off">
+        </label>
+
+        <div class="check-grid">
+          <label class="check-label">
+            <input id="recursive" name="recursive" type="checkbox" checked>
+            递归读取
+          </label>
+          <label class="check-label">
+            <input id="gaussian" name="gaussian" type="checkbox" checked>
+            高斯积分
+          </label>
+        </div>
+
+        <details>
+          <summary>归一化选项</summary>
+          <label>
+            光强处理
+            <select id="photon-mode" name="photon_mode">
+              <option value="first">归一化到首个光强</option>
+              <option value="none">直接除以光强</option>
+              <option value="off">不做光强归一化</option>
+            </select>
+          </label>
+          <label>
+            光强来源
+            <select id="light-source" name="light_source">
+              <option value="io">IO 光电流</option>
+              <option value="beam_current">Beam Current 储存环束流</option>
+            </select>
+          </label>
+          <label>
+            质量歧视因子 D
+            <input id="mass-discrimination" name="mass_discrimination" type="number" min="0.000001" step="0.000001" value="1">
+          </label>
+        </details>
+
+        <button id="start-button" type="submit">生成 PIE 曲线</button>
+      </form>
+
+      <form id="curve-upload-form" class="source-pane hidden">
+        <label>
+          已处理 PIE 曲线
+          <input id="pie-curve-file" type="file" accept=".csv,.tsv,.txt,.xlsx,.xls">
+        </label>
+
+        <div class="format-block compact">
+          <h3>表格格式</h3>
+          <code>长表: mz, energy, intensity</code>
+          <code>宽表: energy, 15, 29, 44 ...</code>
+        </div>
+
+        <button id="upload-curve-button" type="submit">上传 PIE 曲线</button>
+      </form>
+
+      <div class="status-box">
+        <div class="status-line">
+          <span id="status-pill" class="pill idle">Idle</span>
+          <span id="status-text">等待提交任务</span>
+        </div>
+        <div id="progress-log" class="progress-log"></div>
+      </div>
+    </section>
+
+    <section class="panel result-panel">
+      <div class="panel-heading">
+        <h2>结果</h2>
+        <span id="source-caption" class="muted">尚未生成曲线</span>
+      </div>
+
+      <div class="toolbar">
+        <label>
+          选择 m/z
+          <select id="mz-select" disabled></select>
+        </label>
+        <div class="fit-mode">
+          <span>候选 PICS</span>
+          <div class="segmented">
+            <button class="segment-button active" id="fit-auto-button" type="button" data-fit-mode="auto">自动</button>
+            <button class="segment-button" id="fit-manual-button" type="button" data-fit-mode="manual">手动</button>
+          </div>
+        </div>
+        <button id="fit-button" type="button" disabled>拟合当前曲线</button>
+        <label class="check-label compact">
+          <input id="show-components" type="checkbox" disabled>
+          显示组分
+        </label>
+      </div>
+
+      <div class="chart-wrap">
+        <canvas id="pie-chart" height="420"></canvas>
+      </div>
+
+      <div id="fit-summary" class="fit-summary"></div>
+
+      <div id="candidate-panel" class="candidate-panel hidden">
+        <div class="candidate-heading">
+          <strong>PICS 候选</strong>
+          <span id="candidate-caption" class="muted">尚未读取</span>
+          <div class="candidate-actions">
+            <button id="select-all-candidates" class="small-button secondary" type="button">全选</button>
+            <button id="clear-candidates" class="small-button secondary" type="button">清空</button>
+          </div>
+        </div>
+        <div id="candidate-view" class="table-view compact-table">
+          <div class="empty">切换到手动模式后显示候选 PICS。</div>
+        </div>
+      </div>
+
+      <div class="table-toolbar">
+        <button class="tab-button active" type="button" data-table="species">拟合物种</button>
+        <button class="tab-button" type="button" data-table="curve">当前曲线积分</button>
+        <button class="tab-button" type="button" data-table="all">全部积分结果</button>
+        <button id="download-button" type="button" disabled>下载当前表</button>
+      </div>
+      <div id="table-view" class="table-view">
+        <div class="empty">生成曲线后显示结果表。</div>
+      </div>
+    </section>
+  </main>
+
+  <main id="pics-page" class="shell page">
+    <section class="panel query-panel">
+      <div class="panel-heading">
+        <h2>PICS 查询</h2>
+        <span id="pics-library-caption" class="muted">当前使用服务器维护库</span>
+      </div>
+
+      <form id="pics-form">
+        <div class="field-row">
+          <label>
+            m/z
+            <input id="pics-mz" type="number" min="0" placeholder="例如 15">
+          </label>
+          <label>
+            容差
+            <input id="pics-tolerance" type="number" min="0" value="0">
+          </label>
+        </div>
+
+        <label>
+          物种名 / 公式关键词
+          <input id="pics-name" placeholder="例如 methane, methyl" autocomplete="off">
+        </label>
+
+        <div class="field-row">
+          <label>
+            IE 最小值
+            <input id="pics-ie-min" type="number" step="0.001" placeholder="eV">
+          </label>
+          <label>
+            IE 最大值
+            <input id="pics-ie-max" type="number" step="0.001" placeholder="eV">
+          </label>
+        </div>
+
+        <label>
+          最大返回数
+          <input id="pics-limit" type="number" min="1" max="500" value="100">
+        </label>
+
+        <button id="pics-search-button" type="submit">查询 PICS</button>
+      </form>
+    </section>
+
+    <section class="panel result-panel">
+      <div class="panel-heading">
+        <h2>查询结果</h2>
+        <span id="pics-caption" class="muted">尚未查询</span>
+      </div>
+
+      <div id="pics-summary-grid" class="summary-grid">
+        <div class="summary-card"><span>命中物种</span><strong>0</strong></div>
+        <div class="summary-card"><span>当前 m/z</span><strong>-</strong></div>
+        <div class="summary-card"><span>数据点</span><strong>0</strong></div>
+        <div class="summary-card"><span>IE(eV)</span><strong>-</strong></div>
+      </div>
+
+      <div class="chart-wrap">
+        <canvas id="pics-chart" height="380"></canvas>
+      </div>
+
+      <div class="table-toolbar">
+        <button id="pics-download-button" type="button" disabled>下载查询结果</button>
+      </div>
+      <div id="pics-table-view" class="table-view">
+        <div class="empty">输入条件后查询 PICS 数据库。</div>
+      </div>
+    </section>
+  </main>
+
+  <main id="pics-upload-page" class="shell page">
+    <section class="panel query-panel">
+      <div class="panel-heading">
+        <h2>PICS 上传</h2>
+        <span class="muted">维护 SQLite 查询库</span>
+      </div>
+
+      <form id="pics-upload-form">
+        <label>
+          PICS 数据文件
+          <input id="pics-upload-file" type="file" accept=".csv,.tsv,.txt,.xlsx,.xls">
+        </label>
+
+        <label>
+          上传范围
+          <select id="pics-upload-scope">
+            <option value="session">临时工作库，仅当前会话使用</option>
+            <option value="server">写入服务器维护库，需要管理员权限</option>
+          </select>
+        </label>
+
+        <label id="admin-token-wrap" class="hidden">
+          管理员 token
+          <input id="admin-token" type="password" autocomplete="off" placeholder="仅写入服务器维护库时需要">
+        </label>
+
+        <label id="pics-write-mode-wrap" class="hidden">
+          写入模式
+          <select id="pics-upload-mode">
+            <option value="upsert">替换同名同 m/z 物种</option>
+            <option value="append">追加为新记录</option>
+            <option value="overwrite_all">覆盖整个库</option>
+          </select>
+        </label>
+
+        <label id="overwrite-confirm-wrap" class="check-label hidden">
+          <input id="overwrite-confirm" type="checkbox">
+          确认覆盖整个 PICS 库
+        </label>
+
+        <button id="pics-upload-button" type="submit">上传并写入</button>
+      </form>
+
+      <div class="status-box">
+        <div class="status-line">
+          <span id="upload-status-pill" class="pill idle">Idle</span>
+          <span id="upload-status-text">等待上传</span>
+        </div>
+        <div class="library-status">
+          <span id="active-pics-library">当前使用服务器维护库。</span>
+          <button id="use-server-library" class="small-button secondary" type="button">切回服务器库</button>
+        </div>
+        <div id="upload-progress-log" class="progress-log"></div>
+      </div>
+    </section>
+
+    <section class="panel result-panel">
+      <div class="panel-heading">
+        <h2>上传规则</h2>
+        <span class="muted">CSV / TSV / TXT / XLSX / XLS</span>
+      </div>
+
+      <div class="format-block">
+        <h3>长表格式</h3>
+        <p>每行一个能量点。推荐列名：</p>
+        <code>mz, name, ionization_energy, energy_ev, cross_section</code>
+      </div>
+
+      <div class="format-block">
+        <h3>宽表格式</h3>
+        <p>每行一个物种，能量列作为列名，例如：</p>
+        <code>mz, name, ionization_energy, 10.0, 10.5, 11.0, 11.5</code>
+      </div>
+
+      <div id="upload-result" class="upload-result">
+        <div class="empty">上传完成后显示解析和写入统计。</div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

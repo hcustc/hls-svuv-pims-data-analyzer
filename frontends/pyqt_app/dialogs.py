@@ -1,0 +1,1246 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+from PyQt6 import QtCore, QtWidgets
+
+from core.calibration import Calibration
+from core.config import (
+    PeakDetectionConfig,
+    load_calibration_config,
+    load_peak_detection_config,
+    save_calibration_config,
+    save_peak_detection_config,
+    species_database_path,
+)
+from core.isotope import calculate_isotope_distribution, parse_formula
+from core.output_paths import ensure_output_dir
+from core.pie_analysis import analyze_pie_folder, build_pie_curves, identify_species_for_mz_with_curve, load_species_database
+from core.normalization import NormalizationSettings, load_normalization_settings, save_normalization_settings
+from core.temperature_scan import analyze_temperature_folder, build_temperature_curves, compute_kr_expansion_factors
+from frontends.pyqt_app.workers import WorkerThread
+
+try:
+    import pyqtgraph as pg
+except Exception:  # pragma: no cover - only used when optional plotting is unavailable
+    pg = None
+
+
+class DataFrameTableMixin:
+    def set_dataframe(self, table: QtWidgets.QTableWidget, df: pd.DataFrame) -> None:
+        table.setUpdatesEnabled(False)
+        table.clear()
+        table.setRowCount(len(df))
+        table.setColumnCount(len(df.columns))
+        table.setHorizontalHeaderLabels([str(col) for col in df.columns])
+        for row_idx, (_, row) in enumerate(df.iterrows()):
+            for col_idx, value in enumerate(row):
+                table.setItem(row_idx, col_idx, QtWidgets.QTableWidgetItem("" if pd.isna(value) else str(value)))
+        table.setAlternatingRowColors(True)
+        table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.resizeColumnsToContents()
+        table.setUpdatesEnabled(True)
+
+
+def combo_set_data(combo: QtWidgets.QComboBox, value: object) -> None:
+    for index in range(combo.count()):
+        if combo.itemData(index) == value:
+            combo.setCurrentIndex(index)
+            return
+
+
+class IsotopeAbundanceDialog(QtWidgets.QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("同位素丰度计算")
+        self.resize(720, 520)
+        layout = QtWidgets.QVBoxLayout(self)
+
+        input_layout = QtWidgets.QHBoxLayout()
+        self.formula_edit = QtWidgets.QLineEdit()
+        self.formula_edit.setPlaceholderText("输入分子式，例如 C6H6、CF3COOH、H2O")
+        self.calculate_button = QtWidgets.QPushButton("计算")
+        self.calculate_button.clicked.connect(self.calculate)
+        input_layout.addWidget(self.formula_edit)
+        input_layout.addWidget(self.calculate_button)
+        layout.addLayout(input_layout)
+
+        self.composition_label = QtWidgets.QLabel("")
+        layout.addWidget(self.composition_label)
+
+        self.table = QtWidgets.QTableWidget(0, 3)
+        self.table.setHorizontalHeaderLabels(["质量数 (m/z)", "丰度", "丰度占比 (%)"])
+        self.table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
+        self.table.setAlternatingRowColors(True)
+        self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        layout.addWidget(self.table)
+
+    def calculate(self):
+        formula = self.formula_edit.text().strip()
+        if not formula:
+            QtWidgets.QMessageBox.warning(self, "提示", "请输入分子式")
+            return
+        try:
+            composition = parse_formula(formula)
+            rows = calculate_isotope_distribution(formula)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "错误", str(exc))
+            return
+
+        self.composition_label.setText("组成: " + ", ".join(f"{key}{value}" for key, value in composition.items()))
+        self.table.setRowCount(len(rows))
+        for row_idx, row in enumerate(rows):
+            self.table.setItem(row_idx, 0, QtWidgets.QTableWidgetItem(f"{row['mass']:.4f}"))
+            self.table.setItem(row_idx, 1, QtWidgets.QTableWidgetItem(f"{row['abundance']:.8g}"))
+            self.table.setItem(row_idx, 2, QtWidgets.QTableWidgetItem(f"{row['percent']:.4f}"))
+
+
+class NormalizationSettingsWidget(QtWidgets.QWidget, DataFrameTableMixin):
+    def __init__(self, settings: NormalizationSettings, calibration: Calibration, parent=None):
+        super().__init__(parent)
+        self.settings = settings
+        self.calibration = calibration
+        self.peak_detection = load_peak_detection_config()
+        self.worker: WorkerThread | None = None
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        form = QtWidgets.QGridLayout()
+        form.setHorizontalSpacing(8)
+        form.setVerticalSpacing(8)
+
+        self.light_source_combo = QtWidgets.QComboBox()
+        self.light_source_combo.addItem("IO 光电流", "io")
+        self.light_source_combo.addItem("Beam Current 储存环束流", "beam_current")
+
+        self.temperature_photon_check = QtWidgets.QCheckBox("温度扫描光强归一化")
+        self.temperature_kr_check = QtWidgets.QCheckBox("温度扫描使用Kr膨胀校正")
+        self.mass_discrimination_edit = QtWidgets.QDoubleSpinBox()
+        self.mass_discrimination_edit.setRange(0.000001, 1_000_000)
+        self.mass_discrimination_edit.setDecimals(6)
+
+        self.pie_photon_mode_combo = QtWidgets.QComboBox()
+        self.pie_photon_mode_combo.addItem("归一化到首个光强", "first")
+        self.pie_photon_mode_combo.addItem("直接除以光强", "none")
+        self.pie_photon_mode_combo.addItem("不做光强归一化", "off")
+
+        self.calibration_a_edit = QtWidgets.QDoubleSpinBox()
+        self.calibration_b_edit = QtWidgets.QDoubleSpinBox()
+        self.calibration_c_edit = QtWidgets.QDoubleSpinBox()
+        for edit in (self.calibration_a_edit, self.calibration_b_edit, self.calibration_c_edit):
+            edit.setRange(-1_000_000, 1_000_000)
+            edit.setDecimals(12)
+            edit.setSingleStep(0.000000001)
+
+        self.kr_folder_edit = QtWidgets.QLineEdit()
+        self.kr_folder_edit.setPlaceholderText("选择用于计算Kr膨胀系数的温度扫描文件夹")
+        self.kr_folder_button = QtWidgets.QPushButton("选择文件夹")
+        self.kr_folder_button.clicked.connect(self.select_kr_folder)
+        self.kr_peak_file_edit = QtWidgets.QLineEdit()
+        self.kr_peak_file_edit.setPlaceholderText("可选: Kr手动卡峰文件")
+        self.kr_peak_file_button = QtWidgets.QPushButton("选择卡峰")
+        self.kr_peak_file_button.clicked.connect(self.select_kr_peak_file)
+        self.compute_kr_button = QtWidgets.QPushButton("计算Kr膨胀系数")
+        self.compute_kr_button.clicked.connect(self.compute_kr_factors)
+        self.save_button = QtWidgets.QPushButton("保存通用参数")
+        self.save_button.clicked.connect(self.save_settings)
+        self.status_label = QtWidgets.QLabel("就绪")
+
+        form.addWidget(QtWidgets.QLabel("光强来源"), 0, 0)
+        form.addWidget(self.light_source_combo, 0, 1)
+        form.addWidget(self.temperature_photon_check, 0, 2)
+        form.addWidget(self.temperature_kr_check, 0, 3)
+        form.addWidget(QtWidgets.QLabel("质量歧视因子D"), 1, 0)
+        form.addWidget(self.mass_discrimination_edit, 1, 1)
+        form.addWidget(QtWidgets.QLabel("PIE光强归一化"), 1, 2)
+        form.addWidget(self.pie_photon_mode_combo, 1, 3)
+        form.addWidget(QtWidgets.QLabel("定标 A"), 2, 0)
+        form.addWidget(self.calibration_a_edit, 2, 1)
+        form.addWidget(QtWidgets.QLabel("定标 B"), 2, 2)
+        form.addWidget(self.calibration_b_edit, 2, 3)
+        form.addWidget(QtWidgets.QLabel("定标 C"), 2, 4)
+        form.addWidget(self.calibration_c_edit, 2, 5)
+        form.addWidget(QtWidgets.QLabel("Kr定标文件夹"), 3, 0)
+        form.addWidget(self.kr_folder_edit, 3, 1, 1, 4)
+        form.addWidget(self.kr_folder_button, 3, 5)
+        form.addWidget(QtWidgets.QLabel("Kr定标卡峰"), 4, 0)
+        form.addWidget(self.kr_peak_file_edit, 4, 1, 1, 4)
+        form.addWidget(self.kr_peak_file_button, 4, 5)
+        form.addWidget(self.compute_kr_button, 5, 1)
+        form.addWidget(self.save_button, 5, 2)
+        form.addWidget(self.status_label, 6, 0, 1, 6)
+        form.setColumnStretch(1, 1)
+        form.setColumnStretch(3, 1)
+        layout.addLayout(form)
+
+        peak_group = QtWidgets.QGroupBox("自动寻峰参数")
+        peak_layout = QtWidgets.QGridLayout(peak_group)
+        peak_layout.setHorizontalSpacing(8)
+        peak_layout.setVerticalSpacing(8)
+
+        self.peak_detection_min_idx_edit = QtWidgets.QSpinBox()
+        self.peak_detection_min_idx_edit.setRange(0, 10_000_000)
+        self.peak_detection_min_idx_edit.setToolTip("自动寻峰从该数据点之后开始，避免文件头或低TOF噪声参与寻峰")
+        self.peak_threshold_end_edit = QtWidgets.QDoubleSpinBox()
+        self.peak_threshold_end_edit.setRange(0, 1_000_000)
+        self.peak_threshold_end_edit.setDecimals(3)
+        self.peak_threshold_end_edit.setToolTip("向峰两侧扩展边界时，低于该强度即认为到达峰结束")
+        self.peak_min_intensity_edit = QtWidgets.QDoubleSpinBox()
+        self.peak_min_intensity_edit.setRange(0, 1_000_000)
+        self.peak_min_intensity_edit.setDecimals(3)
+        self.peak_min_intensity_edit.setToolTip("低于该强度的局部极大值不会作为候选峰")
+
+        self.peak_nearby_window_edit = QtWidgets.QSpinBox()
+        self.peak_nearby_window_edit.setRange(0, 100_000)
+        self.peak_nearby_window_edit.setToolTip("该半宽范围内若已有更高峰，则当前候选峰会被抑制")
+        self.peak_duplicate_window_edit = QtWidgets.QSpinBox()
+        self.peak_duplicate_window_edit.setRange(0, 100_000)
+        self.peak_duplicate_window_edit.setToolTip("接受一个峰后，该半宽范围内的候选点会被视为同一峰")
+        self.peak_boundary_padding_edit = QtWidgets.QSpinBox()
+        self.peak_boundary_padding_edit.setRange(0, 100_000)
+        self.peak_boundary_padding_edit.setToolTip("最终卡峰边界向左右额外扩展的数据点数")
+
+        self.peak_weak_tail_ratio_edit = QtWidgets.QDoubleSpinBox()
+        self.peak_weak_tail_ratio_edit.setRange(0.001, 1_000_000)
+        self.peak_weak_tail_ratio_edit.setDecimals(3)
+        self.peak_weak_tail_ratio_edit.setToolTip("弱肩峰过滤倍率；值越大，越容易保留主峰后的弱峰")
+        self.peak_gaussian_window_max_edit = QtWidgets.QSpinBox()
+        self.peak_gaussian_window_max_edit.setRange(3, 100_000)
+        self.peak_gaussian_window_max_edit.setToolTip("自动高斯拟合时允许使用的最大半窗口")
+        self.peak_gaussian_boundary_scale_edit = QtWidgets.QDoubleSpinBox()
+        self.peak_gaussian_boundary_scale_edit.setRange(0.1, 100)
+        self.peak_gaussian_boundary_scale_edit.setDecimals(3)
+        self.peak_gaussian_boundary_scale_edit.setToolTip("高斯拟合成功后，以该倍数 FWHM 重新估计卡峰边界")
+
+        peak_layout.addWidget(QtWidgets.QLabel("寻峰起始索引"), 0, 0)
+        peak_layout.addWidget(self.peak_detection_min_idx_edit, 0, 1)
+        peak_layout.addWidget(QtWidgets.QLabel("峰结束阈值"), 0, 2)
+        peak_layout.addWidget(self.peak_threshold_end_edit, 0, 3)
+        peak_layout.addWidget(QtWidgets.QLabel("最小峰强度"), 0, 4)
+        peak_layout.addWidget(self.peak_min_intensity_edit, 0, 5)
+        peak_layout.addWidget(QtWidgets.QLabel("邻峰抑制半宽"), 1, 0)
+        peak_layout.addWidget(self.peak_nearby_window_edit, 1, 1)
+        peak_layout.addWidget(QtWidgets.QLabel("重复峰排除半宽"), 1, 2)
+        peak_layout.addWidget(self.peak_duplicate_window_edit, 1, 3)
+        peak_layout.addWidget(QtWidgets.QLabel("边界外扩点数"), 1, 4)
+        peak_layout.addWidget(self.peak_boundary_padding_edit, 1, 5)
+        peak_layout.addWidget(QtWidgets.QLabel("弱肩峰过滤倍率"), 2, 0)
+        peak_layout.addWidget(self.peak_weak_tail_ratio_edit, 2, 1)
+        peak_layout.addWidget(QtWidgets.QLabel("高斯窗口上限"), 2, 2)
+        peak_layout.addWidget(self.peak_gaussian_window_max_edit, 2, 3)
+        peak_layout.addWidget(QtWidgets.QLabel("高斯边界倍数"), 2, 4)
+        peak_layout.addWidget(self.peak_gaussian_boundary_scale_edit, 2, 5)
+        for column in (1, 3, 5):
+            peak_layout.setColumnStretch(column, 1)
+        layout.addWidget(peak_group)
+
+        self.factor_table = QtWidgets.QTableWidget()
+        layout.addWidget(self.factor_table, stretch=1)
+        self.load_from_settings()
+
+    def load_from_settings(self) -> None:
+        combo_set_data(self.light_source_combo, self.settings.light_source)
+        self.temperature_photon_check.setChecked(self.settings.temperature_photon_normalize)
+        self.temperature_kr_check.setChecked(self.settings.temperature_kr_correct)
+        self.mass_discrimination_edit.setValue(self.settings.mass_discrimination)
+        combo_set_data(self.pie_photon_mode_combo, self.settings.pie_photon_mode)
+        calibration = load_calibration_config()
+        self.calibration_a_edit.setValue(calibration.a)
+        self.calibration_b_edit.setValue(calibration.b)
+        self.calibration_c_edit.setValue(calibration.c)
+        self.kr_folder_edit.setText(self.settings.kr_calibration_folder)
+        self.kr_peak_file_edit.setText(self.settings.kr_calibration_peak_file)
+        self.load_peak_detection_controls()
+        self.refresh_factor_table()
+
+    def load_peak_detection_controls(self) -> None:
+        config = self.peak_detection
+        self.peak_detection_min_idx_edit.setValue(config.detection_min_idx)
+        self.peak_threshold_end_edit.setValue(config.threshold_end)
+        self.peak_min_intensity_edit.setValue(config.min_intensity)
+        self.peak_nearby_window_edit.setValue(config.nearby_peak_window)
+        self.peak_duplicate_window_edit.setValue(config.duplicate_window)
+        self.peak_boundary_padding_edit.setValue(config.boundary_padding)
+        self.peak_weak_tail_ratio_edit.setValue(config.weak_tail_ratio)
+        self.peak_gaussian_window_max_edit.setValue(config.gaussian_window_max)
+        self.peak_gaussian_boundary_scale_edit.setValue(config.gaussian_boundary_scale)
+
+    def apply_to_settings(self) -> None:
+        self.settings.light_source = self.light_source_combo.currentData()
+        self.settings.temperature_photon_normalize = self.temperature_photon_check.isChecked()
+        self.settings.temperature_kr_correct = self.temperature_kr_check.isChecked()
+        self.settings.mass_discrimination = self.mass_discrimination_edit.value()
+        self.settings.pie_photon_mode = self.pie_photon_mode_combo.currentData()
+        self.settings.kr_calibration_folder = self.kr_folder_edit.text().strip()
+        self.settings.kr_calibration_peak_file = self.kr_peak_file_edit.text().strip()
+        self.calibration = Calibration(
+            a=self.calibration_a_edit.value(),
+            b=self.calibration_b_edit.value(),
+            c=self.calibration_c_edit.value(),
+        )
+        self.peak_detection = PeakDetectionConfig(
+            detection_min_idx=self.peak_detection_min_idx_edit.value(),
+            threshold_end=self.peak_threshold_end_edit.value(),
+            min_intensity=self.peak_min_intensity_edit.value(),
+            nearby_peak_window=self.peak_nearby_window_edit.value(),
+            duplicate_window=self.peak_duplicate_window_edit.value(),
+            weak_tail_early_window=self.peak_detection.weak_tail_early_window,
+            weak_tail_late_window=self.peak_detection.weak_tail_late_window,
+            weak_tail_ratio=self.peak_weak_tail_ratio_edit.value(),
+            gaussian_window_max=self.peak_gaussian_window_max_edit.value(),
+            gaussian_boundary_scale=self.peak_gaussian_boundary_scale_edit.value(),
+            boundary_padding=self.peak_boundary_padding_edit.value(),
+        )
+
+    def select_kr_folder(self):
+        folder = QtWidgets.QFileDialog.getExistingDirectory(self, "选择Kr定标文件夹")
+        if folder:
+            self.kr_folder_edit.setText(folder)
+
+    def select_kr_peak_file(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "选择Kr手动卡峰文件",
+            "",
+            "Peak Files (*.yaml *.yml *.csv *.xlsx *.xls);;All Files (*)",
+        )
+        if path:
+            self.kr_peak_file_edit.setText(path)
+
+    def save_settings(self):
+        self.apply_to_settings()
+        normalization_path = save_normalization_settings(self.settings)
+        calibration_path = save_calibration_config(self.calibration)
+        peak_detection_path = save_peak_detection_config(self.peak_detection)
+        self.status_label.setText(f"已保存: {normalization_path}；{calibration_path}；{peak_detection_path}")
+
+    def compute_kr_factors(self):
+        self.apply_to_settings()
+        folder = self.settings.kr_calibration_folder
+        if not folder:
+            QtWidgets.QMessageBox.warning(self, "提示", "请先选择Kr定标文件夹")
+            return
+        peak_config = self.peak_detection
+        self.set_busy(True, "正在计算Kr膨胀系数...")
+        self.worker = WorkerThread(
+            lambda: compute_kr_expansion_factors(
+                folder,
+                calibration=self.calibration,
+                manual_peak_path=self.settings.kr_calibration_peak_file or None,
+                light_source=self.settings.light_source,
+                threshold_end=peak_config.threshold_end,
+                min_intensity=peak_config.min_intensity,
+                detection_min_idx=peak_config.detection_min_idx,
+                nearby_peak_window=peak_config.nearby_peak_window,
+                duplicate_window=peak_config.duplicate_window,
+                weak_tail_early_window=peak_config.weak_tail_early_window,
+                weak_tail_late_window=peak_config.weak_tail_late_window,
+                weak_tail_ratio=peak_config.weak_tail_ratio,
+                gaussian_window_max=peak_config.gaussian_window_max,
+                gaussian_boundary_scale=peak_config.gaussian_boundary_scale,
+                boundary_padding=peak_config.boundary_padding,
+            ),
+            self,
+        )
+        self.worker.finished_with_result.connect(self.on_kr_factors_ready)
+        self.worker.failed.connect(self.on_kr_factors_failed)
+        self.worker.finished.connect(lambda: self.set_busy(False, "就绪"))
+        self.worker.start()
+
+    def set_busy(self, busy: bool, message: str) -> None:
+        self.status_label.setText(message)
+        for widget in (
+            self.compute_kr_button,
+            self.save_button,
+            self.kr_folder_button,
+            self.kr_peak_file_button,
+        ):
+            widget.setDisabled(busy)
+
+    def on_kr_factors_ready(self, result: object) -> None:
+        df = result
+        self.settings.expansion_factors = {
+            float(row["temperature"]): float(row["expansion_lambda"])
+            for _, row in df.iterrows()
+        }
+        self.refresh_factor_table()
+        save_normalization_settings(self.settings)
+        self.status_label.setText(f"已计算 {len(self.settings.expansion_factors)} 个温度点的Kr膨胀系数")
+
+    def on_kr_factors_failed(self, message: str) -> None:
+        QtWidgets.QMessageBox.critical(self, "错误", message)
+
+    def refresh_factor_table(self) -> None:
+        rows = [
+            {"temperature": temperature, "expansion_lambda": value}
+            for temperature, value in sorted(self.settings.expansion_factors.items())
+        ]
+        self.set_dataframe(self.factor_table, pd.DataFrame(rows, columns=["temperature", "expansion_lambda"]))
+
+
+class CommonParametersDialog(QtWidgets.QDialog):
+    def __init__(self, settings: NormalizationSettings, calibration: Calibration, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("通用参数设置")
+        self.resize(1280, 760)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        self.settings_widget = NormalizationSettingsWidget(settings, calibration, self)
+        layout.addWidget(self.settings_widget)
+
+
+class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
+    def __init__(self, calibration: Calibration, normalization_settings: NormalizationSettings | None = None, parent=None):
+        super().__init__(parent)
+        self.calibration = calibration
+        self.normalization_settings = normalization_settings or NormalizationSettings()
+        self.peak_detection = load_peak_detection_config()
+        self.result_df = pd.DataFrame()
+        self.curves: dict[int, dict] = {}
+        self.current_mz: int | None = None
+        self.worker: WorkerThread | None = None
+        self.setWindowTitle("温度扫描分析")
+        self.resize(1180, 760)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        controls = QtWidgets.QWidget()
+        controls_layout = QtWidgets.QGridLayout(controls)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.setHorizontalSpacing(8)
+        controls_layout.setVerticalSpacing(8)
+        self.folder_edit = QtWidgets.QLineEdit()
+        self.folder_edit.setPlaceholderText("选择包含温度扫描 txt 文件的文件夹")
+        self.browse_button = QtWidgets.QPushButton("选择文件夹")
+        self.browse_button.clicked.connect(self.select_folder)
+        self.run_button = QtWidgets.QPushButton("开始分析")
+        self.run_button.clicked.connect(self.run_analysis)
+        self.export_button = QtWidgets.QPushButton("导出")
+        self.export_button.clicked.connect(self.export_result)
+        self.common_params_button = QtWidgets.QPushButton("通用参数")
+        self.common_params_button.clicked.connect(self.open_common_parameters)
+        self.peak_source_combo = QtWidgets.QComboBox()
+        self.peak_source_combo.addItem("自动寻峰", "auto")
+        self.peak_source_combo.addItem("手动卡峰", "manual")
+        self.peak_file_edit = QtWidgets.QLineEdit()
+        self.peak_file_edit.setPlaceholderText("可选: yaml/csv/xlsx 手动卡峰文件")
+        self.select_peak_file_button = QtWidgets.QPushButton("选择卡峰")
+        self.select_peak_file_button.clicked.connect(self.select_peak_file)
+
+        self.threshold_end_edit = QtWidgets.QDoubleSpinBox()
+        self.threshold_end_edit.setRange(0, 1_000_000)
+        self.threshold_end_edit.setDecimals(3)
+        self.threshold_end_edit.setValue(self.peak_detection.threshold_end)
+        self.min_intensity_edit = QtWidgets.QDoubleSpinBox()
+        self.min_intensity_edit.setRange(0, 1_000_000)
+        self.min_intensity_edit.setDecimals(3)
+        self.min_intensity_edit.setValue(self.peak_detection.min_intensity)
+        self.reference_mode_combo = QtWidgets.QComboBox()
+        self.reference_mode_combo.addItem("累加谱寻峰", "sum")
+        self.reference_mode_combo.addItem("最高温谱寻峰", "max_temperature")
+        self.gaussian_check = QtWidgets.QCheckBox("高斯积分")
+        self.gaussian_check.setChecked(True)
+        self.status_label = QtWidgets.QLabel("就绪")
+
+        controls_layout.addWidget(QtWidgets.QLabel("温度扫描文件夹"), 0, 0)
+        controls_layout.addWidget(self.folder_edit, 0, 1, 1, 4)
+        controls_layout.addWidget(self.browse_button, 0, 5)
+        controls_layout.addWidget(self.run_button, 0, 6)
+        controls_layout.addWidget(self.export_button, 0, 7)
+        controls_layout.addWidget(self.common_params_button, 0, 8)
+        controls_layout.addWidget(QtWidgets.QLabel("参考峰来源"), 1, 0)
+        controls_layout.addWidget(self.reference_mode_combo, 1, 1)
+        controls_layout.addWidget(self.gaussian_check, 1, 2)
+        controls_layout.addWidget(QtWidgets.QLabel("自动寻峰与归一化参数在“通用参数”页管理"), 1, 3, 1, 4)
+        controls_layout.addWidget(QtWidgets.QLabel("卡峰来源"), 2, 0)
+        controls_layout.addWidget(self.peak_source_combo, 2, 1)
+        controls_layout.addWidget(self.peak_file_edit, 2, 2, 1, 4)
+        controls_layout.addWidget(self.select_peak_file_button, 2, 6)
+        controls_layout.addWidget(self.status_label, 3, 0, 1, 9)
+        controls_layout.setColumnStretch(1, 1)
+        controls_layout.setColumnStretch(4, 1)
+        layout.addWidget(controls)
+
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+        left_panel = QtWidgets.QWidget()
+        left_layout = QtWidgets.QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(8)
+        self.summary_label = QtWidgets.QLabel("未生成温度曲线")
+        left_layout.addWidget(self.summary_label)
+        self.mz_list = QtWidgets.QListWidget()
+        self.mz_list.currentItemChanged.connect(self.on_mz_selected)
+        left_layout.addWidget(self.mz_list, stretch=1)
+        splitter.addWidget(left_panel)
+
+        right_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
+        if pg is not None:
+            self.plot_widget = pg.PlotWidget()
+            self.plot_widget.setBackground("#ffffff")
+            self.plot_widget.setLabel("bottom", "Temperature (C)")
+            self.plot_widget.setLabel("left", "Normalized Area")
+            self.plot_widget.getAxis("bottom").enableAutoSIPrefix(False)
+            self.plot_widget.showGrid(x=True, y=True)
+            right_splitter.addWidget(self.plot_widget)
+        else:
+            self.plot_widget = None
+            right_splitter.addWidget(QtWidgets.QLabel("未安装 pyqtgraph，无法显示温度扫描曲线图"))
+
+        self.curve_table = QtWidgets.QTableWidget()
+        self.table = QtWidgets.QTableWidget()
+        for table in (self.curve_table, self.table):
+            table.setWordWrap(False)
+            table.setAlternatingRowColors(True)
+            table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.detail_tabs = QtWidgets.QTabWidget()
+        self.detail_tabs.addTab(self.curve_table, "当前曲线")
+        self.detail_tabs.addTab(self.table, "全部积分结果")
+        right_splitter.addWidget(self.detail_tabs)
+        right_splitter.setSizes([500, 220])
+        splitter.addWidget(right_splitter)
+        splitter.setSizes([260, 920])
+        layout.addWidget(splitter, stretch=1)
+
+    def select_folder(self):
+        folder = QtWidgets.QFileDialog.getExistingDirectory(self, "选择温度扫描文件夹")
+        if folder:
+            self.folder_edit.setText(folder)
+
+    def select_peak_file(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "选择手动卡峰文件",
+            "",
+            "Peak Files (*.yaml *.yml *.csv *.xlsx *.xls);;All Files (*)",
+        )
+        if path:
+            self.peak_file_edit.setText(path)
+            self.peak_source_combo.setCurrentIndex(1)
+
+    def open_common_parameters(self):
+        dialog = CommonParametersDialog(self.normalization_settings, self.calibration, self)
+        dialog.exec()
+        self.calibration = load_calibration_config()
+
+    def run_analysis(self):
+        folder = self.folder_edit.text().strip()
+        if not folder:
+            QtWidgets.QMessageBox.warning(self, "提示", "请先选择文件夹")
+            return
+        peak_config = load_peak_detection_config()
+        threshold_end = peak_config.threshold_end
+        min_intensity = peak_config.min_intensity
+        reference_mode = self.reference_mode_combo.currentData()
+        prefer_gaussian = self.gaussian_check.isChecked()
+        manual_peak_path = self.peak_file_edit.text().strip() if self.peak_source_combo.currentData() == "manual" else None
+        if self.peak_source_combo.currentData() == "manual" and not manual_peak_path:
+            QtWidgets.QMessageBox.warning(self, "提示", "请选择手动卡峰文件")
+            return
+        settings = self.normalization_settings
+        photon_normalize = settings.temperature_photon_normalize
+        kr_correct = settings.temperature_kr_correct
+        mass_discrimination = settings.mass_discrimination
+        light_source = settings.light_source
+        expansion_factors = settings.expansion_factors if kr_correct else None
+        self.set_busy(True, "正在分析温度扫描数据...")
+        self.worker = WorkerThread(
+            lambda: analyze_temperature_folder(
+                folder,
+                calibration=self.calibration,
+                threshold_end=threshold_end,
+                min_intensity=min_intensity,
+                detection_min_idx=peak_config.detection_min_idx,
+                nearby_peak_window=peak_config.nearby_peak_window,
+                duplicate_window=peak_config.duplicate_window,
+                weak_tail_early_window=peak_config.weak_tail_early_window,
+                weak_tail_late_window=peak_config.weak_tail_late_window,
+                weak_tail_ratio=peak_config.weak_tail_ratio,
+                gaussian_window_max=peak_config.gaussian_window_max,
+                gaussian_boundary_scale=peak_config.gaussian_boundary_scale,
+                boundary_padding=peak_config.boundary_padding,
+                prefer_gaussian=prefer_gaussian,
+                reference_mode=reference_mode,
+                manual_peak_path=manual_peak_path,
+                photon_normalize=photon_normalize,
+                kr_correct=kr_correct,
+                mass_discrimination=mass_discrimination,
+                light_source=light_source,
+                expansion_factors=expansion_factors,
+            ),
+            self,
+        )
+        self.worker.finished_with_result.connect(self.on_analysis_complete)
+        self.worker.failed.connect(self.on_analysis_failed)
+        self.worker.finished.connect(lambda: self.set_busy(False, "就绪"))
+        self.worker.start()
+
+    def set_busy(self, busy: bool, message: str) -> None:
+        self.status_label.setText(message)
+        self.run_button.setDisabled(busy)
+        self.browse_button.setDisabled(busy)
+        self.export_button.setDisabled(busy)
+        self.common_params_button.setDisabled(busy)
+        self.reference_mode_combo.setDisabled(busy)
+        self.gaussian_check.setDisabled(busy)
+        self.peak_source_combo.setDisabled(busy)
+        self.peak_file_edit.setDisabled(busy)
+        self.select_peak_file_button.setDisabled(busy)
+
+    def on_analysis_complete(self, result: object) -> None:
+        self.result_df = result
+        self.curves = build_temperature_curves(self.result_df)
+        self.set_dataframe(self.table, self.result_df)
+        self.populate_mz_list()
+        temperature_count = self.result_df["temperature"].nunique() if not self.result_df.empty else 0
+        self.summary_label.setText(f"{len(self.curves)} 条m/z曲线 | {temperature_count} 个温度点")
+        if self.curves:
+            self.mz_list.setCurrentRow(0)
+        QtWidgets.QMessageBox.information(self, "完成", f"生成 {len(self.result_df)} 行温度扫描结果")
+
+    def on_analysis_failed(self, message: str) -> None:
+        QtWidgets.QMessageBox.critical(self, "错误", message)
+
+    def populate_mz_list(self):
+        self.mz_list.clear()
+        for mz in sorted(self.curves):
+            curve = self.curves[mz]
+            label = curve.get("species") or ""
+            suffix = f" {label}" if label and label != "Unknown" else ""
+            item = QtWidgets.QListWidgetItem(f"{mz}{suffix}  ({len(curve['temperatures'])}点)")
+            item.setData(QtCore.Qt.ItemDataRole.UserRole, mz)
+            self.mz_list.addItem(item)
+
+    def on_mz_selected(self, current, previous=None):
+        if current is None:
+            self.current_mz = None
+            return
+        self.current_mz = int(current.data(QtCore.Qt.ItemDataRole.UserRole))
+        curve = self.curves[self.current_mz]
+        rows = curve["rows"].copy()
+        curve_df = pd.DataFrame(
+            {
+                "温度(C)": np.round(rows["temperature"].astype(float), 4),
+                "原始积分": np.round(rows["raw_area"].astype(float), 4),
+                "IO归一化": np.round(rows["photon_normalized_area"].astype(float), 4),
+                "λ(T)": np.round(rows["expansion_lambda"].astype(float), 6),
+                "最终强度": np.round(rows["area"].astype(float), 4),
+            }
+        )
+        self.set_dataframe(self.curve_table, curve_df)
+        self.update_plot(curve)
+
+    def update_plot(self, curve: dict):
+        if self.plot_widget is None:
+            return
+        x_values = np.asarray(curve["temperatures"], dtype=float)
+        y_values = np.asarray(curve["areas"], dtype=float)
+        valid = np.isfinite(x_values) & np.isfinite(y_values)
+        x_values = x_values[valid]
+        y_values = y_values[valid]
+        self.plot_widget.clear()
+        self.plot_widget.setLabel("bottom", "Temperature (C)")
+        self.plot_widget.setLabel("left", "Normalized Area")
+        self.plot_widget.getAxis("bottom").enableAutoSIPrefix(False)
+        self.plot_widget.showGrid(x=True, y=True, alpha=0.25)
+        if x_values.size == 0:
+            self.plot_widget.setTitle(f"m/z {curve['mz']} 温度曲线 - 无有效数据")
+            return
+        self.plot_widget.plot(
+            x_values,
+            y_values,
+            pen=pg.mkPen("#2563eb", width=2),
+            symbol="o",
+            symbolBrush="#2563eb",
+            symbolPen="#1e3a8a",
+            symbolSize=8,
+        )
+        self.plot_widget.setTitle(f"m/z {curve['mz']} 温度扫描")
+        x_min = float(np.min(x_values))
+        x_max = float(np.max(x_values))
+        y_min = float(np.min(y_values))
+        y_max = float(np.max(y_values))
+        x_pad = max(5.0, (x_max - x_min) * 0.08)
+        y_pad = max(1.0, (y_max - y_min) * 0.12)
+        if x_min == x_max:
+            x_min -= 5.0
+            x_max += 5.0
+        if y_min == y_max:
+            y_min -= 1.0
+            y_max += 1.0
+        self.plot_widget.setXRange(x_min - x_pad, x_max + x_pad, padding=0)
+        self.plot_widget.setYRange(max(0.0, y_min - y_pad), y_max + y_pad, padding=0)
+
+    def run_analysis_sync(
+        self,
+        folder: str,
+        threshold_end: float,
+        min_intensity: float,
+        *,
+        prefer_gaussian: bool = True,
+        reference_mode: str = "sum",
+        manual_peak_path: str | None = None,
+        photon_normalize: bool = False,
+        kr_correct: bool = False,
+        mass_discrimination: float = 1.0,
+        light_source: str = "io",
+        expansion_factors: dict[float, float] | None = None,
+    ) -> pd.DataFrame:
+        peak_config = load_peak_detection_config()
+        return analyze_temperature_folder(
+            folder,
+            calibration=self.calibration,
+            threshold_end=threshold_end,
+            min_intensity=min_intensity,
+            detection_min_idx=peak_config.detection_min_idx,
+            nearby_peak_window=peak_config.nearby_peak_window,
+            duplicate_window=peak_config.duplicate_window,
+            weak_tail_early_window=peak_config.weak_tail_early_window,
+            weak_tail_late_window=peak_config.weak_tail_late_window,
+            weak_tail_ratio=peak_config.weak_tail_ratio,
+            gaussian_window_max=peak_config.gaussian_window_max,
+            gaussian_boundary_scale=peak_config.gaussian_boundary_scale,
+            boundary_padding=peak_config.boundary_padding,
+            prefer_gaussian=prefer_gaussian,
+            reference_mode=reference_mode,
+            manual_peak_path=manual_peak_path,
+            photon_normalize=photon_normalize,
+            kr_correct=kr_correct,
+            mass_discrimination=mass_discrimination,
+            light_source=light_source,
+            expansion_factors=expansion_factors,
+        )
+
+    def export_result(self):
+        if self.result_df.empty:
+            QtWidgets.QMessageBox.warning(self, "提示", "没有可导出的结果")
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "导出温度扫描结果",
+            str(ensure_output_dir("exports", "temperature") / "temperature_scan.xlsx"),
+            "Excel Files (*.xlsx);;CSV Files (*.csv)",
+        )
+        if not path:
+            return
+        if path.endswith(".xlsx"):
+            self.result_df.to_excel(path, index=False)
+        else:
+            self.result_df.to_csv(path, index=False, encoding="utf-8-sig")
+
+
+class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
+    def __init__(self, calibration: Calibration, normalization_settings: NormalizationSettings | None = None, parent=None):
+        super().__init__(parent)
+        self.calibration = calibration
+        self.normalization_settings = normalization_settings or NormalizationSettings()
+        self.peak_detection = load_peak_detection_config()
+        self.database: list[dict] = []
+        self.analysis_df = pd.DataFrame()
+        self.curves: dict[int, dict] = {}
+        self.current_mz: int | None = None
+        self.current_fit: dict | None = None
+        self.worker: WorkerThread | None = None
+        self.setWindowTitle("PIE物种拟合")
+        self.resize(1280, 780)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        controls = QtWidgets.QWidget()
+        controls_layout = QtWidgets.QGridLayout(controls)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.setHorizontalSpacing(8)
+        controls_layout.setVerticalSpacing(8)
+        default_db = species_database_path()
+        self.database_edit = QtWidgets.QLineEdit(str(default_db) if default_db.exists() else "")
+        self.load_button = QtWidgets.QPushButton("加载数据库")
+        self.load_button.clicked.connect(self.load_database)
+        self.folder_edit = QtWidgets.QLineEdit()
+        self.folder_edit.setPlaceholderText("选择包含PIE扫描质谱文件的文件夹")
+        self.select_folder_button = QtWidgets.QPushButton("选择文件夹")
+        self.select_folder_button.clicked.connect(self.select_folder)
+        self.analyze_button = QtWidgets.QPushButton("生成PIE曲线")
+        self.analyze_button.clicked.connect(self.run_analysis)
+        self.export_button = QtWidgets.QPushButton("导出曲线数据")
+        self.export_button.clicked.connect(self.export_curve_data)
+        self.common_params_button = QtWidgets.QPushButton("通用参数")
+        self.common_params_button.clicked.connect(self.open_common_parameters)
+        self.peak_source_combo = QtWidgets.QComboBox()
+        self.peak_source_combo.addItem("自动寻峰", "auto")
+        self.peak_source_combo.addItem("手动卡峰", "manual")
+        self.peak_file_edit = QtWidgets.QLineEdit()
+        self.peak_file_edit.setPlaceholderText("可选: yaml/csv/xlsx 手动卡峰文件")
+        self.select_peak_file_button = QtWidgets.QPushButton("选择卡峰")
+        self.select_peak_file_button.clicked.connect(self.select_peak_file)
+
+        self.threshold_end_edit = QtWidgets.QDoubleSpinBox()
+        self.threshold_end_edit.setRange(0, 1_000_000)
+        self.threshold_end_edit.setDecimals(3)
+        self.threshold_end_edit.setValue(self.peak_detection.threshold_end)
+        self.min_intensity_edit = QtWidgets.QDoubleSpinBox()
+        self.min_intensity_edit.setRange(0, 1_000_000)
+        self.min_intensity_edit.setDecimals(3)
+        self.min_intensity_edit.setValue(self.peak_detection.min_intensity)
+        self.energy_decimals_edit = QtWidgets.QSpinBox()
+        self.energy_decimals_edit.setRange(0, 6)
+        self.energy_decimals_edit.setValue(1)
+        self.recursive_check = QtWidgets.QCheckBox("递归")
+        self.recursive_check.setChecked(True)
+        self.gaussian_check = QtWidgets.QCheckBox("高斯积分")
+        self.gaussian_check.setChecked(True)
+        self.status_label = QtWidgets.QLabel("就绪")
+
+        controls_layout.addWidget(QtWidgets.QLabel("PICS库"), 0, 0)
+        controls_layout.addWidget(self.database_edit, 0, 1, 1, 6)
+        controls_layout.addWidget(self.load_button, 0, 7)
+        controls_layout.addWidget(QtWidgets.QLabel("PIE文件夹"), 1, 0)
+        controls_layout.addWidget(self.folder_edit, 1, 1, 1, 4)
+        controls_layout.addWidget(self.select_folder_button, 1, 5)
+        controls_layout.addWidget(self.analyze_button, 1, 6)
+        controls_layout.addWidget(self.export_button, 1, 7)
+        controls_layout.addWidget(self.common_params_button, 1, 8)
+        controls_layout.addWidget(QtWidgets.QLabel("能量分组小数"), 2, 0)
+        controls_layout.addWidget(self.energy_decimals_edit, 2, 1)
+        controls_layout.addWidget(self.recursive_check, 2, 2)
+        controls_layout.addWidget(self.gaussian_check, 2, 3)
+        controls_layout.addWidget(QtWidgets.QLabel("自动寻峰与归一化参数在“通用参数”页管理"), 2, 4, 1, 4)
+        controls_layout.addWidget(QtWidgets.QLabel("卡峰来源"), 3, 0)
+        controls_layout.addWidget(self.peak_source_combo, 3, 1)
+        controls_layout.addWidget(self.peak_file_edit, 3, 2, 1, 4)
+        controls_layout.addWidget(self.select_peak_file_button, 3, 6)
+        controls_layout.addWidget(self.status_label, 4, 0, 1, 9)
+        controls_layout.setColumnStretch(1, 1)
+        controls_layout.setColumnStretch(4, 1)
+        layout.addWidget(controls)
+
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+
+        left_panel = QtWidgets.QWidget()
+        left_layout = QtWidgets.QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(8)
+        self.summary_label = QtWidgets.QLabel("未生成PIE曲线")
+        left_layout.addWidget(self.summary_label)
+        self.mz_list = QtWidgets.QListWidget()
+        self.mz_list.currentItemChanged.connect(self.on_mz_selected)
+        left_layout.addWidget(self.mz_list, stretch=1)
+        self.fit_button = QtWidgets.QPushButton("拟合当前曲线")
+        self.fit_button.clicked.connect(self.fit_current_curve)
+        left_layout.addWidget(self.fit_button)
+        self.show_fit_check = QtWidgets.QCheckBox("显示PICS拟合曲线")
+        self.show_fit_check.setChecked(True)
+        self.show_fit_check.stateChanged.connect(lambda _: self.refresh_current_plot())
+        self.show_components_check = QtWidgets.QCheckBox("显示前三个组分")
+        self.show_components_check.stateChanged.connect(lambda _: self.refresh_current_plot())
+        left_layout.addWidget(self.show_fit_check)
+        left_layout.addWidget(self.show_components_check)
+        splitter.addWidget(left_panel)
+
+        right_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
+        if pg is not None:
+            self.plot_widget = pg.PlotWidget()
+            self.plot_widget.setBackground("#ffffff")
+            self.plot_widget.setLabel("bottom", "Photon Energy", units="eV")
+            self.plot_widget.setLabel("left", "Normalized Intensity")
+            self.plot_widget.showGrid(x=True, y=True)
+            right_splitter.addWidget(self.plot_widget)
+        else:
+            self.plot_widget = None
+            right_splitter.addWidget(QtWidgets.QLabel("未安装 pyqtgraph，无法显示PIE曲线图"))
+
+        self.curve_table = QtWidgets.QTableWidget()
+        self.fit_table = QtWidgets.QTableWidget()
+        for table in (self.curve_table, self.fit_table):
+            table.setWordWrap(False)
+            table.setAlternatingRowColors(True)
+            table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.detail_tabs = QtWidgets.QTabWidget()
+        self.detail_tabs.addTab(self.curve_table, "曲线数据")
+        self.detail_tabs.addTab(self.fit_table, "PICS拟合")
+        right_splitter.addWidget(self.detail_tabs)
+        right_splitter.setSizes([520, 210])
+
+        splitter.addWidget(right_splitter)
+        splitter.setSizes([260, 1020])
+        layout.addWidget(splitter, stretch=1)
+
+        if self.database_edit.text():
+            self.load_database(show_message=False)
+
+    def load_database(self, show_message: bool = True):
+        path = self.database_edit.text().strip()
+        if not path:
+            path, _ = QtWidgets.QFileDialog.getOpenFileName(
+                self,
+                "选择物种数据库",
+                "",
+                "SQLite Files (*.sqlite *.sqlite3 *.db);;All Files (*)",
+            )
+            if not path:
+                return
+            self.database_edit.setText(path)
+        try:
+            self.database, _ = load_species_database(path)
+            self.status_label.setText(f"已加载PICS库: {len(self.database)} 个物种")
+            if show_message:
+                QtWidgets.QMessageBox.information(self, "完成", f"已加载 {len(self.database)} 个物种")
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "错误", str(exc))
+
+    def select_folder(self):
+        folder = QtWidgets.QFileDialog.getExistingDirectory(self, "选择PIE扫描文件夹")
+        if folder:
+            self.folder_edit.setText(folder)
+
+    def select_peak_file(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "选择手动卡峰文件",
+            "",
+            "Peak Files (*.yaml *.yml *.csv *.xlsx *.xls);;All Files (*)",
+        )
+        if path:
+            self.peak_file_edit.setText(path)
+            self.peak_source_combo.setCurrentIndex(1)
+
+    def open_common_parameters(self):
+        dialog = CommonParametersDialog(self.normalization_settings, self.calibration, self)
+        dialog.exec()
+        self.calibration = load_calibration_config()
+
+    def run_analysis(self):
+        folder = self.folder_edit.text().strip()
+        if not folder:
+            QtWidgets.QMessageBox.warning(self, "提示", "请先选择PIE扫描文件夹")
+            return
+        energy_decimals = self.energy_decimals_edit.value()
+        peak_config = load_peak_detection_config()
+        threshold_end = peak_config.threshold_end
+        min_intensity = peak_config.min_intensity
+        recursive = self.recursive_check.isChecked()
+        prefer_gaussian = self.gaussian_check.isChecked()
+        manual_peak_path = self.peak_file_edit.text().strip() if self.peak_source_combo.currentData() == "manual" else None
+        if self.peak_source_combo.currentData() == "manual" and not manual_peak_path:
+            QtWidgets.QMessageBox.warning(self, "提示", "请选择手动卡峰文件")
+            return
+        settings = self.normalization_settings
+        photon_mode = settings.pie_photon_mode
+        photon_normalize = photon_mode != "off"
+        photon_reference_mode = "none" if photon_mode == "off" else photon_mode
+        mass_discrimination = settings.mass_discrimination
+        light_source = settings.light_source
+        self.set_busy(True, "正在生成PIE曲线...")
+        self.worker = WorkerThread(
+            lambda: self.run_pie_analysis_sync(
+                folder,
+                recursive=recursive,
+                energy_decimals=energy_decimals,
+                threshold_end=threshold_end,
+                min_intensity=min_intensity,
+                detection_min_idx=peak_config.detection_min_idx,
+                nearby_peak_window=peak_config.nearby_peak_window,
+                duplicate_window=peak_config.duplicate_window,
+                weak_tail_early_window=peak_config.weak_tail_early_window,
+                weak_tail_late_window=peak_config.weak_tail_late_window,
+                weak_tail_ratio=peak_config.weak_tail_ratio,
+                gaussian_window_max=peak_config.gaussian_window_max,
+                gaussian_boundary_scale=peak_config.gaussian_boundary_scale,
+                boundary_padding=peak_config.boundary_padding,
+                prefer_gaussian=prefer_gaussian,
+                manual_peak_path=manual_peak_path,
+                photon_normalize=photon_normalize,
+                photon_reference_mode=photon_reference_mode,
+                mass_discrimination=mass_discrimination,
+                light_source=light_source,
+            ),
+            self,
+        )
+        self.worker.finished_with_result.connect(self.on_analysis_complete)
+        self.worker.failed.connect(self.on_analysis_failed)
+        self.worker.finished.connect(lambda: self.set_busy(False, "就绪"))
+        self.worker.start()
+
+    def set_busy(self, busy: bool, message: str) -> None:
+        self.status_label.setText(message)
+        self.analyze_button.setDisabled(busy)
+        self.select_folder_button.setDisabled(busy)
+        self.export_button.setDisabled(busy)
+        self.common_params_button.setDisabled(busy)
+        self.fit_button.setDisabled(busy)
+        self.load_button.setDisabled(busy)
+        self.peak_source_combo.setDisabled(busy)
+        self.peak_file_edit.setDisabled(busy)
+        self.select_peak_file_button.setDisabled(busy)
+
+    def run_pie_analysis_sync(
+        self,
+        folder: str,
+        *,
+        recursive: bool,
+        energy_decimals: int,
+        threshold_end: float,
+        min_intensity: float,
+        detection_min_idx: int,
+        nearby_peak_window: int,
+        duplicate_window: int,
+        weak_tail_early_window: int,
+        weak_tail_late_window: int,
+        weak_tail_ratio: float,
+        gaussian_window_max: int,
+        gaussian_boundary_scale: float,
+        boundary_padding: int,
+        prefer_gaussian: bool,
+        manual_peak_path: str | None = None,
+        photon_normalize: bool = True,
+        photon_reference_mode: str = "first",
+        mass_discrimination: float = 1.0,
+        light_source: str = "io",
+    ) -> tuple[pd.DataFrame, dict[int, dict]]:
+        analysis_df = analyze_pie_folder(
+            folder,
+            calibration=self.calibration,
+            recursive=recursive,
+            energy_decimals=energy_decimals,
+            threshold_end=threshold_end,
+            min_intensity=min_intensity,
+            detection_min_idx=detection_min_idx,
+            nearby_peak_window=nearby_peak_window,
+            duplicate_window=duplicate_window,
+            weak_tail_early_window=weak_tail_early_window,
+            weak_tail_late_window=weak_tail_late_window,
+            weak_tail_ratio=weak_tail_ratio,
+            gaussian_window_max=gaussian_window_max,
+            gaussian_boundary_scale=gaussian_boundary_scale,
+            boundary_padding=boundary_padding,
+            prefer_gaussian=prefer_gaussian,
+            manual_peak_path=manual_peak_path,
+            photon_normalize=photon_normalize,
+            photon_reference_mode=photon_reference_mode,
+            mass_discrimination=mass_discrimination,
+            light_source=light_source,
+        )
+        return analysis_df, build_pie_curves(analysis_df)
+
+    def on_analysis_complete(self, result: object) -> None:
+        self.analysis_df, self.curves = result
+        self.current_fit = None
+        self.populate_mz_list()
+        energy_count = self.analysis_df["energy"].nunique() if not self.analysis_df.empty else 0
+        self.summary_label.setText(f"{len(self.curves)} 条m/z曲线 | {energy_count} 个能量点")
+        if self.curves:
+            self.mz_list.setCurrentRow(0)
+        QtWidgets.QMessageBox.information(self, "完成", f"生成 {len(self.curves)} 条PIE曲线")
+
+    def on_analysis_failed(self, message: str) -> None:
+        QtWidgets.QMessageBox.critical(self, "错误", message)
+
+    def populate_mz_list(self):
+        self.mz_list.clear()
+        for mz in sorted(self.curves):
+            curve = self.curves[mz]
+            label = curve.get("species") or ""
+            suffix = f" {label}" if label and label != "Unknown" else ""
+            item = QtWidgets.QListWidgetItem(f"{mz}{suffix}  ({len(curve['energies'])}点)")
+            item.setData(QtCore.Qt.ItemDataRole.UserRole, mz)
+            self.mz_list.addItem(item)
+
+    def on_mz_selected(self, current, previous=None):
+        if current is None:
+            self.current_mz = None
+            return
+        self.current_mz = int(current.data(QtCore.Qt.ItemDataRole.UserRole))
+        self.current_fit = None
+        curve = self.curves[self.current_mz]
+        rows = curve["rows"].copy()
+        curve_df = pd.DataFrame(
+            {
+                "光子能量(eV)": np.round(rows["energy"].astype(float), 4),
+                "原始积分": np.round(rows["raw_area"].astype(float), 4),
+                "IO归一化": np.round(rows["photon_normalized_intensity"].astype(float), 4),
+                "最终强度": np.round(rows["normalized_intensity"].astype(float), 4),
+            }
+        )
+        self.set_dataframe(self.curve_table, curve_df)
+        self.fit_table.clear()
+        self.fit_table.setRowCount(0)
+        self.fit_table.setColumnCount(0)
+        self.update_plot(curve, None)
+
+    def refresh_current_plot(self):
+        if self.current_mz is not None and self.current_mz in self.curves:
+            self.update_plot(self.curves[self.current_mz], self.current_fit)
+
+    def update_plot(self, curve: dict, fit_model: dict | None = None):
+        if self.plot_widget is None:
+            return
+        x_values = np.asarray(curve["energies"], dtype=float)
+        y_values = np.asarray(curve["intensities"], dtype=float)
+        valid = np.isfinite(x_values) & np.isfinite(y_values)
+        x_values = x_values[valid]
+        y_values = y_values[valid]
+        self.plot_widget.clear()
+        plot_item = self.plot_widget.getPlotItem()
+        if plot_item.legend is None:
+            plot_item.addLegend(offset=(-10, 10))
+        else:
+            plot_item.legend.clear()
+        self.plot_widget.setLabel("bottom", "Photon Energy", units="eV")
+        self.plot_widget.setLabel("left", "Normalized Intensity")
+        self.plot_widget.showGrid(x=True, y=True, alpha=0.25)
+        if x_values.size == 0:
+            self.plot_widget.setTitle(f"m/z {curve['mz']} PIE - 无有效数据")
+            return
+        x_ranges = [x_values]
+        y_ranges = [y_values]
+        self.plot_widget.plot(
+            x_values,
+            y_values,
+            pen=pg.mkPen("#2563eb", width=2),
+            symbol="o",
+            symbolBrush="#2563eb",
+            symbolPen="#1e3a8a",
+            symbolSize=8,
+            name="实验PIE",
+        )
+
+        if fit_model is not None and self.show_fit_check.isChecked():
+            fit_x = np.asarray(fit_model.get("energies", []), dtype=float)
+            fit_y = np.asarray(fit_model.get("fitted", []), dtype=float)
+            fit_valid = np.isfinite(fit_x) & np.isfinite(fit_y)
+            fit_x = fit_x[fit_valid]
+            fit_y = fit_y[fit_valid]
+            if fit_x.size:
+                x_ranges.append(fit_x)
+                y_ranges.append(fit_y)
+                self.plot_widget.plot(
+                    fit_x,
+                    fit_y,
+                    pen=pg.mkPen("#f97316", width=2.5),
+                    name="PICS总拟合",
+                )
+                if self.show_components_check.isChecked():
+                    colors = ["#16a34a", "#9333ea", "#dc2626"]
+                    for idx, component in enumerate(fit_model.get("species", [])[:3]):
+                        component_y = np.asarray(component.get("component_intensities", []), dtype=float)
+                        component_count = min(fit_x.size, component_y.size)
+                        if component_count == 0:
+                            continue
+                        component_x = fit_x[:component_count]
+                        component_y = component_y[:component_count]
+                        component_valid = np.isfinite(component_x) & np.isfinite(component_y)
+                        component_x = component_x[component_valid]
+                        component_y = component_y[component_valid]
+                        if component_x.size == 0:
+                            continue
+                        x_ranges.append(component_x)
+                        y_ranges.append(component_y)
+                        self.plot_widget.plot(
+                            component_x,
+                            component_y,
+                            pen=pg.mkPen(colors[idx % len(colors)], width=1.5, style=QtCore.Qt.PenStyle.DashLine),
+                            name=str(component.get("species", ""))[:24],
+                        )
+
+        title = f"m/z {curve['mz']} PIE"
+        if fit_model is not None and fit_model.get("fitted"):
+            title += f" | PICS R²={fit_model.get('r_squared', 0.0):.4f}"
+        self.plot_widget.setTitle(title)
+        all_x = np.concatenate(x_ranges)
+        all_y = np.concatenate(y_ranges)
+        x_min = float(np.min(all_x))
+        x_max = float(np.max(all_x))
+        y_min = float(np.min(all_y))
+        y_max = float(np.max(all_y))
+        x_pad = max(0.1, (x_max - x_min) * 0.08)
+        y_pad = max(1.0, (y_max - y_min) * 0.12)
+        if x_min == x_max:
+            x_min -= 0.5
+            x_max += 0.5
+        if y_min == y_max:
+            y_min -= 1.0
+            y_max += 1.0
+        self.plot_widget.setXRange(x_min - x_pad, x_max + x_pad, padding=0)
+        self.plot_widget.setYRange(max(0.0, y_min - y_pad), y_max + y_pad, padding=0)
+
+    def fit_current_curve(self):
+        if not self.database:
+            QtWidgets.QMessageBox.warning(self, "提示", "请先加载物种数据库")
+            return
+        if self.current_mz is None or self.current_mz not in self.curves:
+            QtWidgets.QMessageBox.warning(self, "提示", "请先选择一条m/z曲线")
+            return
+        try:
+            curve = self.curves[self.current_mz]
+            fit_model = identify_species_for_mz_with_curve(
+                self.database,
+                self.current_mz,
+                curve["energies"],
+                curve["intensities"],
+            )
+            self.current_fit = fit_model
+            results = fit_model.get("species", [])
+            fit_df = pd.DataFrame(
+                [
+                    {
+                        "物种名称": item["species"],
+                        "电离能(eV)": "" if item.get("ie") is None else round(float(item["ie"]), 4),
+                        "匹配系数": round(float(item["coefficient"]), 6),
+                        "贡献(%)": round(float(item["contribution_percent"]), 2),
+                        "R²": round(float(item["r_squared"]), 5),
+                    }
+                    for item in results
+                ],
+                columns=["物种名称", "电离能(eV)", "匹配系数", "贡献(%)", "R²"],
+            )
+            self.set_dataframe(self.fit_table, fit_df)
+            self.detail_tabs.setCurrentWidget(self.fit_table)
+            self.update_plot(curve, fit_model)
+            self.status_label.setText(
+                f"m/z {self.current_mz}: PICS候选 {fit_model.get('candidate_count', 0)} 个，"
+                f"命中 {len(results)} 个，R²={fit_model.get('r_squared', 0.0):.4f}"
+            )
+            if not results:
+                QtWidgets.QMessageBox.information(self, "结果", "当前m/z没有匹配到可拟合的物种")
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "错误", str(exc))
+
+    def export_curve_data(self):
+        if self.analysis_df.empty:
+            QtWidgets.QMessageBox.warning(self, "提示", "没有可导出的PIE曲线数据")
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "导出PIE曲线数据",
+            str(ensure_output_dir("exports", "pie") / "pie_curves.xlsx"),
+            "Excel Files (*.xlsx);;CSV Files (*.csv)",
+        )
+        if not path:
+            return
+        if path.endswith(".xlsx"):
+            self.analysis_df.to_excel(path, index=False)
+        else:
+            self.analysis_df.to_csv(path, index=False, encoding="utf-8-sig")
+
+
+class CoreToolsDialog(QtWidgets.QDialog):
+    def __init__(self, calibration: Calibration, parent=None, initial_tab: str = "normalization"):
+        super().__init__(parent)
+        self.setWindowTitle("BL03U核心处理工具")
+        self.resize(1280, 800)
+        self.normalization_settings = load_normalization_settings()
+        layout = QtWidgets.QVBoxLayout(self)
+        self.tabs = QtWidgets.QTabWidget()
+        tab_indexes = {
+            "normalization": self.tabs.addTab(NormalizationSettingsWidget(self.normalization_settings, calibration, self), "通用参数"),
+            "temperature": self.tabs.addTab(TemperatureScanDialog(calibration, self.normalization_settings, self), "温度扫描"),
+            "pie": self.tabs.addTab(PIESpeciesFitDialog(calibration, self.normalization_settings, self), "PIE物种拟合"),
+            "isotope": self.tabs.addTab(IsotopeAbundanceDialog(self), "同位素丰度"),
+        }
+        self.tabs.setCurrentIndex(tab_indexes.get(initial_tab, 0))
+        layout.addWidget(self.tabs)

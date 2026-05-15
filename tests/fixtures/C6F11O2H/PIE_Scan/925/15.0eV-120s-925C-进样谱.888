@@ -1,0 +1,34 @@
+REPORT-FILE from 07/25/2023 11:44:17.190  written 07/25/2023 11:47:12
+REALTIME: 0.000       
+TOTALSUM: 7265942     
+ROISUM: 7265942     
+MAXVAL: 0           
+SWEEPS: 3601773     
+STARTS: 3601774     
+cmline0=07/25/2023 11:44:17.190 
+range=29984
+fstchan=0
+sweepmode=80
+swpreset=1           
+prena=1
+syncout=0
+cycles=60
+sequences=1
+dac01=80c08a4
+dac23=6b406b4
+bitshift=0 
+rtpreset=120.000     
+evpreset=0           
+autoinc=0 
+;datname=E:\2023\202307\中科大赵龙\C6F11O2H全氟己酸\15.0eV-120s-925C-进样谱.888
+savedata=0 
+fmt=asc
+smoothpts=0 
+roimin=0
+roimax=29984
+caluse=3 
+caloff=0.259342
+calfact=0.000638
+calfact2=3.66779e-007
+calfact3=0
+calunit=nsec
