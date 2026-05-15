@@ -374,7 +374,39 @@ def build_pie_curves(analysis_df: pd.DataFrame) -> dict[int, dict]:
     return curves
 
 
-def fit_species_combination_with_curve(species_list: list[dict], experimental_energies, experimental_intensities) -> dict:
+def _solve_nonnegative_coefficients(design: np.ndarray, target: np.ndarray) -> np.ndarray:
+    try:
+        from scipy.optimize import nnls
+
+        coeffs, _ = nnls(design, target)
+    except Exception:
+        coeffs, _, _, _ = np.linalg.lstsq(design, target, rcond=None)
+        coeffs = np.maximum(0, coeffs)
+    return np.asarray(coeffs, dtype=float)
+
+
+def _clean_coefficient_map(coefficients: dict[int, float] | None) -> dict[int, float]:
+    cleaned: dict[int, float] = {}
+    for key, value in (coefficients or {}).items():
+        try:
+            species_id = int(key)
+            coefficient = float(value)
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(coefficient):
+            cleaned[species_id] = max(0.0, coefficient)
+    return cleaned
+
+
+def fit_species_combination_with_curve(
+    species_list: list[dict],
+    experimental_energies,
+    experimental_intensities,
+    *,
+    coefficient_mode: str = "fit",
+    coefficients: dict[int, float] | None = None,
+    locked_species_ids: list[int] | None = None,
+) -> dict:
     """Fit one experimental PIE curve using SQLite PICS records.
 
     The database stores cross sections on each species' native photon-energy
@@ -389,18 +421,25 @@ def fit_species_combination_with_curve(species_list: list[dict], experimental_en
     valid = np.isfinite(energies) & np.isfinite(intensities)
     energies = energies[valid]
     intensities = intensities[valid]
+    coefficient_mode = coefficient_mode if coefficient_mode in {"fit", "manual", "locked_fit"} else "fit"
     empty_model = {
         "energies": energies.tolist(),
         "experimental": intensities.tolist(),
         "fitted": [],
+        "residuals": [],
         "r_squared": 0.0,
+        "rmse": 0.0,
+        "mae": 0.0,
         "candidate_count": len(species_list),
+        "coefficient_mode": coefficient_mode,
+        "locked_species_ids": [],
         "species": [],
     }
     if not species_list or energies.size == 0 or intensities.size == 0:
         return empty_model
 
     active_species: list[dict] = []
+    active_species_ids: list[int] = []
     design_columns: list[np.ndarray] = []
     for species in species_list:
         pic_energies = np.asarray(species["energies"], dtype=float)
@@ -424,23 +463,38 @@ def fit_species_combination_with_curve(species_list: list[dict], experimental_en
         basis = np.nan_to_num(basis, nan=0.0, posinf=0.0, neginf=0.0)
         if np.any(basis > 0):
             active_species.append(species)
+            active_species_ids.append(int(species.get("id", len(active_species_ids) + 1)))
             design_columns.append(basis)
 
     if not design_columns:
         return empty_model
 
     design = np.column_stack(design_columns)
-    try:
-        from scipy.optimize import nnls
-
-        coeffs, _ = nnls(design, intensities)
-    except Exception:
-        coeffs, _, _, _ = np.linalg.lstsq(design, intensities, rcond=None)
-        coeffs = np.maximum(0, coeffs)
+    coefficient_map = _clean_coefficient_map(coefficients)
+    locked_ids = {int(value) for value in (locked_species_ids or [])}
+    coeffs = np.zeros(len(active_species), dtype=float)
+    if coefficient_mode == "manual":
+        coeffs = np.asarray(
+            [coefficient_map.get(species_id, 0.0) for species_id in active_species_ids],
+            dtype=float,
+        )
+    elif coefficient_mode == "locked_fit":
+        locked_indices = [idx for idx, species_id in enumerate(active_species_ids) if species_id in locked_ids]
+        free_indices = [idx for idx, species_id in enumerate(active_species_ids) if species_id not in locked_ids]
+        for idx in locked_indices:
+            coeffs[idx] = coefficient_map.get(active_species_ids[idx], 0.0)
+        residual_target = intensities - design[:, locked_indices] @ coeffs[locked_indices] if locked_indices else intensities
+        if free_indices:
+            coeffs[free_indices] = _solve_nonnegative_coefficients(design[:, free_indices], residual_target)
+    else:
+        coeffs = _solve_nonnegative_coefficients(design, intensities)
     fitted = design @ coeffs
+    residuals = intensities - fitted
     ss_tot = float(np.sum((intensities - np.mean(intensities)) ** 2))
-    ss_res = float(np.sum((intensities - fitted) ** 2))
+    ss_res = float(np.sum(residuals ** 2))
     r_squared = 1 - ss_res / ss_tot if ss_tot > 0 else 0.0
+    rmse = float(np.sqrt(np.mean(residuals ** 2))) if residuals.size else 0.0
+    mae = float(np.mean(np.abs(residuals))) if residuals.size else 0.0
     fitted_area = float(np.sum(fitted))
     merged: dict[tuple[str, float | None], dict] = {}
     for idx, species in enumerate(active_species):
@@ -450,6 +504,8 @@ def fit_species_combination_with_curve(species_list: list[dict], experimental_en
             if key not in merged:
                 merged[key] = {
                     "mz": int(species["mz"]),
+                    "ids": [],
+                    "coefficients_by_id": {},
                     "species": species["species"],
                     "ie": species.get("ie"),
                     "coefficient": 0.0,
@@ -457,6 +513,8 @@ def fit_species_combination_with_curve(species_list: list[dict], experimental_en
                     "component_intensities": np.zeros_like(component),
                     "r_squared": float(r_squared),
                 }
+            merged[key]["ids"].append(active_species_ids[idx])
+            merged[key]["coefficients_by_id"][active_species_ids[idx]] = float(coeffs[idx])
             merged[key]["coefficient"] += float(coeffs[idx])
             merged[key]["component_area"] += float(np.sum(component))
             merged[key]["component_intensities"] = merged[key]["component_intensities"] + component
@@ -467,6 +525,8 @@ def fit_species_combination_with_curve(species_list: list[dict], experimental_en
         results.append(
             {
                 "mz": item["mz"],
+                "ids": item["ids"],
+                "coefficients_by_id": item["coefficients_by_id"],
                 "species": item["species"],
                 "ie": item["ie"],
                 "coefficient": item["coefficient"],
@@ -480,8 +540,13 @@ def fit_species_combination_with_curve(species_list: list[dict], experimental_en
         "energies": energies.tolist(),
         "experimental": intensities.tolist(),
         "fitted": fitted.tolist(),
+        "residuals": residuals.tolist(),
         "r_squared": float(r_squared),
+        "rmse": rmse,
+        "mae": mae,
         "candidate_count": len(active_species),
+        "coefficient_mode": coefficient_mode,
+        "locked_species_ids": sorted(locked_ids & set(active_species_ids)),
         "species": results,
     }
 

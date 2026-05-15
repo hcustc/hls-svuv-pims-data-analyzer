@@ -111,6 +111,9 @@ class PieStartPayload(BaseModel):
 
 class PieFitPayload(BaseModel):
     species_ids: Optional[List[int]] = None
+    coefficient_mode: str = "fit"
+    coefficients: Optional[Dict[int, float]] = None
+    locked_species_ids: Optional[List[int]] = None
 
 
 def _json_records(df) -> List[Dict[str, Any]]:
@@ -806,6 +809,20 @@ def _load_species_records_by_ids(database_path: Path, species_ids: List[int]) ->
     return records
 
 
+def _parse_species_ids(value: Optional[str]) -> List[int]:
+    if not value:
+        return []
+    ids: List[int] = []
+    for token in re.split(r"[,，;；\s]+", value.strip()):
+        if not token:
+            continue
+        try:
+            ids.append(int(token))
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"无法解析候选 PICS id: {token}")
+    return sorted(set(ids))
+
+
 def _run_pie_job(job_id: str, payload: PieStartPayload) -> None:
     try:
         _update_job(job_id, status="running", message="读取配置与文件路径")
@@ -994,6 +1011,32 @@ def pie_fit_candidates(job_id: str, mz: int):
     return {"rows": _query_fit_candidates(database_path, int(mz))}
 
 
+@app.get("/api/pie/candidate_curves/{job_id}/{mz}")
+def pie_candidate_curves(job_id: str, mz: int, species_ids: str = ""):
+    job = _get_job(job_id)
+    if job.status != "done":
+        raise HTTPException(status_code=409, detail=f"job status is {job.status}")
+    database_path = Path(job.database_path)
+    if not database_path.exists() or not database_path.is_file():
+        raise HTTPException(status_code=404, detail="SQLite PICS库不存在")
+    selected_ids = _parse_species_ids(species_ids)
+    if not selected_ids:
+        selected_ids = [row["id"] for row in _query_fit_candidates(database_path, int(mz))]
+    rows = [
+        {
+            "id": int(item["id"]),
+            "mz": int(item["mz"]),
+            "species": item["species"],
+            "ie": item.get("ie"),
+            "energies": [float(value) for value in item["energies"]],
+            "cross_sections": [float(value) for value in item["cross_sections"]],
+        }
+        for item in _load_species_records_by_ids(database_path, selected_ids)
+        if int(item["mz"]) == int(mz)
+    ]
+    return {"rows": rows}
+
+
 @app.post("/api/pie/fit/{job_id}/{mz}")
 def fit_pie_curve(job_id: str, mz: int, payload: Optional[PieFitPayload] = None):
     job = _get_job(job_id)
@@ -1015,6 +1058,9 @@ def fit_pie_curve(job_id: str, mz: int, payload: Optional[PieFitPayload] = None)
             species,
             curve["energies"],
             curve["intensities"],
+            coefficient_mode=payload.coefficient_mode if payload else "fit",
+            coefficients=payload.coefficients if payload else None,
+            locked_species_ids=payload.locked_species_ids if payload else None,
         )
         fit_model["selection_mode"] = "manual"
         fit_model["selected_species_ids"] = [int(value) for value in selected_ids]
