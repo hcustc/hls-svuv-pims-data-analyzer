@@ -111,6 +111,49 @@ def test_pics_fit_returns_fitted_curve():
     assert round(model["r_squared"], 6) == 1.0
 
 
+def test_pics_fit_supports_manual_and_locked_coefficients():
+    species = [
+        {
+            "id": 1,
+            "mz": 18,
+            "species": "A",
+            "ie": None,
+            "energies": [11.0, 12.0, 13.0],
+            "cross_sections": [1.0, 2.0, 3.0],
+        },
+        {
+            "id": 2,
+            "mz": 18,
+            "species": "B",
+            "ie": None,
+            "energies": [11.0, 12.0, 13.0],
+            "cross_sections": [0.0, 1.0, 0.0],
+        },
+    ]
+    manual = fit_species_combination_with_curve(
+        species,
+        [11.0, 12.0, 13.0],
+        [2.0, 5.0, 6.0],
+        coefficient_mode="manual",
+        coefficients={1: 2.0, 2: 1.0},
+    )
+    assert manual["coefficient_mode"] == "manual"
+    assert [round(value, 6) for value in manual["fitted"]] == [2.0, 5.0, 6.0]
+    assert manual["species"][0]["coefficients_by_id"][1] == 2.0
+
+    locked = fit_species_combination_with_curve(
+        species,
+        [11.0, 12.0, 13.0],
+        [2.0, 5.0, 6.0],
+        coefficient_mode="locked_fit",
+        coefficients={1: 2.0},
+        locked_species_ids=[1],
+    )
+    assert locked["coefficient_mode"] == "locked_fit"
+    assert locked["locked_species_ids"] == [1]
+    assert [round(value, 6) for value in locked["fitted"]] == [2.0, 5.0, 6.0]
+
+
 def test_build_temperature_curves_groups_by_rounded_mz():
     df = pd.DataFrame(
         [

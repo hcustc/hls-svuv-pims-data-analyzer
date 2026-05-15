@@ -13,13 +13,13 @@
     </div>
   </header>
 
-  <nav class="top-nav" aria-label="Web tools">
-    <button class="nav-button active" type="button" data-page="pie-page">PIE / PICS 拟合</button>
-    <button class="nav-button" type="button" data-page="pics-page">PICS 查询</button>
-    <button class="nav-button" type="button" data-page="pics-upload-page">PICS 上传</button>
+  <nav class="top-nav" aria-label="Web tools" role="tablist">
+    <button id="pie-tab" class="nav-button active" type="button" role="tab" aria-selected="true" aria-controls="pie-page" data-page="pie-page">PIE / PICS 拟合</button>
+    <button id="pics-tab" class="nav-button" type="button" role="tab" aria-selected="false" aria-controls="pics-page" data-page="pics-page">PICS 查询</button>
+    <button id="pics-upload-tab" class="nav-button" type="button" role="tab" aria-selected="false" aria-controls="pics-upload-page" data-page="pics-upload-page">PICS 上传</button>
   </nav>
 
-  <main id="pie-page" class="shell page active">
+  <main id="pie-page" class="shell page active" role="tabpanel" aria-labelledby="pie-tab">
     <section class="panel query-panel">
       <div class="panel-heading">
         <h2>输入</h2>
@@ -27,11 +27,12 @@
       </div>
 
       <div class="source-switch" role="group" aria-label="PIE 输入方式">
-        <button class="source-button active" type="button" data-pie-source="folder">谱文件夹生成</button>
-        <button class="source-button" type="button" data-pie-source="upload">上传 PIE 曲线</button>
+        <button class="source-button active" type="button" aria-pressed="true" data-pie-source="folder">谱文件夹生成</button>
+        <button class="source-button" type="button" aria-pressed="false" data-pie-source="upload">上传 PIE 曲线</button>
       </div>
 
-      <form id="query-form" class="source-pane active">
+      <form id="query-form" class="source-pane active" aria-describedby="pie-form-help">
+        <p id="pie-form-help" class="sr-only">填写 PIE 扫描来源和归一化参数后生成 PIE 曲线。</p>
         <label>
           PIE 扫描文件夹
           <input id="folder" name="folder" value="tests/fixtures/C6F11O2H/PIE_Scan/1050" autocomplete="off">
@@ -95,10 +96,11 @@
           </label>
         </details>
 
-        <button id="start-button" type="submit">生成 PIE 曲线</button>
+        <button id="start-button" type="submit" aria-label="生成 PIE 曲线">生成 PIE 曲线</button>
       </form>
 
-      <form id="curve-upload-form" class="source-pane hidden">
+      <form id="curve-upload-form" class="source-pane hidden" aria-describedby="curve-upload-help">
+        <p id="curve-upload-help" class="sr-only">上传已处理的 PIE 曲线表格后进入 m/z 选择与拟合流程。</p>
         <label>
           已处理 PIE 曲线
           <input id="pie-curve-file" type="file" accept=".csv,.tsv,.txt,.xlsx,.xls">
@@ -110,15 +112,25 @@
           <code>宽表: energy, 15, 29, 44 ...</code>
         </div>
 
-        <button id="upload-curve-button" type="submit">上传 PIE 曲线</button>
+        <button id="upload-curve-button" type="submit" aria-label="上传已处理 PIE 曲线">上传 PIE 曲线</button>
       </form>
 
-      <div class="status-box">
+      <div class="status-box" role="status" aria-live="polite" aria-atomic="false">
         <div class="status-line">
           <span id="status-pill" class="pill idle">Idle</span>
           <span id="status-text">等待提交任务</span>
         </div>
-        <div id="progress-log" class="progress-log"></div>
+        <div class="progress-meter" aria-label="PIE 任务进度">
+          <div class="progress-track">
+            <div id="progress-bar" class="progress-bar" style="width: 0%"></div>
+          </div>
+          <span id="progress-percent">0%</span>
+        </div>
+        <div class="progress-meta">
+          <span id="progress-step">等待任务</span>
+          <span id="progress-elapsed">--</span>
+        </div>
+        <div id="progress-log" class="progress-log" role="log" aria-live="polite" aria-label="PIE 任务日志"></div>
       </div>
     </section>
 
@@ -128,7 +140,14 @@
         <span id="source-caption" class="muted">尚未生成曲线</span>
       </div>
 
-      <div class="toolbar">
+      <div id="summary-grid" class="summary-grid" aria-label="PIE 任务摘要">
+        <div class="summary-card"><span>提取曲线数</span><strong>0</strong></div>
+        <div class="summary-card"><span>能量点数</span><strong>0</strong></div>
+        <div class="summary-card"><span>积分记录数</span><strong>0</strong></div>
+        <div class="summary-card"><span>原始文件数</span><strong>0</strong></div>
+      </div>
+
+      <div class="toolbar" aria-label="PIE 曲线拟合工具栏">
         <label>
           选择 m/z
           <select id="mz-select" disabled></select>
@@ -136,11 +155,12 @@
         <div class="fit-mode">
           <span>候选 PICS</span>
           <div class="segmented">
-            <button class="segment-button active" id="fit-auto-button" type="button" data-fit-mode="auto">自动</button>
-            <button class="segment-button" id="fit-manual-button" type="button" data-fit-mode="manual">手动</button>
+            <button class="segment-button active" id="fit-auto-button" type="button" aria-pressed="true" data-fit-mode="auto">自动</button>
+            <button class="segment-button" id="fit-manual-button" type="button" aria-pressed="false" data-fit-mode="manual">手动</button>
           </div>
         </div>
-        <button id="fit-button" type="button" disabled>拟合当前曲线</button>
+        <button id="fit-button" type="button" aria-describedby="fit-help" disabled>拟合当前曲线</button>
+        <span id="fit-help" class="sr-only">使用当前候选 PICS 设置拟合所选 m/z 曲线。</span>
         <label class="check-label compact">
           <input id="show-components" type="checkbox" disabled>
           显示组分
@@ -148,7 +168,7 @@
       </div>
 
       <div class="chart-wrap">
-        <canvas id="pie-chart" height="420"></canvas>
+        <canvas id="pie-chart" height="420" role="img" aria-label="PIE 曲线图"></canvas>
       </div>
 
       <div id="fit-summary" class="fit-summary"></div>
@@ -162,15 +182,29 @@
             <button id="clear-candidates" class="small-button secondary" type="button">清空</button>
           </div>
         </div>
+        <div class="manual-fit-controls" aria-label="手动拟合系数设置">
+          <label>
+            系数模式
+            <select id="coefficient-mode">
+              <option value="fit">自动求系数</option>
+              <option value="locked_fit">锁定系数后拟合其余</option>
+              <option value="manual">使用手动系数</option>
+            </select>
+          </label>
+          <button id="seed-coefficients" class="small-button secondary" type="button">读取当前系数</button>
+          <button id="zero-coefficients" class="small-button secondary" type="button">系数清零</button>
+          <button id="manual-fit-button" type="button" aria-describedby="fit-help" disabled>按候选拟合</button>
+          <span id="manual-fit-caption" class="muted">尚未选择候选</span>
+        </div>
         <div id="candidate-view" class="table-view compact-table">
           <div class="empty">切换到手动模式后显示候选 PICS。</div>
         </div>
       </div>
 
-      <div class="table-toolbar">
-        <button class="tab-button active" type="button" data-table="species">拟合物种</button>
-        <button class="tab-button" type="button" data-table="curve">当前曲线积分</button>
-        <button class="tab-button" type="button" data-table="all">全部积分结果</button>
+      <div class="table-toolbar" role="group" aria-label="结果表切换和下载">
+        <button class="tab-button active" type="button" aria-pressed="true" data-table="species">拟合物种</button>
+        <button class="tab-button" type="button" aria-pressed="false" data-table="curve">当前曲线积分</button>
+        <button class="tab-button" type="button" aria-pressed="false" data-table="all">全部积分结果</button>
         <button id="download-button" type="button" disabled>下载当前表</button>
       </div>
       <div id="table-view" class="table-view">
@@ -179,14 +213,15 @@
     </section>
   </main>
 
-  <main id="pics-page" class="shell page">
+  <main id="pics-page" class="shell page" role="tabpanel" aria-labelledby="pics-tab">
     <section class="panel query-panel">
       <div class="panel-heading">
         <h2>PICS 查询</h2>
         <span id="pics-library-caption" class="muted">当前使用服务器维护库</span>
       </div>
 
-      <form id="pics-form">
+      <form id="pics-form" aria-describedby="pics-form-help">
+        <p id="pics-form-help" class="sr-only">按 m/z、名称关键词或电离能范围查询 PICS 数据库。</p>
         <div class="field-row">
           <label>
             m/z
@@ -237,7 +272,7 @@
       </div>
 
       <div class="chart-wrap">
-        <canvas id="pics-chart" height="380"></canvas>
+        <canvas id="pics-chart" height="380" role="img" aria-label="PICS 曲线图"></canvas>
       </div>
 
       <div class="table-toolbar">
@@ -249,14 +284,15 @@
     </section>
   </main>
 
-  <main id="pics-upload-page" class="shell page">
+  <main id="pics-upload-page" class="shell page" role="tabpanel" aria-labelledby="pics-upload-tab">
     <section class="panel query-panel">
       <div class="panel-heading">
         <h2>PICS 上传</h2>
         <span class="muted">维护 SQLite 查询库</span>
       </div>
 
-      <form id="pics-upload-form">
+      <form id="pics-upload-form" aria-describedby="pics-upload-help">
+        <p id="pics-upload-help" class="sr-only">上传 PICS 数据文件并选择写入临时工作库或服务器维护库。</p>
         <label>
           PICS 数据文件
           <input id="pics-upload-file" type="file" accept=".csv,.tsv,.txt,.xlsx,.xls">
@@ -292,7 +328,7 @@
         <button id="pics-upload-button" type="submit">上传并写入</button>
       </form>
 
-      <div class="status-box">
+      <div class="status-box" role="status" aria-live="polite" aria-atomic="false">
         <div class="status-line">
           <span id="upload-status-pill" class="pill idle">Idle</span>
           <span id="upload-status-text">等待上传</span>
@@ -301,7 +337,16 @@
           <span id="active-pics-library">当前使用服务器维护库。</span>
           <button id="use-server-library" class="small-button secondary" type="button">切回服务器库</button>
         </div>
-        <div id="upload-progress-log" class="progress-log"></div>
+        <div class="progress-meter compact" aria-label="PICS 上传进度">
+          <div class="progress-track">
+            <div id="upload-progress-bar" class="progress-bar" style="width: 0%"></div>
+          </div>
+          <span id="upload-progress-percent">0%</span>
+        </div>
+        <div class="progress-meta">
+          <span id="upload-progress-step">等待上传</span>
+        </div>
+        <div id="upload-progress-log" class="progress-log" role="log" aria-live="polite" aria-label="PICS 上传日志"></div>
       </div>
     </section>
 
