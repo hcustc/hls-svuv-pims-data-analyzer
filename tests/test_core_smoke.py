@@ -1,11 +1,27 @@
+import sqlite3
+
 import pandas as pd
 
 from core.calibration import Calibration, fit_quadratic_calibration
 from core.config import load_calibration_config, load_calibration_points, species_database_path
 from core.integration import integrate_peak, load_peak_config
-from core.isotope import calculate_isotope_distribution, parse_formula
+from core.isotope import (
+    calculate_isotope_distribution,
+    formula_monoisotopic_mass,
+    formula_nominal_mass,
+    generate_formula_candidates,
+    parse_element_count_ranges,
+    parse_formula,
+)
+from core.nist_webbook import (
+    NistWebBookClient,
+    infer_nist_search_type,
+    parse_ionization_energy_determinations,
+    parse_ionization_energy_summary,
+    pick_evaluated_ie,
+)
 from core.normalization import extract_light_intensity
-from core.peak_detection import GaussianFit, Peak, detect_peaks_in_range
+from core.peak_detection import GaussianFit, Peak, detect_peaks_in_range, detect_peaks_prominence
 from core.peak_ranges import load_peak_ranges
 from core.pie_analysis import (
     analyze_pie_folder,
@@ -14,7 +30,12 @@ from core.pie_analysis import (
     load_species_database,
     save_species_database_sqlite,
 )
-from core.temperature_scan import analyze_temperature_folder, build_temperature_curves, compute_kr_expansion_factors
+from core.temperature_scan import (
+    analyze_temperature_folder,
+    build_temperature_curves,
+    classify_temperature_curve,
+    compute_kr_expansion_factors,
+)
 
 
 def test_calibration_fit_roundtrip():
@@ -41,6 +62,274 @@ def test_isotope_distribution_contains_main_peak():
     assert rows[0]["percent"] > 99
 
 
+def test_formula_mass_calculation():
+    assert formula_nominal_mass("C6H6") == 78
+    assert round(formula_monoisotopic_mass("H2O"), 6) == 18.010565
+
+
+def test_generate_formula_candidates_from_mass_and_element_ranges():
+    ranges = parse_element_count_ranges("C:0-2,H:0-8,O:0-2")
+    candidates = generate_formula_candidates(
+        18.010565,
+        tolerance=20,
+        tolerance_unit="ppm",
+        element_ranges=ranges,
+        max_results=20,
+    )
+    assert candidates
+    assert candidates[0]["formula"] == "H2O"
+    assert abs(candidates[0]["error_ppm"]) < 20
+
+
+NIST_IE_HTML = """
+<html><body>
+<h2 id="Ion-Energetics">Gas phase ion energetics data</h2>
+<table class="data">
+  <tr><th>Quantity</th><th>Value</th><th>Units</th><th>Method</th><th>Reference</th><th>Comment</th></tr>
+  <tr>
+    <td>IE (evaluated)</td><td>9.24378 ± 0.00007</td><td>eV</td><td>PE</td>
+    <td><a href="/cgi/cbook.cgi?ID=C71432&amp;Units=SI&amp;Mask=20#ref-1">Lias, 1988</a></td>
+    <td>evaluated value</td>
+  </tr>
+</table>
+<h3>Ionization energy determinations</h3>
+<table class="data">
+  <tr><th>IE (eV)</th><th>Method</th><th>Reference</th><th>Comment</th></tr>
+  <tr>
+    <td>9.245 ± 0.003</td><td><a href="/chemistry/">PI</a></td>
+    <td><a href="#ref-2">Smith, 1970</a></td><td>threshold</td>
+  </tr>
+</table>
+</body></html>
+"""
+
+
+NIST_NON_IE_SUMMARY_HTML = """
+<html><body>
+<h2 id="Ion-Energetics">Gas phase ion energetics data</h2>
+<table class="data">
+  <tr><th>Quantity</th><th>Value</th><th>Units</th><th>Method</th><th>Reference</th><th>Comment</th></tr>
+  <tr>
+    <td>Proton affinity (review)</td><td>884</td><td>kJ/mol</td><td>N/A</td>
+    <td>Hunter and Lias, 1998</td><td>HL</td>
+  </tr>
+</table>
+<h3>Ionization energy determinations</h3>
+<table class="data">
+  <tr><th>IE (eV)</th><th>Method</th><th>Reference</th><th>Comment</th></tr>
+  <tr><td>8.320 ± 0.04</td><td>PE</td><td>Butcher, Costa, et al., 1987</td><td>LBLHLM</td></tr>
+</table>
+</body></html>
+"""
+
+
+def _compound_html(nist_id: str, name: str, formula: str, ie: float) -> str:
+    return f"""
+    <html><body>
+    <h1 id="Top">{name}</h1>
+    <ul>
+      <li>Formula: {formula}</li>
+      <li>CAS Registry Number: 64-17-5</li>
+      <li>Other data available:
+        <ul>
+          <li><a href="/cgi/cbook.cgi?ID={nist_id}&amp;Units=SI&amp;Mask=20#Ion-Energetics">Gas phase ion energetics data</a></li>
+        </ul>
+      </li>
+    </ul>
+    <h2 id="Ion-Energetics">Gas phase ion energetics data</h2>
+    <table class="data">
+      <tr><th>Quantity</th><th>Value</th><th>Units</th><th>Method</th><th>Reference</th><th>Comment</th></tr>
+      <tr><td>IE (evaluated)</td><td>{ie}</td><td>eV</td><td>PE</td><td>NIST</td><td></td></tr>
+    </table>
+    </body></html>
+    """
+
+
+def test_nist_webbook_ie_parsers_pick_evaluated_value():
+    summary = parse_ionization_energy_summary(NIST_IE_HTML)
+    assert len(summary) == 1
+    evaluated = pick_evaluated_ie(summary)
+    assert evaluated is not None
+    assert evaluated.source == "evaluated"
+    assert evaluated.value == 9.24378
+    assert evaluated.uncertainty == 0.00007
+    assert evaluated.units == "eV"
+
+    determinations = parse_ionization_energy_determinations(NIST_IE_HTML)
+    assert len(determinations) == 1
+    assert determinations[0].value == 9.245
+    assert determinations[0].method == "PI"
+
+
+def test_nist_webbook_does_not_treat_non_ie_summary_as_ie():
+    summary = parse_ionization_energy_summary(NIST_NON_IE_SUMMARY_HTML)
+    assert len(summary) == 1
+    assert pick_evaluated_ie(summary) is None
+
+    class FakeNistClient(NistWebBookClient):
+        def _fetch_html(self, url: str):
+            return NIST_NON_IE_SUMMARY_HTML, url
+
+    compound = FakeNistClient()._compound_from_html(
+        """
+        <html><body>
+        <h1 id="Top">Phenyl radical</h1>
+        <ul>
+          <li>Formula: C6H5</li>
+          <li>Other data available:
+            <ul>
+              <li><a href="/cgi/cbook.cgi?ID=C2396012&amp;Units=SI&amp;Mask=20#Ion-Energetics">Gas phase ion energetics data</a></li>
+            </ul>
+          </li>
+        </ul>
+        </body></html>
+        """,
+        "https://webbook.nist.gov/cgi/cbook.cgi?ID=C2396012&Units=SI",
+        fallback_id="C2396012",
+    )
+    assert compound.evaluated_ie is None
+    assert compound.best_ie is not None
+    assert compound.best_ie.value == 8.32
+    assert compound.best_ie.units == "eV"
+
+
+def test_nist_webbook_client_returns_formula_isomer_candidates():
+    class FakeNistClient(NistWebBookClient):
+        def _fetch_html(self, url: str):
+            if "Formula=C2H6O" in url:
+                return (
+                    """
+                    <html><body><ol>
+                      <li><a href="/cgi/cbook.cgi?ID=C64175&amp;Units=SI">Ethanol</a></li>
+                      <li><a href="/cgi/cbook.cgi?ID=C115106&amp;Units=SI">Dimethyl ether</a></li>
+                    </ol></body></html>
+                    """,
+                    url,
+                )
+            if "ID=C64175" in url:
+                return _compound_html("C64175", "Ethanol", "C2H6O", 10.48), url
+            if "ID=C115106" in url:
+                return _compound_html("C115106", "Dimethyl ether", "C2H6O", 10.025), url
+            raise AssertionError(f"unexpected URL: {url}")
+
+    result = FakeNistClient(local_first=False).query_ionization_energy("C2H6O", search_type="formula")
+    assert result.selected_compound is None
+    assert len(result.compounds) == 2
+    assert [compound.name for compound in result.compounds] == ["Ethanol", "Dimethyl ether"]
+    assert [compound.best_ie.value for compound in result.compounds] == [10.48, 10.025]
+
+
+def test_nist_webbook_search_type_inference():
+    assert infer_nist_search_type("C6H6") == "formula"
+    assert infer_nist_search_type("71-43-2") == "id"
+    assert infer_nist_search_type("C71432") == "id"
+    assert infer_nist_search_type("Benzene") == "name"
+
+
+def test_nist_webbook_client_uses_local_database_before_network(tmp_path):
+    db_path = tmp_path / "species.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE species (id INTEGER PRIMARY KEY, mz INTEGER NOT NULL, name TEXT NOT NULL, ionization_energy REAL)"
+        )
+        conn.execute(
+            "INSERT INTO species (id, mz, name, ionization_energy) VALUES (1, 78, 'Benzene', 9.24378)"
+        )
+
+    class NoNetworkClient(NistWebBookClient):
+        def _fetch_html(self, url: str):
+            raise AssertionError("local database hit should not call NIST WebBook")
+
+    result = NoNetworkClient(local_db_path=db_path).query_ionization_energy("Benzene", search_type="name")
+    assert result.search_type == "local_database"
+    assert result.selected_compound.name == "Benzene"
+    assert result.best_ie.value == 9.24378
+    assert result.best_ie.source == "local_database"
+
+
+def test_nist_webbook_client_does_not_fuzzy_match_formula_against_local_names(tmp_path):
+    db_path = tmp_path / "species.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE species (id INTEGER PRIMARY KEY, mz INTEGER NOT NULL, name TEXT NOT NULL, ionization_energy REAL)"
+        )
+        conn.execute(
+            "INSERT INTO species (id, mz, name, ionization_energy) VALUES (1, 28, 'Carbon monoxide', 14.014)"
+        )
+
+    class FakeNistClient(NistWebBookClient):
+        def _fetch_html(self, url: str):
+            if "Formula=CO" in url:
+                return (
+                    """
+                    <html><body>
+                    <h1 id="Top">Carbon monoxide</h1>
+                    <ul>
+                      <li>Formula: CO</li>
+                      <li>Other data available:
+                        <ul>
+                          <li><a href="/cgi/cbook.cgi?ID=C630080&amp;Units=SI&amp;Mask=20#Ion-Energetics">Gas phase ion energetics data</a></li>
+                        </ul>
+                      </li>
+                    </ul>
+                    <h2 id="Ion-Energetics">Gas phase ion energetics data</h2>
+                    <table class="data">
+                      <tr><th>Quantity</th><th>Value</th><th>Units</th><th>Method</th><th>Reference</th><th>Comment</th></tr>
+                      <tr><td>IE (evaluated)</td><td>14.014</td><td>eV</td><td>PE</td><td>NIST</td><td></td></tr>
+                    </table>
+                    </body></html>
+                    """,
+                    url,
+                )
+            raise AssertionError(f"unexpected URL: {url}")
+
+    result = FakeNistClient(local_db_path=db_path).query_ionization_energy("CO", search_type="formula")
+    assert result.search_type == "formula"
+    assert [compound.name for compound in result.compounds[:2]] == ["Carbon monoxide", "Carbon monoxide"]
+    assert result.compounds[0].best_ie.source == "local_database"
+    assert result.compounds[1].best_ie.source == "evaluated"
+
+
+def test_nist_webbook_formula_query_includes_local_mz_candidates(tmp_path):
+    db_path = tmp_path / "species.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE species (id INTEGER PRIMARY KEY, mz INTEGER NOT NULL, name TEXT NOT NULL, ionization_energy REAL)"
+        )
+        conn.execute(
+            "INSERT INTO species (id, mz, name, ionization_energy) VALUES (16, 16, 'Atomic oxygen', 13.61806)"
+        )
+        conn.execute(
+            "INSERT INTO species (id, mz, name, ionization_energy) VALUES (19, 16, 'Methane', 12.61)"
+        )
+
+    class FakeNistClient(NistWebBookClient):
+        def _fetch_html(self, url: str):
+            if "Formula=CH4" in url:
+                return (
+                    """
+                    <html><body><ol>
+                      <li><a href="/cgi/cbook.cgi?ID=C74828&amp;Units=SI">Methane</a></li>
+                      <li><a href="/cgi/cbook.cgi?ID=C558203&amp;Units=SI">(2H4)methane</a></li>
+                    </ol></body></html>
+                    """,
+                    url,
+                )
+            if "ID=C74828" in url:
+                return _compound_html("C74828", "Methane", "CH4", 12.61), url
+            if "ID=C558203" in url:
+                return _compound_html("C558203", "(2H4)methane", "C2H4", 12.658), url
+            raise AssertionError(f"unexpected URL: {url}")
+
+    result = FakeNistClient(local_db_path=db_path).query_ionization_energy("CH4", search_type="formula")
+    assert result.compounds[0].name == "Methane"
+    assert result.compounds[0].best_ie.source == "local_database"
+    assert result.compounds[1].name == "Atomic oxygen"
+    assert result.compounds[1].best_ie.source == "local_mz_candidate"
+    assert result.compounds[2].name == "Methane"
+    assert result.compounds[2].best_ie.source == "evaluated"
+
+
 def test_peak_detection_detects_simple_peak():
     y = [0.0] * 20 + [1.0, 4.0, 10.0, 4.0, 1.0] + [0.0] * 20
     peaks = detect_peaks_in_range(
@@ -51,6 +340,25 @@ def test_peak_detection_detects_simple_peak():
         threshold_end=0.5,
     )
     assert len(peaks) == 1
+    assert peaks[0].mz == peaks[0].time
+
+
+def test_prominence_peak_detection_handles_baseline_and_noise():
+    y = [5.0] * 20 + [5.5, 8.0, 18.0, 8.0, 5.5] + [5.0] * 20
+    peaks = detect_peaks_prominence(
+        y,
+        calibration=Calibration(a=0, b=1, c=0),
+        detection_min_idx=0,
+        min_intensity=3,
+        threshold_end=0.5,
+        baseline_window=11,
+        smoothing_window=3,
+        prominence_ratio=0.05,
+        min_peak_width=1,
+        max_peak_width=10,
+    )
+    assert len(peaks) == 1
+    assert abs(peaks[0].time - 22) < 0.75
     assert peaks[0].mz == peaks[0].time
 
 
@@ -166,6 +474,14 @@ def test_build_temperature_curves_groups_by_rounded_mz():
     assert list(curves) == [18]
     assert curves[18]["temperatures"] == [800.0, 825.0]
     assert curves[18]["areas"] == [10.0, 15.0]
+
+
+def test_temperature_curve_classification_trends():
+    temperatures = [400, 500, 600, 700, 800]
+    assert classify_temperature_curve(temperatures, [0, 1, 3, 6, 10])["curve_class"] == "formation"
+    assert classify_temperature_curve(temperatures, [10, 6, 3, 1, 0])["curve_class"] == "consumption"
+    assert classify_temperature_curve(temperatures, [0, 2, 10, 2, 0])["curve_class"] == "intermediate"
+    assert classify_temperature_curve(temperatures, [3, 3.1, 3, 3.1, 3])["curve_class"] == "unclassified"
 
 
 def test_load_manual_peak_ranges_from_yaml(tmp_path):

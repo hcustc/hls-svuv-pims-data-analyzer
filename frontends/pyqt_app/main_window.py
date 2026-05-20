@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 
 from PyQt6.QtCore import QTimer
@@ -23,15 +25,55 @@ from core.config import load_calibration_config, load_calibration_points, load_p
 from core.output_paths import ensure_output_dir
 from core.peak_detection import add_manual_peak as core_add_manual_peak
 from core.peak_detection import detect_peaks_in_range
+from core.peak_detection import detect_peaks_prominence
 from core.spectrum_io import read_bl03u_txt, sum_spectra
 from core.normalization import load_normalization_settings
 from frontends.pyqt_app.dialogs import (
     CommonParametersDialog,
     CoreToolsDialog,
+    IonizationEnergyLookupWidget,
     IsotopeAbundanceDialog,
     PIESpeciesFitDialog,
     TemperatureScanDialog,
 )
+
+
+class SpectrumBottomAxis(pg.AxisItem):
+    """Bottom axis that keeps plot data in TOF while displaying TOF or m/z labels."""
+
+    def __init__(self, orientation: str = "bottom"):
+        super().__init__(orientation=orientation)
+        self.display_mode = "tof"
+        self.calibration = Calibration()
+
+    def set_display_mode(self, mode: str, calibration: Calibration) -> None:
+        self.display_mode = mode if mode in {"tof", "mz"} else "tof"
+        self.calibration = calibration
+        self.picture = None
+        self.update()
+
+    def tickStrings(self, values, scale, spacing):
+        if self.display_mode != "mz":
+            return super().tickStrings(values, scale, spacing)
+
+        try:
+            mz_values = self.calibration.tof_to_mz(np.asarray(values, dtype=float))
+        except Exception:
+            return ["" for _ in values]
+        return [self._format_tick(float(value)) for value in np.atleast_1d(mz_values)]
+
+    @staticmethod
+    def _format_tick(value: float) -> str:
+        if not np.isfinite(value):
+            return ""
+        abs_value = abs(value)
+        if abs_value >= 100:
+            return f"{value:.0f}"
+        if abs_value >= 10:
+            return f"{value:.1f}"
+        if abs_value >= 1:
+            return f"{value:.2f}"
+        return f"{value:.4f}"
 
 
 class PeakDialog(QDialog):
@@ -98,6 +140,20 @@ class MainWindow(Ui_MainWindow, QMainWindow):
     def __init__(self):
         super(MainWindow, self).__init__()
         self.setupUi(self)
+        self.x_axis_mode = "tof"
+        self.current_plot_x = np.array([], dtype=float)
+        self.current_plot_y = np.array([], dtype=float)
+        self.current_plot_title = "质谱图"
+        self.plot_x_min: float | None = None
+        self.plot_x_max: float | None = None
+        self.p1 = None
+        self.p2 = None
+        self.p1_axis: SpectrumBottomAxis | None = None
+        self.p2_axis: SpectrumBottomAxis | None = None
+        self.selection_region = None
+        self.spectrum_plot = None
+        self._clamping_region = False
+        self._updating_peak_table = False
         self.apply_config_defaults()
         self.configure_runtime_ui()
         self.current_time_offset = 0.0
@@ -134,7 +190,7 @@ class MainWindow(Ui_MainWindow, QMainWindow):
 
         # 添加一个定时器用于延迟更新
         self.update_timer = QTimer(self)
-        self.update_timer.setInterval(100)  # 设置延迟时间，单位为毫秒
+        self.update_timer.setInterval(180)  # 设置延迟时间，单位为毫秒
         self.update_timer.timeout.connect(self.on_update_timeout)
         self.pending_update = False
 
@@ -147,10 +203,12 @@ class MainWindow(Ui_MainWindow, QMainWindow):
 
         # 初始化复选框状态
         self.checkBox_show_gaussian.setChecked(True)  # 默认显示高斯拟合图
+        self.checkBox_show_gaussian.toggled.connect(self.on_gaussian_visibility_toggled)
 
         # 设置表格的上下文菜单
         self.peakData.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
         self.peakData.customContextMenuRequested.connect(self.show_peak_context_menu)
+        self.peakData.itemSelectionChanged.connect(self.focus_selected_peak)
 
         # 添加更新按钮
         self.updatePeaks = QPushButton("更新峰标注")
@@ -189,6 +247,8 @@ class MainWindow(Ui_MainWindow, QMainWindow):
                 for row, (tof, mz) in enumerate(points):
                     self.region.setItem(row, 0, QTableWidgetItem(f"{tof:g}"))
                     self.region.setItem(row, 1, QTableWidgetItem(f"{mz:g}"))
+            if hasattr(self, "p2"):
+                self.refresh_plot_axis_mode()
         except Exception as exc:
             print(f"加载YAML配置失败，使用界面默认值: {exc}")
 
@@ -270,13 +330,15 @@ class MainWindow(Ui_MainWindow, QMainWindow):
             self.normalization_settings,
             self.workspace_stack,
         )
+        self.ionization_page = IonizationEnergyLookupWidget(self.workspace_stack)
         self.isotope_page = IsotopeAbundanceDialog(self.workspace_stack)
 
         pages = [
             ("spectrum", "质谱工作台", self.spectrum_page),
             ("temperature", "温度扫描", self.temperature_page),
             ("pie", "PIE拟合", self.pie_page),
-            ("isotope", "同位素", self.isotope_page),
+            ("ionization", "IE查询", self.ionization_page),
+            ("isotope", "分子/同位素", self.isotope_page),
         ]
         self.page_buttons: dict[str, QtWidgets.QToolButton] = {}
         self.page_button_group = QtWidgets.QButtonGroup(self.page_nav)
@@ -307,6 +369,7 @@ class MainWindow(Ui_MainWindow, QMainWindow):
             "spectrum": self.spectrum_page,
             "temperature": self.temperature_page,
             "pie": self.pie_page,
+            "ionization": self.ionization_page,
             "isotope": self.isotope_page,
         }
         page = page_map.get(page_name)
@@ -505,6 +568,16 @@ class MainWindow(Ui_MainWindow, QMainWindow):
         conversion_row.addSpacing(4)
         conversion_row.addWidget(self.checkBox_show_gaussian)
         conversion_row.addSpacing(8)
+        axis_label = QtWidgets.QLabel("横轴", tool_panel)
+        self.xAxisModeCombo = QtWidgets.QComboBox(tool_panel)
+        self.xAxisModeCombo.addItem("TOF", "tof")
+        self.xAxisModeCombo.addItem("m/z", "mz")
+        self.xAxisModeCombo.setFixedWidth(76)
+        self.xAxisModeCombo.setCurrentIndex(1 if self.x_axis_mode == "mz" else 0)
+        self.xAxisModeCombo.currentIndexChanged.connect(self.set_x_axis_mode)
+        conversion_row.addWidget(axis_label)
+        conversion_row.addWidget(self.xAxisModeCombo)
+        conversion_row.addSpacing(8)
         conversion_row.addWidget(self.label_2)
         conversion_row.addWidget(self.lineEdit_2, stretch=1)
         arrow_group = QtWidgets.QWidget(tool_panel)
@@ -536,6 +609,21 @@ class MainWindow(Ui_MainWindow, QMainWindow):
             button.setObjectName("ArrowButton")
             button.setFixedSize(32, 28)
         self.horizontalLayout_17.addWidget(tool_panel, stretch=6)
+
+    def set_x_axis_mode(self):
+        combo = getattr(self, "xAxisModeCombo", None)
+        self.x_axis_mode = str(combo.currentData()) if combo is not None else "tof"
+        self.refresh_plot_axis_mode()
+
+    def refresh_plot_axis_mode(self) -> None:
+        axis_label = "m/z" if self.x_axis_mode == "mz" else "TOF"
+        calibration = self.current_calibration()
+        for axis in (self.p1_axis, self.p2_axis):
+            if axis is not None:
+                axis.set_display_mode(self.x_axis_mode, calibration)
+        for plot in (self.p1, self.p2):
+            if plot is not None:
+                plot.setLabel("bottom", axis_label)
 
     def _rebuild_main_splitter(self):
         self.widget_2.setObjectName("PlotPanel")
@@ -676,6 +764,8 @@ class MainWindow(Ui_MainWindow, QMainWindow):
     
     def update_label_picture(self):
         """更新 label_picture 的图片"""
+        if self.label_picture is None:
+            return
         target_size = self.label_picture.size()
         target_size.setWidth(max(1, min(520, int(target_size.width() * 0.42))))
         target_size.setHeight(max(1, min(170, int(target_size.height() * 0.26))))
@@ -694,55 +784,134 @@ class MainWindow(Ui_MainWindow, QMainWindow):
     def clear_widgets(self):
         """清除旧的小部件"""
         if self.label_picture is not None:
-            self.layout().removeWidget(self.label_picture)
+            self.graph_layout.removeWidget(self.label_picture)
             self.label_picture.setParent(None)
             self.label_picture.deleteLater()
             self.label_picture = None
+        self.clear_plot_area()
+        self.current_plot_x = np.array([], dtype=float)
+        self.current_plot_y = np.array([], dtype=float)
+        self.current_plot_title = "质谱图"
+        self.plot_x_min = None
+        self.plot_x_max = None
 
+    def clear_plot_area(self):
+        """清除当前绘图区，不触发文件重载。"""
+        if hasattr(self, "update_timer"):
+            self.update_timer.stop()
+            self.pending_update = False
         while self.graph_layout.count():
             item = self.graph_layout.takeAt(0)
             widget = item.widget()
             if widget:
                 widget.setParent(None)
                 widget.deleteLater()
+        self.p1 = None
+        self.p2 = None
+        self.p1_axis = None
+        self.p2_axis = None
+        self.selection_region = None
+        self.spectrum_plot = None
 
     def setup_plots(self, x_data, y_data, title="质谱图"):
         """设置并绘制图表"""
-        pg.setConfigOptions(antialias=True)
+        pg.setConfigOptions(antialias=False)
+
+        x_values = np.asarray(x_data, dtype=float)
+        y_values = np.asarray(y_data, dtype=float)
+        if x_values.size == 0 or y_values.size == 0:
+            raise ValueError("谱图没有可绘制的数据")
+        point_count = min(x_values.size, y_values.size)
+        x_values = x_values[:point_count]
+        y_values = y_values[:point_count]
+        self.current_plot_x = x_values
+        self.current_plot_y = y_values
+        self.current_plot_title = title
+        self.plot_x_min = float(np.nanmin(x_values))
+        self.plot_x_max = float(np.nanmax(x_values))
+        x_range = max(1.0, self.plot_x_max - self.plot_x_min)
+        y_min = float(np.nanmin(y_values))
+        y_max = float(np.nanmax(y_values))
+        y_padding = max(1.0, (y_max - y_min) * 0.08)
 
         win = GraphicsLayoutWidget()
         win.setBackground("#ffffff")
         self.graph_layout.addWidget(win)
+        self.p1 = None
+        self.p1_axis = None
 
         # 检查复选框状态，决定是否显示高斯拟合图
-        if self.checkBox_show_gaussian.isChecked():
-            self.p1 = win.addPlot(title="高斯拟合图")
+        show_gaussian = self.checkBox_show_gaussian.isChecked()
+        if show_gaussian:
+            self.p1_axis = SpectrumBottomAxis()
+            self.p1 = win.addPlot(title="高斯拟合图", axisItems={"bottom": self.p1_axis})
             self.p1.setLabel('left', 'COUNTS')
-            self.p1.setLabel('bottom', 'TOF')
             self.p1.showGrid(x=True, y=True, alpha=0.25)
+            self._apply_plot_limits(self.p1, y_min - y_padding, y_max + y_padding, x_range)
+            win.nextRow()
 
-        win.nextRow()
-
-        self.p2 = win.addPlot(title=title)
+        self.p2_axis = SpectrumBottomAxis()
+        self.p2 = win.addPlot(title=title, axisItems={"bottom": self.p2_axis})
         self.p2.setLabel('left', 'COUNTS')
-        self.p2.setLabel('bottom', 'TOF')
         self.p2.showGrid(x=True, y=True, alpha=0.25)
-        self.spectrum_plot = self.p2.plot(x_data, y_data, pen=mkPen('#2563eb', width=1.6), name='质谱图')
+        self._apply_plot_limits(self.p2, y_min - y_padding, y_max + y_padding, x_range)
+        self.spectrum_plot = self.p2.plot(x_values, y_values, pen=mkPen('#2563eb', width=1.2), name='质谱图')
+        self._optimize_curve(self.spectrum_plot)
 
         # 添加 LinearRegionItem 到 p2，设置移动模式和边界约束
+        peak_idx = int(np.nanargmax(y_values))
+        peak_center = float(x_values[peak_idx])
+        half_width = max(4.0, x_range * 0.001)
+        region_left = max(self.plot_x_min, peak_center - half_width)
+        region_right = min(self.plot_x_max, peak_center + half_width)
         self.selection_region = LinearRegionItem(
-            values=[16612, 16620],
-            bounds=None,  # 移除边界约束
+            values=[region_left, region_right],
+            bounds=(self.plot_x_min, self.plot_x_max),
             movable=True,  # 允许整体移动
             brush=pg.mkBrush(color=(128, 128, 128, 50))  # 半透明灰色
         )
         self.selection_region.setZValue(20)
         self.p2.addItem(self.selection_region, ignoreBounds=True)
-        
-        # 连接信号
-        self.selection_region.sigRegionChanged.connect(self.update_gaussian_fit)
-        if self.checkBox_show_gaussian.isChecked():
+
+        self.refresh_plot_axis_mode()
+        self.update_region_readout()
+        if show_gaussian:
+            self.update_gaussian_fit()
+
+        self.selection_region.sigRegionChanged.connect(self.update_region_readout)
+        if show_gaussian:
+            if hasattr(self.selection_region, "sigRegionChangeFinished"):
+                self.selection_region.sigRegionChangeFinished.connect(self.update_gaussian_fit)
+            else:
+                self.selection_region.sigRegionChanged.connect(self.update_gaussian_fit)
             self.p1.sigRangeChanged.connect(lambda window, viewRange: self.update_region(viewRange))
+
+    def _apply_plot_limits(self, plot, y_min: float, y_max: float, x_range: float) -> None:
+        if self.plot_x_min is None or self.plot_x_max is None:
+            return
+        plot.setLimits(
+            xMin=self.plot_x_min,
+            xMax=self.plot_x_max,
+            maxXRange=x_range,
+            minXRange=max(1.0, x_range / 100_000),
+            yMin=y_min,
+            yMax=y_max,
+        )
+        plot.setXRange(self.plot_x_min, self.plot_x_max, padding=0)
+        plot.setYRange(y_min, y_max, padding=0)
+
+    @staticmethod
+    def _optimize_curve(curve) -> None:
+        for method_name, args, kwargs in (
+            ("setClipToView", (True,), {}),
+            ("setDownsampling", (), {"auto": True, "method": "peak"}),
+        ):
+            method = getattr(curve, method_name, None)
+            if method is not None:
+                try:
+                    method(*args, **kwargs)
+                except TypeError:
+                    pass
 
     def plot_graph(self):
         """从单个文件绘制图表"""
@@ -769,30 +938,192 @@ class MainWindow(Ui_MainWindow, QMainWindow):
         except Exception as e:
             QMessageBox.warning(self, 'Warning', str(e))
 
+    def on_gaussian_visibility_toggled(self, checked: bool):
+        """切换高斯拟合图时复用当前谱图数据，避免重新读取文件。"""
+        if self.current_plot_x.size == 0 or self.current_plot_y.size == 0:
+            return
+
+        region = self.selection_region.getRegion() if self.selection_region is not None else None
+        view_range = self.p2.viewRange() if self.p2 is not None else None
+        x_values = self.current_plot_x.copy()
+        y_values = self.current_plot_y.copy()
+        title = self.current_plot_title
+
+        try:
+            self.clear_plot_area()
+            self.setup_plots(x_values, y_values, title=title)
+            if region is not None and self.selection_region is not None:
+                self.selection_region.setRegion(self._clamp_region_values(*region))
+            self._restore_plot_view_range(view_range)
+            self.update_plot()
+            self.update_region_readout()
+            if checked:
+                self.update_gaussian_fit()
+        except Exception as exc:
+            QMessageBox.warning(self, "Warning", f"切换高斯拟合图失败: {exc}")
+
+    def _restore_plot_view_range(self, view_range) -> None:
+        if self.p2 is None or not view_range:
+            return
+        try:
+            left, right = self._clamp_region_values(view_range[0][0], view_range[0][1])
+            if right > left:
+                self.p2.setXRange(left, right, padding=0)
+            y_left, y_right = float(view_range[1][0]), float(view_range[1][1])
+            if np.isfinite(y_left) and np.isfinite(y_right) and y_right > y_left:
+                self.p2.setYRange(y_left, y_right, padding=0)
+        except (TypeError, ValueError, IndexError):
+            return
+
     def update_gaussian_fit(self):
         """准备更新高斯拟合图"""
         if not self.pending_update:
             self.pending_update = True
             self.update_timer.start()
 
+    def update_region_readout(self):
+        if self.selection_region is None:
+            return
+        left, right = self._clamp_region_values(*self.selection_region.getRegion())
+        current_left, current_right = self.selection_region.getRegion()
+        if (left, right) != (current_left, current_right) and not self._clamping_region:
+            self._clamping_region = True
+            try:
+                self.selection_region.setRegion([left, right])
+            finally:
+                self._clamping_region = False
+        center = (left + right) / 2
+        self.label_8.setText(f"{center:.2f}")
+        self.label_9.setText(f"{float(self.current_calibration().tof_to_mz(center)):.2f}")
+        self.label_10.setText(f"{left:.2f}")
+        self.label_11.setText(f"{right:.2f}")
+
+    def _clamp_region_values(self, left: float, right: float) -> tuple[float, float]:
+        if self.plot_x_min is None or self.plot_x_max is None:
+            return float(left), float(right)
+        left = max(self.plot_x_min, min(float(left), self.plot_x_max))
+        right = max(self.plot_x_min, min(float(right), self.plot_x_max))
+        if right < left:
+            left, right = right, left
+        if right == left:
+            right = min(self.plot_x_max, left + 1.0)
+            left = max(self.plot_x_min, right - 1.0)
+        return left, right
+
+    def _table_float(self, row: int, column: int) -> float | None:
+        item = self.peakData.item(row, column)
+        if item is None:
+            return None
+        text = item.text().strip()
+        if not text:
+            return None
+        try:
+            return float(text)
+        except ValueError:
+            return None
+
+    def _peak_row_values(self, row: int) -> tuple[float, float, float] | None:
+        time = self._table_float(row, 1)
+        mz = self._table_float(row, 2)
+        intensity = self._table_float(row, 3)
+        if time is None or mz is None or intensity is None:
+            return None
+        if not (np.isfinite(time) and np.isfinite(mz) and np.isfinite(intensity)):
+            return None
+        return time, mz, intensity
+
+    def focus_selected_peak(self):
+        """根据右侧峰表当前行，将主图定位到对应峰位。"""
+        if self._updating_peak_table or self.p2 is None or self.selection_region is None:
+            return
+        row = self.peakData.currentRow()
+        if row < 0:
+            return
+
+        peak_time = self._table_float(row, 1)
+        peak_intensity = self._table_float(row, 3)
+        left = self._table_float(row, 4)
+        right = self._table_float(row, 5)
+        if peak_time is None or not np.isfinite(peak_time):
+            return
+
+        full_range = self._plot_x_range()
+        fallback_half_width = max(2.0, full_range * 0.0025)
+        if left is None or right is None or not np.isfinite(left) or not np.isfinite(right) or left == right:
+            left = peak_time - fallback_half_width
+            right = peak_time + fallback_half_width
+
+        left, right = self._clamp_region_values(left, right)
+        self.selection_region.setRegion([left, right])
+        self.update_region_readout()
+        self._center_plot_on_peak(peak_time, peak_intensity, left, right)
+        if self.p1 is not None and self.checkBox_show_gaussian.isChecked():
+            self.update_gaussian_fit()
+
+    def _plot_x_range(self) -> float:
+        if self.plot_x_min is None or self.plot_x_max is None:
+            return 1.0
+        return max(1.0, self.plot_x_max - self.plot_x_min)
+
+    def _center_plot_on_peak(
+        self,
+        peak_time: float,
+        peak_intensity: float | None,
+        left: float,
+        right: float,
+    ) -> None:
+        if self.p2 is None or self.plot_x_min is None or self.plot_x_max is None:
+            return
+
+        full_range = self._plot_x_range()
+        selected_width = max(1.0, abs(right - left))
+        view_width = min(full_range, max(selected_width * 6, full_range * 0.02, 10.0))
+        center = max(self.plot_x_min, min(float(peak_time), self.plot_x_max))
+        x_left = center - view_width / 2
+        x_right = center + view_width / 2
+        if x_left < self.plot_x_min:
+            x_right += self.plot_x_min - x_left
+            x_left = self.plot_x_min
+        if x_right > self.plot_x_max:
+            x_left -= x_right - self.plot_x_max
+            x_right = self.plot_x_max
+        x_left = max(self.plot_x_min, x_left)
+        x_right = min(self.plot_x_max, x_right)
+        if x_right > x_left:
+            self.p2.setXRange(x_left, x_right, padding=0)
+
+        if self.current_plot_x.size == 0 or self.current_plot_y.size == 0:
+            return
+        start = int(np.searchsorted(self.current_plot_x, x_left, side="left"))
+        end = int(np.searchsorted(self.current_plot_x, x_right, side="right"))
+        start = max(0, min(start, self.current_plot_y.size - 1))
+        end = max(start + 1, min(end, self.current_plot_y.size))
+        segment_y = self.current_plot_y[start:end]
+        segment_y = segment_y[np.isfinite(segment_y)]
+        if segment_y.size == 0:
+            return
+
+        y_min = float(np.nanmin(segment_y))
+        y_max = float(np.nanmax(segment_y))
+        if peak_intensity is not None and np.isfinite(peak_intensity):
+            y_max = max(y_max, float(peak_intensity))
+        y_span = max(1.0, y_max - y_min)
+        self.p2.setYRange(y_min - y_span * 0.08, y_max + y_span * 0.20, padding=0)
+
     def on_update_timeout(self):
         """实际执行更新高斯拟合图"""
         self.update_timer.stop()
         self.pending_update = False
 
-        if self.selection_region and self.p1 and self.p2:
+        if self.selection_region and self.p1 and self.p2 and self.current_plot_x.size:
             try:
-                # 暂时断开信号连接以防止递归更新
-                self.selection_region.sigRegionChanged.disconnect(self.update_gaussian_fit)
-
-                minX, maxX = self.selection_region.getRegion()
-
-                # 确保 x_slice 不会超出原始数据的边界
-                x_start = max(0, int(minX) - 4000)
-                x_end = min(int(maxX) - 4000 + 1, len(self.spectrum_plot.yData))
-
-                x_data = np.arange(4001, 4001 + len(self.spectrum_plot.yData))[x_start:x_end]
-                y_data = self.spectrum_plot.yData[x_start:x_end]
+                minX, maxX = self._clamp_region_values(*self.selection_region.getRegion())
+                x_start = int(np.searchsorted(self.current_plot_x, minX, side="left"))
+                x_end = int(np.searchsorted(self.current_plot_x, maxX, side="right"))
+                x_start = max(0, min(x_start, self.current_plot_x.size))
+                x_end = max(x_start, min(x_end, self.current_plot_x.size))
+                x_data = self.current_plot_x[x_start:x_end]
+                y_data = self.current_plot_y[x_start:x_end]
 
                 if len(x_data) != len(y_data):
                     print("警告：X 和 Y 数据长度不匹配")
@@ -805,6 +1136,8 @@ class MainWindow(Ui_MainWindow, QMainWindow):
                 # 数据预处理：移除基线
                 baseline = np.min(y_data)
                 y_data = y_data - baseline
+                if np.sum(y_data) <= 0:
+                    return
 
                 # 提供更合理的初始猜测值
                 max_y = np.max(y_data)
@@ -829,15 +1162,13 @@ class MainWindow(Ui_MainWindow, QMainWindow):
                     method='trf'  # 使用更稳健的拟合方法
                 )
 
-                time_max = self.findChild(QLabel, "label_8")
-                mass = self.findChild(QLabel, "label_9")
-                peak_left = self.findChild(QLabel, "label_10")
-                peak_right = self.findChild(QLabel, "label_11")
-
-                time_max.setText(str(round(popt[0], 2)))  # 使用拟合得到的中心点
-                mass.setText(str(round(self.transfer_2(), 2)))
-                peak_left.setText(str(round(minX, 2)))
-                peak_right.setText(str(round(maxX, 2)))
+                readout_labels = (self.label_8, self.label_9, self.label_10, self.label_11)
+                if any(label is None for label in readout_labels):
+                    return
+                self.label_8.setText(str(round(popt[0], 2)))  # 使用拟合得到的中心点
+                self.label_9.setText(str(round(float(self.current_calibration().tof_to_mz(popt[0])), 2)))
+                self.label_10.setText(str(round(minX, 2)))
+                self.label_11.setText(str(round(maxX, 2)))
 
                 self.p1.clear()
                 x_interp = np.linspace(x_data[0], x_data[-1], 1000)
@@ -846,26 +1177,11 @@ class MainWindow(Ui_MainWindow, QMainWindow):
 
             except Exception as e:
                 print(f"高斯拟合错误：{e}")
-            finally:
-                # 无论是否发生异常，都重新连接信号
-                self.selection_region.sigRegionChanged.connect(self.update_gaussian_fit)
 
     @staticmethod
     def func_gaosi(x, miu, sigma, amplitude):
         """高斯函数"""
         return amplitude * np.exp(-(x - miu)**2 / (2 * sigma**2))
-
-    def transfer_2(self):
-        """基于高斯拟合结果估算质荷比 (m/z)"""
-        time_max_label = self.findChild(QLabel, "label_8")
-        try:
-            time_of_flight_peak = float(time_max_label.text())
-        except ValueError:
-            return None  # 或者你可以选择抛出异常
-
-        calibration_constant = 1.0  # 这里只是一个示例值
-        mz_ratio = calibration_constant * (time_of_flight_peak ** 2)
-        return mz_ratio
 
     # 读取表格2数据
     def read_table_data(self):
@@ -1048,24 +1364,7 @@ class MainWindow(Ui_MainWindow, QMainWindow):
             # 获取当前图表数据
             y_data = self.spectrum_plot.yData
             peak_config = load_peak_detection_config()
-            peaks = detect_peaks_in_range(
-                y_data,
-                calibration=self.current_calibration(),
-                start_idx=0,
-                end_idx=len(y_data),
-                detection_min_idx=peak_config.detection_min_idx,
-                time_offset=self.current_time_offset,
-                threshold_end=peak_config.threshold_end,
-                min_intensity=peak_config.min_intensity,
-                nearby_peak_window=peak_config.nearby_peak_window,
-                duplicate_window=peak_config.duplicate_window,
-                weak_tail_early_window=peak_config.weak_tail_early_window,
-                weak_tail_late_window=peak_config.weak_tail_late_window,
-                weak_tail_ratio=peak_config.weak_tail_ratio,
-                gaussian_window_max=peak_config.gaussian_window_max,
-                gaussian_boundary_scale=peak_config.gaussian_boundary_scale,
-                boundary_padding=peak_config.boundary_padding,
-            )
+            peaks = self.detect_peaks_for_config(y_data, peak_config)
 
             # 在表格中显示检测到的峰值
             self.display_peaks(peaks)
@@ -1076,23 +1375,89 @@ class MainWindow(Ui_MainWindow, QMainWindow):
         except Exception as e:
             QMessageBox.warning(self, 'Error', f'自动寻峰失败: {str(e)}')
 
+    def detect_peaks_for_config(self, y_data, peak_config):
+        algorithm = getattr(peak_config, "algorithm", "legacy")
+        common = {
+            "calibration": self.current_calibration(),
+            "start_idx": 0,
+            "end_idx": len(y_data),
+            "detection_min_idx": peak_config.detection_min_idx,
+            "time_offset": self.current_time_offset,
+            "threshold_end": peak_config.threshold_end,
+            "min_intensity": peak_config.min_intensity,
+            "duplicate_window": peak_config.duplicate_window,
+            "gaussian_window_max": peak_config.gaussian_window_max,
+            "gaussian_boundary_scale": peak_config.gaussian_boundary_scale,
+            "boundary_padding": peak_config.boundary_padding,
+        }
+        if algorithm == "legacy":
+            return detect_peaks_in_range(
+                y_data,
+                nearby_peak_window=peak_config.nearby_peak_window,
+                weak_tail_early_window=peak_config.weak_tail_early_window,
+                weak_tail_late_window=peak_config.weak_tail_late_window,
+                weak_tail_ratio=peak_config.weak_tail_ratio,
+                **common,
+            )
+        if algorithm == "cwt":
+            try:
+                from core.cwt_peak_detection import CwtPeakDetectionConfig, detect_peaks_cwt
+            except ImportError as exc:
+                raise RuntimeError("CWT寻峰需要安装 PyWavelets") from exc
+            detection_start = max(0, int(peak_config.detection_min_idx))
+            cwt_config = CwtPeakDetectionConfig(
+                window_size=peak_config.smoothing_window,
+                poly_order=peak_config.smoothing_poly_order,
+                prominence_ratio=peak_config.prominence_ratio,
+                min_peak_distance=max(1, peak_config.duplicate_window),
+                min_peak_width=peak_config.min_peak_width,
+                max_peak_width=peak_config.max_peak_width,
+                baseline_percentile=peak_config.baseline_percentile,
+                baseline_window_factor=max(
+                    1,
+                    int(peak_config.baseline_window / max(1, peak_config.smoothing_window)),
+                ),
+            )
+            return detect_peaks_cwt(
+                y_data[detection_start:],
+                calibration=self.current_calibration(),
+                start_idx=detection_start,
+                time_offset=self.current_time_offset,
+                config=cwt_config,
+            )
+        return detect_peaks_prominence(
+            y_data,
+            prominence_ratio=peak_config.prominence_ratio,
+            smoothing_window=peak_config.smoothing_window,
+            smoothing_poly_order=peak_config.smoothing_poly_order,
+            baseline_window=peak_config.baseline_window,
+            baseline_percentile=peak_config.baseline_percentile,
+            min_peak_width=peak_config.min_peak_width,
+            max_peak_width=peak_config.max_peak_width,
+            **common,
+        )
+
     def display_peaks(self, peaks):
         """在表格中显示检测到的峰值"""
         table = self.findChild(QTableWidget, "peakData")
-        table.setRowCount(len(peaks))
+        self._updating_peak_table = True
+        try:
+            table.setRowCount(len(peaks))
 
-        # 设置表格的列标题
-        headers = ["Species", "飞行时间", "质量数 (m/z)", "强度", "左边界", "右边界"]
-        table.setHorizontalHeaderLabels(headers)
+            # 设置表格的列标题
+            headers = ["Species", "飞行时间", "质量数 (m/z)", "强度", "左边界", "右边界"]
+            table.setHorizontalHeaderLabels(headers)
 
-        for i, peak in enumerate(peaks):
-            # 按列顺序设置数据
-            table.setItem(i, 0, QTableWidgetItem("Unknown"))  # Species 列
-            table.setItem(i, 1, QTableWidgetItem(f"{peak.time:.2f}"))  # 飞行时间列
-            table.setItem(i, 2, QTableWidgetItem(f"{peak.mz:.2f}"))    # 质量数列
-            table.setItem(i, 3, QTableWidgetItem(f"{peak.intensity:.2f}"))  # 强度列
-            table.setItem(i, 4, QTableWidgetItem(f"{peak.left_bound + self.current_time_offset:.2f}"))  # 左边界列
-            table.setItem(i, 5, QTableWidgetItem(f"{peak.right_bound + self.current_time_offset:.2f}"))  # 右边界列
+            for i, peak in enumerate(peaks):
+                # 按列顺序设置数据
+                table.setItem(i, 0, QTableWidgetItem("Unknown"))  # Species 列
+                table.setItem(i, 1, QTableWidgetItem(f"{peak.time:.2f}"))  # 飞行时间列
+                table.setItem(i, 2, QTableWidgetItem(f"{peak.mz:.2f}"))    # 质量数列
+                table.setItem(i, 3, QTableWidgetItem(f"{peak.intensity:.2f}"))  # 强度列
+                table.setItem(i, 4, QTableWidgetItem(f"{peak.left_bound + self.current_time_offset:.2f}"))  # 左边界列
+                table.setItem(i, 5, QTableWidgetItem(f"{peak.right_bound + self.current_time_offset:.2f}"))  # 右边界列
+        finally:
+            self._updating_peak_table = False
 
     @staticmethod
     def mz_to_time(mz: float, a: float, b: float, c: float) -> float:
@@ -1110,6 +1475,8 @@ class MainWindow(Ui_MainWindow, QMainWindow):
 
     def annotate_peaks_on_plot(self, peaks):
         """在质谱图上标注检测到的峰值"""
+        if self.p2 is None:
+            return
         for peak in peaks:
             try:
                 text_item = pg.TextItem(text=f'{peak.mz:.2f}', color='red', anchor=(0.5, 1.5))
@@ -1122,7 +1489,8 @@ class MainWindow(Ui_MainWindow, QMainWindow):
         """更新选择区域"""
         minX, maxX = viewRange[0]
         if self.selection_region is not None:
-            self.selection_region.setRegion([minX, maxX])
+            left, right = self._clamp_region_values(minX, maxX)
+            self.selection_region.setRegion([left, right])
 
     def on_tab_changed(self):
         """选项卡切换事件处理"""
@@ -1214,27 +1582,36 @@ class MainWindow(Ui_MainWindow, QMainWindow):
 
     def add_peak_to_table(self, peak_data):
         """将峰值添加到表格"""
+        self._updating_peak_table = True
         row = self.peakData.rowCount()
-        self.peakData.insertRow(row)
-        
-        self.peakData.setItem(row, 0, QTableWidgetItem(peak_data['species']))
-        self.peakData.setItem(row, 1, QTableWidgetItem(f"{peak_data['time']:.2f}"))
-        self.peakData.setItem(row, 2, QTableWidgetItem(f"{peak_data['mz']:.2f}"))
-        self.peakData.setItem(row, 3, QTableWidgetItem(f"{peak_data['intensity']:.2f}"))
-        self.peakData.setItem(row, 4, QTableWidgetItem(f"{peak_data['left']:.2f}"))
-        self.peakData.setItem(row, 5, QTableWidgetItem(f"{peak_data['right']:.2f}"))
+        try:
+            self.peakData.insertRow(row)
+            self.peakData.setItem(row, 0, QTableWidgetItem(peak_data['species']))
+            self.peakData.setItem(row, 1, QTableWidgetItem(f"{peak_data['time']:.2f}"))
+            self.peakData.setItem(row, 2, QTableWidgetItem(f"{peak_data['mz']:.2f}"))
+            self.peakData.setItem(row, 3, QTableWidgetItem(f"{peak_data['intensity']:.2f}"))
+            self.peakData.setItem(row, 4, QTableWidgetItem(f"{peak_data['left']:.2f}"))
+            self.peakData.setItem(row, 5, QTableWidgetItem(f"{peak_data['right']:.2f}"))
+        finally:
+            self._updating_peak_table = False
 
     def update_peak_in_table(self, row, peak_data):
         """更新表格中的峰值"""
-        self.peakData.setItem(row, 0, QTableWidgetItem(peak_data['species']))
-        self.peakData.setItem(row, 1, QTableWidgetItem(f"{peak_data['time']:.2f}"))
-        self.peakData.setItem(row, 2, QTableWidgetItem(f"{peak_data['mz']:.2f}"))
-        self.peakData.setItem(row, 3, QTableWidgetItem(f"{peak_data['intensity']:.2f}"))
-        self.peakData.setItem(row, 4, QTableWidgetItem(f"{peak_data['left']:.2f}"))
-        self.peakData.setItem(row, 5, QTableWidgetItem(f"{peak_data['right']:.2f}"))
+        self._updating_peak_table = True
+        try:
+            self.peakData.setItem(row, 0, QTableWidgetItem(peak_data['species']))
+            self.peakData.setItem(row, 1, QTableWidgetItem(f"{peak_data['time']:.2f}"))
+            self.peakData.setItem(row, 2, QTableWidgetItem(f"{peak_data['mz']:.2f}"))
+            self.peakData.setItem(row, 3, QTableWidgetItem(f"{peak_data['intensity']:.2f}"))
+            self.peakData.setItem(row, 4, QTableWidgetItem(f"{peak_data['left']:.2f}"))
+            self.peakData.setItem(row, 5, QTableWidgetItem(f"{peak_data['right']:.2f}"))
+        finally:
+            self._updating_peak_table = False
 
     def update_plot(self):
         """更新图表显示"""
+        if self.p2 is None:
+            return
         # 清除现有标注
         for item in self.p2.items[:]:
             if isinstance(item, pg.TextItem):
@@ -1242,21 +1619,18 @@ class MainWindow(Ui_MainWindow, QMainWindow):
         
         # 重新添加所有峰值标注
         for row in range(self.peakData.rowCount()):
-            try:
-                # 使用飞行时间作为 x 坐标
-                time = float(self.peakData.item(row, 1).text())  # 第2列是飞行时间
-                mz = float(self.peakData.item(row, 2).text())    # 第3列是质量数
-                intensity = float(self.peakData.item(row, 3).text())  # 第4列是强度
-                
-                # 使用飞行时间作为 x 坐标进行标注
-                text_item = pg.TextItem(text=f'{mz:.2f}', color='red', anchor=(0.5, 1.5))
-                text_item.setPos(time, intensity)  # 直接使用飞行时间作为 x 坐标
-                self.p2.addItem(text_item)
-            except (ValueError, AttributeError) as e:
-                print(f"更新峰值标注时出错: {e}")
+            values = self._peak_row_values(row)
+            if values is None:
+                continue
+            time, mz, intensity = values
+            text_item = pg.TextItem(text=f'{mz:.2f}', color='red', anchor=(0.5, 1.5))
+            text_item.setPos(time, intensity)
+            self.p2.addItem(text_item)
 
     def annotate_peak(self, peak_data):
         """在图表上标注单个峰值"""
+        if self.p2 is None:
+            return
         try:
             text_item = pg.TextItem(text=f"{peak_data['mz']:.2f}", color='red', anchor=(0.5, 1.5))
             text_item.setPos(peak_data['time'], peak_data['intensity'])
@@ -1267,6 +1641,8 @@ class MainWindow(Ui_MainWindow, QMainWindow):
     def update_all_peaks(self):
         """更新所有峰值标注"""
         try:
+            if self.p2 is None:
+                return
             # 清除现有标注
             for item in self.p2.items[:]:
                 if isinstance(item, pg.TextItem):
@@ -1274,19 +1650,13 @@ class MainWindow(Ui_MainWindow, QMainWindow):
             
             # 从表格中读取所有峰值数据并重新标注
             for row in range(self.peakData.rowCount()):
-                try:
-                    # 获取峰值数据
-                    time = float(self.peakData.item(row, 1).text())
-                    mz = float(self.peakData.item(row, 2).text())
-                    intensity = float(self.peakData.item(row, 3).text())
-                    
-                    # 添加标注
-                    text_item = pg.TextItem(text=f'{mz:.2f}', color='red', anchor=(0.5, 1.5))
-                    text_item.setPos(time, intensity)
-                    self.p2.addItem(text_item)
-                    
-                except (ValueError, AttributeError) as e:
-                    print(f"更新第 {row+1} 行峰值标注时出错: {e}")
+                values = self._peak_row_values(row)
+                if values is None:
+                    continue
+                time, mz, intensity = values
+                text_item = pg.TextItem(text=f'{mz:.2f}', color='red', anchor=(0.5, 1.5))
+                text_item.setPos(time, intensity)
+                self.p2.addItem(text_item)
                 
         except Exception as e:
             QMessageBox.warning(self, 'Error', f'更新峰值标注失败: {str(e)}')
@@ -1295,7 +1665,11 @@ class MainWindow(Ui_MainWindow, QMainWindow):
         """清除峰值数据表格中的所有数据"""
         try:
             # 清除表格数据
-            self.peakData.setRowCount(0)
+            self._updating_peak_table = True
+            try:
+                self.peakData.setRowCount(0)
+            finally:
+                self._updating_peak_table = False
             
             # 清除图表上的峰值标注
             if self.p2:

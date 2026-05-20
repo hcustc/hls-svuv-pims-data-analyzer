@@ -1,3 +1,4 @@
+beautifulsoup4
 fastapi
 numpy
 openpyxl
@@ -7,6 +8,7 @@ PyQt6
 pyqtgraph
 PyWavelets
 PyYAML
+requests
 scikit-learn
 scipy
 uvicorn

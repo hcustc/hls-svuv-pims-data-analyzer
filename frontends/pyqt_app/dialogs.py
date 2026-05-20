@@ -15,11 +15,24 @@ from core.config import (
     save_peak_detection_config,
     species_database_path,
 )
-from core.isotope import calculate_isotope_distribution, parse_formula
+from core.isotope import (
+    calculate_isotope_distribution,
+    formula_monoisotopic_mass,
+    formula_nominal_mass,
+    generate_formula_candidates,
+    parse_element_count_ranges,
+    parse_formula,
+)
+from core.nist_webbook import default_nist_webbook_client
 from core.output_paths import ensure_output_dir
 from core.pie_analysis import analyze_pie_folder, build_pie_curves, identify_species_for_mz_with_curve, load_species_database
 from core.normalization import NormalizationSettings, load_normalization_settings, save_normalization_settings
-from core.temperature_scan import analyze_temperature_folder, build_temperature_curves, compute_kr_expansion_factors
+from core.temperature_scan import (
+    TEMPERATURE_CURVE_CLASS_LABELS,
+    analyze_temperature_folder,
+    build_temperature_curves,
+    compute_kr_expansion_factors,
+)
 from frontends.pyqt_app.workers import WorkerThread
 
 try:
@@ -52,31 +65,110 @@ def combo_set_data(combo: QtWidgets.QComboBox, value: object) -> None:
             return
 
 
-class IsotopeAbundanceDialog(QtWidgets.QWidget):
+class IsotopeAbundanceDialog(QtWidgets.QWidget, DataFrameTableMixin):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("同位素丰度计算")
-        self.resize(720, 520)
+        self.candidate_worker: WorkerThread | None = None
+        self.setWindowTitle("分子式与同位素工具")
+        self.resize(920, 680)
         layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
 
-        input_layout = QtWidgets.QHBoxLayout()
+        self.tabs = QtWidgets.QTabWidget()
+        layout.addWidget(self.tabs)
+
+        mass_tab = QtWidgets.QWidget()
+        mass_layout = QtWidgets.QVBoxLayout(mass_tab)
+        mass_layout.setContentsMargins(8, 8, 8, 8)
+        mass_layout.setSpacing(10)
+
+        formula_group = QtWidgets.QGroupBox("分子式质量与同位素分布")
+        formula_layout = QtWidgets.QGridLayout(formula_group)
+        formula_layout.setHorizontalSpacing(8)
+        formula_layout.setVerticalSpacing(8)
         self.formula_edit = QtWidgets.QLineEdit()
         self.formula_edit.setPlaceholderText("输入分子式，例如 C6H6、CF3COOH、H2O")
-        self.calculate_button = QtWidgets.QPushButton("计算")
+        self.formula_edit.returnPressed.connect(self.calculate)
+        self.min_percent_edit = QtWidgets.QDoubleSpinBox()
+        self.min_percent_edit.setRange(0.0, 100.0)
+        self.min_percent_edit.setDecimals(4)
+        self.min_percent_edit.setSingleStep(0.01)
+        self.min_percent_edit.setValue(0.01)
+        self.calculate_button = QtWidgets.QPushButton("计算质量/同位素")
         self.calculate_button.clicked.connect(self.calculate)
-        input_layout.addWidget(self.formula_edit)
-        input_layout.addWidget(self.calculate_button)
-        layout.addLayout(input_layout)
+        formula_layout.addWidget(QtWidgets.QLabel("分子式"), 0, 0)
+        formula_layout.addWidget(self.formula_edit, 0, 1)
+        formula_layout.addWidget(QtWidgets.QLabel("最小丰度(%)"), 0, 2)
+        formula_layout.addWidget(self.min_percent_edit, 0, 3)
+        formula_layout.addWidget(self.calculate_button, 0, 4)
+        formula_layout.setColumnStretch(1, 1)
+        mass_layout.addWidget(formula_group)
 
         self.composition_label = QtWidgets.QLabel("")
-        layout.addWidget(self.composition_label)
+        self.composition_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.mass_label = QtWidgets.QLabel("")
+        self.mass_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        mass_layout.addWidget(self.composition_label)
+        mass_layout.addWidget(self.mass_label)
 
         self.table = QtWidgets.QTableWidget(0, 3)
         self.table.setHorizontalHeaderLabels(["质量数 (m/z)", "丰度", "丰度占比 (%)"])
         self.table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
         self.table.setAlternatingRowColors(True)
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
-        layout.addWidget(self.table)
+        mass_layout.addWidget(self.table, stretch=1)
+        self.tabs.addTab(mass_tab, "质量/同位素")
+
+        candidate_tab = QtWidgets.QWidget()
+        candidate_layout = QtWidgets.QVBoxLayout(candidate_tab)
+        candidate_layout.setContentsMargins(8, 8, 8, 8)
+        candidate_layout.setSpacing(10)
+
+        search_group = QtWidgets.QGroupBox("按质量生成候选分子式")
+        search_layout = QtWidgets.QGridLayout(search_group)
+        search_layout.setHorizontalSpacing(8)
+        search_layout.setVerticalSpacing(8)
+        self.target_mass_edit = QtWidgets.QDoubleSpinBox()
+        self.target_mass_edit.setRange(0.000001, 100_000)
+        self.target_mass_edit.setDecimals(8)
+        self.target_mass_edit.setValue(78.04695019)
+        self.target_mass_edit.setSingleStep(0.01)
+        self.tolerance_edit = QtWidgets.QDoubleSpinBox()
+        self.tolerance_edit.setRange(0.0, 1_000_000)
+        self.tolerance_edit.setDecimals(6)
+        self.tolerance_edit.setValue(0.01)
+        self.tolerance_unit_combo = QtWidgets.QComboBox()
+        self.tolerance_unit_combo.addItem("Da", "Da")
+        self.tolerance_unit_combo.addItem("ppm", "ppm")
+        self.element_ranges_edit = QtWidgets.QLineEdit()
+        self.element_ranges_edit.setPlaceholderText("C:0-20,H:0-60,O:0-10,N:0-6,F:0-20")
+        self.element_ranges_edit.setText("C:0-20,H:0-60,O:0-10,N:0-6,F:0-20,Cl:0-6,Br:0-4,S:0-4")
+        self.max_results_edit = QtWidgets.QSpinBox()
+        self.max_results_edit.setRange(1, 10_000)
+        self.max_results_edit.setValue(200)
+        self.generate_button = QtWidgets.QPushButton("生成候选")
+        self.generate_button.clicked.connect(self.generate_candidates)
+
+        search_layout.addWidget(QtWidgets.QLabel("目标质量"), 0, 0)
+        search_layout.addWidget(self.target_mass_edit, 0, 1)
+        search_layout.addWidget(QtWidgets.QLabel("误差"), 0, 2)
+        search_layout.addWidget(self.tolerance_edit, 0, 3)
+        search_layout.addWidget(self.tolerance_unit_combo, 0, 4)
+        search_layout.addWidget(QtWidgets.QLabel("最多结果"), 0, 5)
+        search_layout.addWidget(self.max_results_edit, 0, 6)
+        search_layout.addWidget(QtWidgets.QLabel("元素范围"), 1, 0)
+        search_layout.addWidget(self.element_ranges_edit, 1, 1, 1, 5)
+        search_layout.addWidget(self.generate_button, 1, 6)
+        search_layout.setColumnStretch(1, 1)
+        candidate_layout.addWidget(search_group)
+
+        self.candidate_formula_table = QtWidgets.QTableWidget()
+        self.candidate_formula_table.setAlternatingRowColors(True)
+        self.candidate_formula_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.candidate_formula_table.itemDoubleClicked.connect(self.use_candidate_formula)
+        candidate_layout.addWidget(self.candidate_formula_table, stretch=1)
+        self.tabs.addTab(candidate_tab, "候选分子式")
 
     def calculate(self):
         formula = self.formula_edit.text().strip()
@@ -85,17 +177,309 @@ class IsotopeAbundanceDialog(QtWidgets.QWidget):
             return
         try:
             composition = parse_formula(formula)
-            rows = calculate_isotope_distribution(formula)
+            nominal_mass = formula_nominal_mass(formula)
+            exact_mass = formula_monoisotopic_mass(formula)
+            rows = calculate_isotope_distribution(formula, min_percent=self.min_percent_edit.value())
         except Exception as exc:
             QtWidgets.QMessageBox.warning(self, "错误", str(exc))
             return
 
         self.composition_label.setText("组成: " + ", ".join(f"{key}{value}" for key, value in composition.items()))
+        self.mass_label.setText(f"名义质量: {nominal_mass}; 单同位素精确质量: {exact_mass:.8f}")
         self.table.setRowCount(len(rows))
         for row_idx, row in enumerate(rows):
             self.table.setItem(row_idx, 0, QtWidgets.QTableWidgetItem(f"{row['mass']:.4f}"))
             self.table.setItem(row_idx, 1, QtWidgets.QTableWidgetItem(f"{row['abundance']:.8g}"))
             self.table.setItem(row_idx, 2, QtWidgets.QTableWidgetItem(f"{row['percent']:.4f}"))
+
+    def generate_candidates(self):
+        try:
+            ranges = parse_element_count_ranges(self.element_ranges_edit.text())
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "错误", str(exc))
+            return
+
+        target_mass = self.target_mass_edit.value()
+        tolerance = self.tolerance_edit.value()
+        tolerance_unit = str(self.tolerance_unit_combo.currentData())
+        max_results = self.max_results_edit.value()
+        self.set_candidate_busy(True)
+        self.candidate_worker = WorkerThread(
+            lambda: generate_formula_candidates(
+                target_mass,
+                tolerance=tolerance,
+                tolerance_unit=tolerance_unit,
+                element_ranges=ranges,
+                max_results=max_results,
+            ),
+            self,
+        )
+        self.candidate_worker.finished_with_result.connect(self.show_formula_candidates)
+        self.candidate_worker.failed.connect(lambda message: QtWidgets.QMessageBox.warning(self, "错误", message))
+        self.candidate_worker.finished.connect(lambda: self.set_candidate_busy(False))
+        self.candidate_worker.start()
+
+    def set_candidate_busy(self, busy: bool) -> None:
+        for widget in (
+            self.target_mass_edit,
+            self.tolerance_edit,
+            self.tolerance_unit_combo,
+            self.element_ranges_edit,
+            self.max_results_edit,
+            self.generate_button,
+        ):
+            widget.setDisabled(busy)
+
+    def show_formula_candidates(self, candidates: object) -> None:
+        candidate_list = list(candidates if isinstance(candidates, list) else [])
+
+        rows = [
+            {
+                "分子式": item["formula"],
+                "名义质量": item["nominal_mass"],
+                "单同位素质量": f"{item['monoisotopic_mass']:.8f}",
+                "误差(Da)": f"{item['error_da']:.8f}",
+                "误差(ppm)": f"{item['error_ppm']:.3f}",
+                "元素组成": ", ".join(f"{key}{value}" for key, value in item["composition"].items()),
+            }
+            for item in candidate_list
+        ]
+        self.set_dataframe(
+            self.candidate_formula_table,
+            pd.DataFrame(rows, columns=["分子式", "名义质量", "单同位素质量", "误差(Da)", "误差(ppm)", "元素组成"]),
+        )
+
+    def use_candidate_formula(self, item: QtWidgets.QTableWidgetItem | None = None) -> None:
+        row = self.candidate_formula_table.currentRow()
+        if row < 0:
+            return
+        formula_item = self.candidate_formula_table.item(row, 0)
+        if formula_item is None:
+            return
+        self.formula_edit.setText(formula_item.text())
+        self.tabs.setCurrentIndex(0)
+        self.calculate()
+
+
+class IonizationEnergyLookupWidget(QtWidgets.QWidget, DataFrameTableMixin):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.worker: WorkerThread | None = None
+        self.current_compounds = []
+        self.setWindowTitle("电离能查询")
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        input_group = QtWidgets.QGroupBox("输入物种")
+        input_layout = QtWidgets.QGridLayout(input_group)
+        input_layout.setHorizontalSpacing(8)
+        input_layout.setVerticalSpacing(8)
+
+        self.query_edit = QtWidgets.QLineEdit()
+        self.query_edit.setPlaceholderText("输入分子式、名称、CAS号或NIST ID，例如 C6H6、Benzene、71-43-2、C71432")
+        self.query_edit.returnPressed.connect(self.query_webbook)
+        self.search_type_combo = QtWidgets.QComboBox()
+        self.search_type_combo.addItem("自动", "auto")
+        self.search_type_combo.addItem("分子式", "formula")
+        self.search_type_combo.addItem("名称", "name")
+        self.search_type_combo.addItem("CAS/NIST ID", "id")
+        self.query_button = QtWidgets.QPushButton("查询")
+        self.query_button.clicked.connect(self.query_webbook)
+        self.status_label = QtWidgets.QLabel("数据源: 本地物种库优先；未命中则查询 NIST Chemistry WebBook / Gas phase ion energetics")
+        self.status_label.setWordWrap(True)
+
+        input_layout.addWidget(QtWidgets.QLabel("物种"), 0, 0)
+        input_layout.addWidget(self.query_edit, 0, 1)
+        input_layout.addWidget(self.search_type_combo, 0, 2)
+        input_layout.addWidget(self.query_button, 0, 3)
+        input_layout.addWidget(self.status_label, 1, 0, 1, 4)
+        input_layout.setColumnStretch(1, 1)
+        layout.addWidget(input_group)
+
+        result_group = QtWidgets.QGroupBox("查询结果")
+        result_layout = QtWidgets.QGridLayout(result_group)
+        result_layout.setHorizontalSpacing(8)
+        result_layout.setVerticalSpacing(8)
+
+        self.ie_value_label = QtWidgets.QLabel("--")
+        self.ie_value_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.compound_label = QtWidgets.QLabel("--")
+        self.compound_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.formula_label = QtWidgets.QLabel("--")
+        self.formula_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.source_label = QtWidgets.QLabel("--")
+        self.source_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.url_label = QtWidgets.QLabel("--")
+        self.url_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.url_label.setOpenExternalLinks(True)
+        self.message_label = QtWidgets.QLabel("")
+        self.message_label.setWordWrap(True)
+        self.message_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+
+        result_layout.addWidget(QtWidgets.QLabel("WebBook IE"), 0, 0)
+        result_layout.addWidget(self.ie_value_label, 0, 1)
+        result_layout.addWidget(QtWidgets.QLabel("WebBook条目"), 0, 2)
+        result_layout.addWidget(self.compound_label, 0, 3)
+        result_layout.addWidget(QtWidgets.QLabel("分子式"), 1, 0)
+        result_layout.addWidget(self.formula_label, 1, 1)
+        result_layout.addWidget(QtWidgets.QLabel("来源"), 1, 2)
+        result_layout.addWidget(self.source_label, 1, 3)
+        result_layout.addWidget(QtWidgets.QLabel("链接"), 2, 0)
+        result_layout.addWidget(self.url_label, 2, 1, 1, 3)
+        result_layout.addWidget(self.message_label, 3, 0, 1, 4)
+        result_layout.setColumnStretch(1, 1)
+        result_layout.setColumnStretch(3, 2)
+        layout.addWidget(result_group)
+
+        tables_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+        tables_splitter.setChildrenCollapsible(False)
+
+        candidate_group = QtWidgets.QGroupBox("本地/WebBook候选条目")
+        candidate_layout = QtWidgets.QVBoxLayout(candidate_group)
+        candidate_layout.setContentsMargins(8, 8, 8, 8)
+        self.candidate_table = QtWidgets.QTableWidget()
+        self.candidate_table.setWordWrap(False)
+        self.candidate_table.setAlternatingRowColors(True)
+        self.candidate_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.candidate_table.itemSelectionChanged.connect(self.on_candidate_selection_changed)
+        candidate_layout.addWidget(self.candidate_table)
+        tables_splitter.addWidget(candidate_group)
+
+        determination_group = QtWidgets.QGroupBox("IE测定记录")
+        determination_layout = QtWidgets.QVBoxLayout(determination_group)
+        determination_layout.setContentsMargins(8, 8, 8, 8)
+        self.determination_table = QtWidgets.QTableWidget()
+        self.determination_table.setWordWrap(False)
+        self.determination_table.setAlternatingRowColors(True)
+        self.determination_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        determination_layout.addWidget(self.determination_table)
+        tables_splitter.addWidget(determination_group)
+        tables_splitter.setStretchFactor(0, 1)
+        tables_splitter.setStretchFactor(1, 1)
+        layout.addWidget(tables_splitter, stretch=2)
+
+        prediction_group = QtWidgets.QGroupBox("IE预测模型输出")
+        prediction_layout = QtWidgets.QVBoxLayout(prediction_group)
+        prediction_layout.setContentsMargins(8, 8, 8, 8)
+        self.model_prediction_table = QtWidgets.QTableWidget()
+        self.model_prediction_table.setWordWrap(False)
+        self.model_prediction_table.setAlternatingRowColors(True)
+        self.model_prediction_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        prediction_layout.addWidget(self.model_prediction_table)
+        layout.addWidget(prediction_group, stretch=1)
+        self.set_model_prediction_rows([])
+
+    def set_busy(self, busy: bool, message: str) -> None:
+        self.query_button.setDisabled(busy)
+        self.query_edit.setDisabled(busy)
+        self.search_type_combo.setDisabled(busy)
+        self.status_label.setText(message)
+
+    def query_webbook(self):
+        query = self.query_edit.text().strip()
+        if not query:
+            QtWidgets.QMessageBox.warning(self, "提示", "请输入名称、分子式、CAS号或NIST ID")
+            return
+        search_type = str(self.search_type_combo.currentData())
+        self.set_busy(True, "正在查询本地物种库 / NIST WebBook...")
+        self.worker = WorkerThread(
+            lambda: default_nist_webbook_client().query_ionization_energy(query, search_type=search_type),
+            self,
+        )
+        self.worker.finished_with_result.connect(self.on_query_complete)
+        self.worker.failed.connect(self.on_query_failed)
+        self.worker.finished.connect(lambda: self.set_busy(False, "就绪: 本地物种库优先，未命中则查询 NIST WebBook"))
+        self.worker.start()
+
+    def on_query_complete(self, result: object) -> None:
+        selected = getattr(result, "selected_compound", None)
+        self.current_compounds = list(getattr(result, "compounds", ()) or ())
+        self.show_selected_compound(selected, fallback_url=str(getattr(result, "requested_url", "--")))
+
+        message = str(getattr(result, "message", ""))
+        if getattr(result, "lost", False):
+            message += " WebBook提示结果过多，可能未完整返回。"
+        self.message_label.setText(message)
+
+        candidate_rows = []
+        for compound in getattr(result, "compounds", ()) or ():
+            ie = compound.best_ie
+            candidate_rows.append(
+                {
+                    "NIST ID": compound.nist_id or "",
+                    "名称": compound.name or "",
+                    "分子式": compound.formula or "",
+                    "IE(eV)": "" if ie is None else f"{ie.value:.4f}",
+                    "不确定度": "" if ie is None or ie.uncertainty is None else f"{ie.uncertainty:g}",
+                    "来源": "" if ie is None else ie.source,
+                    "方法": "" if ie is None else (ie.method or ""),
+                    "备注": compound.message or ("" if ie is None else (ie.comment or "")),
+                    "URL": compound.ion_energetics_url or compound.url or "",
+                }
+            )
+        self.set_dataframe(
+            self.candidate_table,
+            pd.DataFrame(
+                candidate_rows,
+                columns=["NIST ID", "名称", "分子式", "IE(eV)", "不确定度", "来源", "方法", "备注", "URL"],
+            ),
+        )
+        if self.current_compounds:
+            self.candidate_table.selectRow(0)
+
+    def on_query_failed(self, message: str) -> None:
+        QtWidgets.QMessageBox.warning(self, "错误", message)
+
+    def set_model_prediction_rows(self, rows: list[dict]) -> None:
+        self.set_dataframe(
+            self.model_prediction_table,
+            pd.DataFrame(
+                rows,
+                columns=["模型", "预测IE(eV)", "不确定度", "适用域", "输入", "备注"],
+            ),
+        )
+
+    def on_candidate_selection_changed(self) -> None:
+        row = self.candidate_table.currentRow()
+        if row < 0 or row >= len(self.current_compounds):
+            return
+        self.show_selected_compound(self.current_compounds[row])
+
+    def show_selected_compound(self, compound: object | None, *, fallback_url: str = "--") -> None:
+        best_ie = None if compound is None else getattr(compound, "best_ie", None)
+        self.ie_value_label.setText("--" if best_ie is None else best_ie.formatted_value())
+        if compound is None:
+            self.compound_label.setText("--")
+            self.formula_label.setText("--")
+            self.source_label.setText("--")
+            self.url_label.setText(fallback_url)
+        else:
+            nist_id = getattr(compound, "nist_id", None) or "--"
+            name = getattr(compound, "name", None) or "--"
+            self.compound_label.setText(f"{name} ({nist_id})")
+            self.formula_label.setText(getattr(compound, "formula", None) or "--")
+            source = "--" if best_ie is None else f"{best_ie.source}; {best_ie.method or 'method N/A'}"
+            self.source_label.setText(source)
+            url = getattr(compound, "ion_energetics_url", None) or getattr(compound, "url", None)
+            self.url_label.setText(f'<a href="{url}">{url}</a>' if url else "--")
+
+        determination_rows = []
+        if compound is not None:
+            for item in getattr(compound, "determinations", ()) or ():
+                determination_rows.append(
+                    {
+                        "IE(eV)": f"{item.value:.4f}",
+                        "不确定度": "" if item.uncertainty is None else f"{item.uncertainty:g}",
+                        "方法": item.method or "",
+                        "文献": item.reference or "",
+                        "备注": item.comment or "",
+                    }
+                )
+        self.set_dataframe(
+            self.determination_table,
+            pd.DataFrame(determination_rows, columns=["IE(eV)", "不确定度", "方法", "文献", "备注"]),
+        )
 
 
 class NormalizationSettingsWidget(QtWidgets.QWidget, DataFrameTableMixin):
@@ -183,6 +567,11 @@ class NormalizationSettingsWidget(QtWidgets.QWidget, DataFrameTableMixin):
         peak_layout.setHorizontalSpacing(8)
         peak_layout.setVerticalSpacing(8)
 
+        self.peak_algorithm_combo = QtWidgets.QComboBox()
+        self.peak_algorithm_combo.addItem("Prominence（推荐）", "prominence")
+        self.peak_algorithm_combo.addItem("传统局部极大", "legacy")
+        self.peak_algorithm_combo.addItem("CWT小波", "cwt")
+        self.peak_algorithm_combo.setToolTip("主工作台自动寻峰使用的算法")
         self.peak_detection_min_idx_edit = QtWidgets.QSpinBox()
         self.peak_detection_min_idx_edit.setRange(0, 10_000_000)
         self.peak_detection_min_idx_edit.setToolTip("自动寻峰从该数据点之后开始，避免文件头或低TOF噪声参与寻峰")
@@ -216,25 +605,64 @@ class NormalizationSettingsWidget(QtWidgets.QWidget, DataFrameTableMixin):
         self.peak_gaussian_boundary_scale_edit.setRange(0.1, 100)
         self.peak_gaussian_boundary_scale_edit.setDecimals(3)
         self.peak_gaussian_boundary_scale_edit.setToolTip("高斯拟合成功后，以该倍数 FWHM 重新估计卡峰边界")
+        self.peak_prominence_ratio_edit = QtWidgets.QDoubleSpinBox()
+        self.peak_prominence_ratio_edit.setRange(0, 1)
+        self.peak_prominence_ratio_edit.setDecimals(6)
+        self.peak_prominence_ratio_edit.setSingleStep(0.001)
+        self.peak_prominence_ratio_edit.setToolTip("Prominence阈值占基线校正后最高峰的比例；越大越保守")
+        self.peak_smoothing_window_edit = QtWidgets.QSpinBox()
+        self.peak_smoothing_window_edit.setRange(1, 100_001)
+        self.peak_smoothing_window_edit.setToolTip("Savitzky-Golay平滑窗口，偶数会自动调为奇数")
+        self.peak_baseline_window_edit = QtWidgets.QSpinBox()
+        self.peak_baseline_window_edit.setRange(3, 1_000_001)
+        self.peak_baseline_window_edit.setToolTip("滚动百分位基线窗口，通常应大于峰宽")
+        self.peak_baseline_percentile_edit = QtWidgets.QDoubleSpinBox()
+        self.peak_baseline_percentile_edit.setRange(0, 100)
+        self.peak_baseline_percentile_edit.setDecimals(2)
+        self.peak_baseline_percentile_edit.setToolTip("滚动基线使用的百分位数")
+        self.peak_min_peak_width_edit = QtWidgets.QSpinBox()
+        self.peak_min_peak_width_edit.setRange(1, 1_000_000)
+        self.peak_min_peak_width_edit.setToolTip("Prominence/CWT允许的最小峰宽")
+        self.peak_max_peak_width_edit = QtWidgets.QSpinBox()
+        self.peak_max_peak_width_edit.setRange(1, 1_000_000)
+        self.peak_max_peak_width_edit.setToolTip("Prominence/CWT允许的最大峰宽")
 
-        peak_layout.addWidget(QtWidgets.QLabel("寻峰起始索引"), 0, 0)
-        peak_layout.addWidget(self.peak_detection_min_idx_edit, 0, 1)
-        peak_layout.addWidget(QtWidgets.QLabel("峰结束阈值"), 0, 2)
-        peak_layout.addWidget(self.peak_threshold_end_edit, 0, 3)
+        peak_layout.addWidget(QtWidgets.QLabel("寻峰算法"), 0, 0)
+        peak_layout.addWidget(self.peak_algorithm_combo, 0, 1)
+        peak_layout.addWidget(QtWidgets.QLabel("寻峰起始索引"), 0, 2)
+        peak_layout.addWidget(self.peak_detection_min_idx_edit, 0, 3)
         peak_layout.addWidget(QtWidgets.QLabel("最小峰强度"), 0, 4)
         peak_layout.addWidget(self.peak_min_intensity_edit, 0, 5)
-        peak_layout.addWidget(QtWidgets.QLabel("邻峰抑制半宽"), 1, 0)
-        peak_layout.addWidget(self.peak_nearby_window_edit, 1, 1)
-        peak_layout.addWidget(QtWidgets.QLabel("重复峰排除半宽"), 1, 2)
-        peak_layout.addWidget(self.peak_duplicate_window_edit, 1, 3)
-        peak_layout.addWidget(QtWidgets.QLabel("边界外扩点数"), 1, 4)
-        peak_layout.addWidget(self.peak_boundary_padding_edit, 1, 5)
-        peak_layout.addWidget(QtWidgets.QLabel("弱肩峰过滤倍率"), 2, 0)
-        peak_layout.addWidget(self.peak_weak_tail_ratio_edit, 2, 1)
-        peak_layout.addWidget(QtWidgets.QLabel("高斯窗口上限"), 2, 2)
-        peak_layout.addWidget(self.peak_gaussian_window_max_edit, 2, 3)
-        peak_layout.addWidget(QtWidgets.QLabel("高斯边界倍数"), 2, 4)
-        peak_layout.addWidget(self.peak_gaussian_boundary_scale_edit, 2, 5)
+        peak_layout.addWidget(QtWidgets.QLabel("峰结束阈值"), 1, 0)
+        peak_layout.addWidget(self.peak_threshold_end_edit, 1, 1)
+        peak_layout.addWidget(QtWidgets.QLabel("Prominence比例"), 1, 2)
+        peak_layout.addWidget(self.peak_prominence_ratio_edit, 1, 3)
+        peak_layout.addWidget(QtWidgets.QLabel("平滑窗口"), 1, 4)
+        peak_layout.addWidget(self.peak_smoothing_window_edit, 1, 5)
+        peak_layout.addWidget(QtWidgets.QLabel("邻峰抑制半宽"), 2, 0)
+        peak_layout.addWidget(self.peak_nearby_window_edit, 2, 1)
+        peak_layout.addWidget(QtWidgets.QLabel("重复峰排除半宽"), 2, 2)
+        peak_layout.addWidget(self.peak_duplicate_window_edit, 2, 3)
+        peak_layout.addWidget(QtWidgets.QLabel("边界外扩点数"), 2, 4)
+        peak_layout.addWidget(self.peak_boundary_padding_edit, 2, 5)
+        peak_layout.addWidget(QtWidgets.QLabel("弱肩峰过滤倍率"), 3, 0)
+        peak_layout.addWidget(self.peak_weak_tail_ratio_edit, 3, 1)
+        peak_layout.addWidget(QtWidgets.QLabel("高斯窗口上限"), 3, 2)
+        peak_layout.addWidget(self.peak_gaussian_window_max_edit, 3, 3)
+        peak_layout.addWidget(QtWidgets.QLabel("高斯边界倍数"), 3, 4)
+        peak_layout.addWidget(self.peak_gaussian_boundary_scale_edit, 3, 5)
+        peak_layout.addWidget(QtWidgets.QLabel("基线窗口"), 4, 0)
+        peak_layout.addWidget(self.peak_baseline_window_edit, 4, 1)
+        peak_layout.addWidget(QtWidgets.QLabel("基线百分位"), 4, 2)
+        peak_layout.addWidget(self.peak_baseline_percentile_edit, 4, 3)
+        peak_layout.addWidget(QtWidgets.QLabel("峰宽范围"), 4, 4)
+        width_group = QtWidgets.QWidget()
+        width_layout = QtWidgets.QHBoxLayout(width_group)
+        width_layout.setContentsMargins(0, 0, 0, 0)
+        width_layout.setSpacing(4)
+        width_layout.addWidget(self.peak_min_peak_width_edit)
+        width_layout.addWidget(self.peak_max_peak_width_edit)
+        peak_layout.addWidget(width_group, 4, 5)
         for column in (1, 3, 5):
             peak_layout.setColumnStretch(column, 1)
         layout.addWidget(peak_group)
@@ -260,6 +688,7 @@ class NormalizationSettingsWidget(QtWidgets.QWidget, DataFrameTableMixin):
 
     def load_peak_detection_controls(self) -> None:
         config = self.peak_detection
+        combo_set_data(self.peak_algorithm_combo, config.algorithm)
         self.peak_detection_min_idx_edit.setValue(config.detection_min_idx)
         self.peak_threshold_end_edit.setValue(config.threshold_end)
         self.peak_min_intensity_edit.setValue(config.min_intensity)
@@ -269,6 +698,12 @@ class NormalizationSettingsWidget(QtWidgets.QWidget, DataFrameTableMixin):
         self.peak_weak_tail_ratio_edit.setValue(config.weak_tail_ratio)
         self.peak_gaussian_window_max_edit.setValue(config.gaussian_window_max)
         self.peak_gaussian_boundary_scale_edit.setValue(config.gaussian_boundary_scale)
+        self.peak_prominence_ratio_edit.setValue(config.prominence_ratio)
+        self.peak_smoothing_window_edit.setValue(config.smoothing_window)
+        self.peak_baseline_window_edit.setValue(config.baseline_window)
+        self.peak_baseline_percentile_edit.setValue(config.baseline_percentile)
+        self.peak_min_peak_width_edit.setValue(config.min_peak_width)
+        self.peak_max_peak_width_edit.setValue(config.max_peak_width)
 
     def apply_to_settings(self) -> None:
         self.settings.light_source = self.light_source_combo.currentData()
@@ -284,6 +719,7 @@ class NormalizationSettingsWidget(QtWidgets.QWidget, DataFrameTableMixin):
             c=self.calibration_c_edit.value(),
         )
         self.peak_detection = PeakDetectionConfig(
+            algorithm=str(self.peak_algorithm_combo.currentData()),
             detection_min_idx=self.peak_detection_min_idx_edit.value(),
             threshold_end=self.peak_threshold_end_edit.value(),
             min_intensity=self.peak_min_intensity_edit.value(),
@@ -295,6 +731,13 @@ class NormalizationSettingsWidget(QtWidgets.QWidget, DataFrameTableMixin):
             gaussian_window_max=self.peak_gaussian_window_max_edit.value(),
             gaussian_boundary_scale=self.peak_gaussian_boundary_scale_edit.value(),
             boundary_padding=self.peak_boundary_padding_edit.value(),
+            prominence_ratio=self.peak_prominence_ratio_edit.value(),
+            smoothing_window=self.peak_smoothing_window_edit.value(),
+            smoothing_poly_order=self.peak_detection.smoothing_poly_order,
+            baseline_window=self.peak_baseline_window_edit.value(),
+            baseline_percentile=self.peak_baseline_percentile_edit.value(),
+            min_peak_width=self.peak_min_peak_width_edit.value(),
+            max_peak_width=max(self.peak_min_peak_width_edit.value(), self.peak_max_peak_width_edit.value()),
         )
 
     def select_kr_folder(self):
@@ -474,7 +917,31 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         left_layout.setSpacing(8)
         self.summary_label = QtWidgets.QLabel("未生成温度曲线")
         left_layout.addWidget(self.summary_label)
-        self.mz_list = QtWidgets.QListWidget()
+        filter_row = QtWidgets.QWidget()
+        filter_layout = QtWidgets.QHBoxLayout(filter_row)
+        filter_layout.setContentsMargins(0, 0, 0, 0)
+        filter_layout.setSpacing(6)
+        filter_layout.addWidget(QtWidgets.QLabel("显示"))
+        self.curve_display_combo = QtWidgets.QComboBox()
+        self.curve_display_combo.addItem("按类别分组", "grouped")
+        self.curve_display_combo.addItem("按m/z排序", "mz")
+        self.curve_display_combo.currentIndexChanged.connect(self.populate_mz_list)
+        filter_layout.addWidget(self.curve_display_combo, stretch=1)
+        filter_layout.addWidget(QtWidgets.QLabel("筛选"))
+        self.curve_group_combo = QtWidgets.QComboBox()
+        self.curve_group_combo.addItem("全部", "all")
+        for key in ("formation", "consumption", "intermediate", "unclassified"):
+            self.curve_group_combo.addItem(TEMPERATURE_CURVE_CLASS_LABELS[key], key)
+        self.curve_group_combo.currentIndexChanged.connect(self.populate_mz_list)
+        filter_layout.addWidget(self.curve_group_combo, stretch=1)
+        left_layout.addWidget(filter_row)
+        self.group_summary_label = QtWidgets.QLabel("")
+        self.group_summary_label.setWordWrap(True)
+        left_layout.addWidget(self.group_summary_label)
+        self.mz_list = QtWidgets.QTreeWidget()
+        self.mz_list.setHeaderHidden(True)
+        self.mz_list.setRootIsDecorated(True)
+        self.mz_list.setUniformRowHeights(True)
         self.mz_list.currentItemChanged.connect(self.on_mz_selected)
         left_layout.addWidget(self.mz_list, stretch=1)
         splitter.addWidget(left_panel)
@@ -599,8 +1066,7 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.populate_mz_list()
         temperature_count = self.result_df["temperature"].nunique() if not self.result_df.empty else 0
         self.summary_label.setText(f"{len(self.curves)} 条m/z曲线 | {temperature_count} 个温度点")
-        if self.curves:
-            self.mz_list.setCurrentRow(0)
+        self.update_group_summary()
         QtWidgets.QMessageBox.information(self, "完成", f"生成 {len(self.result_df)} 行温度扫描结果")
 
     def on_analysis_failed(self, message: str) -> None:
@@ -608,23 +1074,96 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
     def populate_mz_list(self):
         self.mz_list.clear()
+        selected_group = self.curve_group_combo.currentData() if hasattr(self, "curve_group_combo") else "all"
+        display_mode = self.curve_display_combo.currentData() if hasattr(self, "curve_display_combo") else "grouped"
+        if display_mode == "mz":
+            self.populate_mz_list_flat(selected_group)
+        else:
+            self.populate_mz_list_grouped(selected_group)
+        first_item = self.first_curve_tree_item()
+        if first_item is not None:
+            self.mz_list.setCurrentItem(first_item)
+        else:
+            self.on_mz_selected(None)
+
+    def populate_mz_list_grouped(self, selected_group: str):
+        for group_key in ("formation", "consumption", "intermediate", "unclassified"):
+            if selected_group != "all" and selected_group != group_key:
+                continue
+            items = [
+                (mz, self.curves[mz])
+                for mz in sorted(self.curves)
+                if self.curves[mz].get("curve_class", "unclassified") == group_key
+            ]
+            if not items:
+                continue
+            parent = QtWidgets.QTreeWidgetItem([f"{TEMPERATURE_CURVE_CLASS_LABELS[group_key]} ({len(items)}条)"])
+            parent.setData(0, QtCore.Qt.ItemDataRole.UserRole, None)
+            parent.setFlags(parent.flags() & ~QtCore.Qt.ItemFlag.ItemIsSelectable)
+            self.mz_list.addTopLevelItem(parent)
+            for mz, curve in items:
+                child = QtWidgets.QTreeWidgetItem([self.curve_tree_label(mz, curve, include_group=False)])
+                child.setData(0, QtCore.Qt.ItemDataRole.UserRole, mz)
+                parent.addChild(child)
+            parent.setExpanded(True)
+
+    def populate_mz_list_flat(self, selected_group: str):
         for mz in sorted(self.curves):
             curve = self.curves[mz]
-            label = curve.get("species") or ""
-            suffix = f" {label}" if label and label != "Unknown" else ""
-            item = QtWidgets.QListWidgetItem(f"{mz}{suffix}  ({len(curve['temperatures'])}点)")
-            item.setData(QtCore.Qt.ItemDataRole.UserRole, mz)
-            self.mz_list.addItem(item)
+            if selected_group != "all" and curve.get("curve_class") != selected_group:
+                continue
+            item = QtWidgets.QTreeWidgetItem([self.curve_tree_label(mz, curve, include_group=True)])
+            item.setData(0, QtCore.Qt.ItemDataRole.UserRole, mz)
+            self.mz_list.addTopLevelItem(item)
+
+    def curve_tree_label(self, mz: int, curve: dict, *, include_group: bool) -> str:
+        label = curve.get("species") or ""
+        suffix = f" {label}" if label and label != "Unknown" else ""
+        base = f"{mz}{suffix}  ({len(curve['temperatures'])}点)"
+        if include_group:
+            class_label = curve.get("curve_class_label", TEMPERATURE_CURVE_CLASS_LABELS["unclassified"])
+            return f"[{class_label}] {base}"
+        return base
+
+    def first_curve_tree_item(self):
+        for index in range(self.mz_list.topLevelItemCount()):
+            item = self.mz_list.topLevelItem(index)
+            if item.data(0, QtCore.Qt.ItemDataRole.UserRole) is not None:
+                return item
+            if item.childCount() > 0:
+                return item.child(0)
+        return None
+
+    def update_group_summary(self):
+        counts = {key: 0 for key in TEMPERATURE_CURVE_CLASS_LABELS}
+        for curve in self.curves.values():
+            counts[curve.get("curve_class", "unclassified")] = counts.get(curve.get("curve_class", "unclassified"), 0) + 1
+        parts = [
+            f"{TEMPERATURE_CURVE_CLASS_LABELS[key]} {counts.get(key, 0)}"
+            for key in ("formation", "consumption", "intermediate", "unclassified")
+        ]
+        self.group_summary_label.setText(" | ".join(parts))
 
     def on_mz_selected(self, current, previous=None):
         if current is None:
             self.current_mz = None
+            self.curve_table.clear()
+            self.curve_table.setRowCount(0)
+            self.curve_table.setColumnCount(0)
+            if self.plot_widget is not None:
+                self.plot_widget.clear()
             return
-        self.current_mz = int(current.data(QtCore.Qt.ItemDataRole.UserRole))
+        mz_value = current.data(0, QtCore.Qt.ItemDataRole.UserRole)
+        if mz_value is None:
+            if current.childCount() > 0:
+                self.mz_list.setCurrentItem(current.child(0))
+            return
+        self.current_mz = int(mz_value)
         curve = self.curves[self.current_mz]
         rows = curve["rows"].copy()
         curve_df = pd.DataFrame(
             {
+                "分类": [curve.get("curve_class_label", "")] * len(rows),
                 "温度(C)": np.round(rows["temperature"].astype(float), 4),
                 "原始积分": np.round(rows["raw_area"].astype(float), 4),
                 "IO归一化": np.round(rows["photon_normalized_area"].astype(float), 4),
@@ -660,7 +1199,7 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
             symbolPen="#1e3a8a",
             symbolSize=8,
         )
-        self.plot_widget.setTitle(f"m/z {curve['mz']} 温度扫描")
+        self.plot_widget.setTitle(f"m/z {curve['mz']} 温度扫描 - {curve.get('curve_class_label', '')}")
         x_min = float(np.min(x_values))
         x_max = float(np.max(x_values))
         y_min = float(np.min(y_values))
@@ -1240,7 +1779,8 @@ class CoreToolsDialog(QtWidgets.QDialog):
             "normalization": self.tabs.addTab(NormalizationSettingsWidget(self.normalization_settings, calibration, self), "通用参数"),
             "temperature": self.tabs.addTab(TemperatureScanDialog(calibration, self.normalization_settings, self), "温度扫描"),
             "pie": self.tabs.addTab(PIESpeciesFitDialog(calibration, self.normalization_settings, self), "PIE物种拟合"),
-            "isotope": self.tabs.addTab(IsotopeAbundanceDialog(self), "同位素丰度"),
+            "ionization": self.tabs.addTab(IonizationEnergyLookupWidget(self), "电离能查询"),
+            "isotope": self.tabs.addTab(IsotopeAbundanceDialog(self), "分子/同位素"),
         }
         self.tabs.setCurrentIndex(tab_indexes.get(initial_tab, 0))
         layout.addWidget(self.tabs)
