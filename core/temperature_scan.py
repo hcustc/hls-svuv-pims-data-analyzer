@@ -14,6 +14,14 @@ from .peak_detection import detect_peaks_in_range
 from .spectrum_io import Spectrum, list_spectrum_files, read_spectrum
 
 
+TEMPERATURE_CURVE_CLASS_LABELS = {
+    "formation": "生成(升高)",
+    "consumption": "消耗(减少)",
+    "intermediate": "中间体(先升后降低)",
+    "unclassified": "暂未区分",
+}
+
+
 def extract_temperature(metadata_lines: list[str], fallback: float) -> float:
     for line in metadata_lines:
         match = re.search(r"Temperature[:\s]*([\d.]+)", line, re.IGNORECASE)
@@ -94,6 +102,9 @@ def analyze_temperature_folder(
                 "area",
                 "left_bound",
                 "right_bound",
+                "curve_class",
+                "curve_class_label",
+                "curve_class_reason",
             ]
         )
 
@@ -148,13 +159,14 @@ def analyze_temperature_folder(
                 }
             )
     result = pd.DataFrame(rows)
-    return _apply_temperature_normalization(
+    normalized = _apply_temperature_normalization(
         result,
         kr_correct=kr_correct,
         kr_mz=kr_mz,
         mass_discrimination=mass_discrimination,
         expansion_factors=expansion_factors,
     )
+    return annotate_temperature_curve_groups(normalized)
 
 
 def _build_reference_spectrum(spectra: list[tuple[float, Path, Spectrum, float, float]], reference_mode: str) -> tuple[float, Spectrum, str]:
@@ -233,6 +245,102 @@ def _map_expansion_factors(temperatures: pd.Series, expansion_factors: dict[floa
         nearest = int(np.argmin(np.abs(factor_temperatures - temperature)))
         mapped.append(factor_values[nearest])
     return pd.Series(mapped, index=temperatures.index, dtype=float)
+
+
+def classify_temperature_curve(
+    temperatures,
+    areas,
+    *,
+    min_points: int = 3,
+    relative_change_threshold: float = 0.25,
+    endpoint_peak_fraction: float = 0.65,
+) -> dict:
+    """Classify temperature curves by their coarse thermal trend."""
+    x_values = np.asarray(temperatures, dtype=float)
+    y_values = np.asarray(areas, dtype=float)
+    valid = np.isfinite(x_values) & np.isfinite(y_values)
+    x_values = x_values[valid]
+    y_values = np.maximum(y_values[valid], 0.0)
+    if x_values.size < min_points:
+        return _curve_class_result("unclassified", "有效温度点不足")
+
+    order = np.argsort(x_values)
+    y_values = y_values[order]
+    if y_values.size >= 3:
+        y_smooth = (
+            pd.Series(y_values)
+            .rolling(window=3, center=True, min_periods=1)
+            .median()
+            .to_numpy(dtype=float)
+        )
+    else:
+        y_smooth = y_values
+
+    peak = float(np.max(y_values))
+    trough = float(np.min(y_values))
+    if peak <= 0:
+        return _curve_class_result("unclassified", "曲线无正信号")
+    dynamic_range = peak - trough
+    if dynamic_range <= max(1e-12, peak * 0.05):
+        return _curve_class_result("unclassified", "曲线变化幅度过小")
+
+    edge_count = min(2, y_smooth.size)
+    low_temp_signal = float(np.median(y_smooth[:edge_count]))
+    high_temp_signal = float(np.median(y_smooth[-edge_count:]))
+    peak_index = int(np.argmax(y_values))
+    normalized_delta = (high_temp_signal - low_temp_signal) / peak
+    first_is_peak_like = low_temp_signal >= endpoint_peak_fraction * peak
+    last_is_peak_like = high_temp_signal >= endpoint_peak_fraction * peak
+    peak_is_internal = 0 < peak_index < y_smooth.size - 1
+
+    if (
+        peak_is_internal
+        and (peak - low_temp_signal) / peak >= relative_change_threshold
+        and (peak - high_temp_signal) / peak >= relative_change_threshold
+    ):
+        return _curve_class_result("intermediate", "中间温度信号最高且两端明显降低")
+    if normalized_delta >= relative_change_threshold and last_is_peak_like:
+        return _curve_class_result("formation", "高温端信号明显高于低温端")
+    if normalized_delta <= -relative_change_threshold and first_is_peak_like:
+        return _curve_class_result("consumption", "低温端信号明显高于高温端")
+    return _curve_class_result("unclassified", "趋势不满足升高、降低或中间体规则")
+
+
+def _curve_class_result(curve_class: str, reason: str) -> dict:
+    return {
+        "curve_class": curve_class,
+        "curve_class_label": TEMPERATURE_CURVE_CLASS_LABELS[curve_class],
+        "curve_class_reason": reason,
+    }
+
+
+def annotate_temperature_curve_groups(result_df: pd.DataFrame) -> pd.DataFrame:
+    """Add curve classification columns to temperature scan rows."""
+    result = result_df.copy()
+    if result.empty:
+        for column in ("curve_class", "curve_class_label", "curve_class_reason"):
+            if column not in result:
+                result[column] = []
+        return result
+
+    curves = build_temperature_curves(result)
+    class_by_mz = {
+        mz: (
+            curve["curve_class"],
+            curve["curve_class_label"],
+            curve["curve_class_reason"],
+        )
+        for mz, curve in curves.items()
+    }
+    mz_rounded = result["mz"].round().astype(int)
+    result["curve_class"] = mz_rounded.map(lambda mz: class_by_mz.get(int(mz), ("unclassified", "", ""))[0])
+    result["curve_class_label"] = mz_rounded.map(
+        lambda mz: class_by_mz.get(int(mz), ("unclassified", TEMPERATURE_CURVE_CLASS_LABELS["unclassified"], ""))[1]
+    )
+    result["curve_class_reason"] = mz_rounded.map(
+        lambda mz: class_by_mz.get(int(mz), ("unclassified", "", ""))[2]
+    )
+    return result
 
 
 def compute_kr_expansion_factors(
@@ -333,12 +441,16 @@ def build_temperature_curves(result_df: pd.DataFrame) -> dict[int, dict]:
             )
             .sort_values("temperature")
         )
+        classification = classify_temperature_curve(ordered["temperature"], ordered["area"])
         curves[int(mz)] = {
             "mz": int(mz),
             "mz_exact_mean": float(ordered["mz"].mean()),
             "species": str(ordered["species"].iloc[0]) if "species" in ordered else "",
             "temperatures": ordered["temperature"].astype(float).tolist(),
             "areas": ordered["area"].astype(float).tolist(),
+            "curve_class": classification["curve_class"],
+            "curve_class_label": classification["curve_class_label"],
+            "curve_class_reason": classification["curve_class_reason"],
             "rows": ordered,
         }
     return curves
