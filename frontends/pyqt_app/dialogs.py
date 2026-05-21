@@ -311,7 +311,7 @@ class IonizationEnergyLookupWidget(QtWidgets.QWidget, DataFrameTableMixin):
         self.source_label = QtWidgets.QLabel("--")
         self.source_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
         self.url_label = QtWidgets.QLabel("--")
-        self.url_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.url_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse | QtCore.Qt.TextInteractionFlag.LinksAccessibleByMouse)
         self.url_label.setOpenExternalLinks(True)
         self.message_label = QtWidgets.QLabel("")
         self.message_label.setWordWrap(True)
