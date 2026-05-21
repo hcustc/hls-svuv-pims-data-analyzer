@@ -16,6 +16,7 @@ DEFAULT_APP_CONFIG = CONFIG_ROOT / "app.yaml"
 
 @dataclass
 class PeakDetectionConfig:
+    algorithm: str = "prominence"
     detection_min_idx: int = 3000
     threshold_end: float = 2.0
     min_intensity: float = 3.0
@@ -27,6 +28,13 @@ class PeakDetectionConfig:
     gaussian_window_max: int = 30
     gaussian_boundary_scale: float = 1.5
     boundary_padding: int = 2
+    prominence_ratio: float = 0.005
+    smoothing_window: int = 5
+    smoothing_poly_order: int = 2
+    baseline_window: int = 301
+    baseline_percentile: float = 5.0
+    min_peak_width: int = 1
+    max_peak_width: int = 80
 
 
 def project_path(path: str | Path) -> Path:
@@ -105,6 +113,7 @@ def load_peak_detection_config(path: str | Path | None = None) -> PeakDetectionC
     defaults = asdict(PeakDetectionConfig())
     defaults.update({key: values[key] for key in defaults if key in values})
     return PeakDetectionConfig(
+        algorithm=str(defaults["algorithm"]),
         detection_min_idx=int(defaults["detection_min_idx"]),
         threshold_end=float(defaults["threshold_end"]),
         min_intensity=float(defaults["min_intensity"]),
@@ -116,6 +125,13 @@ def load_peak_detection_config(path: str | Path | None = None) -> PeakDetectionC
         gaussian_window_max=int(defaults["gaussian_window_max"]),
         gaussian_boundary_scale=float(defaults["gaussian_boundary_scale"]),
         boundary_padding=int(defaults["boundary_padding"]),
+        prominence_ratio=float(defaults["prominence_ratio"]),
+        smoothing_window=int(defaults["smoothing_window"]),
+        smoothing_poly_order=int(defaults["smoothing_poly_order"]),
+        baseline_window=int(defaults["baseline_window"]),
+        baseline_percentile=float(defaults["baseline_percentile"]),
+        min_peak_width=int(defaults["min_peak_width"]),
+        max_peak_width=int(defaults["max_peak_width"]),
     )
 
 
