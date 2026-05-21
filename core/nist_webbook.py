@@ -551,6 +551,7 @@ class NistWebBookClient:
         timeout = (self.timeout, self.timeout)
         last_error: Exception | None = None
         old_allowed_gai_family = None
+        session = None
         for attempt in range(1, self.retries + 1):
             try:
                 session = requests.Session()
@@ -573,10 +574,11 @@ class NistWebBookClient:
                 if old_allowed_gai_family is not None and urllib3_connection is not None:
                     urllib3_connection.allowed_gai_family = old_allowed_gai_family
                     old_allowed_gai_family = None
-                try:
-                    session.close()
-                except Exception:
-                    pass
+                if session is not None:
+                    try:
+                        session.close()
+                    except Exception:
+                        pass
         raise RuntimeError(f"无法连接 NIST WebBook（已重试 {self.retries} 次）: {last_error}") from last_error
 
     def _load_compound_by_id(self, nist_id: str) -> NistCompoundIonization:

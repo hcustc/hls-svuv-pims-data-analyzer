@@ -119,7 +119,7 @@ def detect_peaks_prominence(
     max_peak_width: int = 80,
 ) -> list[Peak]:
     """Detect peaks after baseline correction using scipy prominence and width filters."""
-    data = np.asarray(list(y_data), dtype=float)
+    data = np.asarray(y_data, dtype=float)
     if data.size == 0:
         return []
     data = np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
