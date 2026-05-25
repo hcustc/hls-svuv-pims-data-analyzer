@@ -882,8 +882,6 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.export_button.clicked.connect(self.export_result)
         self.common_params_button = QtWidgets.QPushButton("通用参数")
         self.common_params_button.clicked.connect(self.open_common_parameters)
-        self.compute_kr_button = QtWidgets.QPushButton("计算 Kr 膨胀系数")
-        self.compute_kr_button.clicked.connect(self.compute_kr_expansion)
         self.peak_source_combo = QtWidgets.QComboBox()
         self.peak_source_combo.addItem("自动寻峰", "auto")
         self.peak_source_combo.addItem("手动卡峰", "manual")
@@ -913,7 +911,6 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         controls_layout.addWidget(self.run_button, 0, 6)
         controls_layout.addWidget(self.export_button, 0, 7)
         controls_layout.addWidget(self.common_params_button, 0, 8)
-        controls_layout.addWidget(self.compute_kr_button, 0, 9)
         controls_layout.addWidget(QtWidgets.QLabel("参考峰来源"), 1, 0)
         controls_layout.addWidget(self.reference_mode_combo, 1, 1)
         controls_layout.addWidget(self.gaussian_check, 1, 2)
@@ -1129,13 +1126,13 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 pass
         self.run_analysis()
 
+
     def set_busy(self, busy: bool, message: str) -> None:
         self.status_label.setText(message)
         self.run_button.setDisabled(busy)
         self.browse_button.setDisabled(busy)
         self.export_button.setDisabled(busy)
         self.common_params_button.setDisabled(busy)
-        self.compute_kr_button.setDisabled(busy)
         self.reference_mode_combo.setDisabled(busy)
         self.gaussian_check.setDisabled(busy)
         self.peak_source_combo.setDisabled(busy)
