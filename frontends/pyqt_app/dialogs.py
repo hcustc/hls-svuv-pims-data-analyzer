@@ -882,6 +882,8 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.export_button.clicked.connect(self.export_result)
         self.common_params_button = QtWidgets.QPushButton("通用参数")
         self.common_params_button.clicked.connect(self.open_common_parameters)
+        self.compute_kr_button = QtWidgets.QPushButton("计算 Kr 膨胀系数")
+        self.compute_kr_button.clicked.connect(self.compute_kr_expansion)
         self.peak_source_combo = QtWidgets.QComboBox()
         self.peak_source_combo.addItem("自动寻峰", "auto")
         self.peak_source_combo.addItem("手动卡峰", "manual")
@@ -911,6 +913,7 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         controls_layout.addWidget(self.run_button, 0, 6)
         controls_layout.addWidget(self.export_button, 0, 7)
         controls_layout.addWidget(self.common_params_button, 0, 8)
+        controls_layout.addWidget(self.compute_kr_button, 0, 9)
         controls_layout.addWidget(QtWidgets.QLabel("参考峰来源"), 1, 0)
         controls_layout.addWidget(self.reference_mode_combo, 1, 1)
         controls_layout.addWidget(self.gaussian_check, 1, 2)
@@ -1061,12 +1064,70 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.worker.finished.connect(lambda: self.set_busy(False, "就绪"))
         self.worker.start()
 
+    def compute_kr_expansion(self):
+        folder = self.folder_edit.text().strip()
+        if not folder:
+            QtWidgets.QMessageBox.warning(self, "提示", "请先选择文件夹")
+            return
+        peak_config = load_peak_detection_config()
+        threshold_end = peak_config.threshold_end
+        min_intensity = peak_config.min_intensity
+        reference_mode = self.reference_mode_combo.currentData()
+        prefer_gaussian = self.gaussian_check.isChecked()
+        manual_peak_path = self.peak_file_edit.text().strip() if self.peak_source_combo.currentData() == "manual" else None
+        if self.peak_source_combo.currentData() == "manual" and not manual_peak_path:
+            QtWidgets.QMessageBox.warning(self, "提示", "请选择手动卡峰文件")
+            return
+        settings = self.normalization_settings
+        light_source = settings.light_source
+        self.set_busy(True, "正在计算 Kr 膨胀系数...")
+        self.worker = WorkerThread(
+            lambda: compute_kr_expansion_factors(
+                folder,
+                calibration=self.calibration,
+                kr_mz=84,
+                manual_peak_path=manual_peak_path,
+                light_source=light_source,
+                threshold_end=threshold_end,
+                min_intensity=min_intensity,
+                prefer_gaussian=prefer_gaussian,
+                reference_mode=reference_mode,
+                detection_min_idx=peak_config.detection_min_idx,
+                nearby_peak_window=peak_config.nearby_peak_window,
+                duplicate_window=peak_config.duplicate_window,
+                weak_tail_early_window=peak_config.weak_tail_early_window,
+                weak_tail_late_window=peak_config.weak_tail_late_window,
+                weak_tail_ratio=peak_config.weak_tail_ratio,
+                gaussian_window_max=peak_config.gaussian_window_max,
+                gaussian_boundary_scale=peak_config.gaussian_boundary_scale,
+                boundary_padding=peak_config.boundary_padding,
+            ),
+            self,
+        )
+        self.worker.finished_with_result.connect(self.on_kr_compute_complete)
+        self.worker.failed.connect(self.on_analysis_failed)
+        self.worker.finished.connect(lambda: self.set_busy(False, "就绪"))
+        self.worker.start()
+
+    def on_kr_compute_complete(self, result: pd.DataFrame) -> None:
+        settings = self.normalization_settings
+        expansion_factors = dict(zip(result["temperature"], result["expansion_lambda"]))
+        settings.expansion_factors = expansion_factors
+        settings.temperature_kr_correct = True
+        save_normalization_settings(settings)
+        QtWidgets.QMessageBox.information(
+            self, "完成",
+            f"成功计算 Kr 膨胀系数！\n参考温度: {result['reference_temperature'].iloc[0]:.1f}°C\n共 {len(result)} 个温度点\n\n已启用 Kr 校正，将自动重新分析温度扫描数据",
+        )
+        self.run_analysis()
+
     def set_busy(self, busy: bool, message: str) -> None:
         self.status_label.setText(message)
         self.run_button.setDisabled(busy)
         self.browse_button.setDisabled(busy)
         self.export_button.setDisabled(busy)
         self.common_params_button.setDisabled(busy)
+        self.compute_kr_button.setDisabled(busy)
         self.reference_mode_combo.setDisabled(busy)
         self.gaussian_check.setDisabled(busy)
         self.peak_source_combo.setDisabled(busy)
