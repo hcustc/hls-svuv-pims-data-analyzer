@@ -33,6 +33,7 @@ from frontends.pyqt_app.dialogs import (
     CoreToolsDialog,
     IonizationEnergyLookupWidget,
     IsotopeAbundanceDialog,
+    MoleFractionDialog,
     PIESpeciesFitDialog,
     TemperatureScanDialog,
 )
@@ -330,6 +331,11 @@ class MainWindow(Ui_MainWindow, QMainWindow):
             self.normalization_settings,
             self.workspace_stack,
         )
+        self.mole_fraction_page = MoleFractionDialog(
+            self.current_calibration(),
+            self.normalization_settings,
+            self.workspace_stack,
+        )
         self.ionization_page = IonizationEnergyLookupWidget(self.workspace_stack)
         self.isotope_page = IsotopeAbundanceDialog(self.workspace_stack)
 
@@ -337,6 +343,7 @@ class MainWindow(Ui_MainWindow, QMainWindow):
             ("spectrum", "质谱工作台", self.spectrum_page),
             ("temperature", "温度扫描", self.temperature_page),
             ("pie", "PIE拟合", self.pie_page),
+            ("mole_fraction", "摩尔分数", self.mole_fraction_page),
             ("ionization", "IE查询", self.ionization_page),
             ("isotope", "分子/同位素", self.isotope_page),
         ]
@@ -369,6 +376,7 @@ class MainWindow(Ui_MainWindow, QMainWindow):
             "spectrum": self.spectrum_page,
             "temperature": self.temperature_page,
             "pie": self.pie_page,
+            "mole_fraction": self.mole_fraction_page,
             "ionization": self.ionization_page,
             "isotope": self.isotope_page,
         }
