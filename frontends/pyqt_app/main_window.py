@@ -33,6 +33,7 @@ from frontends.pyqt_app.dialogs import (
     CoreToolsDialog,
     IonizationEnergyLookupWidget,
     IsotopeAbundanceDialog,
+    MoleFractionDialog,
     PIESpeciesFitDialog,
     TemperatureScanDialog,
 )

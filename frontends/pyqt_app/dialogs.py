@@ -33,6 +33,20 @@ from core.temperature_scan import (
     build_temperature_curves,
     compute_kr_expansion_factors,
 )
+from core.mole_fraction import (
+    MASS_DISCRIMINATION_PRESETS,
+    MoleFractionSettings,
+    calc_expansion_coefficients,
+    calc_isomeric_separation,
+    calc_mass_discrimination,
+    calc_parent_mole_fraction,
+    calc_product_mole_fraction,
+    compute_all_mole_fractions,
+    extract_signal_from_temperature_curves,
+    get_expansion_coefficient,
+    load_mole_fraction_settings,
+    save_mole_fraction_settings,
+)
 from frontends.pyqt_app.workers import WorkerThread
 
 try:
@@ -1767,6 +1781,613 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.analysis_df.to_csv(path, index=False, encoding="utf-8-sig")
 
 
+class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
+    def __init__(self, calibration: Calibration, normalization_settings, parent=None):
+        super().__init__(parent)
+        self.calibration = calibration
+        self.normalization_settings = normalization_settings
+        self.settings = load_mole_fraction_settings()
+        self.database: list[dict] = []
+        self.mz_index: dict[int, list[int]] = {}
+        self.expansion_coefficients: dict[float, float] = {}
+        self.parent_mf_results: dict[float, float] = {}
+        self.product_mf_results: dict[str, dict[float, float]] = {}
+        self.isomeric_results: dict[int, dict[str, dict[float, float]]] = {}
+        self._init_ui()
+
+    def _init_ui(self):
+        layout = QtWidgets.QVBoxLayout(self)
+        self.tabs = QtWidgets.QTabWidget()
+        self.tabs.addTab(self._create_params_tab(), "1. 参数设置")
+        self.tabs.addTab(self._create_parent_tab(), "2. 母体摩尔分数")
+        self.tabs.addTab(self._create_isomeric_tab(), "3. 同分异构体分离")
+        self.tabs.addTab(self._create_product_tab(), "4. 产物摩尔分数")
+        self.tabs.addTab(self._create_results_tab(), "5. 结果汇总")
+        layout.addWidget(self.tabs)
+
+    def _create_params_tab(self):
+        widget = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(widget)
+
+        md_group = QtWidgets.QGroupBox("质量歧视因子 D_i")
+        md_layout = QtWidgets.QGridLayout(md_group)
+        md_layout.addWidget(QtWidgets.QLabel("实验条件:"), 0, 0)
+        self.combo_md_preset = QtWidgets.QComboBox()
+        for name in MASS_DISCRIMINATION_PRESETS:
+            self.combo_md_preset.addItem(name)
+        self.combo_md_preset.currentTextChanged.connect(self._on_md_preset_changed)
+        md_layout.addWidget(self.combo_md_preset, 0, 1)
+        md_layout.addWidget(QtWidgets.QLabel("指数 n:"), 1, 0)
+        self.spin_md_exponent = QtWidgets.QDoubleSpinBox()
+        self.spin_md_exponent.setRange(0.0, 2.0)
+        self.spin_md_exponent.setDecimals(5)
+        self.spin_md_exponent.setValue(self.settings.mass_disc_exponent)
+        self.spin_md_exponent.setSingleStep(0.001)
+        self.spin_md_exponent.valueChanged.connect(self._on_md_exponent_changed)
+        md_layout.addWidget(self.spin_md_exponent, 1, 1)
+        md_layout.addWidget(QtWidgets.QLabel("公式: D_i = (MW/30)^n"), 2, 0, 1, 2)
+        self.md_preview_table = QtWidgets.QTableWidget()
+        self.md_preview_table.setColumnCount(3)
+        self.md_preview_table.setHorizontalHeaderLabels(["物种", "分子量", "D_i"])
+        self.md_preview_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
+        self.md_preview_table.setMaximumHeight(200)
+        md_layout.addWidget(self.md_preview_table, 3, 0, 1, 2)
+        btn_calc_md = QtWidgets.QPushButton("预览质量歧视因子")
+        btn_calc_md.clicked.connect(self._preview_mass_discrimination)
+        md_layout.addWidget(btn_calc_md, 4, 0, 1, 2)
+        layout.addWidget(md_group)
+
+        ec_group = QtWidgets.QGroupBox("膨胀系数 λ(T)")
+        ec_layout = QtWidgets.QVBoxLayout(ec_group)
+        ec_top = QtWidgets.QHBoxLayout()
+        ec_top.addWidget(QtWidgets.QLabel("Kr数据来源:"))
+        self.combo_kr_source = QtWidgets.QComboBox()
+        self.combo_kr_source.addItems(["使用默认数据", "从文件加载"])
+        ec_top.addWidget(self.combo_kr_source)
+        self.btn_load_kr = QtWidgets.QPushButton("加载Kr数据")
+        self.btn_load_kr.clicked.connect(self._load_kr_data)
+        self.btn_load_kr.setEnabled(False)
+        self.combo_kr_source.currentTextChanged.connect(
+            lambda t: self.btn_load_kr.setEnabled(t == "从文件加载")
+        )
+        ec_top.addWidget(self.btn_load_kr)
+        ec_top.addStretch()
+        ec_layout.addLayout(ec_top)
+
+        self.kr_table = QtWidgets.QTableWidget()
+        self.kr_table.setColumnCount(4)
+        self.kr_table.setHorizontalHeaderLabels(["温度(°C)", "Kr信号", "λ(T)", ""])
+        self.kr_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
+        ec_layout.addWidget(self.kr_table)
+        btn_calc_lambda = QtWidgets.QPushButton("计算膨胀系数")
+        btn_calc_lambda.clicked.connect(self._calc_expansion_coefficients)
+        ec_layout.addWidget(btn_calc_lambda)
+        layout.addWidget(ec_group, 1)
+
+        self._fill_kr_table()
+        return widget
+
+    def _create_parent_tab(self):
+        widget = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(widget)
+
+        cfg_group = QtWidgets.QGroupBox("母体参数设置")
+        cfg_layout = QtWidgets.QGridLayout(cfg_group)
+        cfg_layout.addWidget(QtWidgets.QLabel("母体质量数 m/z:"), 0, 0)
+        self.spin_parent_mz = QtWidgets.QSpinBox()
+        self.spin_parent_mz.setRange(1, 500)
+        self.spin_parent_mz.setValue(self.settings.parent_mz)
+        cfg_layout.addWidget(self.spin_parent_mz, 0, 1)
+        cfg_layout.addWidget(QtWidgets.QLabel("参考温度 T₀ (°C):"), 1, 0)
+        self.spin_parent_t0 = QtWidgets.QSpinBox()
+        self.spin_parent_t0.setRange(0, 2000)
+        self.spin_parent_t0.setValue(int(self.settings.reference_temperature or 550))
+        cfg_layout.addWidget(self.spin_parent_t0, 1, 1)
+        cfg_layout.addWidget(QtWidgets.QLabel("初始摩尔分数 X(T₀):"), 2, 0)
+        self.spin_parent_mf0 = QtWidgets.QDoubleSpinBox()
+        self.spin_parent_mf0.setRange(0.0, 1.0)
+        self.spin_parent_mf0.setDecimals(6)
+        self.spin_parent_mf0.setValue(self.settings.parent_initial_mf)
+        self.spin_parent_mf0.setSingleStep(0.0001)
+        cfg_layout.addWidget(self.spin_parent_mf0, 2, 1)
+        cfg_layout.addWidget(QtWidgets.QLabel("光子能量 E (eV):"), 3, 0)
+        self.spin_parent_energy = QtWidgets.QDoubleSpinBox()
+        self.spin_parent_energy.setRange(0.0, 30.0)
+        self.spin_parent_energy.setDecimals(2)
+        self.spin_parent_energy.setValue(self.settings.photon_energy)
+        self.spin_parent_energy.setSingleStep(0.5)
+        cfg_layout.addWidget(self.spin_parent_energy, 3, 1)
+        layout.addWidget(cfg_group)
+
+        btn_calc_parent = QtWidgets.QPushButton("计算母体摩尔分数")
+        btn_calc_parent.clicked.connect(self._calc_parent_mole_fraction)
+        layout.addWidget(btn_calc_parent)
+
+        self.parent_result_table = QtWidgets.QTableWidget()
+        self.parent_result_table.setColumnCount(4)
+        self.parent_result_table.setHorizontalHeaderLabels(["温度(°C)", "信号 S(T,E)", "λ(T)", "摩尔分数 X(T)"])
+        self.parent_result_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
+        layout.addWidget(self.parent_result_table, 1)
+
+        return widget
+
+    def _create_isomeric_tab(self):
+        widget = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(widget)
+
+        isom_group = QtWidgets.QGroupBox("同分异构体分离设置")
+        isom_layout = QtWidgets.QGridLayout(isom_group)
+        isom_layout.addWidget(QtWidgets.QLabel("目标质量数 m/z:"), 0, 0)
+        self.spin_isom_mz = QtWidgets.QSpinBox()
+        self.spin_isom_mz.setRange(1, 500)
+        self.spin_isom_mz.setValue(80)
+        isom_layout.addWidget(self.spin_isom_mz, 0, 1)
+        btn_find_species = QtWidgets.QPushButton("查找同质量数物种")
+        btn_find_species.clicked.connect(self._find_isomeric_species)
+        isom_layout.addWidget(btn_find_species, 0, 2)
+        isom_layout.addWidget(QtWidgets.QLabel("低能量 E₁ (eV):"), 1, 0)
+        self.spin_isom_e_low = QtWidgets.QDoubleSpinBox()
+        self.spin_isom_e_low.setRange(0.0, 30.0)
+        self.spin_isom_e_low.setDecimals(2)
+        self.spin_isom_e_low.setValue(8.5)
+        self.spin_isom_e_low.setSingleStep(0.5)
+        isom_layout.addWidget(self.spin_isom_e_low, 1, 1)
+        isom_layout.addWidget(QtWidgets.QLabel("高能量 E₂ (eV):"), 1, 2)
+        self.spin_isom_e_high = QtWidgets.QDoubleSpinBox()
+        self.spin_isom_e_high.setRange(0.0, 30.0)
+        self.spin_isom_e_high.setDecimals(2)
+        self.spin_isom_e_high.setValue(10.0)
+        self.spin_isom_e_high.setSingleStep(0.5)
+        isom_layout.addWidget(self.spin_isom_e_high, 1, 3)
+        layout.addWidget(isom_group)
+
+        self.isom_species_table = QtWidgets.QTableWidget()
+        self.isom_species_table.setColumnCount(5)
+        self.isom_species_table.setHorizontalHeaderLabels(["物种名称", "电离能(eV)", "σ(E₁)", "σ(E₂)", "选择"])
+        self.isom_species_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
+        layout.addWidget(self.isom_species_table)
+
+        btn_calc_isom = QtWidgets.QPushButton("计算同分异构体分离")
+        btn_calc_isom.clicked.connect(self._calc_isomeric_separation)
+        layout.addWidget(btn_calc_isom)
+
+        self.isom_result_table = QtWidgets.QTableWidget()
+        self.isom_result_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
+        layout.addWidget(self.isom_result_table, 1)
+
+        return widget
+
+    def _create_product_tab(self):
+        widget = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(widget)
+
+        ref_group = QtWidgets.QGroupBox("参考物种设置（物种A，摩尔分数已知）")
+        ref_layout = QtWidgets.QGridLayout(ref_group)
+        ref_layout.addWidget(QtWidgets.QLabel("参考物种 m/z:"), 0, 0)
+        self.spin_ref_mz = QtWidgets.QSpinBox()
+        self.spin_ref_mz.setRange(1, 500)
+        self.spin_ref_mz.setValue(self.settings.reference_species_mz or self.settings.parent_mz)
+        ref_layout.addWidget(self.spin_ref_mz, 0, 1)
+        ref_layout.addWidget(QtWidgets.QLabel("参考物种名称:"), 0, 2)
+        self.combo_ref_species = QtWidgets.QComboBox()
+        ref_layout.addWidget(self.combo_ref_species, 0, 3)
+        btn_refresh_ref = QtWidgets.QPushButton("刷新")
+        btn_refresh_ref.clicked.connect(self._refresh_ref_species)
+        ref_layout.addWidget(btn_refresh_ref, 0, 4)
+        ref_layout.addWidget(QtWidgets.QLabel("T_M (°C):"), 1, 0)
+        self.spin_ref_tm = QtWidgets.QSpinBox()
+        self.spin_ref_tm.setRange(0, 2000)
+        self.spin_ref_tm.setValue(int(self.settings.reference_species_tm or 900))
+        ref_layout.addWidget(self.spin_ref_tm, 1, 1)
+        ref_layout.addWidget(QtWidgets.QLabel("X_A(T_M):"), 1, 2)
+        self.spin_ref_mf_tm = QtWidgets.QDoubleSpinBox()
+        self.spin_ref_mf_tm.setRange(0.0, 1.0)
+        self.spin_ref_mf_tm.setDecimals(6)
+        self.spin_ref_mf_tm.setValue(self.settings.reference_species_mf_at_tm)
+        self.spin_ref_mf_tm.setSingleStep(0.0001)
+        ref_layout.addWidget(self.spin_ref_mf_tm, 1, 3)
+        ref_layout.addWidget(QtWidgets.QLabel("光子能量 E (eV):"), 2, 0)
+        self.spin_product_energy = QtWidgets.QDoubleSpinBox()
+        self.spin_product_energy.setRange(0.0, 30.0)
+        self.spin_product_energy.setDecimals(2)
+        self.spin_product_energy.setValue(self.settings.photon_energy)
+        self.spin_product_energy.setSingleStep(0.5)
+        ref_layout.addWidget(self.spin_product_energy, 2, 1)
+        layout.addWidget(ref_group)
+
+        prod_group = QtWidgets.QGroupBox("待计算产物物种")
+        prod_layout = QtWidgets.QVBoxLayout(prod_group)
+        prod_top = QtWidgets.QHBoxLayout()
+        prod_top.addWidget(QtWidgets.QLabel("产物 m/z:"))
+        self.spin_product_mz = QtWidgets.QSpinBox()
+        self.spin_product_mz.setRange(1, 500)
+        self.spin_product_mz.setValue(78)
+        prod_top.addWidget(self.spin_product_mz)
+        prod_top.addWidget(QtWidgets.QLabel("产物名称:"))
+        self.combo_product_species = QtWidgets.QComboBox()
+        prod_top.addWidget(self.combo_product_species)
+        btn_refresh_prod = QtWidgets.QPushButton("刷新")
+        btn_refresh_prod.clicked.connect(self._refresh_product_species)
+        prod_top.addWidget(btn_refresh_prod)
+        prod_top.addWidget(QtWidgets.QLabel("分子量:"))
+        self.spin_product_mw = QtWidgets.QDoubleSpinBox()
+        self.spin_product_mw.setRange(1, 1000)
+        self.spin_product_mw.setValue(78)
+        prod_top.addWidget(self.spin_product_mw)
+        prod_top.addStretch()
+        prod_layout.addLayout(prod_top)
+        btn_add_product = QtWidgets.QPushButton("添加到计算列表")
+        btn_add_product.clicked.connect(self._add_product_species)
+        prod_layout.addWidget(btn_add_product)
+        self.product_list = QtWidgets.QListWidget()
+        prod_layout.addWidget(self.product_list)
+        btn_remove_product = QtWidgets.QPushButton("移除选中")
+        btn_remove_product.clicked.connect(self._remove_product_species)
+        prod_layout.addWidget(btn_remove_product)
+        layout.addWidget(prod_group, 1)
+
+        btn_calc_product = QtWidgets.QPushButton("计算产物摩尔分数")
+        btn_calc_product.clicked.connect(self._calc_product_mole_fractions)
+        layout.addWidget(btn_calc_product)
+
+        return widget
+
+    def _create_results_tab(self):
+        widget = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(widget)
+
+        self.results_table = QtWidgets.QTableWidget()
+        self.results_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
+        layout.addWidget(self.results_table, 1)
+
+        btn_export = QtWidgets.QPushButton("导出结果 (Excel/CSV)")
+        btn_export.clicked.connect(self._export_results)
+        layout.addWidget(btn_export)
+
+        return widget
+
+    def _on_md_preset_changed(self, text):
+        if text in MASS_DISCRIMINATION_PRESETS:
+            self.spin_md_exponent.setValue(MASS_DISCRIMINATION_PRESETS[text])
+
+    def _on_md_exponent_changed(self, val):
+        self.settings.mass_disc_exponent = val
+
+    def _preview_mass_discrimination(self):
+        if not self.database:
+            QtWidgets.QMessageBox.warning(self, "提示", "请先加载物种数据库")
+            return
+        seen = set()
+        species_list = []
+        for spec in self.database:
+            key = (spec["name"], spec["mz"])
+            if key not in seen:
+                seen.add(key)
+                species_list.append(spec)
+        self.md_preview_table.setRowCount(0)
+        for spec in species_list[:30]:
+            row = self.md_preview_table.rowCount()
+            self.md_preview_table.insertRow(row)
+            self.md_preview_table.setItem(row, 0, QtWidgets.QTableWidgetItem(spec["name"]))
+            self.md_preview_table.setItem(row, 1, QtWidgets.QTableWidgetItem(str(spec["mz"])))
+            D_i = calc_mass_discrimination(spec["mz"], self.spin_md_exponent.value())
+            self.md_preview_table.setItem(row, 2, QtWidgets.QTableWidgetItem(f"{D_i:.6f}"))
+
+    def _fill_kr_table(self):
+        self.kr_table.setRowCount(0)
+        for temp in sorted(self.settings.kr_data.keys()):
+            row = self.kr_table.rowCount()
+            self.kr_table.insertRow(row)
+            self.kr_table.setItem(row, 0, QtWidgets.QTableWidgetItem(f"{int(temp)}"))
+            self.kr_table.setItem(row, 1, QtWidgets.QTableWidgetItem(f"{self.settings.kr_data[temp]:.6f}"))
+            self.kr_table.setItem(row, 2, QtWidgets.QTableWidgetItem("-"))
+            self.kr_table.setItem(row, 3, QtWidgets.QTableWidgetItem(""))
+
+    def _load_kr_data(self):
+        file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "加载Kr数据", "", "Excel Files (*.xlsx);;CSV Files (*.csv);;All Files (*)"
+        )
+        if not file_path:
+            return
+        try:
+            if file_path.endswith(".xlsx"):
+                df = pd.read_excel(file_path)
+            else:
+                df = pd.read_csv(file_path)
+            self.settings.kr_data = {}
+            for _, row in df.iterrows():
+                temp = float(row.iloc[0])
+                signal = float(row.iloc[1])
+                self.settings.kr_data[temp] = signal
+            self._fill_kr_table()
+            QtWidgets.QMessageBox.information(self, "成功", f"加载了 {len(self.settings.kr_data)} 个Kr数据点")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "错误", f"加载Kr数据失败: {e}")
+
+    def _calc_expansion_coefficients(self):
+        self.expansion_coefficients = calc_expansion_coefficients(self.settings.kr_data)
+        for row in range(self.kr_table.rowCount()):
+            temp_item = self.kr_table.item(row, 0)
+            if temp_item:
+                temp = float(temp_item.text())
+                if temp in self.expansion_coefficients:
+                    self.kr_table.setItem(row, 2, QtWidgets.QTableWidgetItem(f"{self.expansion_coefficients[temp]:.6f}"))
+        QtWidgets.QMessageBox.information(self, "成功", f"计算了 {len(self.expansion_coefficients)} 个温度点的膨胀系数")
+
+    def _refresh_ref_species(self):
+        mz = self.spin_ref_mz.value()
+        self.combo_ref_species.clear()
+        for spec in self.database:
+            if spec["mz"] == mz:
+                self.combo_ref_species.addItem(spec["name"])
+
+    def _refresh_product_species(self):
+        mz = self.spin_product_mz.value()
+        self.combo_product_species.clear()
+        for spec in self.database:
+            if spec["mz"] == mz:
+                self.combo_product_species.addItem(spec["name"])
+
+    def _add_product_species(self):
+        mz = self.spin_product_mz.value()
+        name = self.combo_product_species.currentText() or f"m/z={mz}"
+        mw = self.spin_product_mw.value()
+        text = f"m/z={mz}, name={name}, MW={mw:.0f}"
+        for i in range(self.product_list.count()):
+            if self.product_list.item(i).text() == text:
+                QtWidgets.QMessageBox.warning(self, "提示", "该物种已在列表中")
+                return
+        self.product_list.addItem(text)
+
+    def _remove_product_species(self):
+        current = self.product_list.currentRow()
+        if current >= 0:
+            self.product_list.takeItem(current)
+
+    def _calc_parent_mole_fraction(self):
+        if not self.expansion_coefficients:
+            QtWidgets.QMessageBox.warning(self, "提示", "请先在参数设置中计算膨胀系数")
+            return
+        mz = self.spin_parent_mz.value()
+        T0 = self.spin_parent_t0.value()
+        X0 = self.spin_parent_mf0.value()
+
+        scan_df = getattr(self, "_temperature_scan_df", None)
+        if scan_df is None or scan_df.empty:
+            QtWidgets.QMessageBox.warning(self, "提示", "请先在温度扫描选项卡中加载数据")
+            return
+
+        curves = build_temperature_curves(scan_df)
+        signal_data = extract_signal_from_temperature_curves(curves, mz)
+        if not signal_data:
+            QtWidgets.QMessageBox.warning(self, "提示", f"未找到 m/z={mz} 的温度扫描数据")
+            return
+
+        self.parent_mf_results = calc_parent_mole_fraction(
+            signal_data,
+            reference_temperature=float(T0),
+            parent_initial_mf=X0,
+            expansion_coefficients=self.expansion_coefficients,
+        )
+
+        self.parent_result_table.setRowCount(0)
+        for temp in sorted(self.parent_mf_results.keys()):
+            row = self.parent_result_table.rowCount()
+            self.parent_result_table.insertRow(row)
+            self.parent_result_table.setItem(row, 0, QtWidgets.QTableWidgetItem(f"{int(temp)}"))
+            self.parent_result_table.setItem(row, 1, QtWidgets.QTableWidgetItem(f"{signal_data.get(temp, 0):.6f}"))
+            self.parent_result_table.setItem(row, 2, QtWidgets.QTableWidgetItem(f"{get_expansion_coefficient(temp, self.expansion_coefficients):.6f}"))
+            self.parent_result_table.setItem(row, 3, QtWidgets.QTableWidgetItem(f"{self.parent_mf_results[temp]:.6f}"))
+
+        QtWidgets.QMessageBox.information(self, "成功", f"计算了 {len(self.parent_mf_results)} 个温度点的母体摩尔分数")
+
+    def _find_isomeric_species(self):
+        mz = self.spin_isom_mz.value()
+        e_low = self.spin_isom_e_low.value()
+        e_high = self.spin_isom_e_high.value()
+        self.isom_species_table.setRowCount(0)
+        for spec in self.database:
+            if spec["mz"] != mz:
+                continue
+            row = self.isom_species_table.rowCount()
+            self.isom_species_table.insertRow(row)
+            self.isom_species_table.setItem(row, 0, QtWidgets.QTableWidgetItem(spec["name"]))
+            ie = spec.get("ionization_energy")
+            self.isom_species_table.setItem(row, 1, QtWidgets.QTableWidgetItem(f"{ie:.2f}" if ie else "N/A"))
+            energies = spec.get("energies")
+            cross_sections = spec.get("cross_sections")
+            if energies is not None and cross_sections is not None:
+                sigma_low = float(np.interp(e_low, energies, cross_sections, left=0, right=0))
+                sigma_high = float(np.interp(e_high, energies, cross_sections, left=0, right=0))
+            else:
+                sigma_low = 0.0
+                sigma_high = 0.0
+            self.isom_species_table.setItem(row, 2, QtWidgets.QTableWidgetItem(f"{sigma_low:.4f}"))
+            self.isom_species_table.setItem(row, 3, QtWidgets.QTableWidgetItem(f"{sigma_high:.4f}"))
+            checkbox = QtWidgets.QCheckBox()
+            checkbox.setChecked(True)
+            self.isom_species_table.setCellWidget(row, 4, checkbox)
+
+    def _calc_isomeric_separation(self):
+        if not self.expansion_coefficients:
+            QtWidgets.QMessageBox.warning(self, "提示", "请先在参数设置中计算膨胀系数")
+            return
+        mz = self.spin_isom_mz.value()
+        e_low = self.spin_isom_e_low.value()
+        e_high = self.spin_isom_e_high.value()
+
+        scan_df = getattr(self, "_temperature_scan_df", None)
+        if scan_df is None or scan_df.empty:
+            QtWidgets.QMessageBox.warning(self, "提示", "请先在温度扫描选项卡中加载数据")
+            return
+
+        curves = build_temperature_curves(scan_df)
+        signal_low = extract_signal_from_temperature_curves(curves, mz)
+        signal_high = extract_signal_from_temperature_curves(curves, mz)
+
+        species_list = []
+        for row in range(self.isom_species_table.rowCount()):
+            checkbox = self.isom_species_table.cellWidget(row, 4)
+            if checkbox and checkbox.isChecked():
+                spec_name = self.isom_species_table.item(row, 0).text()
+                sigma_low = float(self.isom_species_table.item(row, 2).text())
+                sigma_high = float(self.isom_species_table.item(row, 3).text())
+                species_list.append({"name": spec_name, "sigma_low": sigma_low, "sigma_high": sigma_high})
+
+        if len(species_list) < 2:
+            QtWidgets.QMessageBox.warning(self, "提示", "请至少选择2个物种进行分离")
+            return
+
+        isom_result = calc_isomeric_separation(
+            signal_low, signal_high, species_list,
+            expansion_coefficients=self.expansion_coefficients,
+        )
+        self.isomeric_results[mz] = isom_result
+
+        self.isom_result_table.setRowCount(0)
+        common_temps = sorted(set().union(*(r.keys() for r in isom_result.values()))) if isom_result else []
+        self.isom_result_table.setColumnCount(2 + len(species_list))
+        headers = ["温度(°C)", "总信号"] + [s["name"] for s in species_list]
+        self.isom_result_table.setHorizontalHeaderLabels(headers)
+        for temp in common_temps:
+            row = self.isom_result_table.rowCount()
+            self.isom_result_table.insertRow(row)
+            self.isom_result_table.setItem(row, 0, QtWidgets.QTableWidgetItem(f"{int(temp)}"))
+            self.isom_result_table.setItem(row, 1, QtWidgets.QTableWidgetItem(f"{signal_high.get(temp, 0):.6f}"))
+            for j, spec in enumerate(species_list):
+                contrib = isom_result.get(spec["name"], {}).get(temp, 0)
+                self.isom_result_table.setItem(row, 2 + j, QtWidgets.QTableWidgetItem(f"{contrib:.6f}"))
+
+        QtWidgets.QMessageBox.information(self, "成功", f"完成同分异构体分离，共 {len(common_temps)} 个温度点")
+
+    def _calc_product_mole_fractions(self):
+        if not self.expansion_coefficients:
+            QtWidgets.QMessageBox.warning(self, "提示", "请先在参数设置中计算膨胀系数")
+            return
+        if self.product_list.count() == 0:
+            QtWidgets.QMessageBox.warning(self, "提示", "请先添加产物物种")
+            return
+
+        ref_mz = self.spin_ref_mz.value()
+        ref_name = self.combo_ref_species.currentText()
+        ref_mw = float(ref_mz)
+        T_M = self.spin_ref_tm.value()
+        X_A_TM = self.spin_ref_mf_tm.value()
+        energy = self.spin_product_energy.value()
+
+        scan_df = getattr(self, "_temperature_scan_df", None)
+        if scan_df is None or scan_df.empty:
+            QtWidgets.QMessageBox.warning(self, "提示", "请先在温度扫描选项卡中加载数据")
+            return
+
+        curves = build_temperature_curves(scan_df)
+        ref_signal_data = extract_signal_from_temperature_curves(curves, ref_mz)
+        if not ref_signal_data:
+            QtWidgets.QMessageBox.warning(self, "提示", "未找到参考物种的温度扫描数据")
+            return
+
+        self.product_mf_results = {}
+        for i in range(self.product_list.count()):
+            item_text = self.product_list.item(i).text()
+            parts = {}
+            for part in item_text.split(","):
+                k, v = part.strip().split("=")
+                parts[k.strip()] = v.strip()
+            prod_mz = int(parts.get("m/z", 0))
+            prod_name = parts.get("name", "")
+            prod_mw = float(parts.get("MW", prod_mz))
+
+            prod_signal_data = extract_signal_from_temperature_curves(curves, prod_mz)
+            if not prod_signal_data:
+                continue
+
+            results = calc_product_mole_fraction(
+                prod_signal_data,
+                species_mw=prod_mw,
+                species_mz=prod_mz,
+                species_name=prod_name,
+                ref_mw=ref_mw,
+                ref_mz=ref_mz,
+                ref_species_name=ref_name,
+                ref_signal_data=ref_signal_data,
+                ref_mf_at_tm=X_A_TM,
+                energy=energy,
+                reference_species_tm=float(T_M),
+                mass_disc_exponent=self.settings.mass_disc_exponent,
+                expansion_coefficients=self.expansion_coefficients,
+                database=self.database,
+                mz_index=self.mz_index,
+            )
+            self.product_mf_results[prod_name] = results
+
+        self._update_results_table()
+        QtWidgets.QMessageBox.information(self, "成功", f"计算了 {len(self.product_mf_results)} 个产物物种的摩尔分数")
+
+    def _update_results_table(self):
+        all_results: dict[str, dict[float, float]] = {}
+        if self.parent_mf_results:
+            all_results[f"母体(m/z={self.settings.parent_mz})"] = self.parent_mf_results
+        all_results.update(self.product_mf_results)
+        for mz, species_data in self.isomeric_results.items():
+            for species_name, mf_data in species_data.items():
+                all_results[f"{species_name}(m/z={mz})"] = mf_data
+        if not all_results:
+            return
+        all_temps = sorted(set().union(*(r.keys() for r in all_results.values())))
+        species_names = list(all_results.keys())
+        self.results_table.setRowCount(len(all_temps))
+        self.results_table.setColumnCount(len(species_names) + 1)
+        self.results_table.setHorizontalHeaderLabels(["温度(°C)"] + species_names)
+        for i, temp in enumerate(all_temps):
+            self.results_table.setItem(i, 0, QtWidgets.QTableWidgetItem(f"{int(temp)}"))
+            for j, name in enumerate(species_names):
+                val = all_results[name].get(temp, 0)
+                self.results_table.setItem(i, j + 1, QtWidgets.QTableWidgetItem(f"{val:.6f}"))
+
+    def _export_results(self):
+        all_results: dict[str, dict[float, float]] = {}
+        if self.parent_mf_results:
+            all_results[f"母体(m/z={self.settings.parent_mz})"] = self.parent_mf_results
+        all_results.update(self.product_mf_results)
+        for mz, species_data in self.isomeric_results.items():
+            for species_name, mf_data in species_data.items():
+                all_results[f"{species_name}(m/z={mz})"] = mf_data
+        if not all_results:
+            QtWidgets.QMessageBox.warning(self, "提示", "没有计算结果可导出")
+            return
+        file_path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "导出摩尔分数结果", "", "Excel Files (*.xlsx);;CSV Files (*.csv)"
+        )
+        if not file_path:
+            return
+        try:
+            all_temps = sorted(set().union(*(r.keys() for r in all_results.values())))
+            data = {"温度(°C)": all_temps}
+            for name, res in all_results.items():
+                data[name] = [res.get(t, 0) for t in all_temps]
+            df = pd.DataFrame(data)
+            if file_path.endswith(".xlsx"):
+                df.to_excel(file_path, index=False)
+            else:
+                df.to_csv(file_path, index=False, encoding="utf-8-sig")
+            QtWidgets.QMessageBox.information(self, "成功", "摩尔分数结果导出成功！")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "错误", f"导出失败: {e}")
+
+    def set_temperature_scan_df(self, df: pd.DataFrame):
+        self._temperature_scan_df = df
+
+    def load_species_database(self, path: str | Path | None = None):
+        if path is None:
+            path = species_database_path()
+        try:
+            self.database, self.mz_index = load_species_database(path)
+            self._refresh_ref_species()
+            self._refresh_product_species()
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "错误", f"加载数据库失败: {e}")
+
+
 class CoreToolsDialog(QtWidgets.QDialog):
     def __init__(self, calibration: Calibration, parent=None, initial_tab: str = "normalization"):
         super().__init__(parent)
@@ -1779,6 +2400,7 @@ class CoreToolsDialog(QtWidgets.QDialog):
             "normalization": self.tabs.addTab(NormalizationSettingsWidget(self.normalization_settings, calibration, self), "通用参数"),
             "temperature": self.tabs.addTab(TemperatureScanDialog(calibration, self.normalization_settings, self), "温度扫描"),
             "pie": self.tabs.addTab(PIESpeciesFitDialog(calibration, self.normalization_settings, self), "PIE物种拟合"),
+            "mole_fraction": self.tabs.addTab(MoleFractionDialog(calibration, self.normalization_settings, self), "摩尔分数"),
             "ionization": self.tabs.addTab(IonizationEnergyLookupWidget(self), "电离能查询"),
             "isotope": self.tabs.addTab(IsotopeAbundanceDialog(self), "分子/同位素"),
         }
