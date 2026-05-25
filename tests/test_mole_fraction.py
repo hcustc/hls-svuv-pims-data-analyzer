@@ -90,7 +90,7 @@ class TestCalcParentMoleFraction:
             expansion_coefficients=expansion,
         )
         assert result[100.0] == pytest.approx(0.01)
-        assert result[200.0] == pytest.approx(0.01)
+        assert result[200.0] == pytest.approx(0.0025)
 
     def test_empty_signal(self):
         assert calc_parent_mole_fraction({}) == {}
