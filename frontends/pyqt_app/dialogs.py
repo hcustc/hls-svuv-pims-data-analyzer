@@ -1026,6 +1026,7 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         settings = self.normalization_settings
         photon_normalize = settings.temperature_photon_normalize
         kr_correct = settings.temperature_kr_correct
+        kr_mz = self.spin_kr_mz.value() if hasattr(self, "spin_kr_mz") else 84
         mass_discrimination = settings.mass_discrimination
         light_source = settings.light_source
         expansion_factors = settings.expansion_factors if kr_correct else None
@@ -1050,6 +1051,7 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 manual_peak_path=manual_peak_path,
                 photon_normalize=photon_normalize,
                 kr_correct=kr_correct,
+                kr_mz=kr_mz,
                 mass_discrimination=mass_discrimination,
                 light_source=light_source,
                 expansion_factors=expansion_factors,
@@ -1060,6 +1062,70 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.worker.failed.connect(self.on_analysis_failed)
         self.worker.finished.connect(lambda: self.set_busy(False, "就绪"))
         self.worker.start()
+
+    def compute_kr_expansion(self):
+        folder = self.folder_edit.text().strip()
+        if not folder:
+            QtWidgets.QMessageBox.warning(self, "提示", "请先选择文件夹")
+            return
+        peak_config = load_peak_detection_config()
+        threshold_end = peak_config.threshold_end
+        min_intensity = peak_config.min_intensity
+        reference_mode = self.reference_mode_combo.currentData()
+        prefer_gaussian = self.gaussian_check.isChecked()
+        manual_peak_path = self.peak_file_edit.text().strip() if self.peak_source_combo.currentData() == "manual" else None
+        if self.peak_source_combo.currentData() == "manual" and not manual_peak_path:
+            QtWidgets.QMessageBox.warning(self, "提示", "请选择手动卡峰文件")
+            return
+        settings = self.normalization_settings
+        light_source = settings.light_source
+        kr_mz = self.spin_kr_mz.value() if hasattr(self, "spin_kr_mz") else 84
+        self.set_busy(True, "正在计算 Kr 膨胀系数...")
+        self.worker = WorkerThread(
+            lambda: compute_kr_expansion_factors(
+                folder,
+                calibration=self.calibration,
+                kr_mz=kr_mz,
+                manual_peak_path=manual_peak_path,
+                light_source=light_source,
+                threshold_end=threshold_end,
+                min_intensity=min_intensity,
+                prefer_gaussian=prefer_gaussian,
+                reference_mode=reference_mode,
+                detection_min_idx=peak_config.detection_min_idx,
+                nearby_peak_window=peak_config.nearby_peak_window,
+                duplicate_window=peak_config.duplicate_window,
+                weak_tail_early_window=peak_config.weak_tail_early_window,
+                weak_tail_late_window=peak_config.weak_tail_late_window,
+                weak_tail_ratio=peak_config.weak_tail_ratio,
+                gaussian_window_max=peak_config.gaussian_window_max,
+                gaussian_boundary_scale=peak_config.gaussian_boundary_scale,
+                boundary_padding=peak_config.boundary_padding,
+            ),
+            self,
+        )
+        self.worker.finished_with_result.connect(self.on_kr_compute_complete)
+        self.worker.failed.connect(self.on_analysis_failed)
+        self.worker.finished.connect(lambda: self.set_busy(False, "就绪"))
+        self.worker.start()
+
+    def on_kr_compute_complete(self, result: pd.DataFrame) -> None:
+        settings = self.normalization_settings
+        expansion_factors = {float(t): float(lam) for t, lam in zip(result["temperature"], result["expansion_lambda"])}
+        settings.expansion_factors = expansion_factors
+        settings.temperature_kr_correct = True
+        save_normalization_settings(settings)
+        QtWidgets.QMessageBox.information(
+            self, "完成",
+            f"成功计算 Kr 膨胀系数！\n参考温度: {result['reference_temperature'].iloc[0]:.1f}°C\n共 {len(result)} 个温度点\n\n已启用 Kr 校正，将自动重新分析温度扫描数据",
+        )
+        if self.worker is not None:
+            try:
+                self.worker.finished.disconnect()
+            except (RuntimeError, TypeError):
+                pass
+        self.run_analysis()
+
 
     def set_busy(self, busy: bool, message: str) -> None:
         self.status_label.setText(message)
