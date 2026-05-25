@@ -1029,6 +1029,7 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         settings = self.normalization_settings
         photon_normalize = settings.temperature_photon_normalize
         kr_correct = settings.temperature_kr_correct
+        kr_mz = self.spin_kr_mz.value() if hasattr(self, "spin_kr_mz") else 84
         mass_discrimination = settings.mass_discrimination
         light_source = settings.light_source
         expansion_factors = settings.expansion_factors if kr_correct else None
@@ -1053,6 +1054,7 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 manual_peak_path=manual_peak_path,
                 photon_normalize=photon_normalize,
                 kr_correct=kr_correct,
+                kr_mz=kr_mz,
                 mass_discrimination=mass_discrimination,
                 light_source=light_source,
                 expansion_factors=expansion_factors,
@@ -1112,7 +1114,7 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
     def on_kr_compute_complete(self, result: pd.DataFrame) -> None:
         settings = self.normalization_settings
-        expansion_factors = dict(zip(result["temperature"], result["expansion_lambda"]))
+        expansion_factors = {float(t): float(lam) for t, lam in zip(result["temperature"], result["expansion_lambda"])}
         settings.expansion_factors = expansion_factors
         settings.temperature_kr_correct = True
         save_normalization_settings(settings)
