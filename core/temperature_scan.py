@@ -383,6 +383,7 @@ def compute_kr_expansion_factors(
         manual_peak_path=manual_peak_path,
         photon_normalize=True,
         kr_correct=False,
+        kr_mz=kr_mz,
         light_source=light_source,
     )
     kr_rows = result[result["mz_rounded"].astype(int) == int(kr_mz)]
