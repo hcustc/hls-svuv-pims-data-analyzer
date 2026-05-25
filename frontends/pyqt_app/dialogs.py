@@ -1080,12 +1080,13 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
             return
         settings = self.normalization_settings
         light_source = settings.light_source
+        kr_mz = self.spin_kr_mz.value() if hasattr(self, "spin_kr_mz") else 84
         self.set_busy(True, "正在计算 Kr 膨胀系数...")
         self.worker = WorkerThread(
             lambda: compute_kr_expansion_factors(
                 folder,
                 calibration=self.calibration,
-                kr_mz=84,
+                kr_mz=kr_mz,
                 manual_peak_path=manual_peak_path,
                 light_source=light_source,
                 threshold_end=threshold_end,
@@ -1119,6 +1120,11 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self, "完成",
             f"成功计算 Kr 膨胀系数！\n参考温度: {result['reference_temperature'].iloc[0]:.1f}°C\n共 {len(result)} 个温度点\n\n已启用 Kr 校正，将自动重新分析温度扫描数据",
         )
+        if self.worker is not None:
+            try:
+                self.worker.finished.disconnect()
+            except (RuntimeError, TypeError):
+                pass
         self.run_analysis()
 
     def set_busy(self, busy: bool, message: str) -> None:
