@@ -21,7 +21,7 @@ def baseline_corrected_area(y_data: Iterable[float], left: int, right: int) -> f
     segment = data[left : right + 1]
     if segment.size == 0:
         return 0.0
-    return float(np.trapezoid(segment - np.min(segment)))
+    return float(np.trapz(segment - np.min(segment)))
 
 
 def gaussian_area(amplitude: float, fwhm: float) -> float:
@@ -99,7 +99,7 @@ def integrate_by_config(y_data: Iterable[float], config: dict, *, mode: str = "a
         elif mode == "height":
             result[species] = float(np.max(segment))
         else:
-            result[species] = float(np.trapezoid(segment, dx=0.01))
+            result[species] = float(np.trapz(segment, dx=0.01))
     return result
 
 
