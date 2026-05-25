@@ -1113,9 +1113,13 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         settings = self.normalization_settings
         expansion_factors = dict(zip(result["temperature"], result["expansion_lambda"]))
         settings.expansion_factors = expansion_factors
+        settings.temperature_kr_correct = True
         save_normalization_settings(settings)
-        msg = f"成功计算 Kr 膨胀系数！\n参考温度: {result['reference_temperature'].iloc[0]:.1f}°C\n共 {len(result)} 个温度点\n\n膨胀系数已保存到配置文件"
-        QtWidgets.QMessageBox.information(self, "完成", msg)
+        QtWidgets.QMessageBox.information(
+            self, "完成",
+            f"成功计算 Kr 膨胀系数！\n参考温度: {result['reference_temperature'].iloc[0]:.1f}°C\n共 {len(result)} 个温度点\n\n已启用 Kr 校正，将自动重新分析温度扫描数据",
+        )
+        self.run_analysis()
 
     def set_busy(self, busy: bool, message: str) -> None:
         self.status_label.setText(message)
