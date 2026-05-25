@@ -1829,7 +1829,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.md_preview_table = QtWidgets.QTableWidget()
         self.md_preview_table.setColumnCount(3)
         self.md_preview_table.setHorizontalHeaderLabels(["物种", "分子量", "D_i"])
-        self.md_preview_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
+        self.md_preview_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
         self.md_preview_table.setMaximumHeight(200)
         md_layout.addWidget(self.md_preview_table, 3, 0, 1, 2)
         btn_calc_md = QtWidgets.QPushButton("预览质量歧视因子")
@@ -1857,7 +1857,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.kr_table = QtWidgets.QTableWidget()
         self.kr_table.setColumnCount(4)
         self.kr_table.setHorizontalHeaderLabels(["温度(°C)", "Kr信号", "λ(T)", ""])
-        self.kr_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
+        self.kr_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
         ec_layout.addWidget(self.kr_table)
         btn_calc_lambda = QtWidgets.QPushButton("计算膨胀系数")
         btn_calc_lambda.clicked.connect(self._calc_expansion_coefficients)
@@ -1906,7 +1906,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.parent_result_table = QtWidgets.QTableWidget()
         self.parent_result_table.setColumnCount(4)
         self.parent_result_table.setHorizontalHeaderLabels(["温度(°C)", "信号 S(T,E)", "λ(T)", "摩尔分数 X(T)"])
-        self.parent_result_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
+        self.parent_result_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
         layout.addWidget(self.parent_result_table, 1)
 
         return widget
@@ -1944,7 +1944,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.isom_species_table = QtWidgets.QTableWidget()
         self.isom_species_table.setColumnCount(5)
         self.isom_species_table.setHorizontalHeaderLabels(["物种名称", "电离能(eV)", "σ(E₁)", "σ(E₂)", "选择"])
-        self.isom_species_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
+        self.isom_species_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
         layout.addWidget(self.isom_species_table)
 
         btn_calc_isom = QtWidgets.QPushButton("计算同分异构体分离")
@@ -1952,7 +1952,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         layout.addWidget(btn_calc_isom)
 
         self.isom_result_table = QtWidgets.QTableWidget()
-        self.isom_result_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
+        self.isom_result_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
         layout.addWidget(self.isom_result_table, 1)
 
         return widget
@@ -2037,7 +2037,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         layout = QtWidgets.QVBoxLayout(widget)
 
         self.results_table = QtWidgets.QTableWidget()
-        self.results_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
+        self.results_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
         layout.addWidget(self.results_table, 1)
 
         btn_export = QtWidgets.QPushButton("导出结果 (Excel/CSV)")
