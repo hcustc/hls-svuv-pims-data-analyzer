@@ -377,7 +377,7 @@ class SpeciesDatabaseCleaner:
 
 def main():
     """主清洗流程"""
-    db_path = "/Users/huangchen/VscodeProject/BL03U_MSTool_clean_repo/BL03U_MassSpectrumTool/database/species_database.sqlite"
+    db_path = Path(__file__).parent.parent / "database" / "species_database.sqlite"
     
     cleaner = SpeciesDatabaseCleaner(db_path, backup=True)
     

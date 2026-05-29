@@ -83,7 +83,7 @@ pic_cross_sections (截面表)
 
 ```bash
 # 进入项目目录
-cd /Users/huangchen/VscodeProject/BL03U_MSTool_clean_repo/BL03U_MassSpectrumTool
+cd <repository-root>
 
 # 运行清洗脚本
 python scripts/clean_species_database.py

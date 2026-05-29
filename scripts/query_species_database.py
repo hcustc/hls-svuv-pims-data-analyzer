@@ -174,7 +174,7 @@ class SpeciesDatabaseQuery:
 
 def main():
     """交互式查询程序"""
-    db_path = "/Users/huangchen/VscodeProject/BL03U_MSTool_clean_repo/BL03U_MassSpectrumTool/database/species_database.sqlite"
+    db_path = Path(__file__).parent.parent / "database" / "species_database.sqlite"
     
     query = SpeciesDatabaseQuery(db_path)
     query.connect()
