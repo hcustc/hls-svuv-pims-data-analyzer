@@ -4,6 +4,7 @@ __pycache__/
 .DS_Store
 .claude/
 .idea/
+.codex/
 
 # Large files
 *.exe

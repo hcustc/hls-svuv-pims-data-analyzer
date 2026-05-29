@@ -1,8 +1,10 @@
 import sqlite3
 
+import numpy as np
 import pandas as pd
 
 from core.calibration import Calibration, fit_quadratic_calibration
+from core.cwt_peak_detection import CwtPeakDetectionConfig, detect_peaks_cwt
 from core.config import load_calibration_config, load_calibration_points, species_database_path
 from core.integration import integrate_peak, load_peak_config
 from core.isotope import (
@@ -53,6 +55,28 @@ def test_yaml_config_loads_project_defaults():
     assert species_database_path().name == "species_database.sqlite"
     peak_config = load_peak_config()
     assert "H2O" in peak_config
+
+
+def test_species_database_quality_after_cleaning():
+    with sqlite3.connect(species_database_path()) as conn:
+        missing_ie = conn.execute(
+            "SELECT id, mz, name FROM species WHERE ionization_energy IS NULL ORDER BY id"
+        ).fetchall()
+        negative_cross_sections = conn.execute(
+            "SELECT COUNT(*) FROM pic_cross_sections WHERE cross_section < 0"
+        ).fetchone()[0]
+        duplicate_species = conn.execute(
+            """
+            SELECT mz, name, COUNT(*)
+            FROM species
+            GROUP BY mz, name
+            HAVING COUNT(*) > 1
+            """
+        ).fetchall()
+
+    assert missing_ie == []
+    assert negative_cross_sections == 0
+    assert duplicate_species == []
 
 
 def test_isotope_distribution_contains_main_peak():
@@ -360,6 +384,34 @@ def test_prominence_peak_detection_handles_baseline_and_noise():
     assert len(peaks) == 1
     assert abs(peaks[0].time - 22) < 0.75
     assert peaks[0].mz == peaks[0].time
+
+
+def test_cwt_peak_detection_handles_multiscale_peaks():
+    x = np.arange(120, dtype=float)
+    y = (
+        3.0
+        + 0.02 * x
+        + 25.0 * np.exp(-0.5 * ((x - 40) / 3) ** 2)
+        + 16.0 * np.exp(-0.5 * ((x - 82) / 6) ** 2)
+    )
+    config = CwtPeakDetectionConfig(
+        window_size=5,
+        poly_order=2,
+        prominence_ratio=0.08,
+        min_peak_distance=20,
+        min_peak_width=2,
+        max_peak_width=30,
+        wavelet_widths=tuple(range(1, 18)),
+        baseline_window_factor=8,
+    )
+
+    peaks = detect_peaks_cwt(y, calibration=Calibration(a=0, b=1, c=0), config=config)
+
+    assert len(peaks) == 2
+    assert abs(peaks[0].time - 40) < 1
+    assert abs(peaks[1].time - 82) < 1
+    assert peaks[0].left_bound < peaks[0].time < peaks[0].right_bound
+    assert peaks[1].left_bound < peaks[1].time < peaks[1].right_bound
 
 
 def test_extract_light_intensity_supports_io_and_beam_current():
@@ -693,6 +745,36 @@ def test_temperature_scan_sum_reference_finds_peaks_across_temperatures(tmp_path
     assert set(build_temperature_curves(sum_df)) == {20, 45}
 
 
+def test_real_temperature_fixture_builds_grouped_curves():
+    df = analyze_temperature_folder(
+        "tests/fixtures/C6F11O2H/Temp_Scan/12.5eV",
+        calibration=Calibration(),
+        detection_min_idx=0,
+        threshold_end=2,
+        min_intensity=3,
+        prefer_gaussian=False,
+        reference_mode="sum",
+    )
+    curves = build_temperature_curves(df)
+
+    assert sorted(df["temperature"].unique().tolist()) == [
+        400.0,
+        700.0,
+        750.0,
+        800.0,
+        825.0,
+        850.0,
+        875.0,
+        900.0,
+        925.0,
+        950.0,
+        975.0,
+    ]
+    assert len(curves) >= 60
+    assert curves[31]["curve_class"] == "formation"
+    assert curves[69]["curve_class"] == "formation"
+
+
 def test_analyze_pie_folder_builds_selectable_curves(tmp_path):
     def write_spectrum(folder_name, energy, io, scale):
         folder = tmp_path / folder_name
@@ -727,6 +809,34 @@ def test_analyze_pie_folder_builds_selectable_curves(tmp_path):
     curves = build_pie_curves(df)
     assert 22 in curves
     assert curves[22]["energies"] == [11.0, 12.0]
+
+
+def test_real_pie_fixture_builds_expected_energy_grid():
+    df = analyze_pie_folder(
+        "tests/fixtures/C6F11O2H/PIE_Scan/400",
+        calibration=Calibration(),
+        recursive=False,
+        detection_min_idx=0,
+        threshold_end=2,
+        min_intensity=3,
+        prefer_gaussian=False,
+    )
+    curves = build_pie_curves(df)
+
+    assert sorted(df["energy"].unique().tolist()) == [
+        11.0,
+        11.5,
+        12.0,
+        12.5,
+        12.9,
+        13.0,
+        13.5,
+        14.0,
+        14.5,
+    ]
+    assert len(curves) >= 15
+    assert curves[18]["intensities"] == [0.0, 0.0, 0.0, 0.0, 751.0, 207.5, 239.5, 171.0, 93.0]
+    assert curves[84]["intensities"] == [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 19.0, 368.0]
 
 
 def test_pie_analysis_uses_manual_peak_file_and_direct_io_normalization(tmp_path):
