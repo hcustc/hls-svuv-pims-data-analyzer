@@ -2,6 +2,7 @@ import sqlite3
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from core.calibration import Calibration, fit_quadratic_calibration
 from core.cwt_peak_detection import CwtPeakDetectionConfig, detect_peaks_cwt
@@ -89,6 +90,20 @@ def test_isotope_distribution_contains_main_peak():
 def test_formula_mass_calculation():
     assert formula_nominal_mass("C6H6") == 78
     assert round(formula_monoisotopic_mass("H2O"), 6) == 18.010565
+
+
+def test_formula_parser_supports_groups_hydrates_charges_and_isotope_labels():
+    assert parse_formula("Ca(OH)2") == {"Ca": 1, "O": 2, "H": 2}
+    assert parse_formula("CuSO4.5H2O") == {"Cu": 1, "S": 1, "O": 9, "H": 10}
+    assert parse_formula("NH4+") == {"N": 1, "H": 4}
+    assert parse_formula("[13C]2H4") == {"C": 2, "H": 4}
+    assert formula_nominal_mass("[13C]2H4") == 30
+    assert round(formula_monoisotopic_mass("[13C]H4"), 6) == 17.034655
+
+
+def test_formula_parser_rejects_unparsed_trailing_text():
+    with pytest.raises(ValueError):
+        parse_formula("C6H6foo")
 
 
 def test_generate_formula_candidates_from_mass_and_element_ranges():
