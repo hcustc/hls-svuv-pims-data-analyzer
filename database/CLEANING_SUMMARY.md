@@ -41,35 +41,21 @@ python scripts/clean_species_database.py
 | 负截面值 | ✅ 0条（已清洗） |
 | 重复物种 | ✅ 0组（已清洗） |
 | 外键完整性 | ✅ 通过验证 |
-| 缺失离子化能 | ⚠️ 3条（需手动补充） |
+| 缺失离子化能 | ✅ 0条（已补齐） |
 
 ---
 
 ## 🛠️ 后续操作
 
-### 1️⃣ 补充缺失的离子化能（可选）
+### 1️⃣ 已补充缺失的离子化能
 
-需要补充的3条记录：
+已补充的3条记录：
 
-```python
-from scripts.clean_species_database import SpeciesDatabaseCleaner
-
-cleaner = SpeciesDatabaseCleaner("database/species_database.sqlite", backup=False)
-cleaner.connect()
-
-# 补充ID=79的数据
-import sqlite3
-conn = sqlite3.connect("database/species_database.sqlite")
-cursor = conn.cursor()
-
-# 查询NIST等权威数据库后更新
-cursor.execute("UPDATE species SET ionization_energy = 10.5 WHERE id = 79")  # Hydroxymethylene
-cursor.execute("UPDATE species SET ionization_energy = ? WHERE id = 165")     # 2-Hydroxyethyl radical
-cursor.execute("UPDATE species SET ionization_energy = 10.65 WHERE id = 260") # 乙酸
-
-conn.commit()
-conn.close()
-```
+| ID | m/z | 物种 | ionization_energy (eV) | 来源 |
+|----|-----|------|------------------------|------|
+| 79 | 30 | Hydroxymethylene | 8.91 | [J. Phys. Chem. A 2006, 110, 8864-8871](https://pubs.acs.org/doi/10.1021/jp0568069) |
+| 165 | 45 | 2-Hydroxyethyl radical | 7.662 | [Active Thermochemical Tables v1.176](https://atct.anl.gov/Thermochemical%20Data/version%201.176/species/?species_number=2683), CH2CH2OH -> [(CH2CH2)OH]+ + e- |
+| 260 | 60 | 乙酸 / Acetic acid | 10.65 | [NIST Chemistry WebBook](https://webbook.nist.gov/cgi/cbook.cgi?ID=C64197&Mask=20), evaluated IE |
 
 ### 2️⃣ 查询和导出数据
 

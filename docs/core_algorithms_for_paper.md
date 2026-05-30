@@ -97,6 +97,17 @@ current_peak * weak_tail_ratio <= previous_peak
 5. 使用 `find_peaks` 对 CWT 响应做 prominence、宽度和距离筛选。
 6. 使用 `peak_widths` 与高斯拟合估计边界。
 
+关键参数包括：
+
+```text
+wavelet_widths           小波尺度范围，决定对不同峰宽的响应
+wavelet                  小波基，默认 mexh
+prominence_ratio         CWT 响应峰的相对 prominence 阈值
+min_peak_distance        候选峰最小间隔
+min_peak_width/max_peak_width  CWT 响应峰宽筛选范围
+baseline_window_factor   基线估计窗口相对平滑窗口的放大倍数
+```
+
 论文讨论点：CWT 可作为多尺度峰检测方法，用于弱峰、峰宽变化明显或肩峰较多的数据。代价是参数更多、计算更慢。
 
 ## 3. 峰边界与高斯拟合
