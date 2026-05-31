@@ -1,0 +1,76 @@
+name: Build Desktop App
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ runner.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Compile Python sources
+        run: python -m compileall -q core frontends main.py
+
+      - name: Build with PyInstaller
+        env:
+          PYINSTALLER_CONFIG_DIR: ${{ runner.temp }}/pyinstaller
+          MPLCONFIGDIR: ${{ runner.temp }}/matplotlib
+        run: pyinstaller --noconfirm --clean packaging/BL03U_MassSpectrumTool.spec
+
+      - name: Package Windows executable
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force release
+          Copy-Item "dist/BL03U-MassSpectrumTool.exe" "release/BL03U-MassSpectrumTool-Windows.exe"
+
+      - name: Package macOS DMG
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p release
+          hdiutil create \
+            -volname "BL03U MassSpectrumTool" \
+            -srcfolder "dist/BL03U-MassSpectrumTool.app" \
+            -ov \
+            -format UDZO \
+            "release/BL03U-MassSpectrumTool-macOS.dmg"
+
+      - name: Upload test artifacts
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: BL03U-MassSpectrumTool-${{ runner.os }}
+          path: release/*
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish release assets
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*

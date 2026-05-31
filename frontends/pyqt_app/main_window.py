@@ -26,6 +26,7 @@ from core.output_paths import ensure_output_dir
 from core.peak_detection import add_manual_peak as core_add_manual_peak
 from core.peak_detection import detect_peaks_in_range
 from core.peak_detection import detect_peaks_prominence
+from core.runtime_paths import resource_path
 from core.spectrum_io import read_bl03u_txt, sum_spectra
 from core.normalization import load_normalization_settings
 from frontends.pyqt_app.dialogs import (
@@ -165,7 +166,7 @@ class MainWindow(Ui_MainWindow, QMainWindow):
         self.add_core_tools_launcher()
         self.pushButton.clicked.connect(self.plot_graph)
         self.pushButton_plot_graph_sum.clicked.connect(self.plot_graph_sum)
-        self.setWindowIcon(QIcon('icons/icon.png'))
+        self.setWindowIcon(QIcon(str(resource_path("icons/icon.png"))))
         self.setWindowTitle('BL03U_MassSpectrumTool')
         self.pushButton_3.clicked.connect(self.calculate)
         self.toolButton.clicked.connect(self.transfer)
@@ -175,7 +176,7 @@ class MainWindow(Ui_MainWindow, QMainWindow):
 
         
         # 加载并显示图片
-        self.original_pixmap = QPixmap('icons/bjt.png')  # 替换为您的图像文件路径
+        self.original_pixmap = QPixmap(str(resource_path("icons/bjt.png")))
         if not self.original_pixmap.isNull():
             self.update_label_picture()
 
@@ -875,7 +876,7 @@ class MainWindow(Ui_MainWindow, QMainWindow):
             QMessageBox.critical(self, "错误", f"启动核心处理工具失败：{str(e)}")
 
     def load_image(self, image_path):
-        pixmap = QPixmap(image_path)
+        pixmap = QPixmap(str(resource_path(image_path)))
 
         if pixmap.isNull():
             print(f"无法加载图片: {image_path}")
