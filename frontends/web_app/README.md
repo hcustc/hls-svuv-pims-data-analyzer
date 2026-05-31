@@ -23,6 +23,16 @@ uvicorn api.server:app --reload
 
 Open `http://127.0.0.1:8000/` after the server starts.
 
+If you deploy the static frontend to GitHub Pages or another static host, the
+page still needs a running API backend. Pass the backend URL with `?api=` in the
+page URL, for example:
+
+```text
+https://<owner>.github.io/<repo>/?api=https://api.example.com
+```
+
+The backend must allow cross-origin requests from the static site.
+
 For public deployment, set `BL03U_ADMIN_TOKEN` before enabling server-library
 uploads. Optional limits:
 

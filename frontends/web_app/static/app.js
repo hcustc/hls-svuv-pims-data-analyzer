@@ -24,6 +24,47 @@ const state = {
   uploadLogEntries: [],
 };
 
+const API_BASE_STORAGE_KEY = "bl03u_api_base_url";
+
+function resolveApiBase() {
+  const defaultBase = window.location.origin && window.location.origin !== "null"
+    ? window.location.origin
+    : "http://127.0.0.1:8000";
+  let queryBase = "";
+  try {
+    const params = new URLSearchParams(window.location.search);
+    queryBase = params.get("api") || params.get("api_base") || "";
+  } catch {
+    queryBase = "";
+  }
+  let storedBase = "";
+  try {
+    storedBase = localStorage.getItem(API_BASE_STORAGE_KEY) || "";
+  } catch {
+    storedBase = "";
+  }
+  const globalBase = typeof window.BL03U_API_BASE_URL === "string" ? window.BL03U_API_BASE_URL : "";
+  const base = queryBase || globalBase || storedBase || defaultBase;
+  if (queryBase) {
+    try {
+      localStorage.setItem(API_BASE_STORAGE_KEY, queryBase);
+    } catch {
+      // Ignore storage errors in private browsing or file:// contexts.
+    }
+  }
+  return base.replace(/\/+$/, "");
+}
+
+const API_BASE = resolveApiBase();
+
+function apiUrl(path) {
+  const value = String(path || "");
+  if (/^https?:\/\//i.test(value)) return value;
+  const normalizedBase = API_BASE.endsWith("/") ? API_BASE : `${API_BASE}/`;
+  const normalizedPath = value.startsWith("/") ? value.slice(1) : value;
+  return new URL(normalizedPath, normalizedBase).toString();
+}
+
 const $ = (id) => document.getElementById(id);
 
 function statusPresentation(status) {
@@ -166,7 +207,7 @@ function solveNonnegativeLeastSquares(design, target, lockedCoefficients = {}) {
 }
 
 async function fetchJson(url, options = {}) {
-  const response = await fetch(url, options);
+  const response = await fetch(apiUrl(url), options);
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     const error = new Error(data.detail || data.error || response.statusText);
@@ -1441,6 +1482,12 @@ function csvCell(value) {
   return /[",\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
 }
 
+function updateApiBaseCaption() {
+  const caption = $("api-base-caption");
+  if (!caption) return;
+  caption.textContent = `API 后端: ${API_BASE}`;
+}
+
 function activePageId() {
   const page = document.querySelector(".page.active");
   return page ? page.id : "pie-page";
@@ -1608,6 +1655,7 @@ document.querySelectorAll(".page").forEach((page) => {
 });
 updatePicsLibraryCaptions();
 updateUploadScopeUi();
+updateApiBaseCaption();
 setProgress(0, "等待任务", "idle");
 setUploadProgress(0, "等待上传", "idle");
 drawChart();

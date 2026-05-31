@@ -1,0 +1,20 @@
+services:
+  bl03u:
+    build:
+      context: .
+    container_name: bl03u
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      TZ: Asia/Shanghai
+      BL03U_ALLOWED_DATA_ROOTS: /data/bl03u:/app
+      BL03U_MAX_UPLOAD_MB: 20
+      BL03U_PICS_LIBRARY_TTL_HOURS: 24
+      BL03U_PIE_JOB_TTL_HOURS: 6
+      BL03U_MAX_PIE_JOBS: 100
+    volumes:
+      - ./database:/app/database
+      - ./data:/data/bl03u
+    ports:
+      - "127.0.0.1:8000:8000"
