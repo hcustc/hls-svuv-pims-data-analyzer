@@ -11,12 +11,19 @@ conda activate pyqt_env
 python -m pytest tests/test_core_smoke.py tests/test_mole_fraction.py tests/test_api_server.py tests/test_cli.py
 ```
 
-若需要新建环境：
+若需要新建运行/部署环境：
 
 ```bash
 conda create -n bl03u python=3.9
 conda activate bl03u
 pip install -r requirements.txt
+```
+
+若需要新建开发/测试环境，`requirements-dev.txt` 已包含运行依赖：
+
+```bash
+conda create -n bl03u-dev python=3.9
+conda activate bl03u-dev
 pip install -r requirements-dev.txt
 ```
 
