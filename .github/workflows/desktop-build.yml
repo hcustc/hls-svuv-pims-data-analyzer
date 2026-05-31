@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   build:
-    name: Build ${{ runner.os }}
+    name: Build ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -43,14 +43,14 @@ jobs:
         run: pyinstaller --noconfirm --clean packaging/BL03U_MassSpectrumTool.spec
 
       - name: Package Windows executable
-        if: runner.os == 'Windows'
+        if: matrix.os == 'windows-latest'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force release
           Copy-Item "dist/BL03U-MassSpectrumTool.exe" "release/BL03U-MassSpectrumTool-Windows.exe"
 
       - name: Package macOS DMG
-        if: runner.os == 'macOS'
+        if: matrix.os == 'macos-latest'
         run: |
           mkdir -p release
           hdiutil create \
@@ -64,7 +64,7 @@ jobs:
         if: github.ref_type != 'tag'
         uses: actions/upload-artifact@v4
         with:
-          name: BL03U-MassSpectrumTool-${{ runner.os }}
+          name: BL03U-MassSpectrumTool-${{ matrix.os }}
           path: release/*
           if-no-files-found: error
           retention-days: 14
