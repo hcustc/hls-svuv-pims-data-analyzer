@@ -6,11 +6,11 @@ from typing import Any
 
 import yaml
 
-from .config import CONFIG_ROOT, project_path
+from .config import project_path, writable_project_path
 from .spectrum_io import extract_first_number
 
 
-DEFAULT_NORMALIZATION_CONFIG = CONFIG_ROOT / "normalization.yaml"
+DEFAULT_NORMALIZATION_CONFIG = Path("config/normalization.yaml")
 
 
 @dataclass
@@ -63,7 +63,7 @@ def save_normalization_settings(
     settings: NormalizationSettings,
     path: str | Path = DEFAULT_NORMALIZATION_CONFIG,
 ) -> Path:
-    config_path = project_path(path)
+    config_path = writable_project_path(path)
     config_path.parent.mkdir(parents=True, exist_ok=True)
     data: dict[str, Any] = asdict(settings)
     data["expansion_factors"] = {float(key): float(value) for key, value in settings.expansion_factors.items()}

@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from pathlib import Path
+from .runtime_paths import writable_path
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-OUTPUT_ROOT = PROJECT_ROOT / "output"
+OUTPUT_ROOT = writable_path("output")
 
 OUTPUT_SUBDIRS = (
     ("exports", "calibration"),

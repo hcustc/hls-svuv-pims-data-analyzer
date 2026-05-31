@@ -7,10 +7,11 @@ from typing import Any
 import yaml
 
 from .calibration import Calibration
+from .runtime_paths import ensure_user_copy, resource_path, runtime_read_path, writable_path
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-CONFIG_ROOT = PROJECT_ROOT / "config"
+PROJECT_ROOT = resource_path(".")
+CONFIG_ROOT = resource_path("config")
 DEFAULT_APP_CONFIG = CONFIG_ROOT / "app.yaml"
 
 
@@ -38,12 +39,23 @@ class PeakDetectionConfig:
 
 
 def project_path(path: str | Path) -> Path:
-    path = Path(path)
-    return path if path.is_absolute() else PROJECT_ROOT / path
+    return runtime_read_path(path)
+
+
+def writable_project_path(path: str | Path) -> Path:
+    return writable_path(path)
+
+
+def readable_config_path(path: str | Path) -> Path:
+    return runtime_read_path(path)
+
+
+def writable_config_path(path: str | Path) -> Path:
+    return writable_path(path)
 
 
 def load_yaml(path: str | Path) -> dict[str, Any]:
-    with project_path(path).open("r", encoding="utf-8") as handle:
+    with readable_config_path(path).open("r", encoding="utf-8") as handle:
         data = yaml.safe_load(handle) or {}
     if not isinstance(data, dict):
         raise ValueError(f"YAML root must be a mapping: {path}")
@@ -61,7 +73,9 @@ def app_path(section: str, key: str, fallback: str) -> Path:
 
 
 def species_database_path() -> Path:
-    return app_path("database", "pics", "database/species_database.sqlite")
+    app = load_app_config()
+    value = app.get("database", {}).get("pics", "database/species_database.sqlite")
+    return ensure_user_copy(value)
 
 
 def load_calibration_config(path: str | Path | None = None) -> Calibration:
@@ -78,7 +92,7 @@ def load_calibration_config(path: str | Path | None = None) -> Calibration:
 
 def save_calibration_config(calibration: Calibration, path: str | Path | None = None) -> Path:
     app = load_app_config()
-    config_path = project_path(path or app.get("config", {}).get("calibration", "config/calibration.yaml"))
+    config_path = writable_config_path(path or app.get("config", {}).get("calibration", "config/calibration.yaml"))
     config_path.parent.mkdir(parents=True, exist_ok=True)
     data = {
         "calibration": {
@@ -105,10 +119,10 @@ def load_calibration_points(path: str | Path | None = None) -> list[tuple[float,
 
 def load_peak_detection_config(path: str | Path | None = None) -> PeakDetectionConfig:
     app = load_app_config()
-    config_path = project_path(path or app.get("config", {}).get("peak_detection", "config/peak_detection.yaml"))
-    if not config_path.exists():
+    path_to_load = readable_config_path(path or app.get("config", {}).get("peak_detection", "config/peak_detection.yaml"))
+    if not path_to_load.exists():
         return PeakDetectionConfig()
-    data = load_yaml(config_path)
+    data = load_yaml(path_to_load)
     values = data.get("peak_detection", {})
     defaults = asdict(PeakDetectionConfig())
     defaults.update({key: values[key] for key in defaults if key in values})
@@ -137,7 +151,7 @@ def load_peak_detection_config(path: str | Path | None = None) -> PeakDetectionC
 
 def save_peak_detection_config(config: PeakDetectionConfig, path: str | Path | None = None) -> Path:
     app = load_app_config()
-    config_path = project_path(path or app.get("config", {}).get("peak_detection", "config/peak_detection.yaml"))
+    config_path = writable_config_path(path or app.get("config", {}).get("peak_detection", "config/peak_detection.yaml"))
     config_path.parent.mkdir(parents=True, exist_ok=True)
     with config_path.open("w", encoding="utf-8") as handle:
         yaml.safe_dump({"peak_detection": asdict(config)}, handle, allow_unicode=True, sort_keys=False)
