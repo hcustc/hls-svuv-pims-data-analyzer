@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 import re
 from functools import lru_cache
 from typing import Mapping
@@ -71,19 +72,203 @@ MONOISOTOPIC_MASSES = {
     "Sn": 119.90220163,
 }
 
+ISOTOPE_EXACT_MASSES = {
+    ("H", 1): 1.00782503223,
+    ("H", 2): 2.01410177812,
+    ("C", 12): 12.0,
+    ("C", 13): 13.00335483507,
+    ("N", 14): 14.00307400443,
+    ("N", 15): 15.00010889888,
+    ("O", 16): 15.99491461957,
+    ("O", 17): 16.9991317565,
+    ("O", 18): 17.99915961286,
+    ("S", 32): 31.9720711744,
+    ("S", 33): 32.9714589098,
+    ("S", 34): 33.967867004,
+    ("S", 36): 35.96708071,
+    ("Cl", 35): 34.968852682,
+    ("Cl", 37): 36.965902602,
+    ("Br", 79): 78.9183376,
+    ("Br", 81): 80.9162897,
+}
+
 FORMULA_ORDER = ("C", "H")
+HYDRATE_SEPARATORS = {"·", "•", "."}
+
+
+@dataclass(frozen=True)
+class ParsedFormula:
+    composition: dict[str, int]
+    monoisotopic_mass: float
+    nominal_mass: int
+
+
+def _merge_composition(target: dict[str, int], source: Mapping[str, int], multiplier: int = 1) -> None:
+    for element, count in source.items():
+        value = int(count) * int(multiplier)
+        if value:
+            target[element] = target.get(element, 0) + value
+
+
+def _strip_charge_suffix(formula: str) -> str:
+    text = formula.strip()
+    for pattern in (r"\^\d*[+-]$", r"\^[+-]\d*$", r"[+-]\d+$", r"[+-]$"):
+        cleaned = re.sub(pattern, "", text)
+        if cleaned != text:
+            return cleaned
+    return text
+
+
+def _split_formula_segments(formula: str) -> list[str]:
+    segments: list[str] = []
+    start = 0
+    depth = 0
+    bracket_depth = 0
+    for index, char in enumerate(formula):
+        if char == "[":
+            bracket_depth += 1
+        elif char == "]":
+            bracket_depth = max(0, bracket_depth - 1)
+        elif bracket_depth == 0 and char == "(":
+            depth += 1
+        elif bracket_depth == 0 and char == ")":
+            depth -= 1
+            if depth < 0:
+                raise ValueError("unmatched ')' in molecular formula")
+        elif depth == 0 and bracket_depth == 0 and char in HYDRATE_SEPARATORS:
+            segment = formula[start:index]
+            if not segment:
+                raise ValueError("empty hydrate segment in molecular formula")
+            segments.append(segment)
+            start = index + 1
+    if depth != 0:
+        raise ValueError("unmatched '(' in molecular formula")
+    if bracket_depth != 0:
+        raise ValueError("unmatched '[' in molecular formula")
+    tail = formula[start:]
+    if not tail:
+        raise ValueError("empty hydrate segment in molecular formula")
+    segments.append(tail)
+    return segments
+
+
+class _FormulaParser:
+    def __init__(self, text: str):
+        self.text = text
+        self.pos = 0
+
+    def parse(self) -> ParsedFormula:
+        parsed = self._parse_group(stop_char=None)
+        if self.pos != len(self.text):
+            raise ValueError(f"invalid molecular formula near: {self.text[self.pos:]}")
+        if not parsed.composition:
+            raise ValueError("invalid molecular formula")
+        return parsed
+
+    def _parse_group(self, stop_char: str | None) -> ParsedFormula:
+        composition: dict[str, int] = {}
+        monoisotopic_mass = 0.0
+        nominal_mass = 0
+        while self.pos < len(self.text):
+            char = self.text[self.pos]
+            if stop_char and char == stop_char:
+                break
+            if char == "(":
+                self.pos += 1
+                inner = self._parse_group(stop_char=")")
+                if self.pos >= len(self.text) or self.text[self.pos] != ")":
+                    raise ValueError("unmatched '(' in molecular formula")
+                self.pos += 1
+                count = self._parse_count()
+                _merge_composition(composition, inner.composition, count)
+                monoisotopic_mass += inner.monoisotopic_mass * count
+                nominal_mass += inner.nominal_mass * count
+                continue
+            if char == "[":
+                element, mass_number = self._parse_isotope_label()
+                count = self._parse_count()
+                composition[element] = composition.get(element, 0) + count
+                monoisotopic_mass += _isotope_exact_mass(element, mass_number) * count
+                nominal_mass += int(mass_number) * count
+                continue
+            if char.isupper():
+                element = self._parse_element()
+                count = self._parse_count()
+                composition[element] = composition.get(element, 0) + count
+                monoisotopic_mass += MONOISOTOPIC_MASSES[element] * count
+                nominal_isotope = max(ISOTOPES[element], key=lambda item: item[1])[0]
+                nominal_mass += int(nominal_isotope) * count
+                continue
+            raise ValueError(f"invalid molecular formula near: {self.text[self.pos:]}")
+        return ParsedFormula(composition, float(monoisotopic_mass), int(nominal_mass))
+
+    def _parse_count(self) -> int:
+        start = self.pos
+        while self.pos < len(self.text) and self.text[self.pos].isdigit():
+            self.pos += 1
+        if start == self.pos:
+            return 1
+        count = int(self.text[start:self.pos])
+        if count <= 0:
+            raise ValueError("formula counts must be positive integers")
+        return count
+
+    def _parse_element(self) -> str:
+        start = self.pos
+        self.pos += 1
+        if self.pos < len(self.text) and self.text[self.pos].islower():
+            self.pos += 1
+        element = self.text[start:self.pos]
+        if element not in ISOTOPES:
+            raise ValueError(f"unknown element: {element}")
+        return element
+
+    def _parse_isotope_label(self) -> tuple[str, int]:
+        match = re.match(r"\[(\d+)([A-Z][a-z]?)\]", self.text[self.pos :])
+        if not match:
+            raise ValueError(f"invalid isotope label near: {self.text[self.pos:]}")
+        mass_number = int(match.group(1))
+        element = match.group(2)
+        if element not in ISOTOPES:
+            raise ValueError(f"unknown element: {element}")
+        self.pos += len(match.group(0))
+        return element, mass_number
+
+
+def _isotope_exact_mass(element: str, mass_number: int) -> float:
+    return float(ISOTOPE_EXACT_MASSES.get((element, int(mass_number)), mass_number))
+
+
+def _parse_segment_multiplier(segment: str) -> tuple[int, str]:
+    match = re.match(r"(\d+)(?=[A-Z(\[])", segment)
+    if not match:
+        return 1, segment
+    multiplier = int(match.group(1))
+    if multiplier <= 0:
+        raise ValueError("hydrate segment multipliers must be positive integers")
+    return multiplier, segment[match.end() :]
+
+
+def _parse_formula_detail(formula: str) -> ParsedFormula:
+    text = _strip_charge_suffix(re.sub(r"\s+", "", formula or ""))
+    if not text:
+        raise ValueError("invalid molecular formula")
+    composition: dict[str, int] = {}
+    monoisotopic_mass = 0.0
+    nominal_mass = 0
+    for segment in _split_formula_segments(text):
+        multiplier, body = _parse_segment_multiplier(segment)
+        if not body:
+            raise ValueError("empty hydrate segment in molecular formula")
+        parsed = _FormulaParser(body).parse()
+        _merge_composition(composition, parsed.composition, multiplier)
+        monoisotopic_mass += parsed.monoisotopic_mass * multiplier
+        nominal_mass += parsed.nominal_mass * multiplier
+    return ParsedFormula(composition, float(monoisotopic_mass), int(nominal_mass))
 
 
 def parse_formula(formula: str) -> dict[str, int]:
-    matches = re.findall(r"([A-Z][a-z]?)(\d*)", formula.strip())
-    if not matches:
-        raise ValueError("invalid molecular formula")
-    composition: dict[str, int] = {}
-    for element, count_text in matches:
-        if element not in ISOTOPES:
-            raise ValueError(f"unknown element: {element}")
-        composition[element] = composition.get(element, 0) + (int(count_text) if count_text else 1)
-    return composition
+    return dict(_parse_formula_detail(formula).composition)
 
 
 def formula_to_string(composition: Mapping[str, int]) -> str:
@@ -109,7 +294,7 @@ def composition_nominal_mass(composition: Mapping[str, int]) -> int:
 
 
 def formula_nominal_mass(formula: str) -> int:
-    return composition_nominal_mass(parse_formula(formula))
+    return _parse_formula_detail(formula).nominal_mass
 
 
 def composition_monoisotopic_mass(composition: Mapping[str, int]) -> float:
@@ -122,7 +307,7 @@ def composition_monoisotopic_mass(composition: Mapping[str, int]) -> float:
 
 
 def formula_monoisotopic_mass(formula: str) -> float:
-    return composition_monoisotopic_mass(parse_formula(formula))
+    return _parse_formula_detail(formula).monoisotopic_mass
 
 
 def parse_element_count_ranges(text: str) -> dict[str, tuple[int, int]]:
