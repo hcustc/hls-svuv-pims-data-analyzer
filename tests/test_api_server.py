@@ -38,6 +38,17 @@ def _write_test_pics_db(path: Path) -> Path:
     return path
 
 
+def test_web_root_redirects_to_static_index():
+    response = _client().get("/", follow_redirects=False)
+
+    assert response.status_code == 307
+    assert response.headers["location"] == "/static/index.html"
+
+    static_response = _client().get("/static/index.html")
+    assert static_response.status_code == 200
+    assert "HSL SVUV-PIMS Data Analyzer" in static_response.text
+
+
 def test_api_rejects_database_path_outside_allowed_roots(tmp_path, monkeypatch):
     monkeypatch.delenv("BL03U_ALLOWED_DATA_ROOTS", raising=False)
     outside_database = tmp_path / "outside.sqlite"

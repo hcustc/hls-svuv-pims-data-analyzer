@@ -21,7 +21,7 @@ from fastapi import FastAPI, Request
 from fastapi import HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from starlette.responses import FileResponse
+from starlette.responses import FileResponse, RedirectResponse
 from starlette.staticfiles import StaticFiles
 
 from core.calibration import Calibration
@@ -990,7 +990,7 @@ def web_index():
     index = WEB_ROOT / "index.html"
     if not index.exists():
         raise HTTPException(status_code=404, detail="web frontend not found")
-    return FileResponse(index)
+    return RedirectResponse(url="/static/index.html")
 
 
 @app.post("/api/pie/start")
