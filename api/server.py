@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional, Union
 import pandas as pd
 from fastapi import FastAPI, Request
 from fastapi import HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from starlette.responses import FileResponse
 from starlette.staticfiles import StaticFiles
@@ -45,6 +46,12 @@ from core.spectrum_io import read_bl03u_txt, sum_spectra
 
 
 app = FastAPI(title="BL03U MassSpectrumTool API")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 WEB_ROOT = PROJECT_ROOT / "frontends" / "web_app" / "static"
 if WEB_ROOT.exists():
     app.mount("/static", StaticFiles(directory=WEB_ROOT), name="static")

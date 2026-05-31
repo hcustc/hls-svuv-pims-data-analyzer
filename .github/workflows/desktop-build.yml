@@ -1,4 +1,5 @@
 name: Build Desktop App
+run-name: Desktop App Build • ${{ github.ref_name }}
 
 on:
   push:
