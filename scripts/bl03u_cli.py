@@ -12,6 +12,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from core.analysis_artifacts import (
+    build_analysis_manifest,
+    build_pie_evidence_objects,
+    build_temperature_evidence_objects,
+    write_artifact_bundle,
+)
 from core.config import load_calibration_config, load_peak_detection_config, project_path
 from core.isotope import (
     calculate_isotope_distribution,
@@ -20,7 +26,12 @@ from core.isotope import (
     parse_formula,
 )
 from core.normalization import load_normalization_settings
-from core.pie_analysis import analyze_pie_folder, build_pie_curves
+from core.pie_analysis import (
+    analyze_pie_folder,
+    build_pie_curves,
+    identify_species_for_mz_with_curve,
+    load_species_database,
+)
 from core.temperature_scan import analyze_temperature_folder, build_temperature_curves
 
 
@@ -110,8 +121,57 @@ def cmd_pie(args: argparse.Namespace) -> int:
     output = _resolve_output(args.output)
     df.to_csv(output, index=False)
     curves = build_pie_curves(df)
+    outputs = {"csv": output}
     if args.curves_json:
-        _write_json(args.curves_json, _curve_json_ready(curves))
+        curves_path = _write_json(args.curves_json, _curve_json_ready(curves))
+        outputs["curves_json"] = curves_path
+
+    fits: dict[int, dict[str, Any]] = {}
+    if args.fit_pics:
+        if not args.database:
+            raise ValueError("--fit-pics requires --database")
+        database, _ = load_species_database(args.database)
+        for mz, curve in curves.items():
+            fits[int(mz)] = identify_species_for_mz_with_curve(
+                database,
+                int(mz),
+                curve.get("energies", []),
+                curve.get("intensities", []),
+            )
+
+    if args.manifest_json or args.evidence_json or args.report_md:
+        manifest = build_analysis_manifest(
+            analysis_type="pie",
+            input_path=args.folder,
+            parameters={
+                "recursive": not args.no_recursive,
+                "energy_decimals": args.energy_decimals,
+                "prefer_gaussian": not args.no_gaussian,
+                "manual_peak_path": args.manual_peak_path,
+                "target_mz": args.target_mz,
+                "photon_mode": photon_mode,
+                "light_source": light_source,
+                "mass_discrimination": mass_discrimination,
+                "fit_pics": bool(args.fit_pics),
+                "database": args.database,
+            },
+            outputs={
+                **outputs,
+                "manifest_json": args.manifest_json,
+                "evidence_json": args.evidence_json,
+                "report_md": args.report_md,
+            },
+            analysis_df=df,
+            curves=curves,
+        )
+        evidence = build_pie_evidence_objects(curves, fits)
+        write_artifact_bundle(
+            manifest=manifest,
+            evidence=evidence,
+            manifest_json=_resolve_output(args.manifest_json) if args.manifest_json else None,
+            evidence_json=_resolve_output(args.evidence_json) if args.evidence_json else None,
+            report_md=_resolve_output(args.report_md) if args.report_md else None,
+        )
     print(f"wrote {len(df)} rows and {len(curves)} curves to {output}")
     return 0
 
@@ -140,8 +200,41 @@ def cmd_temperature(args: argparse.Namespace) -> int:
     output = _resolve_output(args.output)
     df.to_csv(output, index=False)
     curves = build_temperature_curves(df)
+    outputs = {"csv": output}
     if args.curves_json:
-        _write_json(args.curves_json, _curve_json_ready(curves))
+        curves_path = _write_json(args.curves_json, _curve_json_ready(curves))
+        outputs["curves_json"] = curves_path
+    if args.manifest_json or args.evidence_json or args.report_md:
+        manifest = build_analysis_manifest(
+            analysis_type="temperature",
+            input_path=args.folder,
+            parameters={
+                "reference_mode": args.reference_mode,
+                "prefer_gaussian": not args.no_gaussian,
+                "manual_peak_path": args.manual_peak_path,
+                "photon_normalize": not args.no_photon_normalize,
+                "kr_correct": args.kr_correct,
+                "kr_mz": args.kr_mz,
+                "light_source": light_source,
+                "mass_discrimination": mass_discrimination,
+            },
+            outputs={
+                **outputs,
+                "manifest_json": args.manifest_json,
+                "evidence_json": args.evidence_json,
+                "report_md": args.report_md,
+            },
+            analysis_df=df,
+            curves=curves,
+        )
+        evidence = build_temperature_evidence_objects(curves)
+        write_artifact_bundle(
+            manifest=manifest,
+            evidence=evidence,
+            manifest_json=_resolve_output(args.manifest_json) if args.manifest_json else None,
+            evidence_json=_resolve_output(args.evidence_json) if args.evidence_json else None,
+            report_md=_resolve_output(args.report_md) if args.report_md else None,
+        )
     print(f"wrote {len(df)} rows and {len(curves)} curves to {output}")
     return 0
 
@@ -181,6 +274,11 @@ def build_parser() -> argparse.ArgumentParser:
     pie.add_argument("--photon-mode", choices=["first", "none", "off"])
     pie.add_argument("--light-source", choices=["io", "beam_current"])
     pie.add_argument("--mass-discrimination", type=float)
+    pie.add_argument("--manifest-json")
+    pie.add_argument("--evidence-json")
+    pie.add_argument("--report-md")
+    pie.add_argument("--fit-pics", action="store_true")
+    pie.add_argument("--database")
     pie.set_defaults(func=cmd_pie)
 
     temperature = subparsers.add_parser("temperature", help="Analyze a temperature scan folder")
@@ -195,6 +293,9 @@ def build_parser() -> argparse.ArgumentParser:
     temperature.add_argument("--kr-mz", type=int, default=84)
     temperature.add_argument("--light-source", choices=["io", "beam_current"])
     temperature.add_argument("--mass-discrimination", type=float)
+    temperature.add_argument("--manifest-json")
+    temperature.add_argument("--evidence-json")
+    temperature.add_argument("--report-md")
     temperature.set_defaults(func=cmd_temperature)
 
     formula = subparsers.add_parser("formula", help="Parse a formula and calculate masses")

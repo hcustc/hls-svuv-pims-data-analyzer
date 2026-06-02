@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import sqlite3
 import time
@@ -103,6 +104,40 @@ def test_spectrum_upload_temp_file_is_removed(monkeypatch):
     assert not paths[0].exists()
 
 
+def test_detect_peaks_endpoint_uses_calibration(monkeypatch):
+    class FakePeak:
+        def to_dict(self):
+            return {"mz": 18.0}
+
+    def fake_read_bl03u_txt(path):
+        return Spectrum(
+            x=np.array([100.0, 101.0]),
+            y=np.array([3.0, 8.0]),
+            metadata_lines=[],
+            path=str(path),
+        )
+
+    def fake_detect_peaks_in_range(y, *, calibration, detection_min_idx, time_offset):
+        assert calibration.a == 1.0
+        assert calibration.b == 2.0
+        assert calibration.c == 3.0
+        assert detection_min_idx == 0
+        assert time_offset == 100.0
+        return [FakePeak()]
+
+    monkeypatch.setattr(server, "read_bl03u_txt", fake_read_bl03u_txt)
+    monkeypatch.setattr(server, "detect_peaks_in_range", fake_detect_peaks_in_range)
+
+    response = _client().post(
+        "/spectrum/peaks",
+        params={"filename": "spectrum.txt", "a": 1.0, "b": 2.0, "c": 3.0},
+        content=b"1\n2\n",
+    )
+
+    assert response.status_code == 200
+    assert response.json()["peaks"] == [{"mz": 18.0}]
+
+
 def test_pics_server_upload_requires_and_accepts_admin_token(tmp_path, monkeypatch):
     monkeypatch.delenv("BL03U_ADMIN_TOKEN", raising=False)
     client = _client()
@@ -166,6 +201,25 @@ def test_upload_pie_curve_uses_allowed_database_root(tmp_path, monkeypatch):
     curve_response = _client().get(f"/api/pie/curve/{job_id}/18")
     assert curve_response.status_code == 200
     assert curve_response.json()["curve"]["energies"] == [11.0, 12.0]
+
+    artifacts_response = _client().get(f"/api/pie/artifacts/{job_id}")
+    assert artifacts_response.status_code == 200
+    artifacts = artifacts_response.json()
+    assert artifacts["manifest"]["analysis_type"] == "pie"
+    assert artifacts["summary"]["curve_count"] == 1
+    assert artifacts["evidence"]["18"]["confidence_level"] == "unfitted"
+    assert artifacts["manifest"]["input_path"] == "curve.csv"
+    assert artifacts["manifest"]["parameters"]["database_scope"] == "custom"
+    assert artifacts["manifest"]["parameters"]["database_name"] == "species.sqlite"
+    artifacts_text = json.dumps(artifacts, ensure_ascii=False)
+    assert str(database) not in artifacts_text
+    assert str(tmp_path) not in artifacts_text
+
+    fit_response = _client().post(f"/api/pie/fit/{job_id}/18")
+    assert fit_response.status_code == 200
+    fitted_artifacts = _client().get(f"/api/pie/artifacts/{job_id}").json()
+    assert fitted_artifacts["evidence"]["18"]["candidate_count"] == 1
+    assert fitted_artifacts["evidence"]["18"]["fit"] is not None
 
 
 def test_cleanup_jobs_removes_stale_completed_jobs(monkeypatch):
