@@ -44,6 +44,17 @@ def _run_cli(*args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _run_cli_allow_failure(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(CLI), *args],
+        cwd=PROJECT_ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+
 def test_cli_formula_outputs_json():
     result = _run_cli("formula", "Ca(OH)2")
     payload = json.loads(result.stdout)
@@ -95,6 +106,13 @@ def test_cli_pie_writes_csv_and_curve_json(tmp_path):
     assert manifest["data_summary"]["curve_count"] == 1
     assert evidence["22"]["confidence_level"] == "unfitted"
     assert "m/z 级证据摘要" in report
+
+
+def test_cli_pie_fit_pics_requires_database(tmp_path):
+    result = _run_cli_allow_failure("pie", str(tmp_path), "--fit-pics")
+    assert result.returncode == 2
+    assert "error: --fit-pics requires --database" in result.stderr
+    assert "Traceback" not in result.stderr
 
 
 def test_cli_temperature_writes_csv_and_curve_json(tmp_path):

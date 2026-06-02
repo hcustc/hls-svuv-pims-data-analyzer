@@ -36,6 +36,22 @@ def test_build_manifest_records_data_summary():
     assert manifest["data_summary"]["mz_values"] == [18]
 
 
+def test_build_manifest_file_count_uses_named_axis():
+    df = pd.DataFrame(
+        {
+            "mz_rounded": [18, 18],
+            "energy": [11.0, 12.0],
+            "file_count": [1, 1],
+        }
+    )
+    manifest = build_analysis_manifest(
+        analysis_type="pie",
+        input_path="input",
+        analysis_df=df,
+    )
+    assert manifest["data_summary"]["file_count"] == 2
+
+
 def test_pie_evidence_scores_fit_quality():
     curves = {18: {"mz": 18, "energies": [11.0, 12.0, 13.0], "intensities": [1.0, 2.0, 3.0]}}
     fits = {
@@ -51,6 +67,19 @@ def test_pie_evidence_scores_fit_quality():
     assert evidence["18"]["confidence_level"] == "high"
     assert evidence["18"]["candidate_count"] == 1
     assert score_pie_fit(fits[18], point_count=3)["warnings"] == []
+
+
+def test_pie_evidence_filters_non_finite_curve_values():
+    curves = {
+        18: {
+            "mz": 18,
+            "energies": [11.0, float("nan"), float("inf"), 12.0],
+            "intensities": [1.0, float("-inf"), 2.0],
+        }
+    }
+    evidence = build_pie_evidence_objects(curves)
+    assert evidence["18"]["curve"]["energies"] == [11.0, 12.0]
+    assert evidence["18"]["curve"]["intensities"] == [1.0, 2.0]
 
 
 def test_temperature_evidence_reports_curve_class():

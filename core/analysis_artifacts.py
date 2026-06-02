@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import math
 from pathlib import Path
 import platform
 import sys
@@ -13,13 +14,19 @@ def _json_float(value: Any) -> float | None:
     if value is None:
         return None
     try:
-        return float(value)
+        parsed = float(value)
     except (TypeError, ValueError):
         return None
+    return parsed if math.isfinite(parsed) else None
 
 
 def _series_values(values: Any) -> list[float]:
-    return [float(value) for value in values if _json_float(value) is not None]
+    parsed_values: list[float] = []
+    for value in values:
+        parsed = _json_float(value)
+        if parsed is not None:
+            parsed_values.append(parsed)
+    return parsed_values
 
 
 def _curve_payload(curve: dict[str, Any]) -> dict[str, Any]:
@@ -69,7 +76,13 @@ def build_analysis_manifest(
         if "temperature" in analysis_df:
             manifest["data_summary"]["temperature_count"] = int(analysis_df["temperature"].nunique())
         if "file_count" in analysis_df:
-            manifest["data_summary"]["file_count"] = int(analysis_df.groupby(analysis_df.columns[0])["file_count"].first().sum())
+            if "energy" in analysis_df:
+                file_count = analysis_df.groupby("energy")["file_count"].first().sum()
+            elif "temperature" in analysis_df:
+                file_count = analysis_df.groupby("temperature")["file_count"].first().sum()
+            else:
+                file_count = analysis_df["file_count"].sum()
+            manifest["data_summary"]["file_count"] = int(file_count)
     if curves:
         manifest["data_summary"]["mz_values"] = sorted(int(mz) for mz in curves)
     return manifest

@@ -831,7 +831,7 @@ def _pie_artifacts(
             {
                 "recursive": payload.recursive,
                 "energy_decimals": payload.energy_decimals,
-                "gaussian": payload.gaussian,
+                "prefer_gaussian": payload.gaussian,
                 "manual_peak_path": payload.manual_peak_path,
                 "target_mz": payload.target_mz,
                 "photon_mode": payload.photon_mode,
