@@ -26,6 +26,7 @@ from core.output_paths import ensure_output_dir
 from core.peak_detection import add_manual_peak as core_add_manual_peak
 from core.peak_detection import detect_peaks_in_range
 from core.peak_detection import detect_peaks_prominence
+from core.runtime_paths import resource_path
 from core.spectrum_io import read_bl03u_txt, sum_spectra
 from core.normalization import load_normalization_settings
 from frontends.pyqt_app.dialogs import (
@@ -40,15 +41,15 @@ from frontends.pyqt_app.dialogs import (
 
 
 class SpectrumBottomAxis(pg.AxisItem):
-    """Bottom axis that keeps plot data in TOF while displaying TOF or m/z labels."""
+    """Bottom axis formatter for TOF or true m/z plot coordinates."""
 
     def __init__(self, orientation: str = "bottom"):
         super().__init__(orientation=orientation)
-        self.display_mode = "tof"
+        self.display_mode = "mz"
         self.calibration = Calibration()
 
     def set_display_mode(self, mode: str, calibration: Calibration) -> None:
-        self.display_mode = mode if mode in {"tof", "mz"} else "tof"
+        self.display_mode = mode if mode in {"tof", "mz"} else "mz"
         self.calibration = calibration
         self.picture = None
         self.update()
@@ -57,24 +58,26 @@ class SpectrumBottomAxis(pg.AxisItem):
         if self.display_mode != "mz":
             return super().tickStrings(values, scale, spacing)
 
-        try:
-            mz_values = self.calibration.tof_to_mz(np.asarray(values, dtype=float))
-        except Exception:
-            return ["" for _ in values]
-        return [self._format_tick(float(value)) for value in np.atleast_1d(mz_values)]
+        mz_values = np.atleast_1d(np.asarray(values, dtype=float))
+        finite_mz_values = mz_values[np.isfinite(mz_values)]
+        mz_spacing = float(abs(spacing)) if np.isfinite(spacing) and spacing > 0 else None
+        if mz_spacing is None and finite_mz_values.size > 1:
+            sorted_values = np.sort(finite_mz_values)
+            deltas = np.diff(sorted_values)
+            deltas = deltas[np.isfinite(deltas) & (deltas > 0)]
+            if deltas.size:
+                mz_spacing = float(np.min(deltas))
+        return [self._format_tick(float(value), mz_spacing) for value in mz_values]
 
     @staticmethod
-    def _format_tick(value: float) -> str:
+    def _format_tick(value: float, spacing: float | None = None) -> str:
         if not np.isfinite(value):
             return ""
-        abs_value = abs(value)
-        if abs_value >= 100:
-            return f"{value:.0f}"
-        if abs_value >= 10:
-            return f"{value:.1f}"
-        if abs_value >= 1:
-            return f"{value:.2f}"
-        return f"{value:.4f}"
+        if spacing is None or not np.isfinite(spacing) or spacing <= 0:
+            decimals = 4
+        else:
+            decimals = int(np.clip(np.ceil(-np.log10(spacing)) + 1, 3, 6))
+        return f"{value:.{decimals}f}"
 
 
 class PeakDialog(QDialog):
@@ -141,8 +144,9 @@ class MainWindow(Ui_MainWindow, QMainWindow):
     def __init__(self):
         super(MainWindow, self).__init__()
         self.setupUi(self)
-        self.x_axis_mode = "tof"
+        self.x_axis_mode = "mz"
         self.current_plot_x = np.array([], dtype=float)
+        self.current_plot_axis_x = np.array([], dtype=float)
         self.current_plot_y = np.array([], dtype=float)
         self.current_plot_title = "质谱图"
         self.plot_x_min: float | None = None
@@ -154,6 +158,7 @@ class MainWindow(Ui_MainWindow, QMainWindow):
         self.selection_region = None
         self.spectrum_plot = None
         self._clamping_region = False
+        self._updating_spectrum_y_range = False
         self._updating_peak_table = False
         self.apply_config_defaults()
         self.configure_runtime_ui()
@@ -161,7 +166,7 @@ class MainWindow(Ui_MainWindow, QMainWindow):
         self.add_core_tools_launcher()
         self.pushButton.clicked.connect(self.plot_graph)
         self.pushButton_plot_graph_sum.clicked.connect(self.plot_graph_sum)
-        self.setWindowIcon(QIcon('icons/icon.png'))
+        self.setWindowIcon(QIcon(str(resource_path("icons/icon.png"))))
         self.setWindowTitle('BL03U_MassSpectrumTool')
         self.pushButton_3.clicked.connect(self.calculate)
         self.toolButton.clicked.connect(self.transfer)
@@ -171,7 +176,7 @@ class MainWindow(Ui_MainWindow, QMainWindow):
 
         
         # 加载并显示图片
-        self.original_pixmap = QPixmap('icons/bjt.png')  # 替换为您的图像文件路径
+        self.original_pixmap = QPixmap(str(resource_path("icons/bjt.png")))
         if not self.original_pixmap.isNull():
             self.update_label_picture()
 
@@ -209,19 +214,8 @@ class MainWindow(Ui_MainWindow, QMainWindow):
         # 设置表格的上下文菜单
         self.peakData.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
         self.peakData.customContextMenuRequested.connect(self.show_peak_context_menu)
-        self.peakData.itemSelectionChanged.connect(self.focus_selected_peak)
-
-        # 添加更新按钮
-        self.updatePeaks = QPushButton("更新峰标注")
-        self.updatePeaks.setText("更新标注")
-        self.updatePeaks.setMinimumWidth(0)
-        self.updatePeaks.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Expanding,
-            QtWidgets.QSizePolicy.Policy.Fixed,
-        )
-        self.updatePeaks.setFixedHeight(28)
-        self.horizontalLayout_4.addWidget(self.updatePeaks)
-        self.updatePeaks.clicked.connect(self.update_all_peaks)
+        self.peakData.itemSelectionChanged.connect(self.on_peak_selection_changed)
+        self.peakData.itemChanged.connect(self.on_peak_table_item_changed)
 
         # 添加清除按钮
         self.clearPeaksButton = QPushButton("清除峰值数据")
@@ -234,6 +228,7 @@ class MainWindow(Ui_MainWindow, QMainWindow):
         self.clearPeaksButton.setFixedHeight(28)
         self.horizontalLayout_4.addWidget(self.clearPeaksButton)
         self.clearPeaksButton.clicked.connect(self.clear_peak_data)
+        self._add_peak_navigation_controls()
 
     def apply_config_defaults(self):
         try:
@@ -434,6 +429,43 @@ class MainWindow(Ui_MainWindow, QMainWindow):
         while layout.count():
             layout.takeAt(0)
 
+    def _add_peak_navigation_controls(self):
+        self.peakNavigationPanel = QtWidgets.QWidget(self.widget_3)
+        self.peakNavigationPanel.setObjectName("PeakNavigationPanel")
+        navigation_layout = QHBoxLayout(self.peakNavigationPanel)
+        navigation_layout.setContentsMargins(0, 0, 0, 0)
+        navigation_layout.setSpacing(4)
+
+        self.previousPeakButton = QPushButton("上一峰", self.peakNavigationPanel)
+        self.nextPeakButton = QPushButton("下一峰", self.peakNavigationPanel)
+        self.updatePeakRangeButton = QPushButton("更新范围", self.peakNavigationPanel)
+        self.previousPeakButton.setToolTip("切换到表格中的上一个有效峰")
+        self.nextPeakButton.setToolTip("切换到表格中的下一个有效峰")
+        self.addPeak.setToolTip("根据当前框选区域添加一个峰，并按 m/z 插入表格")
+        self.updatePeakRangeButton.setToolTip("根据当前框选区域重算当前峰，并写回卡峰范围")
+
+        self.horizontalLayout_4.removeWidget(self.addPeak)
+        for button in (self.previousPeakButton, self.nextPeakButton, self.addPeak, self.updatePeakRangeButton):
+            button.setMinimumWidth(0)
+            button.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Expanding,
+                QtWidgets.QSizePolicy.Policy.Fixed,
+            )
+            button.setFixedHeight(28)
+        for button in (self.previousPeakButton, self.nextPeakButton):
+            button.setObjectName("BrowseButton")
+
+        navigation_layout.addWidget(self.previousPeakButton)
+        navigation_layout.addWidget(self.nextPeakButton)
+        navigation_layout.addWidget(self.addPeak)
+        navigation_layout.addWidget(self.updatePeakRangeButton)
+        self.verticalLayout.insertWidget(2, self.peakNavigationPanel)
+
+        self.previousPeakButton.clicked.connect(self.select_previous_peak)
+        self.nextPeakButton.clicked.connect(self.select_next_peak)
+        self.updatePeakRangeButton.clicked.connect(self.update_current_peak_range_from_region)
+        self.update_peak_navigation_state()
+
     def _rebuild_top_controls(self):
         self.widget.setObjectName("ControlBar")
         self.widget.setSizePolicy(
@@ -620,8 +652,48 @@ class MainWindow(Ui_MainWindow, QMainWindow):
 
     def set_x_axis_mode(self):
         combo = getattr(self, "xAxisModeCombo", None)
-        self.x_axis_mode = str(combo.currentData()) if combo is not None else "tof"
-        self.refresh_plot_axis_mode()
+        new_mode = str(combo.currentData()) if combo is not None else "mz"
+        if new_mode == self.x_axis_mode:
+            self.refresh_plot_axis_mode()
+            return
+
+        old_mode = self.x_axis_mode
+        region_tof = None
+        view_tof = None
+        if self.current_plot_x.size:
+            if self.selection_region is not None:
+                region_tof = self._axis_range_to_tof(
+                    *self.selection_region.getRegion(),
+                    mode=old_mode,
+                )
+            if self.p2 is not None:
+                view_tof = self._axis_range_to_tof(*self.p2.viewRange()[0], mode=old_mode)
+
+        self.x_axis_mode = new_mode
+        if self.current_plot_x.size == 0:
+            self.refresh_plot_axis_mode()
+            return
+
+        x_values = self.current_plot_x.copy()
+        y_values = self.current_plot_y.copy()
+        title = self.current_plot_title
+        try:
+            self.clear_plot_area()
+            self.setup_plots(x_values, y_values, title=title)
+            if region_tof is not None and self.selection_region is not None:
+                self.selection_region.setRegion(self._tof_range_to_axis_range(*region_tof))
+            if view_tof is not None and self.p2 is not None:
+                left, right = self._tof_range_to_axis_range(*view_tof)
+                left, right = self._clamp_region_values(left, right)
+                if right > left:
+                    self.p2.setXRange(left, right, padding=0)
+                    self.update_spectrum_y_range_for_visible_x((left, right))
+            self.update_plot()
+            self.update_region_readout()
+            if self.p1 is not None and self.checkBox_show_gaussian.isChecked():
+                self.update_gaussian_fit()
+        except Exception as exc:
+            QMessageBox.warning(self, "Warning", f"切换横轴失败: {exc}")
 
     def refresh_plot_axis_mode(self) -> None:
         axis_label = "m/z" if self.x_axis_mode == "mz" else "TOF"
@@ -632,6 +704,54 @@ class MainWindow(Ui_MainWindow, QMainWindow):
         for plot in (self.p1, self.p2):
             if plot is not None:
                 plot.setLabel("bottom", axis_label)
+
+    def _tof_to_axis_x(self, tof, mode: str | None = None):
+        axis_mode = self.x_axis_mode if mode is None else mode
+        tof_values = np.asarray(tof, dtype=float)
+        if axis_mode == "mz":
+            converted = self.current_calibration().tof_to_mz(tof_values)
+        else:
+            converted = tof_values
+        return float(converted) if np.ndim(converted) == 0 else converted
+
+    def _axis_x_to_tof(self, axis_x: float, mode: str | None = None) -> float:
+        axis_mode = self.x_axis_mode if mode is None else mode
+        if axis_mode == "mz":
+            return self.current_calibration().mz_to_tof(float(axis_x))
+        return float(axis_x)
+
+    def _axis_range_to_tof(
+        self,
+        left: float,
+        right: float,
+        mode: str | None = None,
+    ) -> tuple[float, float]:
+        left_tof = self._axis_x_to_tof(left, mode)
+        right_tof = self._axis_x_to_tof(right, mode)
+        if right_tof < left_tof:
+            left_tof, right_tof = right_tof, left_tof
+        return left_tof, right_tof
+
+    def _tof_range_to_axis_range(self, left_tof: float, right_tof: float) -> tuple[float, float]:
+        left = float(self._tof_to_axis_x(left_tof))
+        right = float(self._tof_to_axis_x(right_tof))
+        if right < left:
+            left, right = right, left
+        return left, right
+
+    def _tof_bounds_to_indices(self, left_tof: float, right_tof: float) -> tuple[int, int]:
+        if right_tof < left_tof:
+            left_tof, right_tof = right_tof, left_tof
+        left_idx = int(np.searchsorted(self.current_plot_x, left_tof, side="left"))
+        right_idx = int(np.searchsorted(self.current_plot_x, right_tof, side="right") - 1)
+        left_idx = max(0, min(left_idx, self.current_plot_y.size - 1))
+        right_idx = max(left_idx, min(right_idx, self.current_plot_y.size - 1))
+        return left_idx, right_idx
+
+    def _current_axis_x_values(self) -> np.ndarray:
+        if self.current_plot_x.size == 0:
+            return np.array([], dtype=float)
+        return np.asarray(self._tof_to_axis_x(self.current_plot_x), dtype=float)
 
     def _rebuild_main_splitter(self):
         self.widget_2.setObjectName("PlotPanel")
@@ -756,7 +876,7 @@ class MainWindow(Ui_MainWindow, QMainWindow):
             QMessageBox.critical(self, "错误", f"启动核心处理工具失败：{str(e)}")
 
     def load_image(self, image_path):
-        pixmap = QPixmap(image_path)
+        pixmap = QPixmap(str(resource_path(image_path)))
 
         if pixmap.isNull():
             print(f"无法加载图片: {image_path}")
@@ -798,10 +918,12 @@ class MainWindow(Ui_MainWindow, QMainWindow):
             self.label_picture = None
         self.clear_plot_area()
         self.current_plot_x = np.array([], dtype=float)
+        self.current_plot_axis_x = np.array([], dtype=float)
         self.current_plot_y = np.array([], dtype=float)
         self.current_plot_title = "质谱图"
         self.plot_x_min = None
         self.plot_x_max = None
+        self.update_peak_navigation_state()
 
     def clear_plot_area(self):
         """清除当前绘图区，不触发文件重载。"""
@@ -833,11 +955,15 @@ class MainWindow(Ui_MainWindow, QMainWindow):
         x_values = x_values[:point_count]
         y_values = y_values[:point_count]
         self.current_plot_x = x_values
+        axis_x_values = self._current_axis_x_values()
+        if axis_x_values.size == 0 or not np.any(np.isfinite(axis_x_values)):
+            raise ValueError("谱图横坐标无效")
+        self.current_plot_axis_x = axis_x_values
         self.current_plot_y = y_values
         self.current_plot_title = title
-        self.plot_x_min = float(np.nanmin(x_values))
-        self.plot_x_max = float(np.nanmax(x_values))
-        x_range = max(1.0, self.plot_x_max - self.plot_x_min)
+        self.plot_x_min = float(np.nanmin(axis_x_values))
+        self.plot_x_max = float(np.nanmax(axis_x_values))
+        x_range = max(1e-9, self.plot_x_max - self.plot_x_min)
         y_min = float(np.nanmin(y_values))
         y_max = float(np.nanmax(y_values))
         y_padding = max(1.0, (y_max - y_min) * 0.08)
@@ -863,13 +989,22 @@ class MainWindow(Ui_MainWindow, QMainWindow):
         self.p2.setLabel('left', 'COUNTS')
         self.p2.showGrid(x=True, y=True, alpha=0.25)
         self._apply_plot_limits(self.p2, y_min - y_padding, y_max + y_padding, x_range)
-        self.spectrum_plot = self.p2.plot(x_values, y_values, pen=mkPen('#2563eb', width=1.2), name='质谱图')
+        self.spectrum_plot = self.p2.plot(axis_x_values, y_values, pen=mkPen('#2563eb', width=1.2), name='质谱图')
         self._optimize_curve(self.spectrum_plot)
+        self._configure_spectrum_plot_interaction()
 
         # 添加 LinearRegionItem 到 p2，设置移动模式和边界约束
         peak_idx = int(np.nanargmax(y_values))
-        peak_center = float(x_values[peak_idx])
-        half_width = max(4.0, x_range * 0.001)
+        peak_center = float(axis_x_values[peak_idx])
+        finite_axis_x = axis_x_values[np.isfinite(axis_x_values)]
+        if finite_axis_x.size > 1:
+            spacing_values = np.diff(np.sort(finite_axis_x))
+            spacing_values = spacing_values[np.isfinite(spacing_values) & (spacing_values > 0)]
+            data_spacing = float(np.median(spacing_values)) if spacing_values.size else 1.0
+        else:
+            data_spacing = 1.0
+        min_half_width = max(data_spacing * 6, 0.02 if self.x_axis_mode == "mz" else 4.0)
+        half_width = max(min_half_width, x_range * 0.001)
         region_left = max(self.plot_x_min, peak_center - half_width)
         region_right = min(self.plot_x_max, peak_center + half_width)
         self.selection_region = LinearRegionItem(
@@ -893,20 +1028,78 @@ class MainWindow(Ui_MainWindow, QMainWindow):
             else:
                 self.selection_region.sigRegionChanged.connect(self.update_gaussian_fit)
             self.p1.sigRangeChanged.connect(lambda window, viewRange: self.update_region(viewRange))
+        self.update_peak_navigation_state()
 
     def _apply_plot_limits(self, plot, y_min: float, y_max: float, x_range: float) -> None:
         if self.plot_x_min is None or self.plot_x_max is None:
             return
+        y_span = max(1.0, y_max - y_min)
         plot.setLimits(
             xMin=self.plot_x_min,
             xMax=self.plot_x_max,
             maxXRange=x_range,
-            minXRange=max(1.0, x_range / 100_000),
-            yMin=y_min,
-            yMax=y_max,
+            minXRange=max(1e-6 if self.x_axis_mode == "mz" else 1.0, x_range / 100_000),
+            yMin=y_min - y_span,
+            yMax=y_max + y_span,
         )
         plot.setXRange(self.plot_x_min, self.plot_x_max, padding=0)
         plot.setYRange(y_min, y_max, padding=0)
+
+    def _configure_spectrum_plot_interaction(self) -> None:
+        if self.p2 is None:
+            return
+        self.p2.setMouseEnabled(x=True, y=False)
+        sig_x_range_changed = getattr(self.p2, "sigXRangeChanged", None)
+        if sig_x_range_changed is not None:
+            sig_x_range_changed.connect(
+                lambda _plot, x_range: self.update_spectrum_y_range_for_visible_x(x_range)
+            )
+        else:
+            self.p2.sigRangeChanged.connect(
+                lambda _plot, view_range: self.update_spectrum_y_range_for_visible_x(view_range[0])
+            )
+
+    def update_spectrum_y_range_for_visible_x(self, x_range=None) -> None:
+        if self.p2 is None or self._updating_spectrum_y_range:
+            return
+        if x_range is None:
+            x_range = self.p2.viewRange()[0]
+        self._set_spectrum_y_range_for_x_range(float(x_range[0]), float(x_range[1]))
+
+    def _set_spectrum_y_range_for_x_range(
+        self,
+        x_left: float,
+        x_right: float,
+        include_y: float | None = None,
+    ) -> None:
+        if self.p2 is None or self.current_plot_axis_x.size == 0 or self.current_plot_y.size == 0:
+            return
+        if not (np.isfinite(x_left) and np.isfinite(x_right)):
+            return
+        if x_right < x_left:
+            x_left, x_right = x_right, x_left
+
+        start = int(np.searchsorted(self.current_plot_axis_x, x_left, side="left"))
+        end = int(np.searchsorted(self.current_plot_axis_x, x_right, side="right"))
+        start = max(0, min(start, self.current_plot_y.size - 1))
+        end = max(start + 1, min(end, self.current_plot_y.size))
+        segment_y = self.current_plot_y[start:end]
+        segment_y = segment_y[np.isfinite(segment_y)]
+        if segment_y.size == 0:
+            return
+
+        y_min = float(np.nanmin(segment_y))
+        y_max = float(np.nanmax(segment_y))
+        if include_y is not None and np.isfinite(include_y):
+            y_max = max(y_max, float(include_y))
+        y_span = max(1.0, y_max - y_min)
+        lower = y_min - y_span * 0.08
+        upper = y_max + y_span * 0.20
+        self._updating_spectrum_y_range = True
+        try:
+            self.p2.setYRange(lower, upper, padding=0)
+        finally:
+            self._updating_spectrum_y_range = False
 
     @staticmethod
     def _optimize_curve(curve) -> None:
@@ -977,9 +1170,7 @@ class MainWindow(Ui_MainWindow, QMainWindow):
             left, right = self._clamp_region_values(view_range[0][0], view_range[0][1])
             if right > left:
                 self.p2.setXRange(left, right, padding=0)
-            y_left, y_right = float(view_range[1][0]), float(view_range[1][1])
-            if np.isfinite(y_left) and np.isfinite(y_right) and y_right > y_left:
-                self.p2.setYRange(y_left, y_right, padding=0)
+                self.update_spectrum_y_range_for_visible_x((left, right))
         except (TypeError, ValueError, IndexError):
             return
 
@@ -1000,11 +1191,17 @@ class MainWindow(Ui_MainWindow, QMainWindow):
                 self.selection_region.setRegion([left, right])
             finally:
                 self._clamping_region = False
-        center = (left + right) / 2
-        self.label_8.setText(f"{center:.2f}")
-        self.label_9.setText(f"{float(self.current_calibration().tof_to_mz(center)):.2f}")
-        self.label_10.setText(f"{left:.2f}")
-        self.label_11.setText(f"{right:.2f}")
+        center_axis = (left + right) / 2
+        try:
+            center_tof = self._axis_x_to_tof(center_axis)
+            left_tof, right_tof = self._axis_range_to_tof(left, right)
+            center_mz = float(self.current_calibration().tof_to_mz(center_tof))
+        except Exception:
+            return
+        self.label_8.setText(f"{center_tof:.2f}")
+        self.label_9.setText(f"{center_mz:.5f}")
+        self.label_10.setText(f"{left_tof:.2f}")
+        self.label_11.setText(f"{right_tof:.2f}")
 
     def _clamp_region_values(self, left: float, right: float) -> tuple[float, float]:
         if self.plot_x_min is None or self.plot_x_max is None:
@@ -1040,6 +1237,184 @@ class MainWindow(Ui_MainWindow, QMainWindow):
             return None
         return time, mz, intensity
 
+    def _valid_peak_rows(self) -> list[int]:
+        return [row for row in range(self.peakData.rowCount()) if self._peak_row_values(row) is not None]
+
+    def on_peak_selection_changed(self):
+        self.focus_selected_peak()
+        self.update_peak_navigation_state()
+
+    def on_peak_table_item_changed(self, item: QTableWidgetItem):
+        if self._updating_peak_table:
+            return
+        self.update_plot()
+        self.update_peak_navigation_state()
+
+    def update_peak_navigation_state(self):
+        if not hasattr(self, "previousPeakButton"):
+            return
+        rows = self._valid_peak_rows()
+        current = self.peakData.currentRow()
+        has_current = current in rows
+        self.previousPeakButton.setEnabled(
+            bool(rows) if not has_current else any(row < current for row in rows)
+        )
+        self.nextPeakButton.setEnabled(
+            bool(rows) if not has_current else any(row > current for row in rows)
+        )
+        self.updatePeakRangeButton.setEnabled(
+            has_current
+            and self.selection_region is not None
+            and self.current_plot_y.size > 0
+        )
+
+    def _select_peak_row(self, row: int) -> None:
+        if row < 0 or row >= self.peakData.rowCount():
+            return
+        self.peakData.setCurrentCell(row, 0)
+        self.peakData.selectRow(row)
+        item = self.peakData.item(row, 0)
+        if item is not None:
+            self.peakData.scrollToItem(
+                item,
+                QtWidgets.QAbstractItemView.ScrollHint.PositionAtCenter,
+            )
+        self.update_peak_navigation_state()
+
+    def select_previous_peak(self):
+        rows = self._valid_peak_rows()
+        current = self.peakData.currentRow()
+        if current not in rows and rows:
+            self._select_peak_row(rows[-1])
+            return
+        previous_rows = [row for row in rows if row < current]
+        if previous_rows:
+            self._select_peak_row(previous_rows[-1])
+
+    def select_next_peak(self):
+        rows = self._valid_peak_rows()
+        current = self.peakData.currentRow()
+        if current not in rows and rows:
+            self._select_peak_row(rows[0])
+            return
+        next_rows = [row for row in rows if row > current]
+        if next_rows:
+            self._select_peak_row(next_rows[0])
+
+    def _set_peak_table_row(self, row: int, peak_data: dict) -> None:
+        self.peakData.setItem(row, 0, QTableWidgetItem(str(peak_data["species"])))
+        self.peakData.setItem(row, 1, QTableWidgetItem(f"{float(peak_data['time']):.2f}"))
+        self.peakData.setItem(row, 2, QTableWidgetItem(f"{float(peak_data['mz']):.2f}"))
+        self.peakData.setItem(row, 3, QTableWidgetItem(f"{float(peak_data['intensity']):.2f}"))
+        self.peakData.setItem(row, 4, QTableWidgetItem(f"{float(peak_data['left']):.2f}"))
+        self.peakData.setItem(row, 5, QTableWidgetItem(f"{float(peak_data['right']):.2f}"))
+
+    def _peak_row_is_empty(self, row: int) -> bool:
+        for column in range(self.peakData.columnCount()):
+            item = self.peakData.item(row, column)
+            if item is not None and item.text().strip():
+                return False
+        return True
+
+    def _peak_row_data(self, row: int) -> dict | None:
+        values = self._peak_row_values(row)
+        if values is None:
+            return None
+
+        time, mz, intensity = values
+        species_item = self.peakData.item(row, 0)
+        species = species_item.text().strip() if species_item and species_item.text().strip() else "Unknown"
+        left = self._table_float(row, 4)
+        right = self._table_float(row, 5)
+        return {
+            "species": species,
+            "time": time,
+            "mz": mz,
+            "intensity": intensity,
+            "left": time if left is None else left,
+            "right": time if right is None else right,
+        }
+
+    def _set_peak_table_text_row(self, row: int, values: list[str]) -> None:
+        for column, value in enumerate(values[: self.peakData.columnCount()]):
+            if value:
+                self.peakData.setItem(row, column, QTableWidgetItem(value))
+
+    def _insert_peak_data_sorted(self, peak_data: dict) -> int:
+        entries = []
+        trailing_rows = []
+        for row in range(self.peakData.rowCount()):
+            row_data = self._peak_row_data(row)
+            if row_data is not None:
+                entries.append((False, row_data))
+            elif not self._peak_row_is_empty(row):
+                trailing_rows.append([
+                    self.peakData.item(row, column).text() if self.peakData.item(row, column) else ""
+                    for column in range(self.peakData.columnCount())
+                ])
+
+        entries.append((True, peak_data))
+        entries.sort(key=lambda entry: (float(entry[1]["mz"]), float(entry[1]["time"])))
+
+        self.peakData.setRowCount(0)
+        insert_row = 0
+        for is_new, row_data in entries:
+            row = self.peakData.rowCount()
+            self.peakData.insertRow(row)
+            self._set_peak_table_row(row, row_data)
+            if is_new:
+                insert_row = row
+
+        for values in trailing_rows:
+            row = self.peakData.rowCount()
+            self.peakData.insertRow(row)
+            self._set_peak_table_text_row(row, values)
+
+        return insert_row
+
+    def _peak_from_current_region(self):
+        if self.selection_region is None or self.current_plot_y.size == 0:
+            return None
+        min_x, max_x = self._clamp_region_values(*self.selection_region.getRegion())
+        left_tof, right_tof = self._axis_range_to_tof(min_x, max_x)
+        left_idx, right_idx = self._tof_bounds_to_indices(left_tof, right_tof)
+        return core_add_manual_peak(
+            self.current_plot_y,
+            left_idx,
+            right_idx,
+            calibration=self.current_calibration(),
+            time_offset=self.current_time_offset,
+        )
+
+    def update_current_peak_range_from_region(self):
+        row = self.peakData.currentRow()
+        if row < 0 or self._peak_row_values(row) is None:
+            QMessageBox.warning(self, "提示", "请先在卡峰范围表中选择一个峰。")
+            return
+
+        peak = self._peak_from_current_region()
+        if peak is None:
+            QMessageBox.warning(self, "提示", "当前框选范围无效，无法更新卡峰范围。")
+            return
+
+        species_item = self.peakData.item(row, 0)
+        species = species_item.text() if species_item and species_item.text().strip() else peak.species
+        peak_data = {
+            "species": species,
+            "time": peak.time,
+            "mz": peak.mz,
+            "intensity": peak.intensity,
+            "left": peak.left_bound + self.current_time_offset,
+            "right": peak.right_bound + self.current_time_offset,
+        }
+        new_row = self.update_peak_in_table(row, peak_data)
+        self._select_peak_row(new_row)
+        self.update_plot()
+        self.update_region_readout()
+        if self.p1 is not None and self.checkBox_show_gaussian.isChecked():
+            self.update_gaussian_fit()
+        self.statusbar.showMessage("已根据当前框选范围更新当前峰", 3000)
+
     def focus_selected_peak(self):
         """根据右侧峰表当前行，将主图定位到对应峰位。"""
         if self._updating_peak_table or self.p2 is None or self.selection_region is None:
@@ -1055,14 +1430,14 @@ class MainWindow(Ui_MainWindow, QMainWindow):
         if peak_time is None or not np.isfinite(peak_time):
             return
 
-        full_range = self._plot_x_range()
-        fallback_half_width = max(2.0, full_range * 0.0025)
+        full_tof_range = self._tof_x_range()
+        fallback_half_width = max(2.0, full_tof_range * 0.0025)
         if left is None or right is None or not np.isfinite(left) or not np.isfinite(right) or left == right:
             left = peak_time - fallback_half_width
             right = peak_time + fallback_half_width
 
-        left, right = self._clamp_region_values(left, right)
-        self.selection_region.setRegion([left, right])
+        left, right = self._clamp_tof_range(left, right)
+        self.selection_region.setRegion(self._tof_range_to_axis_range(left, right))
         self.update_region_readout()
         self._center_plot_on_peak(peak_time, peak_intensity, left, right)
         if self.p1 is not None and self.checkBox_show_gaussian.isChecked():
@@ -1071,7 +1446,26 @@ class MainWindow(Ui_MainWindow, QMainWindow):
     def _plot_x_range(self) -> float:
         if self.plot_x_min is None or self.plot_x_max is None:
             return 1.0
-        return max(1.0, self.plot_x_max - self.plot_x_min)
+        return max(1e-9, self.plot_x_max - self.plot_x_min)
+
+    def _tof_x_range(self) -> float:
+        if self.current_plot_x.size == 0:
+            return 1.0
+        return max(1.0, float(np.nanmax(self.current_plot_x) - np.nanmin(self.current_plot_x)))
+
+    def _clamp_tof_range(self, left: float, right: float) -> tuple[float, float]:
+        if self.current_plot_x.size == 0:
+            return float(left), float(right)
+        tof_min = float(np.nanmin(self.current_plot_x))
+        tof_max = float(np.nanmax(self.current_plot_x))
+        left = max(tof_min, min(float(left), tof_max))
+        right = max(tof_min, min(float(right), tof_max))
+        if right < left:
+            left, right = right, left
+        if right == left:
+            right = min(tof_max, left + 1.0)
+            left = max(tof_min, right - 1.0)
+        return left, right
 
     def _center_plot_on_peak(
         self,
@@ -1084,9 +1478,12 @@ class MainWindow(Ui_MainWindow, QMainWindow):
             return
 
         full_range = self._plot_x_range()
-        selected_width = max(1.0, abs(right - left))
-        view_width = min(full_range, max(selected_width * 6, full_range * 0.02, 10.0))
-        center = max(self.plot_x_min, min(float(peak_time), self.plot_x_max))
+        left_axis, right_axis = self._tof_range_to_axis_range(left, right)
+        peak_axis = float(self._tof_to_axis_x(peak_time))
+        selected_width = max(1e-9, abs(right_axis - left_axis))
+        minimum_view_width = 0.05 if self.x_axis_mode == "mz" else 10.0
+        view_width = min(full_range, max(selected_width * 6, full_range * 0.02, minimum_view_width))
+        center = max(self.plot_x_min, min(peak_axis, self.plot_x_max))
         x_left = center - view_width / 2
         x_right = center + view_width / 2
         if x_left < self.plot_x_min:
@@ -1099,24 +1496,7 @@ class MainWindow(Ui_MainWindow, QMainWindow):
         x_right = min(self.plot_x_max, x_right)
         if x_right > x_left:
             self.p2.setXRange(x_left, x_right, padding=0)
-
-        if self.current_plot_x.size == 0 or self.current_plot_y.size == 0:
-            return
-        start = int(np.searchsorted(self.current_plot_x, x_left, side="left"))
-        end = int(np.searchsorted(self.current_plot_x, x_right, side="right"))
-        start = max(0, min(start, self.current_plot_y.size - 1))
-        end = max(start + 1, min(end, self.current_plot_y.size))
-        segment_y = self.current_plot_y[start:end]
-        segment_y = segment_y[np.isfinite(segment_y)]
-        if segment_y.size == 0:
-            return
-
-        y_min = float(np.nanmin(segment_y))
-        y_max = float(np.nanmax(segment_y))
-        if peak_intensity is not None and np.isfinite(peak_intensity):
-            y_max = max(y_max, float(peak_intensity))
-        y_span = max(1.0, y_max - y_min)
-        self.p2.setYRange(y_min - y_span * 0.08, y_max + y_span * 0.20, padding=0)
+            self._set_spectrum_y_range_for_x_range(x_left, x_right, peak_intensity)
 
     def on_update_timeout(self):
         """实际执行更新高斯拟合图"""
@@ -1125,7 +1505,8 @@ class MainWindow(Ui_MainWindow, QMainWindow):
 
         if self.selection_region and self.p1 and self.p2 and self.current_plot_x.size:
             try:
-                minX, maxX = self._clamp_region_values(*self.selection_region.getRegion())
+                region_left, region_right = self._clamp_region_values(*self.selection_region.getRegion())
+                minX, maxX = self._axis_range_to_tof(region_left, region_right)
                 x_start = int(np.searchsorted(self.current_plot_x, minX, side="left"))
                 x_end = int(np.searchsorted(self.current_plot_x, maxX, side="right"))
                 x_start = max(0, min(x_start, self.current_plot_x.size))
@@ -1174,14 +1555,20 @@ class MainWindow(Ui_MainWindow, QMainWindow):
                 if any(label is None for label in readout_labels):
                     return
                 self.label_8.setText(str(round(popt[0], 2)))  # 使用拟合得到的中心点
-                self.label_9.setText(str(round(float(self.current_calibration().tof_to_mz(popt[0])), 2)))
+                self.label_9.setText(f"{float(self.current_calibration().tof_to_mz(popt[0])):.5f}")
                 self.label_10.setText(str(round(minX, 2)))
                 self.label_11.setText(str(round(maxX, 2)))
 
                 self.p1.clear()
                 x_interp = np.linspace(x_data[0], x_data[-1], 1000)
                 y_fit = self.func_gaosi(x_interp, *popt) + baseline  # 添加回基线
-                self.p1.plot(x_interp, y_fit, pen=mkPen('r', width=2), name='拟合图')
+                x_interp_axis = self._tof_to_axis_x(x_interp)
+                self.p1.plot(x_interp_axis, y_fit, pen=mkPen('r', width=2), name='拟合图')
+                self.p1.setXRange(region_left, region_right, padding=0)
+                y_min = float(np.nanmin(y_fit))
+                y_max = float(np.nanmax(y_fit))
+                y_span = max(1.0, y_max - y_min)
+                self.p1.setYRange(y_min - y_span * 0.08, y_max + y_span * 0.20, padding=0)
 
             except Exception as e:
                 print(f"高斯拟合错误：{e}")
@@ -1356,11 +1743,11 @@ class MainWindow(Ui_MainWindow, QMainWindow):
             # 获取当前选择区域的范围
             if self.selection_region is None:
                 raise ValueError("请先加载谱图并选择卡峰区域")
-            minX, maxX = self.selection_region.getRegion()
-            left_idx = int(max(0, round(minX - self.current_time_offset)))
-            right_idx = int(min(len(self.spectrum_plot.yData) - 1, round(maxX - self.current_time_offset)))
+            minX, maxX = self._clamp_region_values(*self.selection_region.getRegion())
+            left_tof, right_tof = self._axis_range_to_tof(minX, maxX)
+            left_idx, right_idx = self._tof_bounds_to_indices(left_tof, right_tof)
             peak = core_add_manual_peak(
-                self.spectrum_plot.yData,
+                self.current_plot_y,
                 left_idx,
                 right_idx,
                 calibration=self.current_calibration(),
@@ -1369,22 +1756,21 @@ class MainWindow(Ui_MainWindow, QMainWindow):
             if peak is None:
                 raise ValueError("选择区域无效")
             
-            # 在表格中显示
-            row = self.peakData.rowCount()
-            self.peakData.insertRow(row)
-            
-            # 按列顺序设置数据
-            self.peakData.setItem(row, 0, QTableWidgetItem("Unknown"))  # Species 列
-            self.peakData.setItem(row, 1, QTableWidgetItem(f"{peak.time:.2f}"))  # 飞行时间列
-            self.peakData.setItem(row, 2, QTableWidgetItem(f"{peak.mz:.2f}"))    # 质量数列
-            self.peakData.setItem(row, 3, QTableWidgetItem(f"{peak.intensity:.2f}"))  # 强度列
-            self.peakData.setItem(row, 4, QTableWidgetItem(f"{peak.left_bound + self.current_time_offset:.2f}"))  # 左边界列
-            self.peakData.setItem(row, 5, QTableWidgetItem(f"{peak.right_bound + self.current_time_offset:.2f}"))  # 右边界列
-            
-            # 添加标注
-            text_item = pg.TextItem(text=f'{peak.mz:.2f}', color='red', anchor=(0.5, 1.5))
-            text_item.setPos(peak.time, peak.intensity)
-            self.p2.addItem(text_item)
+            peak_data = {
+                "species": peak.species,
+                "time": peak.time,
+                "mz": peak.mz,
+                "intensity": peak.intensity,
+                "left": peak.left_bound + self.current_time_offset,
+                "right": peak.right_bound + self.current_time_offset,
+            }
+            self._updating_peak_table = True
+            try:
+                row = self._insert_peak_data_sorted(peak_data)
+            finally:
+                self._updating_peak_table = False
+            self._select_peak_row(row)
+            self.update_plot()
             
         except Exception as e:
             QMessageBox.warning(self, 'Error', f'添加峰值失败: {str(e)}')
@@ -1400,8 +1786,8 @@ class MainWindow(Ui_MainWindow, QMainWindow):
             # 在表格中显示检测到的峰值
             self.display_peaks(peaks)
 
-            # 在图表上标注检测到的峰值
-            self.annotate_peaks_on_plot(peaks)
+            # 表格是峰标注的单一数据源，避免重复叠加旧标注。
+            self.update_plot()
 
         except Exception as e:
             QMessageBox.warning(self, 'Error', f'自动寻峰失败: {str(e)}')
@@ -1479,7 +1865,8 @@ class MainWindow(Ui_MainWindow, QMainWindow):
             headers = ["Species", "飞行时间", "质量数 (m/z)", "强度", "左边界", "右边界"]
             table.setHorizontalHeaderLabels(headers)
 
-            for i, peak in enumerate(peaks):
+            sorted_peaks = sorted(peaks, key=lambda peak: (float(peak.mz), float(peak.time)))
+            for i, peak in enumerate(sorted_peaks):
                 # 按列顺序设置数据
                 table.setItem(i, 0, QTableWidgetItem("Unknown"))  # Species 列
                 table.setItem(i, 1, QTableWidgetItem(f"{peak.time:.2f}"))  # 飞行时间列
@@ -1489,6 +1876,7 @@ class MainWindow(Ui_MainWindow, QMainWindow):
                 table.setItem(i, 5, QTableWidgetItem(f"{peak.right_bound + self.current_time_offset:.2f}"))  # 右边界列
         finally:
             self._updating_peak_table = False
+        self.update_peak_navigation_state()
 
     @staticmethod
     def mz_to_time(mz: float, a: float, b: float, c: float) -> float:
@@ -1503,18 +1891,6 @@ class MainWindow(Ui_MainWindow, QMainWindow):
         time2 = (-b - np.sqrt(discriminant)) / (2*c)
         # 返回正值的解
         return time1 if time1 > 0 else time2
-
-    def annotate_peaks_on_plot(self, peaks):
-        """在质谱图上标注检测到的峰值"""
-        if self.p2 is None:
-            return
-        for peak in peaks:
-            try:
-                text_item = pg.TextItem(text=f'{peak.mz:.2f}', color='red', anchor=(0.5, 1.5))
-                text_item.setPos(peak.time, peak.intensity)  # 使用飞行时间作为x坐标
-                self.p2.addItem(text_item)
-            except Exception as e:
-                print(f"无法标注峰值 {peak.mz}: {e}")
 
     def update_region(self, viewRange):
         """更新选择区域"""
@@ -1585,7 +1961,7 @@ class MainWindow(Ui_MainWindow, QMainWindow):
         if dialog.exec() == QDialog.DialogCode.Accepted:
             peak_data = dialog.get_peak_data()
             self.add_peak_to_table(peak_data)
-            self.annotate_peak(peak_data)
+            self.update_plot()
 
     def delete_peak(self, row):
         """删除峰值"""
@@ -1597,6 +1973,7 @@ class MainWindow(Ui_MainWindow, QMainWindow):
         if reply == QMessageBox.StandardButton.Yes:
             self.peakData.removeRow(row)
             self.update_plot()  # 更新图表
+            self.update_peak_navigation_state()
 
     def edit_peak(self, row):
         """编辑峰值"""
@@ -1608,36 +1985,30 @@ class MainWindow(Ui_MainWindow, QMainWindow):
         dialog = PeakDialog(self, current_data)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             peak_data = dialog.get_peak_data()
-            self.update_peak_in_table(row, peak_data)
+            new_row = self.update_peak_in_table(row, peak_data)
+            self._select_peak_row(new_row)
             self.update_plot()  # 更新图表
+            self.update_peak_navigation_state()
 
     def add_peak_to_table(self, peak_data):
         """将峰值添加到表格"""
         self._updating_peak_table = True
-        row = self.peakData.rowCount()
         try:
-            self.peakData.insertRow(row)
-            self.peakData.setItem(row, 0, QTableWidgetItem(peak_data['species']))
-            self.peakData.setItem(row, 1, QTableWidgetItem(f"{peak_data['time']:.2f}"))
-            self.peakData.setItem(row, 2, QTableWidgetItem(f"{peak_data['mz']:.2f}"))
-            self.peakData.setItem(row, 3, QTableWidgetItem(f"{peak_data['intensity']:.2f}"))
-            self.peakData.setItem(row, 4, QTableWidgetItem(f"{peak_data['left']:.2f}"))
-            self.peakData.setItem(row, 5, QTableWidgetItem(f"{peak_data['right']:.2f}"))
+            row = self._insert_peak_data_sorted(peak_data)
         finally:
             self._updating_peak_table = False
+        self._select_peak_row(row)
 
     def update_peak_in_table(self, row, peak_data):
         """更新表格中的峰值"""
         self._updating_peak_table = True
         try:
-            self.peakData.setItem(row, 0, QTableWidgetItem(peak_data['species']))
-            self.peakData.setItem(row, 1, QTableWidgetItem(f"{peak_data['time']:.2f}"))
-            self.peakData.setItem(row, 2, QTableWidgetItem(f"{peak_data['mz']:.2f}"))
-            self.peakData.setItem(row, 3, QTableWidgetItem(f"{peak_data['intensity']:.2f}"))
-            self.peakData.setItem(row, 4, QTableWidgetItem(f"{peak_data['left']:.2f}"))
-            self.peakData.setItem(row, 5, QTableWidgetItem(f"{peak_data['right']:.2f}"))
+            self.peakData.removeRow(row)
+            new_row = self._insert_peak_data_sorted(peak_data)
         finally:
             self._updating_peak_table = False
+        self.update_peak_navigation_state()
+        return new_row
 
     def update_plot(self):
         """更新图表显示"""
@@ -1655,42 +2026,8 @@ class MainWindow(Ui_MainWindow, QMainWindow):
                 continue
             time, mz, intensity = values
             text_item = pg.TextItem(text=f'{mz:.2f}', color='red', anchor=(0.5, 1.5))
-            text_item.setPos(time, intensity)
+            text_item.setPos(float(self._tof_to_axis_x(time)), intensity)
             self.p2.addItem(text_item)
-
-    def annotate_peak(self, peak_data):
-        """在图表上标注单个峰值"""
-        if self.p2 is None:
-            return
-        try:
-            text_item = pg.TextItem(text=f"{peak_data['mz']:.2f}", color='red', anchor=(0.5, 1.5))
-            text_item.setPos(peak_data['time'], peak_data['intensity'])
-            self.p2.addItem(text_item)
-        except Exception as e:
-            print(f"无法标注峰值: {e}")
-
-    def update_all_peaks(self):
-        """更新所有峰值标注"""
-        try:
-            if self.p2 is None:
-                return
-            # 清除现有标注
-            for item in self.p2.items[:]:
-                if isinstance(item, pg.TextItem):
-                    self.p2.removeItem(item)
-            
-            # 从表格中读取所有峰值数据并重新标注
-            for row in range(self.peakData.rowCount()):
-                values = self._peak_row_values(row)
-                if values is None:
-                    continue
-                time, mz, intensity = values
-                text_item = pg.TextItem(text=f'{mz:.2f}', color='red', anchor=(0.5, 1.5))
-                text_item.setPos(time, intensity)
-                self.p2.addItem(text_item)
-                
-        except Exception as e:
-            QMessageBox.warning(self, 'Error', f'更新峰值标注失败: {str(e)}')
 
     def clear_peak_data(self):
         """清除峰值数据表格中的所有数据"""
@@ -1722,6 +2059,7 @@ class MainWindow(Ui_MainWindow, QMainWindow):
             if mass: mass.setText("")
             if peak_left: peak_left.setText("")
             if peak_right: peak_right.setText("")
+            self.update_peak_navigation_state()
             
             QMessageBox.information(self, "成功", "峰值数据已清除")
             

@@ -24,6 +24,47 @@ const state = {
   uploadLogEntries: [],
 };
 
+const API_BASE_STORAGE_KEY = "bl03u_api_base_url";
+
+function resolveApiBase() {
+  const defaultBase = window.location.origin && window.location.origin !== "null"
+    ? window.location.origin
+    : "http://127.0.0.1:8000";
+  let queryBase = "";
+  try {
+    const params = new URLSearchParams(window.location.search);
+    queryBase = params.get("api") || params.get("api_base") || "";
+  } catch {
+    queryBase = "";
+  }
+  let storedBase = "";
+  try {
+    storedBase = localStorage.getItem(API_BASE_STORAGE_KEY) || "";
+  } catch {
+    storedBase = "";
+  }
+  const globalBase = typeof window.BL03U_API_BASE_URL === "string" ? window.BL03U_API_BASE_URL : "";
+  const base = queryBase || globalBase || storedBase || defaultBase;
+  if (queryBase) {
+    try {
+      localStorage.setItem(API_BASE_STORAGE_KEY, queryBase);
+    } catch {
+      // Ignore storage errors in private browsing or file:// contexts.
+    }
+  }
+  return base.replace(/\/+$/, "");
+}
+
+const API_BASE = resolveApiBase();
+
+function apiUrl(path) {
+  const value = String(path || "");
+  if (/^https?:\/\//i.test(value)) return value;
+  const normalizedBase = API_BASE.endsWith("/") ? API_BASE : `${API_BASE}/`;
+  const normalizedPath = value.startsWith("/") ? value.slice(1) : value;
+  return new URL(normalizedPath, normalizedBase).toString();
+}
+
 const $ = (id) => document.getElementById(id);
 
 function statusPresentation(status) {
@@ -166,12 +207,38 @@ function solveNonnegativeLeastSquares(design, target, lockedCoefficients = {}) {
 }
 
 async function fetchJson(url, options = {}) {
-  const response = await fetch(url, options);
+  const response = await fetch(apiUrl(url), options);
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new Error(data.detail || data.error || response.statusText);
+    const error = new Error(data.detail || data.error || response.statusText);
+    error.status = response.status;
+    error.detail = data.detail || data.error || "";
+    throw error;
   }
   return data;
+}
+
+function isMissingPicsLibraryError(error) {
+  if (!state.picsLibraryId || !error) return false;
+  const text = String(error.detail || error.message || "");
+  return (
+    error.status === 404
+    && (
+      text.includes("PICS library not found")
+      || text.includes("临时 PICS 工作库")
+      || text.includes("临时工作库")
+      || text.includes("工作库不存在")
+    )
+  );
+}
+
+function handleMissingPicsLibrary(error, writer = log) {
+  if (!isMissingPicsLibraryError(error)) return false;
+  const shortId = state.picsLibraryId.slice(0, 8);
+  setPicsLibrary("");
+  const message = `临时工作库 ${shortId} 已失效，已切回服务器维护库`;
+  writer(message);
+  return true;
 }
 
 function payloadFromForm() {
@@ -289,6 +356,7 @@ async function startJob(event) {
     setProgress(14, "等待服务器开始计算", "running");
     pollProgress();
   } catch (error) {
+    handleMissingPicsLibrary(error);
     setBusy(false);
     setStatus("error", error.message);
     setProgress(100, "提交失败", "error");
@@ -324,6 +392,7 @@ async function uploadPieCurve(event) {
     setProgress(100, "PIE 曲线已载入", "done");
     setStatus("done", "PIE 曲线已载入");
   } catch (error) {
+    handleMissingPicsLibrary(error);
     setStatus("error", error.message);
     setProgress(100, "上传失败", "error");
     log(error.message);
@@ -353,6 +422,7 @@ async function pollProgress() {
       return;
     }
     if (data.status === "error") {
+      handleMissingPicsLibrary({ status: 404, message: data.error, detail: data.error });
       setBusy(false);
       setProgress(100, data.error || "任务失败", "error", `${data.elapsed}s`);
       log(data.error || "任务失败");
@@ -360,6 +430,7 @@ async function pollProgress() {
     }
     setTimeout(pollProgress, 900);
   } catch (error) {
+    handleMissingPicsLibrary(error);
     setBusy(false);
     setStatus("error", error.message);
     setProgress(100, "读取进度失败", "error");
@@ -1032,6 +1103,13 @@ async function searchPics(event) {
       await loadPicsSpecies(state.picsRows[0].id);
     }
   } catch (error) {
+    if (handleMissingPicsLibrary(error)) {
+      state.picsRows = [];
+      state.currentPics = null;
+      renderPicsSummary();
+      drawPicsChart();
+      renderPicsTable();
+    }
     $("pics-caption").textContent = error.message;
   } finally {
     $("pics-search-button").disabled = false;
@@ -1056,7 +1134,19 @@ async function loadPicsSpecies(speciesId) {
   const params = new URLSearchParams();
   if (state.picsLibraryId) params.set("library_id", state.picsLibraryId);
   const suffix = params.toString() ? `?${params.toString()}` : "";
-  const data = await fetchJson(`/api/pics/species/${encodeURIComponent(speciesId)}${suffix}`);
+  let data;
+  try {
+    data = await fetchJson(`/api/pics/species/${encodeURIComponent(speciesId)}${suffix}`);
+  } catch (error) {
+    if (handleMissingPicsLibrary(error)) {
+      state.currentPics = null;
+      renderPicsSummary();
+      drawPicsChart();
+      renderPicsTable();
+    }
+    $("pics-caption").textContent = error.message;
+    throw error;
+  }
   state.currentPics = data;
   renderPicsSummary();
   drawPicsChart();
@@ -1392,6 +1482,12 @@ function csvCell(value) {
   return /[",\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
 }
 
+function updateApiBaseCaption() {
+  const caption = $("api-base-caption");
+  if (!caption) return;
+  caption.textContent = `API 后端: ${API_BASE}`;
+}
+
 function activePageId() {
   const page = document.querySelector(".page.active");
   return page ? page.id : "pie-page";
@@ -1522,7 +1618,11 @@ $("pics-form").addEventListener("submit", searchPics);
 $("pics-download-button").addEventListener("click", downloadPicsRows);
 $("pics-table-view").addEventListener("click", (event) => {
   const button = event.target.closest("[data-pics-id]");
-  if (button) loadPicsSpecies(button.dataset.picsId);
+  if (button) {
+    loadPicsSpecies(button.dataset.picsId).catch((error) => {
+      if (!isMissingPicsLibraryError(error)) $("pics-caption").textContent = error.message;
+    });
+  }
 });
 $("pics-upload-form").addEventListener("submit", uploadPics);
 $("pics-upload-scope").addEventListener("change", updateUploadScopeUi);
@@ -1555,6 +1655,7 @@ document.querySelectorAll(".page").forEach((page) => {
 });
 updatePicsLibraryCaptions();
 updateUploadScopeUi();
+updateApiBaseCaption();
 setProgress(0, "等待任务", "idle");
 setUploadProgress(0, "等待上传", "idle");
 drawChart();

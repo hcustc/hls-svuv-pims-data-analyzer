@@ -9,13 +9,13 @@ import numpy as np
 import pandas as pd
 import yaml
 
-from .config import CONFIG_ROOT, project_path
+from .config import project_path, writable_project_path
 from .isotope import formula_nominal_mass
 from .pie_analysis import load_species_database
 from .temperature_scan import build_temperature_curves
 
 
-DEFAULT_MOLE_FRACTION_CONFIG = CONFIG_ROOT / "mole_fraction.yaml"
+DEFAULT_MOLE_FRACTION_CONFIG = Path("config/mole_fraction.yaml")
 
 MASS_DISCRIMINATION_PRESETS = {
     "760 Torr / 80μm": 0.77897,
@@ -79,7 +79,7 @@ def save_mole_fraction_settings(
     settings: MoleFractionSettings,
     path: str | Path = DEFAULT_MOLE_FRACTION_CONFIG,
 ) -> Path:
-    config_path = project_path(path)
+    config_path = writable_project_path(path)
     config_path.parent.mkdir(parents=True, exist_ok=True)
     data: dict[str, Any] = asdict(settings)
     data["expansion_factors"] = {

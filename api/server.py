@@ -19,8 +19,9 @@ from typing import Any, Dict, List, Optional, Union
 import pandas as pd
 from fastapi import FastAPI, Request
 from fastapi import HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from starlette.responses import FileResponse
+from starlette.responses import FileResponse, RedirectResponse
 from starlette.staticfiles import StaticFiles
 
 from core.calibration import Calibration
@@ -45,6 +46,12 @@ from core.spectrum_io import read_bl03u_txt, sum_spectra
 
 
 app = FastAPI(title="BL03U MassSpectrumTool API")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 WEB_ROOT = PROJECT_ROOT / "frontends" / "web_app" / "static"
 if WEB_ROOT.exists():
     app.mount("/static", StaticFiles(directory=WEB_ROOT), name="static")
@@ -87,6 +94,12 @@ PICS_LIBRARIES_LOCK = threading.Lock()
 PICS_LIBRARIES: Dict[str, PicsLibrary] = {}
 PICS_LIBRARY_TTL_SECONDS = int(float(os.environ.get("BL03U_PICS_LIBRARY_TTL_HOURS", "24")) * 3600)
 MAX_UPLOAD_BYTES = int(float(os.environ.get("BL03U_MAX_UPLOAD_MB", "20")) * 1024 * 1024)
+DEFAULT_JOB_TTL_HOURS = 6
+DEFAULT_MAX_JOBS = 100
+
+
+class PathAccessError(ValueError):
+    """Raised when a user-supplied path escapes configured data roots."""
 
 
 class IsotopePayload(BaseModel):
@@ -182,9 +195,41 @@ def _parse_mz_values(value: Optional[str]) -> List[int]:
     return sorted(set(values))
 
 
-def _resolve_path(path: Union[str, Path]) -> Path:
+def _resolve_root_path(path: Union[str, Path]) -> Path:
     path = Path(path).expanduser()
-    return path if path.is_absolute() else PROJECT_ROOT / path
+    return (path if path.is_absolute() else PROJECT_ROOT / path).resolve(strict=False)
+
+
+def _path_is_inside(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _allowed_data_roots() -> List[Path]:
+    roots = [_resolve_root_path(PROJECT_ROOT)]
+    configured = os.environ.get("BL03U_ALLOWED_DATA_ROOTS", "").strip()
+    if configured:
+        for token in configured.split(os.pathsep):
+            token = token.strip()
+            if token:
+                roots.append(_resolve_root_path(token))
+
+    unique_roots: List[Path] = []
+    for root in roots:
+        if root not in unique_roots:
+            unique_roots.append(root)
+    return unique_roots
+
+
+def _resolve_path(path: Union[str, Path]) -> Path:
+    resolved = _resolve_root_path(path)
+    if any(_path_is_inside(resolved, root) for root in _allowed_data_roots()):
+        return resolved
+    allowed = ", ".join(str(root) for root in _allowed_data_roots())
+    raise PathAccessError(f"路径不在允许的数据目录内: {resolved}。允许目录: {allowed}")
 
 
 def _default_database_path() -> Path:
@@ -248,13 +293,17 @@ def _database_path_from_request(
     if library is not None:
         path = Path(library.database_path)
     else:
-        path = _resolve_path(database or species_database_path())
+        try:
+            path = _resolve_path(database or species_database_path())
+        except PathAccessError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
     if not path.exists() or not path.is_file():
         raise HTTPException(status_code=404, detail="SQLite PICS database not found")
     return path
 
 
 def _get_job(job_id: str) -> PieJob:
+    _cleanup_jobs()
     with JOBS_LOCK:
         job = JOBS.get(job_id)
     if job is None:
@@ -268,6 +317,39 @@ def _update_job(job_id: str, **values) -> None:
         for key, value in values.items():
             setattr(job, key, value)
         job.updated_at = time.time()
+
+
+def _job_ttl_seconds() -> int:
+    return int(float(os.environ.get("BL03U_PIE_JOB_TTL_HOURS", str(DEFAULT_JOB_TTL_HOURS))) * 3600)
+
+
+def _max_jobs() -> int:
+    return max(1, int(os.environ.get("BL03U_MAX_PIE_JOBS", str(DEFAULT_MAX_JOBS))))
+
+
+def _cleanup_jobs() -> None:
+    ttl_seconds = _job_ttl_seconds()
+    max_jobs = _max_jobs()
+    now = time.time()
+    with JOBS_LOCK:
+        if ttl_seconds > 0:
+            for job_id, job in list(JOBS.items()):
+                if job.status in {"done", "error"} and now - job.updated_at > ttl_seconds:
+                    JOBS.pop(job_id, None)
+
+        overflow = len(JOBS) - max_jobs
+        if overflow <= 0:
+            return
+        removable = sorted(
+            (
+                job
+                for job in JOBS.values()
+                if job.status in {"done", "error"}
+            ),
+            key=lambda item: item.updated_at,
+        )
+        for job in removable[:overflow]:
+            JOBS.pop(job.id, None)
 
 
 def _curve_payload(curve: dict) -> Dict[str, Any]:
@@ -908,11 +990,12 @@ def web_index():
     index = WEB_ROOT / "index.html"
     if not index.exists():
         raise HTTPException(status_code=404, detail="web frontend not found")
-    return FileResponse(index)
+    return RedirectResponse(url="/static/index.html")
 
 
 @app.post("/api/pie/start")
 def start_pie_job(payload: PieStartPayload):
+    _cleanup_jobs()
     job_id = uuid.uuid4().hex
     with JOBS_LOCK:
         JOBS[job_id] = PieJob(id=job_id)
@@ -944,6 +1027,7 @@ async def upload_pie_curve(
         raise HTTPException(status_code=400, detail=str(exc))
 
     summary = _pie_summary(analysis_df, curves)
+    _cleanup_jobs()
     job_id = uuid.uuid4().hex
     with JOBS_LOCK:
         JOBS[job_id] = PieJob(
@@ -1230,11 +1314,16 @@ def isotope(payload: IsotopePayload):
 @app.post("/spectrum/read")
 async def read_spectrum(request: Request, filename: str = "spectrum.txt"):
     suffix = Path(filename).suffix or ".txt"
-    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as handle:
-        handle.write(await request.body())
-        temp_path = handle.name
-    spectrum = read_bl03u_txt(temp_path)
-    return {"x": spectrum.x.tolist(), "y": spectrum.y.tolist()}
+    temp_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as handle:
+            handle.write(await request.body())
+            temp_path = handle.name
+        spectrum = read_bl03u_txt(temp_path)
+        return {"x": spectrum.x.tolist(), "y": spectrum.y.tolist()}
+    finally:
+        if temp_path:
+            Path(temp_path).unlink(missing_ok=True)
 
 
 @app.post("/spectrum/peaks")
@@ -1246,21 +1335,32 @@ async def detect_peaks(
     c: float = 0.272489072,
 ):
     suffix = Path(filename).suffix or ".txt"
-    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as handle:
-        handle.write(await request.body())
-        temp_path = handle.name
-    spectrum = read_bl03u_txt(temp_path)
-    offset = float(spectrum.x[0]) if len(spectrum.x) else 0.0
-    peaks = detect_peaks_in_range(
-        spectrum.y,
-        calibration=Calibration(a, b, c),
-        detection_min_idx=0,
-        time_offset=offset,
-    )
-    return {"peaks": [peak.to_dict() for peak in peaks]}
+    temp_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as handle:
+            handle.write(await request.body())
+            temp_path = handle.name
+        spectrum = read_bl03u_txt(temp_path)
+        offset = float(spectrum.x[0]) if len(spectrum.x) else 0.0
+        peaks = detect_peaks_in_range(
+            spectrum.y,
+            calibration=Calibration(a, b, c),
+            detection_min_idx=0,
+            time_offset=offset,
+        )
+        return {"peaks": [peak.to_dict() for peak in peaks]}
+    finally:
+        if temp_path:
+            Path(temp_path).unlink(missing_ok=True)
 
 
 @app.get("/spectrum/sum")
 def sum_folder(folder: str):
-    spectrum = sum_spectra(folder)
+    try:
+        folder_path = _resolve_path(folder)
+        spectrum = sum_spectra(folder_path)
+    except PathAccessError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     return {"x": spectrum.x.tolist(), "y": spectrum.y.tolist()}
