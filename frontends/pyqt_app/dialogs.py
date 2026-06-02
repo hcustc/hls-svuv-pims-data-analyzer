@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -25,7 +26,8 @@ from core.isotope import (
 )
 from core.nist_webbook import default_nist_webbook_client
 from core.output_paths import ensure_output_dir
-from core.pie_analysis import analyze_pie_folder, build_pie_curves, identify_species_for_mz_with_curve, load_species_database
+from core.pie_analysis import analyze_pie_folder, build_pie_curves, identify_species_for_mz_with_curve, load_species_database, analyze_multiple_pie_folders, merge_pie_segments
+from core.elements import get_all_elements_from_database, filter_species_by_elements, COMMON_ELEMENTS, parse_formula as parse_formula_elements, get_elements_from_formula
 from core.normalization import NormalizationSettings, load_normalization_settings, save_normalization_settings
 from core.temperature_scan import (
     TEMPERATURE_CURVE_CLASS_LABELS,
@@ -1364,9 +1366,11 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.curves: dict[int, dict] = {}
         self.current_mz: int | None = None
         self.current_fit: dict | None = None
+        self.all_fit_results: dict[int, dict] = {}  # 保存所有拟合结果
         self.worker: WorkerThread | None = None
+        self.pie_folders: list[str] = []
         self.setWindowTitle("PIE物种拟合")
-        self.resize(1280, 780)
+        self.resize(1380, 850)
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
@@ -1380,10 +1384,31 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.database_edit = QtWidgets.QLineEdit(str(default_db) if default_db.exists() else "")
         self.load_button = QtWidgets.QPushButton("加载数据库")
         self.load_button.clicked.connect(self.load_database)
+        
+        # 多文件夹选择相关
+        self.use_multi_folders = QtWidgets.QCheckBox("多文件夹模式")
+        self.use_multi_folders.setChecked(False)
+        self.use_multi_folders.stateChanged.connect(self.toggle_multi_folder_mode)
+        
         self.folder_edit = QtWidgets.QLineEdit()
         self.folder_edit.setPlaceholderText("选择包含PIE扫描质谱文件的文件夹")
         self.select_folder_button = QtWidgets.QPushButton("选择文件夹")
         self.select_folder_button.clicked.connect(self.select_folder)
+        
+        self.folder_list = QtWidgets.QListWidget()
+        self.folder_list.setMaximumHeight(100)
+        self.add_folder_button = QtWidgets.QPushButton("添加文件夹")
+        self.add_folder_button.clicked.connect(self.add_folder)
+        self.remove_folder_button = QtWidgets.QPushButton("移除选中")
+        self.remove_folder_button.clicked.connect(self.remove_folder)
+        self.clear_folders_button = QtWidgets.QPushButton("清空列表")
+        self.clear_folders_button.clicked.connect(self.clear_folders)
+        
+        self.merge_method_combo = QtWidgets.QComboBox()
+        self.merge_method_combo.addItem("低能段为主 (推荐)", "low_energy_dominant")
+        self.merge_method_combo.addItem("第一组为主", "first_segment_dominant")
+        self.merge_method_combo.addItem("简单拼接 (不缩放)", "mean")
+        
         self.analyze_button = QtWidgets.QPushButton("生成PIE曲线")
         self.analyze_button.clicked.connect(self.run_analysis)
         self.export_button = QtWidgets.QPushButton("导出曲线数据")
@@ -1416,27 +1441,128 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.status_label = QtWidgets.QLabel("就绪")
 
         controls_layout.addWidget(QtWidgets.QLabel("PICS库"), 0, 0)
-        controls_layout.addWidget(self.database_edit, 0, 1, 1, 6)
-        controls_layout.addWidget(self.load_button, 0, 7)
+        controls_layout.addWidget(self.database_edit, 0, 1, 1, 7)
+        controls_layout.addWidget(self.load_button, 0, 8)
         controls_layout.addWidget(QtWidgets.QLabel("PIE文件夹"), 1, 0)
-        controls_layout.addWidget(self.folder_edit, 1, 1, 1, 4)
-        controls_layout.addWidget(self.select_folder_button, 1, 5)
-        controls_layout.addWidget(self.analyze_button, 1, 6)
-        controls_layout.addWidget(self.export_button, 1, 7)
-        controls_layout.addWidget(self.common_params_button, 1, 8)
-        controls_layout.addWidget(QtWidgets.QLabel("能量分组小数"), 2, 0)
-        controls_layout.addWidget(self.energy_decimals_edit, 2, 1)
-        controls_layout.addWidget(self.recursive_check, 2, 2)
-        controls_layout.addWidget(self.gaussian_check, 2, 3)
-        controls_layout.addWidget(QtWidgets.QLabel("自动寻峰与归一化参数在“通用参数”页管理"), 2, 4, 1, 4)
-        controls_layout.addWidget(QtWidgets.QLabel("卡峰来源"), 3, 0)
-        controls_layout.addWidget(self.peak_source_combo, 3, 1)
-        controls_layout.addWidget(self.peak_file_edit, 3, 2, 1, 4)
-        controls_layout.addWidget(self.select_peak_file_button, 3, 6)
-        controls_layout.addWidget(self.status_label, 4, 0, 1, 9)
-        controls_layout.setColumnStretch(1, 1)
-        controls_layout.setColumnStretch(4, 1)
+        controls_layout.addWidget(self.use_multi_folders, 1, 1)
+        controls_layout.addWidget(self.folder_edit, 1, 2, 1, 4)
+        controls_layout.addWidget(self.select_folder_button, 1, 6)
+        controls_layout.addWidget(self.analyze_button, 1, 7)
+        controls_layout.addWidget(self.export_button, 1, 8)
+        controls_layout.addWidget(self.common_params_button, 1, 9)
+        
+        # 多文件夹列表区域
+        folder_list_group = QtWidgets.QGroupBox("多段PIE文件夹列表 (按能量顺序添加)")
+        folder_list_layout = QtWidgets.QVBoxLayout(folder_list_group)
+        folder_list_layout.setContentsMargins(5, 5, 5, 5)
+        folder_list_layout.addWidget(self.folder_list)
+        folder_btn_layout = QtWidgets.QHBoxLayout()
+        folder_btn_layout.addWidget(self.add_folder_button)
+        folder_btn_layout.addWidget(self.remove_folder_button)
+        folder_btn_layout.addWidget(self.clear_folders_button)
+        folder_btn_layout.addWidget(QtWidgets.QLabel("合并方式:"))
+        folder_btn_layout.addWidget(self.merge_method_combo)
+        folder_btn_layout.addStretch()
+        folder_list_layout.addLayout(folder_btn_layout)
+        controls_layout.addWidget(folder_list_group, 2, 0, 1, 10)
+        
+        controls_layout.addWidget(QtWidgets.QLabel("能量分组小数"), 3, 0)
+        controls_layout.addWidget(self.energy_decimals_edit, 3, 1)
+        controls_layout.addWidget(self.recursive_check, 3, 2)
+        controls_layout.addWidget(self.gaussian_check, 3, 3)
+        controls_layout.addWidget(QtWidgets.QLabel("自动寻峰与归一化参数在“通用参数”页管理"), 3, 4, 1, 5)
+        controls_layout.addWidget(QtWidgets.QLabel("卡峰来源"), 4, 0)
+        controls_layout.addWidget(self.peak_source_combo, 4, 1)
+        controls_layout.addWidget(self.peak_file_edit, 4, 2, 1, 4)
+        controls_layout.addWidget(self.select_peak_file_button, 4, 6)
+        controls_layout.addWidget(self.status_label, 5, 0, 1, 10)
+        controls_layout.setColumnStretch(2, 1)
+        controls_layout.setColumnStretch(5, 1)
         layout.addWidget(controls)
+        
+        # 元素筛选和一键拟合区域
+        fit_controls = QtWidgets.QWidget()
+        fit_controls_layout = QtWidgets.QGridLayout(fit_controls)
+        fit_controls_layout.setContentsMargins(0, 0, 0, 0)
+        fit_controls_layout.setHorizontalSpacing(10)
+        fit_controls_layout.setVerticalSpacing(5)
+        
+        # 元素筛选区域
+        elements_group = QtWidgets.QGroupBox("元素筛选")
+        elements_layout = QtWidgets.QVBoxLayout(elements_group)
+        elements_layout.setSpacing(5)
+        
+        self.element_checks = {}
+        for i, elem in enumerate(COMMON_ELEMENTS):
+            check = QtWidgets.QCheckBox(elem)
+            check.setChecked(True)
+            check.stateChanged.connect(self.on_element_filter_changed)
+            self.element_checks[elem] = check
+        
+        elements_grid = QtWidgets.QGridLayout()
+        for i, elem in enumerate(COMMON_ELEMENTS):
+            row = i // 4
+            col = i % 4
+            elements_grid.addWidget(self.element_checks[elem], row, col)
+        elements_layout.addLayout(elements_grid)
+        
+        fit_controls_layout.addWidget(elements_group, 0, 0)
+        
+        # 一键拟合按钮
+        fit_buttons = QtWidgets.QVBoxLayout()
+        self.fit_all_button = QtWidgets.QPushButton("一键拟合所有曲线")
+        self.fit_all_button.clicked.connect(self.fit_all_curves)
+        self.refit_selected_button = QtWidgets.QPushButton("重新拟合选中")
+        self.refit_selected_button.clicked.connect(self.refit_selected_curves)
+        self.clear_fits_button = QtWidgets.QPushButton("清除所有拟合")
+        self.clear_fits_button.clicked.connect(self.clear_all_fits)
+        self.export_pie_button = QtWidgets.QPushButton("导出PIE鉴定结果")
+        self.export_pie_button.clicked.connect(self.export_pie_results)
+        self.export_pie_button.setStyleSheet("""
+            QPushButton {
+                background-color: #4CAF50;
+                color: white;
+                border: none;
+                padding: 5px;
+                border-radius: 3px;
+            }
+            QPushButton:hover {
+                background-color: #45a049;
+            }
+            QPushButton:disabled {
+                background-color: #cccccc;
+            }
+        """)
+        fit_buttons.addWidget(self.fit_all_button)
+        fit_buttons.addWidget(self.refit_selected_button)
+        fit_buttons.addWidget(self.clear_fits_button)
+        fit_buttons.addWidget(self.export_pie_button)
+        fit_buttons.addStretch()
+        fit_controls_layout.addLayout(fit_buttons, 0, 1)
+        
+        # 强制拟合物种
+        force_group = QtWidgets.QGroupBox("强制拟合物种 (双击m/z列表添加)")
+        force_layout = QtWidgets.QVBoxLayout(force_group)
+        force_layout.setSpacing(5)
+        self.force_species_list = QtWidgets.QListWidget()
+        self.force_species_list.setMaximumHeight(80)
+        self.remove_force_button = QtWidgets.QPushButton("移除选中")
+        self.remove_force_button.clicked.connect(self.remove_force_species)
+        force_layout.addWidget(self.force_species_list)
+        force_layout.addWidget(self.remove_force_button)
+        fit_controls_layout.addWidget(force_group, 0, 2)
+        
+        # 拟合统计
+        stats_group = QtWidgets.QGroupBox("拟合统计")
+        stats_layout = QtWidgets.QVBoxLayout(stats_group)
+        self.fit_stats_label = QtWidgets.QLabel("已拟合: 0 / 0 条曲线\n平均R²: N/A")
+        stats_layout.addWidget(self.fit_stats_label)
+        fit_controls_layout.addWidget(stats_group, 0, 3)
+        
+        layout.addWidget(fit_controls)
+        
+        # 初始化UI状态
+        self.toggle_multi_folder_mode(0)
 
         splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
 
@@ -1512,10 +1638,308 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, "错误", str(exc))
 
+    def get_selected_elements(self) -> set:
+        """获取选中的元素集合"""
+        return {elem for elem, check in self.element_checks.items() if check.isChecked()}
+    
+    def on_element_filter_changed(self):
+        """元素筛选变化时更新统计信息"""
+        selected = self.get_selected_elements()
+        self.status_label.setText(f"已加载PICS库: {len(self.database)} 个物种 | 筛选元素: {', '.join(sorted(selected)) if selected else '全部'}")
+    
+    def get_filtered_database(self) -> list:
+        """获取根据选中元素筛选后的数据库"""
+        selected_elements = self.get_selected_elements()
+        if not selected_elements:
+            return self.database
+        return filter_species_by_elements(self.database, selected_elements)
+    
+    def fit_all_curves(self):
+        """一键拟合所有曲线"""
+        if not self.curves:
+            QtWidgets.QMessageBox.warning(self, "提示", "请先生成PIE曲线")
+            return
+        
+        self.set_busy(True, "正在一键拟合所有曲线...")
+        self.worker = WorkerThread(
+            lambda: self.fit_curves_sync(list(self.curves.keys())),
+            self,
+        )
+        self.worker.finished_with_result.connect(self.on_fit_all_complete)
+        self.worker.failed.connect(self.on_analysis_failed)
+        self.worker.finished.connect(lambda: self.set_busy(False, "就绪"))
+        self.worker.start()
+    
+    def fit_curves_sync(self, mz_list: list) -> dict:
+        """拟合指定的质量数曲线"""
+        filtered_db = self.get_filtered_database()
+        force_species = self.get_force_species()
+        results = {}
+        for mz in mz_list:
+            curve = self.curves.get(mz)
+            if not curve:
+                continue
+            fit_result = self._fit_curve(mz, curve, filtered_db, force_species)
+            results[mz] = fit_result
+        return results
+    
+    def _fit_curve(self, mz: int, curve: dict, database: list, force_species: list) -> dict:
+        """拟合单条曲线"""
+        energies = np.array(curve.get('energies', []))
+        intensities = np.array(curve.get('intensities', []))
+        
+        if len(energies) == 0 or len(intensities) == 0:
+            return {'success': False, 'error': '无数据'}
+        
+        fit_model = identify_species_for_mz_with_curve(
+            database, mz, energies, intensities, forced_species=force_species
+        )
+        
+        if not fit_model or not fit_model.get('species'):
+            return {'success': False, 'error': '无匹配物种', 'model': None}
+        
+        return {
+            'success': True,
+            'model': fit_model,
+            'species': fit_model.get('species', [])[:3],
+            'r_squared': fit_model.get('r_squared', 0.0)
+        }
+    
+    def get_force_species(self) -> list:
+        """获取强制拟合物种列表"""
+        return [self.force_species_list.item(i).text() 
+                for i in range(self.force_species_list.count())]
+    
+    def on_fit_all_complete(self, results: dict):
+        """一键拟合完成"""
+        # 保存所有拟合结果
+        self.all_fit_results = results
+        
+        fitted_count = sum(1 for r in results.values() if r.get('success'))
+        total_count = len(results)
+        
+        all_r_squared = [r.get('r_squared', 0.0) for r in results.values() if r.get('success')]
+        avg_r_squared = sum(all_r_squared) / len(all_r_squared) if all_r_squared else 0.0
+        
+        self.fit_stats_label.setText(f"已拟合: {fitted_count} / {total_count} 条曲线\n平均R²: {avg_r_squared:.4f}")
+        
+        if fitted_count > 0:
+            first_mz = list(results.keys())[0]
+            self.current_mz = first_mz
+            
+            first_result = results[first_mz]
+            if first_result.get('success') and first_result.get('model'):
+                self.current_fit = first_result['model']
+                
+                results_list = first_result['model'].get('species', [])
+                fit_df = pd.DataFrame(
+                    [
+                        {
+                            "物种名称": item["species"],
+                            "电离能(eV)": "" if item.get("ie") is None else round(float(item["ie"]), 4),
+                            "匹配系数": round(float(item["coefficient"]), 6),
+                            "贡献(%)": round(float(item["contribution_percent"]), 2),
+                            "R²": round(float(item["r_squared"]), 5),
+                        }
+                        for item in results_list
+                    ],
+                    columns=["物种名称", "电离能(eV)", "匹配系数", "贡献(%)", "R²"],
+                )
+                self.set_dataframe(self.fit_table, fit_df)
+                self.detail_tabs.setCurrentWidget(self.fit_table)
+                
+                if first_mz in self.curves:
+                    self.update_plot(self.curves[first_mz], first_result['model'])
+            
+            self.refresh_current_plot()
+            self.mz_list.setCurrentRow(0)
+        
+        QtWidgets.QMessageBox.information(
+            self, "完成", 
+            f"拟合完成！\n已拟合: {fitted_count} / {total_count} 条曲线"
+        )
+    
+    def refit_selected_curves(self):
+        """重新拟合选中的曲线"""
+        selected_items = self.mz_list.selectedItems()
+        if not selected_items:
+            QtWidgets.QMessageBox.warning(self, "提示", "请先选择要重新拟合的质量数")
+            return
+        
+        mz_list = []
+        for item in selected_items:
+            try:
+                mz = int(item.text())
+                mz_list.append(mz)
+            except ValueError:
+                continue
+        
+        if not mz_list:
+            return
+        
+        self.set_busy(True, f"正在重新拟合 {len(mz_list)} 条曲线...")
+        self.worker = WorkerThread(
+            lambda: self.fit_curves_sync(mz_list),
+            self,
+        )
+        self.worker.finished_with_result.connect(self.on_refit_complete)
+        self.worker.failed.connect(self.on_analysis_failed)
+        self.worker.finished.connect(lambda: self.set_busy(False, "就绪"))
+        self.worker.start()
+    
+    def on_refit_complete(self, results: dict):
+        """重新拟合完成"""
+        # 更新保存的拟合结果
+        for mz, result in results.items():
+            if result.get('success'):
+                self.all_fit_results[mz] = result
+        
+        fitted_count = sum(1 for r in self.all_fit_results.values() if r.get('success'))
+        total_count = len(self.curves)
+        
+        # 更新统计信息
+        all_r_squared = [r.get('r_squared', 0.0) for r in self.all_fit_results.values() if r.get('success')]
+        avg_r_squared = sum(all_r_squared) / len(all_r_squared) if all_r_squared else 0.0
+        self.fit_stats_label.setText(f"已拟合: {fitted_count} / {total_count} 条曲线\n平均R²: {avg_r_squared:.4f}")
+        
+        if fitted_count > 0:
+            for mz, result in results.items():
+                if result.get('success') and result.get('model'):
+                    self.current_mz = mz
+                    self.current_fit = result['model']
+                    
+                    results_list = result['model'].get('species', [])
+                    fit_df = pd.DataFrame(
+                        [
+                            {
+                                "物种名称": item["species"],
+                                "电离能(eV)": "" if item.get("ie") is None else round(float(item["ie"]), 4),
+                                "匹配系数": round(float(item["coefficient"]), 6),
+                                "贡献(%)": round(float(item["contribution_percent"]), 2),
+                                "R²": round(float(item["r_squared"]), 5),
+                            }
+                            for item in results_list
+                        ],
+                        columns=["物种名称", "电离能(eV)", "匹配系数", "贡献(%)", "R²"],
+                    )
+                    self.set_dataframe(self.fit_table, fit_df)
+                    self.detail_tabs.setCurrentWidget(self.fit_table)
+                    
+                    if mz in self.curves:
+                        self.update_plot(self.curves[mz], result['model'])
+                    break
+        
+        self.refresh_current_plot()
+        
+        QtWidgets.QMessageBox.information(
+            self, "完成", 
+            f"重新拟合完成！\n已拟合: {fitted_count} / {total_count} 条曲线"
+        )
+    
+    def clear_all_fits(self):
+        """清除所有拟合"""
+        self.current_fit = None
+        self.all_fit_results = {}
+        self.fit_table.setRowCount(0)
+        self.fit_stats_label.setText("已拟合: 0 / 0 条曲线\n平均R²: N/A")
+        self.refresh_current_plot()
+    
+    def export_pie_results(self):
+        """导出PIE物种鉴定结果到Excel"""
+        from core.export_pie_results import export_pie_results_to_excel
+        
+        # 检查是否有拟合结果
+        if not hasattr(self, 'all_fit_results') or not self.all_fit_results:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "警告",
+                "没有找到拟合结果，请先进行拟合操作。"
+            )
+            return
+        
+        # 生成默认文件名
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        default_filename = f"PIE_identification_results_{timestamp}.xlsx"
+        
+        # 打开文件保存对话框
+        file_path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "导出PIE鉴定结果",
+            default_filename,
+            "Excel Files (*.xlsx);;All Files (*)"
+        )
+        
+        if not file_path:
+            return
+        
+        try:
+            # 调用导出函数
+            result = export_pie_results_to_excel(self, file_path)
+            
+            if result['success']:
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "导出成功",
+                    result['message']
+                )
+            else:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "导出失败",
+                    result['message']
+                )
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(
+                self,
+                "错误",
+                f"导出时发生错误：{str(e)}"
+            )
+    
+    def remove_force_species(self):
+        """移除强制拟合物种"""
+        current_row = self.force_species_list.currentRow()
+        if current_row >= 0:
+            self.force_species_list.takeItem(current_row)
+    
+    def add_force_species(self, species_name: str):
+        """添加强制拟合物种"""
+        if species_name not in self.get_force_species():
+            self.force_species_list.addItem(species_name)
+
     def select_folder(self):
         folder = QtWidgets.QFileDialog.getExistingDirectory(self, "选择PIE扫描文件夹")
         if folder:
             self.folder_edit.setText(folder)
+    
+    def toggle_multi_folder_mode(self, state):
+        """切换多文件夹模式"""
+        is_multi = state == 2  # Qt.Checked is 2
+        self.folder_edit.setEnabled(not is_multi)
+        self.select_folder_button.setEnabled(not is_multi)
+        self.folder_list.setEnabled(is_multi)
+        self.add_folder_button.setEnabled(is_multi)
+        self.remove_folder_button.setEnabled(is_multi)
+        self.clear_folders_button.setEnabled(is_multi)
+        self.merge_method_combo.setEnabled(is_multi)
+    
+    def add_folder(self):
+        """添加文件夹到列表"""
+        folder = QtWidgets.QFileDialog.getExistingDirectory(self, "选择PIE扫描文件夹")
+        if folder:
+            self.pie_folders.append(folder)
+            self.folder_list.addItem(Path(folder).name + f" ({folder})")
+    
+    def remove_folder(self):
+        """移除选中的文件夹"""
+        current_row = self.folder_list.currentRow()
+        if current_row >= 0:
+            self.folder_list.takeItem(current_row)
+            self.pie_folders.pop(current_row)
+    
+    def clear_folders(self):
+        """清空文件夹列表"""
+        self.folder_list.clear()
+        self.pie_folders.clear()
 
     def select_peak_file(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -1534,10 +1958,24 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.calibration = load_calibration_config()
 
     def run_analysis(self):
-        folder = self.folder_edit.text().strip()
-        if not folder:
-            QtWidgets.QMessageBox.warning(self, "提示", "请先选择PIE扫描文件夹")
-            return
+        use_multi = self.use_multi_folders.isChecked()
+        
+        if use_multi:
+            if not self.pie_folders:
+                QtWidgets.QMessageBox.warning(self, "提示", "请先添加至少一个PIE扫描文件夹")
+                return
+            folders = self.pie_folders
+            merge_method = self.merge_method_combo.currentData()
+            message = f"正在合并{len(folders)}段PIE数据..."
+        else:
+            folder = self.folder_edit.text().strip()
+            if not folder:
+                QtWidgets.QMessageBox.warning(self, "提示", "请先选择PIE扫描文件夹")
+                return
+            folders = [folder]
+            merge_method = None
+            message = "正在生成PIE曲线..."
+        
         energy_decimals = self.energy_decimals_edit.value()
         peak_config = load_peak_detection_config()
         threshold_end = peak_config.threshold_end
@@ -1554,10 +1992,11 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         photon_reference_mode = "none" if photon_mode == "off" else photon_mode
         mass_discrimination = settings.mass_discrimination
         light_source = settings.light_source
-        self.set_busy(True, "正在生成PIE曲线...")
+        self.set_busy(True, message)
         self.worker = WorkerThread(
             lambda: self.run_pie_analysis_sync(
-                folder,
+                folders,
+                merge_method=merge_method,
                 recursive=recursive,
                 energy_decimals=energy_decimals,
                 threshold_end=threshold_end,
@@ -1596,11 +2035,21 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.peak_source_combo.setDisabled(busy)
         self.peak_file_edit.setDisabled(busy)
         self.select_peak_file_button.setDisabled(busy)
+        self.use_multi_folders.setDisabled(busy)
+        self.add_folder_button.setDisabled(busy)
+        self.remove_folder_button.setDisabled(busy)
+        self.clear_folders_button.setDisabled(busy)
+        self.merge_method_combo.setDisabled(busy)
+        self.fit_all_button.setDisabled(busy)
+        self.refit_selected_button.setDisabled(busy)
+        self.clear_fits_button.setDisabled(busy)
+        self.remove_force_button.setDisabled(busy)
 
     def run_pie_analysis_sync(
         self,
-        folder: str,
+        folders: list[str],
         *,
+        merge_method: str | None = None,
         recursive: bool,
         energy_decimals: int,
         threshold_end: float,
@@ -1621,37 +2070,66 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         mass_discrimination: float = 1.0,
         light_source: str = "io",
     ) -> tuple[pd.DataFrame, dict[int, dict]]:
-        analysis_df = analyze_pie_folder(
-            folder,
-            calibration=self.calibration,
-            recursive=recursive,
-            energy_decimals=energy_decimals,
-            threshold_end=threshold_end,
-            min_intensity=min_intensity,
-            detection_min_idx=detection_min_idx,
-            nearby_peak_window=nearby_peak_window,
-            duplicate_window=duplicate_window,
-            weak_tail_early_window=weak_tail_early_window,
-            weak_tail_late_window=weak_tail_late_window,
-            weak_tail_ratio=weak_tail_ratio,
-            gaussian_window_max=gaussian_window_max,
-            gaussian_boundary_scale=gaussian_boundary_scale,
-            boundary_padding=boundary_padding,
-            prefer_gaussian=prefer_gaussian,
-            manual_peak_path=manual_peak_path,
-            photon_normalize=photon_normalize,
-            photon_reference_mode=photon_reference_mode,
-            mass_discrimination=mass_discrimination,
-            light_source=light_source,
-        )
+        
+        if merge_method is not None and len(folders) > 1:
+            analysis_df = analyze_multiple_pie_folders(
+                folders,
+                calibration=self.calibration,
+                recursive=recursive,
+                energy_decimals=energy_decimals,
+                threshold_end=threshold_end,
+                min_intensity=min_intensity,
+                detection_min_idx=detection_min_idx,
+                nearby_peak_window=nearby_peak_window,
+                duplicate_window=duplicate_window,
+                weak_tail_early_window=weak_tail_early_window,
+                weak_tail_late_window=weak_tail_late_window,
+                weak_tail_ratio=weak_tail_ratio,
+                gaussian_window_max=gaussian_window_max,
+                gaussian_boundary_scale=gaussian_boundary_scale,
+                boundary_padding=boundary_padding,
+                prefer_gaussian=prefer_gaussian,
+                manual_peak_path=manual_peak_path,
+                photon_normalize=photon_normalize,
+                photon_reference_mode=photon_reference_mode,
+                mass_discrimination=mass_discrimination,
+                light_source=light_source,
+                merge_method=merge_method,
+            )
+        else:
+            analysis_df = analyze_pie_folder(
+                folders[0],
+                calibration=self.calibration,
+                recursive=recursive,
+                energy_decimals=energy_decimals,
+                threshold_end=threshold_end,
+                min_intensity=min_intensity,
+                detection_min_idx=detection_min_idx,
+                nearby_peak_window=nearby_peak_window,
+                duplicate_window=duplicate_window,
+                weak_tail_early_window=weak_tail_early_window,
+                weak_tail_late_window=weak_tail_late_window,
+                weak_tail_ratio=weak_tail_ratio,
+                gaussian_window_max=gaussian_window_max,
+                gaussian_boundary_scale=gaussian_boundary_scale,
+                boundary_padding=boundary_padding,
+                prefer_gaussian=prefer_gaussian,
+                manual_peak_path=manual_peak_path,
+                photon_normalize=photon_normalize,
+                photon_reference_mode=photon_reference_mode,
+                mass_discrimination=mass_discrimination,
+                light_source=light_source,
+            )
         return analysis_df, build_pie_curves(analysis_df)
 
     def on_analysis_complete(self, result: object) -> None:
         self.analysis_df, self.curves = result
         self.current_fit = None
+        self.all_fit_results = {}  # 重置拟合结果
         self.populate_mz_list()
         energy_count = self.analysis_df["energy"].nunique() if not self.analysis_df.empty else 0
         self.summary_label.setText(f"{len(self.curves)} 条m/z曲线 | {energy_count} 个能量点")
+        self.fit_stats_label.setText("已拟合: 0 / 0 条曲线\n平均R²: N/A")
         if self.curves:
             self.mz_list.setCurrentRow(0)
         QtWidgets.QMessageBox.information(self, "完成", f"生成 {len(self.curves)} 条PIE曲线")
@@ -1674,7 +2152,42 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.current_mz = None
             return
         self.current_mz = int(current.data(QtCore.Qt.ItemDataRole.UserRole))
-        self.current_fit = None
+        
+        # 检查是否有保存的拟合结果
+        if self.current_mz in self.all_fit_results:
+            fit_result = self.all_fit_results[self.current_mz]
+            if fit_result.get('success') and fit_result.get('model'):
+                self.current_fit = fit_result['model']
+                
+                # 显示拟合结果表格
+                results_list = fit_result['model'].get('species', [])
+                fit_df = pd.DataFrame(
+                    [
+                        {
+                            "物种名称": item["species"],
+                            "电离能(eV)": "" if item.get("ie") is None else round(float(item["ie"]), 4),
+                            "匹配系数": round(float(item["coefficient"]), 6),
+                            "贡献(%)": round(float(item["contribution_percent"]), 2),
+                            "R²": round(float(item["r_squared"]), 5),
+                        }
+                        for item in results_list
+                    ],
+                    columns=["物种名称", "电离能(eV)", "匹配系数", "贡献(%)", "R²"],
+                )
+                self.set_dataframe(self.fit_table, fit_df)
+                self.detail_tabs.setCurrentWidget(self.fit_table)
+            else:
+                self.current_fit = None
+                self.fit_table.clear()
+                self.fit_table.setRowCount(0)
+                self.fit_table.setColumnCount(0)
+        else:
+            self.current_fit = None
+            self.fit_table.clear()
+            self.fit_table.setRowCount(0)
+            self.fit_table.setColumnCount(0)
+        
+        # 显示曲线数据
         curve = self.curves[self.current_mz]
         rows = curve["rows"].copy()
         curve_df = pd.DataFrame(
@@ -1686,10 +2199,9 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             }
         )
         self.set_dataframe(self.curve_table, curve_df)
-        self.fit_table.clear()
-        self.fit_table.setRowCount(0)
-        self.fit_table.setColumnCount(0)
-        self.update_plot(curve, None)
+        
+        # 更新图表
+        self.update_plot(curve, self.current_fit)
 
     def refresh_current_plot(self):
         if self.current_mz is not None and self.current_mz in self.curves:
@@ -1796,12 +2308,18 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             return
         try:
             curve = self.curves[self.current_mz]
+            # 使用筛选后的数据库
+            filtered_db = self.get_filtered_database()
+            force_species = self.get_force_species()
+            
             fit_model = identify_species_for_mz_with_curve(
-                self.database,
+                filtered_db,
                 self.current_mz,
                 curve["energies"],
                 curve["intensities"],
+                forced_species=force_species,
             )
+            
             self.current_fit = fit_model
             results = fit_model.get("species", [])
             fit_df = pd.DataFrame(

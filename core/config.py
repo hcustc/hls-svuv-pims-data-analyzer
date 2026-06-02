@@ -112,9 +112,27 @@ def save_calibration_config(calibration: Calibration, path: str | Path | None = 
 def load_calibration_points(path: str | Path | None = None) -> list[tuple[float, float]]:
     app = load_app_config()
     config_path = path or app.get("config", {}).get("calibration_points", "config/calibration_points.yaml")
+    path_to_load = readable_config_path(config_path)
+    if not path_to_load.exists():
+        return []
     data = load_yaml(config_path)
     points = data.get("calibration_points", [])
     return [(float(item["tof"]), float(item["mz"])) for item in points]
+
+
+def save_calibration_points(points: list[tuple[float, float]], path: str | Path | None = None) -> Path:
+    app = load_app_config()
+    config_path = writable_config_path(path or app.get("config", {}).get("calibration_points", "config/calibration_points.yaml"))
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    data = {
+        "calibration_points": [
+            {"tof": float(tof), "mz": float(mz)}
+            for tof, mz in points
+        ]
+    }
+    with config_path.open("w", encoding="utf-8") as handle:
+        yaml.safe_dump(data, handle, allow_unicode=True, sort_keys=False)
+    return config_path
 
 
 def load_peak_detection_config(path: str | Path | None = None) -> PeakDetectionConfig:
