@@ -1257,39 +1257,62 @@ class MainWindow(Ui_MainWindow, QMainWindow):
         # print(df)
 
     def calculate(self):
-        df = self.read_table_data_1()
-        poly = PolynomialFeatures(degree=2)  # 二次多项式
-        x = poly.fit_transform(df[['time']])
-        y = df['mass'].astype(float)  # 将y转换为浮点类型
-        # print(y)
-        model = LinearRegression()
-        model.fit(x, y)
-
-        # 获取系数
-        coefficients = model.coef_
-        intercept = model.intercept_
-        y_pred = model.predict(x)
-        # print(y_pred)
-        # 计算残差
-        # residuals = y - y_pred
-        # print(residuals)
-        # 计算R平方（COD）
-        r2 = model.score(x, y)
-        # print(r2)
-        #
-        # 提取回归系数
-        a, b, c = coefficients[1], coefficients[2], intercept
-        # print(a, b, c)
-        # # 格式化输出结果
-        # print("y =", f"{c}" + " + " f"{a}" "x" + " + " f"{b}" "x²")
-        # print(f"R²(COD) = {r2}")
-
-        # 在标签上设置文本内容
-        result_text = f"y = {c} + {a}x + {b}x²\n, R²(COD) = {r2}"
-        label = self.findChild(QLabel, "label_4")
-        label.setText(result_text)
-        # print("Column 1 data:", column1_data)
-        # print("Column 2 data:", column2_data)
+        """计算飞行时间质谱定标参数 A、B、C"""
+        try:
+            # 读取定标数据
+            df = self.read_table_data_1()
+            
+            # 确保有至少3个点
+            if len(df) < 3:
+                QMessageBox.warning(self, "警告", "至少需要3个定标点才能进行二次拟合！")
+                return
+            
+            # 准备数据点列表 [(tof, mz), ...]
+            points = []
+            for _, row in df.iterrows():
+                try:
+                    tof = float(row['time'])
+                    mz = float(row['mass'])
+                    points.append((tof, mz))
+                except (ValueError, TypeError):
+                    continue
+            
+            if len(points) < 3:
+                QMessageBox.warning(self, "警告", "有效的定标点不足3个，请检查数据！")
+                return
+            
+            # 使用核心库中的拟合函数
+            from core.calibration import fit_quadratic_calibration, score_quadratic_calibration
+            calibration = fit_quadratic_calibration(points)
+            r2 = score_quadratic_calibration(points, calibration)
+            
+            # 更新界面显示
+            self.lineEdit_4.setText(f"{calibration.a:.12g}")
+            self.lineEdit_5.setText(f"{calibration.b:.12g}")
+            self.lineEdit_6.setText(f"{calibration.c:.12g}")
+            
+            # 显示结果
+            result_text = (
+                f"m/z = {calibration.c:.8g} + {calibration.b:.8g}×TOF + {calibration.a:.8g}×TOF²\n"
+                f"R² = {r2:.6f}"
+            )
+            self.label_4.setText(result_text)
+            
+            # 保存到配置文件
+            try:
+                from core.config import save_calibration_config, save_calibration_points
+                save_calibration_config(calibration)
+                save_calibration_points(points)
+            except Exception as e:
+                print(f"保存配置失败: {e}")
+            
+            # 显示成功消息
+            QMessageBox.information(self, "成功", f"定标完成！\nR² = {r2:.6f}")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"计算定标参数时发生错误：{str(e)}")
+            import traceback
+            traceback.print_exc()
 
     def transfer(self):
         time = self.findChild(QLineEdit, "lineEdit_2")

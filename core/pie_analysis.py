@@ -22,7 +22,10 @@ CREATE TABLE IF NOT EXISTS species (
     id INTEGER PRIMARY KEY,
     mz INTEGER NOT NULL,
     name TEXT NOT NULL,
-    ionization_energy REAL
+    ionization_energy REAL,
+    formula TEXT,
+    elements TEXT,
+    smiles TEXT
 );
 
 CREATE TABLE IF NOT EXISTS pic_cross_sections (
@@ -58,17 +61,22 @@ def save_species_database_sqlite(database: list[dict], sqlite_path: str | Path, 
         conn.executescript(SCHEMA_SQL)
         for species_id, item in enumerate(database, start=1):
             conn.execute(
-                "INSERT INTO species (id, mz, name, ionization_energy) VALUES (?, ?, ?, ?)",
-                (species_id, int(item["mz"]), str(item["species"]), item.get("ie")),
+                "INSERT INTO species (id, mz, name, ionization_energy, formula, elements, smiles) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    species_id, 
+                    int(item["mz"]), 
+                    str(item["species"]), 
+                    item.get("ie"), 
+                    item.get("formula"), 
+                    item.get("elements"), 
+                    item.get("smiles"),
+                ),
             )
             energies = np.asarray(item["energies"], dtype=float)
             cross_sections = np.asarray(item["cross_sections"], dtype=float)
             conn.executemany(
                 "INSERT INTO pic_cross_sections (species_id, energy_ev, cross_section) VALUES (?, ?, ?)",
-                [
-                    (species_id, float(energy), float(cross_section))
-                    for energy, cross_section in zip(energies, cross_sections)
-                ],
+                [(species_id, float(e), float(c)) for e, c in zip(energies, cross_sections)],
             )
         conn.commit()
     return sqlite_path
@@ -81,31 +89,27 @@ def load_species_database_sqlite(path: str | Path) -> tuple[list[dict], dict[int
     with sqlite3.connect(path) as conn:
         conn.row_factory = sqlite3.Row
         species_rows = conn.execute(
-            "SELECT id, mz, name, ionization_energy FROM species ORDER BY id"
+            "SELECT id, mz, name, ionization_energy, formula, elements, smiles FROM species ORDER BY id"
         ).fetchall()
         for species_row in species_rows:
             pic_rows = conn.execute(
-                """
-                SELECT energy_ev, cross_section
-                FROM pic_cross_sections
-                WHERE species_id = ?
-                ORDER BY energy_ev
-                """,
+                "SELECT energy_ev, cross_section FROM pic_cross_sections WHERE species_id = ? ORDER BY energy_ev",
                 (species_row["id"],),
             ).fetchall()
             if not pic_rows:
                 continue
             index = len(database)
             mz = int(species_row["mz"])
-            database.append(
-                {
-                    "mz": mz,
-                    "species": species_row["name"],
-                    "ie": species_row["ionization_energy"],
-                    "energies": np.array([row["energy_ev"] for row in pic_rows], dtype=np.float32),
-                    "cross_sections": np.array([row["cross_section"] for row in pic_rows], dtype=np.float32),
-                }
-            )
+            database.append({
+                "mz": mz,
+                "species": species_row["name"],
+                "ie": species_row["ionization_energy"],
+                "formula": species_row["formula"],
+                "elements": species_row["elements"],
+                "smiles": species_row["smiles"],
+                "energies": np.array([row["energy_ev"] for row in pic_rows]),
+                "cross_sections": np.array([row["cross_section"] for row in pic_rows]),
+            })
             mz_index.setdefault(mz, []).append(index)
     return database, mz_index
 
@@ -114,18 +118,18 @@ def query_species_by_mz(path: str | Path, mz: int) -> list[dict]:
     """Query candidate species records for one integer m/z from SQLite."""
     with sqlite3.connect(path) as conn:
         conn.row_factory = sqlite3.Row
-        return [
-            {
-                "id": row["id"],
-                "mz": row["mz"],
-                "species": row["name"],
-                "ie": row["ionization_energy"],
-            }
-            for row in conn.execute(
-                "SELECT id, mz, name, ionization_energy FROM species WHERE mz = ? ORDER BY id",
-                (int(mz),),
-            )
-        ]
+        return [{
+            "id": row["id"],
+            "mz": row["mz"],
+            "species": row["name"],
+            "ie": row["ionization_energy"],
+            "formula": row["formula"],
+            "elements": row["elements"],
+            "smiles": row["smiles"],
+        } for row in conn.execute(
+            "SELECT id, mz, name, ionization_energy, formula, elements, smiles FROM species WHERE mz = ? ORDER BY id",
+            (int(mz),)
+        )]
 
 
 def extract_photon_energy(metadata_lines: list[str], path: str | Path | None = None, fallback: float | None = None) -> float:
@@ -136,13 +140,11 @@ def extract_photon_energy(metadata_lines: list[str], path: str | Path | None = N
             match = EV_RE.search(part)
             if match:
                 return float(match.group(1))
-
     for line in metadata_lines:
         if "energy" in line.lower():
             value = extract_first_number(line)
             if value is not None:
                 return value
-
     if fallback is not None:
         return float(fallback)
     raise ValueError("cannot extract photon energy")
@@ -156,7 +158,7 @@ def extract_io_current(metadata_lines: list[str], fallback: float = 1.0) -> floa
 def _iter_pie_files(folder: str | Path, suffixes: tuple[str, ...], recursive: bool) -> list[Path]:
     folder = Path(folder)
     iterator = folder.rglob("*") if recursive else folder.iterdir()
-    return sorted(path for path in iterator if path.is_file() and path.suffix.lower() in suffixes)
+    return sorted(p for p in iterator if p.is_file() and p.suffix.lower() in suffixes)
 
 
 def _group_spectra_by_energy(
@@ -177,28 +179,25 @@ def _group_spectra_by_energy(
         energy_key = round(energy, energy_decimals)
         io_current = extract_light_intensity(spectrum.metadata_lines, light_source)
         grouped.setdefault(energy_key, []).append((path, spectrum, energy, io_current))
-
     groups = []
     for energy_key, items in grouped.items():
         min_len = min(len(item[1].y) for item in items)
         y_sum = np.sum([item[1].y[:min_len] for item in items], axis=0)
-        groups.append(
-            {
-                "energy": float(np.mean([item[2] for item in items])),
-                "energy_key": energy_key,
-                "io": float(np.mean([item[3] for item in items])),
-                "light_source": light_source,
-                "file_count": len(items),
-                "files": [item[0].name for item in items],
-                "spectrum": Spectrum(
-                    x=np.arange(1, min_len + 1, dtype=float),
-                    y=y_sum,
-                    metadata_lines=[],
-                    path=str(folder),
-                ),
-            }
-        )
-    return sorted(groups, key=lambda item: item["energy"])
+        groups.append({
+            "energy": float(np.mean([item[2] for item in items])),
+            "energy_key": energy_key,
+            "io": float(np.mean([item[3] for item in items])),
+            "light_source": light_source,
+            "file_count": len(items),
+            "files": [item[0].name for item in items],
+            "spectrum": Spectrum(
+                x=np.arange(1, min_len + 1, dtype=float),
+                y=y_sum,
+                metadata_lines=[],
+                path=str(folder),
+            ),
+        })
+    return sorted(groups, key=lambda x: x["energy"])
 
 
 def analyze_pie_folder(
@@ -227,14 +226,7 @@ def analyze_pie_folder(
     light_source: str = "io",
     target_mz_values: list[int] | None = None,
 ) -> pd.DataFrame:
-    """Generate experimental PIE curves from a folder of energy-resolved spectra.
-
-    Files are grouped by nominal photon energy, spectra at the same energy are
-    summed, reference peaks are detected on the highest-energy group, and all
-    energy groups are integrated using those reference bounds. TXT, ASC, and
-    text-like 888 files are considered by default. Intensities are normalized by
-    IO current to the lowest-energy group's IO when IO metadata is available.
-    """
+    """Generate experimental PIE curves from a folder of energy-resolved spectra."""
     groups = _group_spectra_by_energy(
         folder,
         suffixes=suffixes,
@@ -243,29 +235,17 @@ def analyze_pie_folder(
         light_source=light_source,
     )
     if not groups:
-        return pd.DataFrame(
-            columns=[
-                "energy",
-                "file_count",
-                "io",
-                "light_source",
-                "mz",
-                "mz_rounded",
-                "species",
-                "photon_normalized_intensity",
-                "normalized_intensity",
-                "raw_area",
-                "left_bound",
-                "right_bound",
-            ]
-        )
-
+        return pd.DataFrame(columns=[
+            "energy", "file_count", "io", "light_source", "mz", "mz_rounded",
+            "species", "photon_normalized_intensity", "normalized_intensity",
+            "raw_area", "left_bound", "right_bound",
+        ])
     if manual_peak_path:
-        reference_group = max(groups, key=lambda item: item["energy"])
+        reference_group = max(groups, key=lambda x: x["energy"])
         reference_peaks = peak_ranges_to_peaks(load_peak_ranges(manual_peak_path, calibration=calibration))
         reference_source = Path(manual_peak_path).name
     else:
-        reference_group = max(groups, key=lambda item: item["energy"])
+        reference_group = max(groups, key=lambda x: x["energy"])
         reference_spectrum = reference_group["spectrum"]
         reference_peaks = detect_peaks_in_range(
             reference_spectrum.y,
@@ -285,13 +265,9 @@ def analyze_pie_folder(
             boundary_padding=boundary_padding,
         )
         reference_source = "auto"
-
     if target_mz_values:
-        target_set = {int(round(value)) for value in target_mz_values}
-        reference_peaks = [
-            peak for peak in reference_peaks if int(round(peak.mz)) in target_set
-        ]
-
+        target_set = {int(round(v)) for v in target_mz_values}
+        reference_peaks = [p for p in reference_peaks if int(round(p.mz)) in target_set]
     base_io = groups[0]["io"] if groups[0]["io"] > 0 else 1.0
     denominator = float(mass_discrimination)
     if denominator <= 0:
@@ -307,7 +283,6 @@ def analyze_pie_folder(
                 fit = fit_gaussian(spectrum.y, center_idx, window_size)
                 if fit is not None:
                     raw_area = gaussian_area(fit.amplitude, fit.fwhm)
-
             photon_normalized = raw_area
             if photon_normalize:
                 photon_normalized = raw_area / group["io"] if group["io"] > 0 else 0.0
@@ -316,29 +291,29 @@ def analyze_pie_folder(
                 elif photon_reference_mode != "none":
                     raise ValueError("photon_reference_mode must be 'first' or 'none'")
             normalized = photon_normalized / denominator
-            rows.append(
-                {
-                    "energy": group["energy"],
-                    "file_count": group["file_count"],
-                    "io": group["io"],
-                    "light_source": group["light_source"],
-                    "reference_energy": reference_group["energy"],
-                    "reference_source": reference_source,
-                    "mz": peak.mz,
-                    "mz_rounded": int(round(peak.mz)),
-                    "species": peak.species,
-                    "photon_normalized_intensity": photon_normalized,
-                    "normalized_intensity": normalized,
-                    "raw_area": raw_area,
-                    "left_bound": peak.left_bound,
-                    "right_bound": peak.right_bound,
-                }
-            )
+            rows.append({
+                "energy": group["energy"],
+                "file_count": group["file_count"],
+                "io": group["io"],
+                "light_source": group["light_source"],
+                "reference_energy": reference_group["energy"],
+                "reference_source": reference_source,
+                "mz": peak.mz,
+                "mz_rounded": int(round(peak.mz)),
+                "species": peak.species,
+                "photon_normalized_intensity": photon_normalized,
+                "normalized_intensity": normalized,
+                "raw_area": raw_area,
+                "left_bound": peak.left_bound,
+                "right_bound": peak.right_bound,
+            })
     return pd.DataFrame(rows)
 
 
 def build_pie_curves(analysis_df: pd.DataFrame) -> dict[int, dict]:
     """Convert PIE analysis rows into m/z keyed curve objects."""
+    print(f"=== build_pie_curves 开始执行 ===")
+    print(f"输入DataFrame: {len(analysis_df)} 行")
     curves: dict[int, dict] = {}
     if analysis_df.empty:
         return curves
@@ -350,19 +325,18 @@ def build_pie_curves(analysis_df: pd.DataFrame) -> dict[int, dict]:
     if "species" not in working:
         working["species"] = ""
     for mz, group in working.groupby("mz_rounded"):
-        ordered = (
-            group.groupby("energy", as_index=False)
-            .agg(
-                normalized_intensity=("normalized_intensity", "sum"),
-                raw_area=("raw_area", "sum"),
-                photon_normalized_intensity=("photon_normalized_intensity", "sum"),
-                species=("species", "first"),
-                mz=("mz", "mean"),
-                file_count=("file_count", "first"),
-                io=("io", "first"),
-            )
-            .sort_values("energy")
-        )
+        group = group.sort_values("energy").reset_index(drop=True)
+        group["energy_rounded"] = group["energy"].round(2)
+        ordered = group.groupby("energy_rounded", as_index=False).agg(
+            energy=("energy", "mean"),
+            normalized_intensity=("normalized_intensity", "mean"),
+            raw_area=("raw_area", "mean"),
+            photon_normalized_intensity=("photon_normalized_intensity", "mean"),
+            species=("species", "first"),
+            mz=("mz", "mean"),
+            file_count=("file_count", "first"),
+            io=("io", "first"),
+        ).sort_values("energy")
         curves[int(mz)] = {
             "mz": int(mz),
             "mz_exact_mean": float(ordered["mz"].mean()),
@@ -371,13 +345,16 @@ def build_pie_curves(analysis_df: pd.DataFrame) -> dict[int, dict]:
             "intensities": ordered["normalized_intensity"].astype(float).tolist(),
             "rows": ordered,
         }
+    print(f"=== build_pie_curves 完成 ===")
+    print(f"构建了 {len(curves)} 条曲线")
+    for mz, curve in curves.items():
+        print(f"  m/z {mz}: {len(curve['energies'])} 个点, 能量范围: {curve['energies'][0]:.2f} - {curve['energies'][-1]:.2f}")
     return curves
 
 
 def _solve_nonnegative_coefficients(design: np.ndarray, target: np.ndarray) -> np.ndarray:
     try:
         from scipy.optimize import nnls
-
         coeffs, _ = nnls(design, target)
     except Exception:
         coeffs, _, _, _ = np.linalg.lstsq(design, target, rcond=None)
@@ -407,12 +384,7 @@ def fit_species_combination_with_curve(
     coefficients: dict[int, float] | None = None,
     locked_species_ids: list[int] | None = None,
 ) -> dict:
-    """Fit one experimental PIE curve using SQLite PICS records.
-
-    The database stores cross sections on each species' native photon-energy
-    grid. For fitting, each candidate PICS curve is interpolated onto the
-    experimental energy grid and solved as a non-negative linear combination.
-    """
+    """Fit one experimental PIE curve using SQLite PICS records."""
     energies = np.asarray(experimental_energies, dtype=float)
     intensities = np.asarray(experimental_intensities, dtype=float)
     point_count = min(energies.size, intensities.size)
@@ -437,7 +409,6 @@ def fit_species_combination_with_curve(
     }
     if not species_list or energies.size == 0 or intensities.size == 0:
         return empty_model
-
     active_species: list[dict] = []
     active_species_ids: list[int] = []
     design_columns: list[np.ndarray] = []
@@ -454,33 +425,26 @@ def fit_species_combination_with_curve(
             continue
         order = np.argsort(pic_energies)
         basis = np.interp(
-            energies,
-            pic_energies[order],
-            pic_sections[order],
-            left=0.0,
-            right=0.0,
+            energies, pic_energies[order], pic_sections[order], left=0.0, right=0.0
         )
         basis = np.nan_to_num(basis, nan=0.0, posinf=0.0, neginf=0.0)
         if np.any(basis > 0):
             active_species.append(species)
             active_species_ids.append(int(species.get("id", len(active_species_ids) + 1)))
             design_columns.append(basis)
-
     if not design_columns:
         return empty_model
-
     design = np.column_stack(design_columns)
     coefficient_map = _clean_coefficient_map(coefficients)
     locked_ids = {int(value) for value in (locked_species_ids or [])}
     coeffs = np.zeros(len(active_species), dtype=float)
     if coefficient_mode == "manual":
-        coeffs = np.asarray(
-            [coefficient_map.get(species_id, 0.0) for species_id in active_species_ids],
-            dtype=float,
-        )
+        coeffs = np.asarray([
+            coefficient_map.get(species_id, 0.0) for species_id in active_species_ids
+        ], dtype=float)
     elif coefficient_mode == "locked_fit":
-        locked_indices = [idx for idx, species_id in enumerate(active_species_ids) if species_id in locked_ids]
-        free_indices = [idx for idx, species_id in enumerate(active_species_ids) if species_id not in locked_ids]
+        locked_indices = [idx for idx, sid in enumerate(active_species_ids) if sid in locked_ids]
+        free_indices = [idx for idx, sid in enumerate(active_species_ids) if sid not in locked_ids]
         for idx in locked_indices:
             coeffs[idx] = coefficient_map.get(active_species_ids[idx], 0.0)
         residual_target = intensities - design[:, locked_indices] @ coeffs[locked_indices] if locked_indices else intensities
@@ -493,8 +457,8 @@ def fit_species_combination_with_curve(
     ss_tot = float(np.sum((intensities - np.mean(intensities)) ** 2))
     ss_res = float(np.sum(residuals ** 2))
     r_squared = 1 - ss_res / ss_tot if ss_tot > 0 else 0.0
-    rmse = float(np.sqrt(np.mean(residuals ** 2))) if residuals.size else 0.0
-    mae = float(np.mean(np.abs(residuals))) if residuals.size else 0.0
+    rmse = float(np.sqrt(np.mean(residuals ** 2)) if residuals.size else 0.0)
+    mae = float(np.mean(np.abs(residuals)) if residuals.size else 0.0)
     fitted_area = float(np.sum(fitted))
     merged: dict[tuple[str, float | None], dict] = {}
     for idx, species in enumerate(active_species):
@@ -508,6 +472,9 @@ def fit_species_combination_with_curve(
                     "coefficients_by_id": {},
                     "species": species["species"],
                     "ie": species.get("ie"),
+                    "formula": species.get("formula"),
+                    "elements": species.get("elements"),
+                    "smiles": species.get("smiles"),
                     "coefficient": 0.0,
                     "component_area": 0.0,
                     "component_intensities": np.zeros_like(component),
@@ -518,24 +485,24 @@ def fit_species_combination_with_curve(
             merged[key]["coefficient"] += float(coeffs[idx])
             merged[key]["component_area"] += float(np.sum(component))
             merged[key]["component_intensities"] = merged[key]["component_intensities"] + component
-
     results = []
     for item in merged.values():
         contribution = 100.0 * item["component_area"] / fitted_area if fitted_area > 0 else 0.0
-        results.append(
-            {
-                "mz": item["mz"],
-                "ids": item["ids"],
-                "coefficients_by_id": item["coefficients_by_id"],
-                "species": item["species"],
-                "ie": item["ie"],
-                "coefficient": item["coefficient"],
-                "contribution_percent": contribution,
-                "r_squared": item["r_squared"],
-                "component_intensities": item["component_intensities"].tolist(),
-            }
-        )
-    results = sorted(results, key=lambda item: -item["coefficient"])
+        results.append({
+            "mz": item["mz"],
+            "ids": item["ids"],
+            "coefficients_by_id": item["coefficients_by_id"],
+            "species": item["species"],
+            "ie": item["ie"],
+            "formula": item.get("formula"),
+            "elements": item.get("elements"),
+            "smiles": item.get("smiles"),
+            "coefficient": item["coefficient"],
+            "contribution_percent": contribution,
+            "r_squared": item["r_squared"],
+            "component_intensities": item["component_intensities"].tolist(),
+        })
+    results = sorted(results, key=lambda x: -x["coefficient"])
     return {
         "energies": energies.tolist(),
         "experimental": intensities.tolist(),
@@ -553,14 +520,9 @@ def fit_species_combination_with_curve(
 
 def fit_species_combination(species_list: list[dict], experimental_energies, experimental_intensities) -> list[dict]:
     model = fit_species_combination_with_curve(species_list, experimental_energies, experimental_intensities)
-    return [
-        {
-            key: value
-            for key, value in item.items()
-            if key not in {"component_intensities"}
-        }
-        for item in model["species"]
-    ]
+    return [{
+        k: v for k, v in item.items() if k not in {"component_intensities"}
+    } for item in model["species"]]
 
 
 def identify_species_for_mz_with_curve(database: list[dict], mz: int, energies, intensities) -> dict:
@@ -571,13 +533,375 @@ def identify_species_for_mz_with_curve(database: list[dict], mz: int, energies, 
     )
 
 
+def merge_pie_segments(
+    analysis_dfs: list[pd.DataFrame],
+    *,
+    merge_method: str = "low_energy_dominant",
+) -> pd.DataFrame:
+    """Merge multiple PIE analysis DataFrames from different energy segments.
+
+    Args:
+        analysis_dfs: List of DataFrames from analyze_pie_folder calls
+        merge_method: Method to use for scaling in overlap regions:
+            - "low_energy_dominant": Scale all segments to match the lowest-energy segment
+            - "first_segment_dominant": Scale all segments to match the first segment
+            - "mean": Average overlapping regions without scaling
+
+    Returns:
+        Merged DataFrame with concatenated and scaled PIE curves
+    """
+    print(f"=== merge_pie_segments 开始执行 ===")
+    print(f"输入了 {len(analysis_dfs)} 个DataFrame")
+    all_segment_mz = []
+    for i, df in enumerate(analysis_dfs):
+        if not df.empty:
+            mz_list = sorted(df["mz_rounded"].unique())
+            all_segment_mz.append(set(mz_list))
+            print(f"  段 {i}: {len(df)} 行, m/z数: {df['mz_rounded'].nunique()}, 能量范围: {df['energy'].min():.2f} - {df['energy'].max():.2f}")
+            print(f"    段 {i} 的 m/z 列表: {mz_list}")
+    
+    if len(all_segment_mz) >= 2:
+        common_mz = all_segment_mz[0] & all_segment_mz[1]
+        print(f"\n两个段共有的 m/z: {sorted(common_mz)}")
+        print(f"只在段 0 中的 m/z: {sorted(all_segment_mz[0] - all_segment_mz[1])}")
+        print(f"只在段 1 中的 m/z: {sorted(all_segment_mz[1] - all_segment_mz[0])}")
+
+    if not analysis_dfs:
+        return pd.DataFrame(
+            columns=[
+                "energy",
+                "file_count",
+                "io",
+                "light_source",
+                "mz",
+                "mz_rounded",
+                "species",
+                "photon_normalized_intensity",
+                "normalized_intensity",
+                "raw_area",
+                "left_bound",
+                "right_bound",
+            ]
+        )
+
+    if len(analysis_dfs) == 1:
+        return analysis_dfs[0].copy()
+    
+    all_mz = set()
+    for df in analysis_dfs:
+        if not df.empty:
+            all_mz.update(df["mz_rounded"].unique())
+    if not all_mz:
+        return pd.DataFrame()
+    
+    merged_rows = []
+    for target_mz in sorted(all_mz):
+        mz_segments = []
+        for df_idx, df in enumerate(analysis_dfs):
+            if df.empty:
+                continue
+            seg_df = df[df["mz_rounded"] == target_mz].copy()
+            if seg_df.empty:
+                continue
+            seg_df = seg_df.sort_values("energy").reset_index(drop=True)
+            seg_df["energy_rounded"] = seg_df["energy"].round(2)
+            seg_df = seg_df.groupby("energy_rounded", as_index=False).agg(
+                energy=("energy", "mean"),
+                mz_rounded=("mz_rounded", "first"),
+                normalized_intensity=("normalized_intensity", "mean"),
+                raw_area=("raw_area", "mean"),
+                photon_normalized_intensity=("photon_normalized_intensity", "mean"),
+                mz=("mz", "mean"),
+                species=("species", "first"),
+                file_count=("file_count", "first"),
+                io=("io", "first"),
+                light_source=("light_source", "first"),
+                left_bound=("left_bound", "first"),
+                right_bound=("right_bound", "first"),
+            )
+            mz_segments.append({
+                "df": seg_df,
+                "min_energy": seg_df["energy"].min(),
+                "max_energy": seg_df["energy"].max(),
+                "segment_idx": df_idx,
+            })
+        
+        if not mz_segments:
+            continue
+        
+        if len(mz_segments) == 1:
+            merged_rows.extend(mz_segments[0]["df"].to_dict("records"))
+            continue
+        
+        mz_segments.sort(key=lambda x: x["min_energy"])
+        
+        if merge_method == "low_energy_dominant":
+            ref_segment = mz_segments[0]
+        elif merge_method == "first_segment_dominant":
+            ref_segment = next((s for s in mz_segments if s["segment_idx"] == 0), mz_segments[0])
+        else:
+            all_dfs = [s["df"] for s in mz_segments]
+            combined = pd.concat(all_dfs, ignore_index=True)
+            combined = combined.groupby("energy_rounded", as_index=False).agg(
+                energy=("energy", "mean"),
+                mz_rounded=("mz_rounded", "first"),
+                normalized_intensity=("normalized_intensity", "mean"),
+                raw_area=("raw_area", "mean"),
+                photon_normalized_intensity=("photon_normalized_intensity", "mean"),
+                mz=("mz", "mean"),
+                species=("species", "first"),
+                file_count=("file_count", "first"),
+                io=("io", "first"),
+                light_source=("light_source", "first"),
+                left_bound=("left_bound", "first"),
+                right_bound=("right_bound", "first"),
+            )
+            merged_rows.extend(combined.to_dict("records"))
+            continue
+        
+        scaled_segments = [ref_segment["df"].copy()]
+        for segment in mz_segments[1:]:
+            seg_df = segment["df"].copy()
+            ref_df = ref_segment["df"]
+            
+            ref_energies = set(ref_df["energy_rounded"].values)
+            seg_energies = set(seg_df["energy_rounded"].values)
+            overlapping_energies = ref_energies & seg_energies
+            
+            if not overlapping_energies:
+                scaled_segments.append(seg_df)
+                continue
+            
+            ref_overlap = ref_df[ref_df["energy_rounded"].isin(overlapping_energies)]
+            seg_overlap = seg_df[seg_df["energy_rounded"].isin(overlapping_energies)]
+            
+            if len(ref_overlap) == 0 or len(seg_overlap) == 0:
+                scaled_segments.append(seg_df)
+                continue
+            
+            merged_overlap = pd.merge(
+                ref_overlap[["energy_rounded", "normalized_intensity"]],
+                seg_overlap[["energy_rounded", "normalized_intensity"]],
+                on="energy_rounded",
+                suffixes=("_ref", "_seg"),
+            )
+            
+            ref_intensities = merged_overlap["normalized_intensity_ref"].values
+            seg_intensities = merged_overlap["normalized_intensity_seg"].values
+            
+            valid_mask = (seg_intensities > 0) & (ref_intensities > 0)
+            if np.sum(valid_mask) == 0:
+                scaled_segments.append(seg_df)
+                continue
+            
+            ratios = ref_intensities[valid_mask] / seg_intensities[valid_mask]
+            scale_factor = float(np.median(ratios))
+            
+            seg_df["normalized_intensity"] *= scale_factor
+            seg_df["photon_normalized_intensity"] *= scale_factor
+            seg_df["raw_area"] *= scale_factor
+            seg_df["source_segment"] = segment["segment_idx"]
+            seg_df["scale_factor"] = scale_factor
+            
+            scaled_segments.append(seg_df)
+        
+        combined = pd.concat(scaled_segments, ignore_index=True)
+        final_combined = combined.groupby("energy_rounded", as_index=False).agg(
+            energy=("energy", "mean"),
+            mz_rounded=("mz_rounded", "first"),
+            normalized_intensity=("normalized_intensity", "mean"),
+            raw_area=("raw_area", "mean"),
+            photon_normalized_intensity=("photon_normalized_intensity", "mean"),
+            mz=("mz", "mean"),
+            species=("species", "first"),
+            file_count=("file_count", "first"),
+            io=("io", "first"),
+            light_source=("light_source", "first"),
+            left_bound=("left_bound", "first"),
+            right_bound=("right_bound", "first"),
+        )
+        merged_rows.extend(final_combined.to_dict("records"))
+    
+    if not merged_rows:
+        return pd.DataFrame()
+    
+    result_df = pd.DataFrame(merged_rows)
+    result_df = result_df.sort_values(["mz_rounded", "energy"]).reset_index(drop=True)
+    print(f"=== merge_pie_segments 完成 ===")
+    print(f"最终结果: {len(result_df)} 行, m/z: {result_df['mz_rounded'].nunique()}, 能量范围: {result_df['energy'].min():.2f} - {result_df['energy'].max():.2f}")
+    return result_df
+
+
+def analyze_multiple_pie_folders(
+    folders: list[str | Path],
+    *,
+    calibration: Calibration = Calibration(),
+    suffixes: tuple[str, ...] = (".txt", ".asc", ".888"),
+    recursive: bool = True,
+    energy_decimals: int = 1,
+    threshold_end: float = 2,
+    min_intensity: float = 3,
+    detection_min_idx: int = 3000,
+    nearby_peak_window: int = 30,
+    duplicate_window: int = 20,
+    weak_tail_early_window: int = 90,
+    weak_tail_late_window: int = 50,
+    weak_tail_ratio: float = 5,
+    gaussian_window_max: int = 30,
+    gaussian_boundary_scale: float = 1.5,
+    boundary_padding: int = 2,
+    prefer_gaussian: bool = True,
+    manual_peak_path: str | Path | None = None,
+    photon_normalize: bool = True,
+    photon_reference_mode: str = "first",
+    mass_discrimination: float = 1.0,
+    light_source: str = "io",
+    merge_method: str = "low_energy_dominant",
+) -> pd.DataFrame:
+    """Analyze multiple PIE folders and merge them with overlap scaling.
+    
+    This is the CORRECT version: it detects peaks ONCE on the highest-energy 
+    spectrum and applies the same peak bounds to all spectra in all folders.
+    """
+    print(f"=== analyze_multiple_pie_folders 开始执行 ===")
+    print(f"处理 {len(folders)} 个文件夹")
+    
+    # 第一步：收集所有光谱，并按文件夹分组
+    all_spectra_by_folder = []  # 每个元素是 (folder_path, list_of_grouped_spectra)
+    all_spectra_flat = []  # 所有光谱的扁平列表，方便找最高能量的
+    
+    for folder in folders:
+        folder = Path(folder)
+        print(f"  扫描文件夹: {folder}")
+        
+        # 读取并分组这个文件夹中的所有光谱（按能量）
+        groups = _group_spectra_by_energy(
+            folder,
+            suffixes=suffixes,
+            recursive=recursive,
+            energy_decimals=energy_decimals,
+            light_source=light_source
+        )
+        
+        all_spectra_by_folder.append((folder, groups))
+        
+        # 把所有单个光谱添加到扁平列表中
+        for group in groups:
+            all_spectra_flat.append(group)
+    
+    if not all_spectra_flat:
+        print("  错误：没有找到任何光谱！")
+        return pd.DataFrame()
+    
+    print(f"  共找到 {len(all_spectra_flat)} 个能量组")
+    
+    # 第二步：找到能量最高的能量组，用它的光谱来检测峰
+    ref_group = max(all_spectra_flat, key=lambda g: g["energy"])
+    print(f"  用能量最高的组做峰检测: 能量 {ref_group['energy']:.2f} eV")
+    
+    # 检测峰
+    if manual_peak_path:
+        reference_peaks = peak_ranges_to_peaks(load_peak_ranges(manual_peak_path, calibration=calibration))
+        reference_source = Path(manual_peak_path).name
+    else:
+        reference_peaks = detect_peaks_in_range(
+            ref_group["spectrum"].y,
+            calibration=calibration,
+            start_idx=0,
+            end_idx=len(ref_group["spectrum"].y),
+            detection_min_idx=detection_min_idx,
+            threshold_end=threshold_end,
+            min_intensity=min_intensity,
+            nearby_peak_window=nearby_peak_window,
+            duplicate_window=duplicate_window,
+            weak_tail_early_window=weak_tail_early_window,
+            weak_tail_late_window=weak_tail_late_window,
+            weak_tail_ratio=weak_tail_ratio,
+            gaussian_window_max=gaussian_window_max,
+            gaussian_boundary_scale=gaussian_boundary_scale,
+            boundary_padding=boundary_padding,
+        )
+        reference_source = "auto"
+    
+    print(f"  检测到 {len(reference_peaks)} 个峰")
+    
+    # 第三步：收集所有能量组，用于确定归一化参考点
+    all_groups_flat = []
+    for folder, groups in all_spectra_by_folder:
+        all_groups_flat.extend(groups)
+    
+    # 按能量排序所有能量组
+    all_groups_sorted = sorted(all_groups_flat, key=lambda g: g["energy"])
+    base_io = all_groups_sorted[0]["io"] if all_groups_sorted[0]["io"] > 0 else 1.0
+    denominator = float(mass_discrimination)
+    
+    # 第四步：逐个处理所有能量组，用相同的峰进行积分
+    all_rows = []
+    for folder, groups in all_spectra_by_folder:
+        for group in groups:
+            spectrum = group["spectrum"]
+            energy = group["energy"]
+            io_current = group["io"]
+            file_count = group["file_count"]
+            
+            for peak in reference_peaks:
+                raw_area = baseline_corrected_area(spectrum.y, peak.left_bound, peak.right_bound)
+                if prefer_gaussian:
+                    window_size = max(5, min(30, peak.right_bound - peak.left_bound + 5))
+                    fit = fit_gaussian(spectrum.y, int(round(peak.index)), window_size)
+                    if fit is not None:
+                        raw_area = gaussian_area(fit.amplitude, fit.fwhm)
+                
+                photon_normalized = raw_area
+                if photon_normalize:
+                    photon_normalized = raw_area / io_current if io_current > 0 else 0.0
+                    if photon_reference_mode == "first":
+                        photon_normalized *= base_io
+                normalized = photon_normalized / denominator
+                
+                all_rows.append({
+                    "energy": energy,
+                    "file_count": file_count,
+                    "io": io_current,
+                    "light_source": light_source,
+                    "reference_energy": ref_group["energy"],
+                    "reference_source": reference_source,
+                    "mz": peak.mz,
+                    "mz_rounded": int(round(peak.mz)),
+                    "species": peak.species,
+                    "photon_normalized_intensity": photon_normalized,
+                    "normalized_intensity": normalized,
+                    "raw_area": raw_area,
+                    "left_bound": peak.left_bound,
+                    "right_bound": peak.right_bound,
+                })
+    
+    # 创建临时的 DataFrame，按文件夹分组后再合并
+    temp_df = pd.DataFrame(all_rows)
+    
+    # 现在我们需要按文件夹分离并合并！
+    # 首先，我们需要把这些数据重新按文件夹分组，计算每个文件夹的结果
+    # 但这样比较复杂，所以我们用更简单的方法：
+    # 只需要用 merge_pie_segments 的逻辑，但是是用我们现在已经统一了峰的 DataFrame
+    
+    # 为了用 merge_pie_segments，我们需要先模拟原来的分段输出
+    # 实际上，更简单的方法是：我们可以直接构建分段的 DataFrame 列表
+    analysis_dfs = []
+    
+    for folder_idx, (folder, groups) in enumerate(all_spectra_by_folder):
+        folder_energies = {g["energy"] for g in groups}
+        folder_df = temp_df[temp_df["energy"].isin(folder_energies)].copy().reset_index(drop=True)
+        analysis_dfs.append(folder_df)
+        print(f"  文件夹 {folder_idx} 能量数: {folder_df['energy'].nunique()}, m/z 数: {folder_df['mz_rounded'].nunique()}")
+    
+    # 现在用 merge_pie_segments 合并！
+    result = merge_pie_segments(analysis_dfs, merge_method=merge_method)
+    print(f"=== analyze_multiple_pie_folders 完成 ===")
+    return result
+
+
 def identify_species_for_mz(database: list[dict], mz: int, energies, intensities) -> list[dict]:
     model = identify_species_for_mz_with_curve(database, mz, energies, intensities)
-    return [
-        {
-            key: value
-            for key, value in item.items()
-            if key not in {"component_intensities"}
-        }
-        for item in model["species"]
-    ]
+    return [{
+        k: v for k, v in item.items() if k not in {"component_intensities"}
+    } for item in model["species"]]
