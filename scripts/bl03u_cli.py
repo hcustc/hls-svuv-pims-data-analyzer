@@ -128,8 +128,6 @@ def cmd_pie(args: argparse.Namespace) -> int:
 
     fits: dict[int, dict[str, Any]] = {}
     if args.fit_pics:
-        if not args.database:
-            raise ValueError("--fit-pics requires --database")
         database, _ = load_species_database(args.database)
         for mz, curve in curves.items():
             fits[int(mz)] = identify_species_for_mz_with_curve(
@@ -311,6 +309,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.command == "pie" and args.fit_pics and not args.database:
+        parser.error("--fit-pics requires --database")
     return int(args.func(args))
 
 
