@@ -211,6 +211,7 @@ def test_upload_pie_curve_uses_allowed_database_root(tmp_path, monkeypatch):
     assert artifacts["manifest"]["input_path"] == "curve.csv"
     assert artifacts["manifest"]["parameters"]["database_scope"] == "custom"
     assert artifacts["manifest"]["parameters"]["database_name"] == "species.sqlite"
+    assert "gaussian" not in artifacts["manifest"]["parameters"]
     artifacts_text = json.dumps(artifacts, ensure_ascii=False)
     assert str(database) not in artifacts_text
     assert str(tmp_path) not in artifacts_text
