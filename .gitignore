@@ -2,8 +2,26 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .DS_Store
+build/
+dist/
 .claude/
 .idea/
+.codex/
+
+# Local agent/Codex skill notes
+skills/
+
+# Local environment files
+.env
+.env.*
+!.env.example
+
+# Database maintenance byproducts and local notes
+database/*.backup_*.sqlite
+database/cleaning_report_*.txt
+database/backups/
+database/CLEANING_*.md
+database/DATA_CLEANING_*.md
 
 # Large files
 *.exe
