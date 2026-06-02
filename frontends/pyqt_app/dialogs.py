@@ -1692,19 +1692,11 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             return {'success': False, 'error': '无数据'}
         
         fit_model = identify_species_for_mz_with_curve(
-            database, mz, energies, intensities
+            database, mz, energies, intensities, forced_species=force_species
         )
         
         if not fit_model or not fit_model.get('species'):
             return {'success': False, 'error': '无匹配物种', 'model': None}
-        
-        species = fit_model.get('species', [])
-        
-        if force_species and species:
-            forced = [s for s in species if s.get('species') in force_species]
-            if forced:
-                non_forced = [s for s in species if s.get('species') not in force_species]
-                fit_model['species'] = forced + non_forced
         
         return {
             'success': True,
@@ -1967,8 +1959,6 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
     def run_analysis(self):
         use_multi = self.use_multi_folders.isChecked()
-        print(f"=== run_analysis 开始执行 ===")
-        print(f"use_multi: {use_multi}")
         
         if use_multi:
             if not self.pie_folders:
@@ -1976,7 +1966,6 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 return
             folders = self.pie_folders
             merge_method = self.merge_method_combo.currentData()
-            print(f"folders: {folders}, merge_method: {merge_method}")
             message = f"正在合并{len(folders)}段PIE数据..."
         else:
             folder = self.folder_edit.text().strip()
@@ -2081,12 +2070,8 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         mass_discrimination: float = 1.0,
         light_source: str = "io",
     ) -> tuple[pd.DataFrame, dict[int, dict]]:
-        print(f"=== run_pie_analysis_sync 开始执行 ===")
-        print(f"文件夹列表: {folders}")
-        print(f"merge_method: {merge_method}, len(folders): {len(folders)}")
         
         if merge_method is not None and len(folders) > 1:
-            print(f"调用 analyze_multiple_pie_folders")
             analysis_df = analyze_multiple_pie_folders(
                 folders,
                 calibration=self.calibration,
@@ -2332,15 +2317,8 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 self.current_mz,
                 curve["energies"],
                 curve["intensities"],
+                forced_species=force_species,
             )
-            
-            # 处理强制拟合物种
-            if force_species and fit_model.get('species'):
-                species_list = fit_model.get('species', [])
-                forced = [s for s in species_list if s.get('species') in force_species]
-                if forced:
-                    non_forced = [s for s in species_list if s.get('species') not in force_species]
-                    fit_model['species'] = forced + non_forced
             
             self.current_fit = fit_model
             results = fit_model.get("species", [])
