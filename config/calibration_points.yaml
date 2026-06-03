@@ -1,0 +1,7 @@
+calibration_points:
+- tof: 8175.21
+  mz: 30.0
+- tof: 16692.76
+  mz: 97.0
+- tof: 16614.57
+  mz: 96.0

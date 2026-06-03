@@ -1,0 +1,6 @@
+calibration:
+  equation: mz = c + b * tof + a * tof^2
+  coefficients:
+    a: 3.66779e-07
+    b: 0.000637644
+    c: 0.259342113238
