@@ -3,9 +3,8 @@ from core.output_paths import ensure_output_structure
 from frontends.pyqt_app.login_dialog import LoginDialog
 from frontends.pyqt_app.main_window import MainWindow
 from frontends.pyqt_app.theme import apply_application_theme
-from frontends.pyqt_app.dialogs import PICSCalculatorDialog, CoreToolsDialog
+from frontends.pyqt_app.dialogs import CoreToolsDialog
 from core.config import load_calibration_config
-from core.normalization import load_normalization_settings
 from PyQt6 import QtWidgets
 
 
@@ -42,7 +41,6 @@ if __name__ == "__main__":
     
     elif "--pics" in args:
         calibration = load_calibration_config()
-        normalization_settings = load_normalization_settings()
         dialog = CoreToolsDialog(calibration, initial_tab="pics")
         dialog.exec()
     

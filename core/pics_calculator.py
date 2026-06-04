@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 from dataclasses import dataclass, field
-from typing import Optional
+PICSResultKey = float | tuple[float, float]
 
 
 @dataclass
@@ -62,6 +62,8 @@ def calc_pics_single_energy(
 ) -> float:
     if new_species_signal <= 0 or no_signal <= 0:
         return 0.0
+    if new_species_mf <= 0 or no_mf <= 0:
+        return 0.0
     
     D_new = calc_mass_discrimination(float(new_species_mz), mass_disc_exponent)
     D_no = calc_mass_discrimination(float(no_mz), mass_disc_exponent)
@@ -79,8 +81,11 @@ def calc_pics_single_energy(
 
 def calc_pics_with_temperature(
     input_data: PICSInputData,
-) -> dict[float, PICSResult]:
-    results: dict[float, PICSResult] = {}
+) -> dict[PICSResultKey, PICSResult]:
+    results: dict[PICSResultKey, PICSResult] = {}
+
+    if input_data.new_species_mf <= 0 or input_data.no_mf <= 0:
+        return results
     
     new_signal = input_data.new_species_signal
     no_signal = input_data.no_signal
@@ -161,6 +166,9 @@ def calc_pics_multi_energy(
     input_data: PICSInputData,
 ) -> dict[float, PICSResult]:
     results: dict[float, PICSResult] = {}
+
+    if input_data.new_species_mf <= 0 or input_data.no_mf <= 0:
+        return results
     
     all_energies = set(new_species_signal_by_energy.keys()) & set(no_signal_by_energy.keys())
     
@@ -211,15 +219,15 @@ def calc_pics_multi_energy(
     return results
 
 
-class PICS_Calculator:
+class PICSCalculator:
     def __init__(self):
         self.input_data = PICSInputData()
-        self.results: dict[float, PICSResult] = {}
+        self.results: dict[PICSResultKey, PICSResult] = {}
     
     def set_input_data(self, data: PICSInputData) -> None:
         self.input_data = data
     
-    def calculate(self) -> dict[float, PICSResult]:
+    def calculate(self) -> dict[PICSResultKey, PICSResult]:
         self.results = calc_pics_with_temperature(self.input_data)
         return self.results
     
@@ -235,7 +243,7 @@ class PICS_Calculator:
         )
         return self.results
     
-    def get_results(self) -> dict[float, PICSResult]:
+    def get_results(self) -> dict[PICSResultKey, PICSResult]:
         return self.results
     
     def get_average_cross_section(self) -> float:
@@ -243,3 +251,7 @@ class PICS_Calculator:
             return 0.0
         values = [r.cross_section for r in self.results.values()]
         return float(np.mean(values))
+
+
+# Backwards-compatible alias for older callers.
+PICS_Calculator = PICSCalculator
