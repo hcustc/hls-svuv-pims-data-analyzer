@@ -1,6 +1,5 @@
 import sys
 from core.output_paths import ensure_output_structure
-from frontends.pyqt_app.login_dialog import LoginDialog
 from frontends.pyqt_app.main_window import MainWindow
 from frontends.pyqt_app.theme import apply_application_theme
 from frontends.pyqt_app.dialogs import CoreToolsDialog

@@ -428,13 +428,20 @@ async function pollProgress() {
       log(data.error || "任务失败");
       return;
     }
+    state._pollRetries = 0;
     setTimeout(pollProgress, 900);
   } catch (error) {
     handleMissingPicsLibrary(error);
-    setBusy(false);
-    setStatus("error", error.message);
-    setProgress(100, "读取进度失败", "error");
-    log(error.message);
+    state._pollRetries = (state._pollRetries || 0) + 1;
+    if (state._pollRetries <= 5) {
+      log(`读取进度失败，${state._pollRetries}/5 次重试...`);
+      setTimeout(pollProgress, 2000);
+    } else {
+      setBusy(false);
+      setStatus("error", error.message);
+      setProgress(100, "读取进度失败", "error");
+      log(error.message);
+    }
   }
 }
 
