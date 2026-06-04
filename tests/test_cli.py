@@ -44,6 +44,17 @@ def _run_cli(*args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _run_cli_allow_failure(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(CLI), *args],
+        cwd=PROJECT_ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+
 def test_cli_formula_outputs_json():
     result = _run_cli("formula", "Ca(OH)2")
     payload = json.loads(result.stdout)
@@ -59,6 +70,9 @@ def test_cli_pie_writes_csv_and_curve_json(tmp_path):
     peaks.write_text("mz,peak,start,end\n22,22,21,23\n", encoding="utf-8")
     output = tmp_path / "pie.csv"
     curves_json = tmp_path / "pie_curves.json"
+    manifest_json = tmp_path / "pie_manifest.json"
+    evidence_json = tmp_path / "pie_evidence.json"
+    report_md = tmp_path / "pie_report.md"
 
     _run_cli(
         "pie",
@@ -72,13 +86,33 @@ def test_cli_pie_writes_csv_and_curve_json(tmp_path):
         str(output),
         "--curves-json",
         str(curves_json),
+        "--manifest-json",
+        str(manifest_json),
+        "--evidence-json",
+        str(evidence_json),
+        "--report-md",
+        str(report_md),
     )
 
     df = pd.read_csv(output)
     curves = json.loads(curves_json.read_text(encoding="utf-8"))
+    manifest = json.loads(manifest_json.read_text(encoding="utf-8"))
+    evidence = json.loads(evidence_json.read_text(encoding="utf-8"))
+    report = report_md.read_text(encoding="utf-8")
     assert df["energy"].tolist() == [11.0, 12.0]
     assert "22" in curves
     assert curves["22"]["intensities"] == [9.0, 18.0]
+    assert manifest["analysis_type"] == "pie"
+    assert manifest["data_summary"]["curve_count"] == 1
+    assert evidence["22"]["confidence_level"] == "unfitted"
+    assert "m/z 级证据摘要" in report
+
+
+def test_cli_pie_fit_pics_requires_database(tmp_path):
+    result = _run_cli_allow_failure("pie", str(tmp_path), "--fit-pics")
+    assert result.returncode == 2
+    assert "error: --fit-pics requires --database" in result.stderr
+    assert "Traceback" not in result.stderr
 
 
 def test_cli_temperature_writes_csv_and_curve_json(tmp_path):
@@ -88,6 +122,9 @@ def test_cli_temperature_writes_csv_and_curve_json(tmp_path):
     peaks.write_text("mz,peak,start,end\n22,22,21,23\n", encoding="utf-8")
     output = tmp_path / "temperature.csv"
     curves_json = tmp_path / "temperature_curves.json"
+    manifest_json = tmp_path / "temperature_manifest.json"
+    evidence_json = tmp_path / "temperature_evidence.json"
+    report_md = tmp_path / "temperature_report.md"
 
     _run_cli(
         "temperature",
@@ -100,10 +137,22 @@ def test_cli_temperature_writes_csv_and_curve_json(tmp_path):
         str(output),
         "--curves-json",
         str(curves_json),
+        "--manifest-json",
+        str(manifest_json),
+        "--evidence-json",
+        str(evidence_json),
+        "--report-md",
+        str(report_md),
     )
 
     df = pd.read_csv(output)
     curves = json.loads(curves_json.read_text(encoding="utf-8"))
+    manifest = json.loads(manifest_json.read_text(encoding="utf-8"))
+    evidence = json.loads(evidence_json.read_text(encoding="utf-8"))
+    report = report_md.read_text(encoding="utf-8")
     assert df["temperature"].tolist() == [400.0, 500.0]
     assert "22" in curves
     assert curves["22"]["areas"] == [9.0, 18.0]
+    assert manifest["analysis_type"] == "temperature"
+    assert evidence["22"]["curve"]["point_count"] == 2
+    assert "有效温度点少于 3 个" in report
