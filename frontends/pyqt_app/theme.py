@@ -28,9 +28,40 @@ QWidget#SidePanel {
     border-radius: 6px;
 }
 
+QFrame#ProjectCard {
+    background: #ffffff;
+    border: 1px solid #d8dee8;
+    border-radius: 6px;
+}
+
+QLabel#ProjectTitle {
+    background: transparent;
+    color: #111827;
+    font-size: 11pt;
+    font-weight: 700;
+}
+
+QLabel#ProjectStatus {
+    background: transparent;
+    color: #475569;
+    font-weight: 600;
+}
+
+QLabel#ProjectParamSummary {
+    background: #f8fafc;
+    border: 1px solid #d8dee8;
+    border-radius: 5px;
+    color: #334155;
+    padding: 4px 7px;
+}
+
 QWidget#PageNav {
     background: transparent;
     border: 0;
+}
+
+QWidget#ProjectPage {
+    background: transparent;
 }
 
 QStackedWidget#WorkspaceStack {
