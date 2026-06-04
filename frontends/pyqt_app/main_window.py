@@ -30,11 +30,11 @@ from core.runtime_paths import resource_path
 from core.spectrum_io import read_bl03u_txt, sum_spectra
 from core.normalization import load_normalization_settings
 from frontends.pyqt_app.dialogs import (
-    CommonParametersDialog,
     CoreToolsDialog,
     IonizationEnergyLookupWidget,
     IsotopeAbundanceDialog,
     MoleFractionDialog,
+    NormalizationSettingsWidget,
     PICSCalculatorDialog,
     PIESpeciesFitDialog,
     TemperatureScanDialog,
@@ -339,8 +339,12 @@ class MainWindow(Ui_MainWindow, QMainWindow):
             self.normalization_settings,
             self.workspace_stack,
         )
+        self.project_page = QtWidgets.QWidget(self.workspace_stack)
+        self.project_page.setObjectName("ProjectPage")
+        self._build_project_page()
 
         pages = [
+            ("project", "项目管理", self.project_page),
             ("spectrum", "质谱工作台", self.spectrum_page),
             ("temperature", "温度扫描", self.temperature_page),
             ("pie", "PIE拟合", self.pie_page),
@@ -371,10 +375,318 @@ class MainWindow(Ui_MainWindow, QMainWindow):
         self.verticalLayout_9.insertWidget(0, self.page_nav)
         self.verticalLayout_9.insertWidget(1, self.workspace_stack, stretch=1)
         self.workspace_stack.setCurrentWidget(self.spectrum_page)
+        self._route_common_parameter_buttons()
+
+    def _build_project_page(self):
+        page_layout = QVBoxLayout(self.project_page)
+        page_layout.setContentsMargins(12, 12, 12, 12)
+        page_layout.setSpacing(10)
+
+        self.project_tabs = QtWidgets.QTabWidget(self.project_page)
+        self.project_tabs.setObjectName("ProjectTabs")
+
+        self.project_settings_page = QtWidgets.QWidget(self.project_tabs)
+        project_settings_layout = QVBoxLayout(self.project_settings_page)
+        project_settings_layout.setContentsMargins(8, 8, 8, 8)
+        project_settings_layout.setSpacing(10)
+        self._build_project_card(self.project_settings_page)
+        project_settings_layout.addWidget(self.project_card)
+        project_settings_layout.addStretch(1)
+
+        self.project_common_page = QtWidgets.QWidget(self.project_tabs)
+        common_layout = QVBoxLayout(self.project_common_page)
+        common_layout.setContentsMargins(8, 8, 8, 8)
+        common_layout.setSpacing(10)
+        self.project_common_settings_widget = NormalizationSettingsWidget(
+            self.normalization_settings,
+            self.current_calibration(),
+            self.project_common_page,
+        )
+        self.project_common_settings_widget.save_button.clicked.connect(self.on_project_common_parameters_saved)
+        common_layout.addWidget(self.project_common_settings_widget)
+
+        self.project_tabs.addTab(self.project_settings_page, "项目设置")
+        self.project_tabs.addTab(self.project_common_page, "通用参数")
+        page_layout.addWidget(self.project_tabs, stretch=1)
+
+    def _build_project_card(self, parent):
+        self.project_settings = QtCore.QSettings("BL03U", "MassSpectrumTool")
+        self.project_card = QtWidgets.QFrame(parent)
+        self.project_card.setObjectName("ProjectCard")
+        self.project_card.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+
+        card_layout = QVBoxLayout(self.project_card)
+        card_layout.setContentsMargins(10, 8, 10, 10)
+        card_layout.setSpacing(8)
+
+        header_layout = QHBoxLayout()
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(8)
+        title = QtWidgets.QLabel("项目管理与全局参数", self.project_card)
+        title.setObjectName("ProjectTitle")
+        self.project_status_label = QtWidgets.QLabel("", self.project_card)
+        self.project_status_label.setObjectName("ProjectStatus")
+        self.project_status_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        header_layout.addWidget(title)
+        header_layout.addWidget(self.project_status_label, stretch=1)
+
+        self.project_save_button = QPushButton("保存项目", self.project_card)
+        self.project_apply_button = QPushButton("应用到工具", self.project_card)
+        self.project_capture_button = QPushButton("读取当前路径", self.project_card)
+        self.project_common_params_button = QPushButton("通用参数", self.project_card)
+        for button in (
+            self.project_capture_button,
+            self.project_common_params_button,
+        ):
+            button.setObjectName("BrowseButton")
+        for button in (
+            self.project_save_button,
+            self.project_apply_button,
+            self.project_capture_button,
+            self.project_common_params_button,
+        ):
+            button.setFixedHeight(28)
+            header_layout.addWidget(button)
+        card_layout.addLayout(header_layout)
+
+        form_layout = QtWidgets.QGridLayout()
+        form_layout.setContentsMargins(0, 0, 0, 0)
+        form_layout.setHorizontalSpacing(8)
+        form_layout.setVerticalSpacing(6)
+        self.project_name_edit = QLineEdit(self.project_card)
+        self.project_system_edit = QLineEdit(self.project_card)
+        self.project_single_file_edit = QLineEdit(self.project_card)
+        self.project_sum_folder_edit = QLineEdit(self.project_card)
+        self.project_temperature_folder_edit = QLineEdit(self.project_card)
+        self.project_pie_folder_edit = QLineEdit(self.project_card)
+        self.project_pics_database_edit = QLineEdit(self.project_card)
+
+        form_layout.addWidget(QtWidgets.QLabel("项目名", self.project_card), 0, 0)
+        form_layout.addWidget(self.project_name_edit, 0, 1)
+        form_layout.addWidget(QtWidgets.QLabel("实验体系", self.project_card), 0, 2)
+        form_layout.addWidget(self.project_system_edit, 0, 3)
+        form_layout.addWidget(QtWidgets.QLabel("PICS库", self.project_card), 0, 4)
+        form_layout.addWidget(self.project_pics_database_edit, 0, 5)
+        self.project_database_button = QPushButton("选择", self.project_card)
+        self.project_database_button.setObjectName("BrowseButton")
+        self.project_database_button.setFixedHeight(28)
+        form_layout.addWidget(self.project_database_button, 0, 6)
+
+        form_layout.addWidget(QtWidgets.QLabel("单谱文件", self.project_card), 1, 0)
+        form_layout.addWidget(self.project_single_file_edit, 1, 1)
+        self.project_single_file_button = QPushButton("选择", self.project_card)
+        self.project_single_file_button.setObjectName("BrowseButton")
+        self.project_single_file_button.setFixedHeight(28)
+        form_layout.addWidget(self.project_single_file_button, 1, 2)
+        form_layout.addWidget(QtWidgets.QLabel("累计谱文件夹", self.project_card), 1, 3)
+        form_layout.addWidget(self.project_sum_folder_edit, 1, 4, 1, 2)
+        self.project_sum_folder_button = QPushButton("选择", self.project_card)
+        self.project_sum_folder_button.setObjectName("BrowseButton")
+        self.project_sum_folder_button.setFixedHeight(28)
+        form_layout.addWidget(self.project_sum_folder_button, 1, 6)
+
+        form_layout.addWidget(QtWidgets.QLabel("温度扫描目录", self.project_card), 2, 0)
+        form_layout.addWidget(self.project_temperature_folder_edit, 2, 1, 1, 2)
+        self.project_temperature_folder_button = QPushButton("选择", self.project_card)
+        self.project_temperature_folder_button.setObjectName("BrowseButton")
+        self.project_temperature_folder_button.setFixedHeight(28)
+        form_layout.addWidget(self.project_temperature_folder_button, 2, 3)
+        form_layout.addWidget(QtWidgets.QLabel("PIE扫描目录", self.project_card), 2, 4)
+        form_layout.addWidget(self.project_pie_folder_edit, 2, 5)
+        self.project_pie_folder_button = QPushButton("选择", self.project_card)
+        self.project_pie_folder_button.setObjectName("BrowseButton")
+        self.project_pie_folder_button.setFixedHeight(28)
+        form_layout.addWidget(self.project_pie_folder_button, 2, 6)
+
+        for column in (1, 3, 5):
+            form_layout.setColumnStretch(column, 1)
+        card_layout.addLayout(form_layout)
+
+        self.project_param_summary = QtWidgets.QLabel(self.project_card)
+        self.project_param_summary.setObjectName("ProjectParamSummary")
+        self.project_param_summary.setWordWrap(True)
+        self.project_param_summary.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        card_layout.addWidget(self.project_param_summary)
+
+        self.project_save_button.clicked.connect(self.save_project_settings)
+        self.project_apply_button.clicked.connect(self.apply_project_settings_to_tools)
+        self.project_capture_button.clicked.connect(self.capture_current_project_paths)
+        self.project_common_params_button.clicked.connect(self.open_common_parameters)
+        self.project_single_file_button.clicked.connect(self.select_project_single_file)
+        self.project_sum_folder_button.clicked.connect(
+            lambda: self.select_project_folder(self.project_sum_folder_edit, "选择累计谱文件夹")
+        )
+        self.project_temperature_folder_button.clicked.connect(
+            lambda: self.select_project_folder(self.project_temperature_folder_edit, "选择温度扫描目录")
+        )
+        self.project_pie_folder_button.clicked.connect(
+            lambda: self.select_project_folder(self.project_pie_folder_edit, "选择PIE扫描目录")
+        )
+        self.project_database_button.clicked.connect(self.select_project_database)
+
+        self.load_project_settings()
+        self.refresh_project_parameter_summary()
+
+    def _route_common_parameter_buttons(self) -> None:
+        for page in (self.temperature_page, self.pie_page):
+            button = getattr(page, "common_params_button", None)
+            if button is None:
+                continue
+            try:
+                button.clicked.disconnect()
+            except (TypeError, RuntimeError):
+                pass
+            button.clicked.connect(self.open_common_parameters)
+
+    def _project_setting_text(self, key: str, default: str = "") -> str:
+        value = self.project_settings.value(key, default)
+        return str(value or "")
+
+    def _project_field_values(self) -> dict[str, str]:
+        return {
+            "project/name": self.project_name_edit.text().strip(),
+            "project/system": self.project_system_edit.text().strip(),
+            "project/single_file": self.project_single_file_edit.text().strip(),
+            "project/sum_folder": self.project_sum_folder_edit.text().strip(),
+            "project/temperature_folder": self.project_temperature_folder_edit.text().strip(),
+            "project/pie_folder": self.project_pie_folder_edit.text().strip(),
+            "project/pics_database": self.project_pics_database_edit.text().strip(),
+        }
+
+    def load_project_settings(self) -> None:
+        default_pie_folder = "tests/fixtures/C6F11O2H/PIE_Scan/1050"
+        default_database = str(resource_path("database/species_database.sqlite"))
+        self.project_name_edit.setText(self._project_setting_text("project/name"))
+        self.project_system_edit.setText(self._project_setting_text("project/system", "C6F11O2H"))
+        self.project_single_file_edit.setText(self._project_setting_text("project/single_file", self.lineEdit.text()))
+        self.project_sum_folder_edit.setText(self._project_setting_text("project/sum_folder", self.folder_path.text()))
+        self.project_temperature_folder_edit.setText(
+            self._project_setting_text("project/temperature_folder", self.folder_path.text())
+        )
+        self.project_pie_folder_edit.setText(self._project_setting_text("project/pie_folder", default_pie_folder))
+        self.project_pics_database_edit.setText(self._project_setting_text("project/pics_database", default_database))
+        self.update_project_title()
+
+    def save_project_settings(self) -> None:
+        for key, value in self._project_field_values().items():
+            self.project_settings.setValue(key, value)
+        self.project_settings.sync()
+        self.update_project_title()
+        self.refresh_project_parameter_summary()
+        self.statusbar.showMessage("项目设置已保存", 3000)
+
+    def apply_project_settings_to_tools(self) -> None:
+        values = self._project_field_values()
+        if values["project/single_file"]:
+            self.lineEdit.setText(values["project/single_file"])
+        if values["project/sum_folder"]:
+            self.folder_path.setText(values["project/sum_folder"])
+        if values["project/temperature_folder"] and hasattr(self, "temperature_page"):
+            self.temperature_page.folder_edit.setText(values["project/temperature_folder"])
+        if values["project/pie_folder"] and hasattr(self, "pie_page"):
+            self.pie_page.folder_edit.setText(values["project/pie_folder"])
+        if values["project/pics_database"] and hasattr(self, "pie_page"):
+            self.pie_page.database_edit.setText(values["project/pics_database"])
+            if os.path.exists(values["project/pics_database"]):
+                self.pie_page.load_database(show_message=False)
+        self.save_project_settings()
+        self.statusbar.showMessage("项目路径和统一参数已应用到当前工具", 3000)
+
+    def capture_current_project_paths(self) -> None:
+        self.project_single_file_edit.setText(self.lineEdit.text().strip())
+        self.project_sum_folder_edit.setText(self.folder_path.text().strip())
+        if hasattr(self, "temperature_page"):
+            self.project_temperature_folder_edit.setText(self.temperature_page.folder_edit.text().strip())
+        if hasattr(self, "pie_page"):
+            self.project_pie_folder_edit.setText(self.pie_page.folder_edit.text().strip())
+            self.project_pics_database_edit.setText(self.pie_page.database_edit.text().strip())
+        self.statusbar.showMessage("已读取当前工具路径，保存后会写入项目设置", 3000)
+
+    def select_project_single_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择单谱文件",
+            self._dialog_start_dir(self.project_single_file_edit.text()),
+            "质谱数据 (*.txt *.asc *.888);;所有文件 (*)",
+        )
+        if path:
+            self.project_single_file_edit.setText(path)
+
+    def select_project_folder(self, target: QLineEdit, title: str) -> None:
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            title,
+            self._dialog_start_dir(target.text()),
+        )
+        if folder:
+            target.setText(folder)
+
+    def select_project_database(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择PICS数据库",
+            self._dialog_start_dir(self.project_pics_database_edit.text()),
+            "SQLite Files (*.sqlite *.sqlite3 *.db);;所有文件 (*)",
+        )
+        if path:
+            self.project_pics_database_edit.setText(path)
+
+    def update_project_title(self) -> None:
+        project_name = self.project_name_edit.text().strip()
+        project_system = self.project_system_edit.text().strip()
+        caption = project_name or project_system or "未命名项目"
+        self.project_status_label.setText(f"当前项目: {caption}")
+        window_title = "BL03U_MassSpectrumTool"
+        if project_name:
+            window_title = f"{window_title} - {project_name}"
+        self.setWindowTitle(window_title)
+
+    def refresh_project_parameter_summary(self) -> None:
+        try:
+            settings = load_normalization_settings()
+            peak_config = load_peak_detection_config()
+            calibration = self.current_calibration()
+            light_map = {"io": "IO光电流", "beam_current": "Beam Current"}
+            pie_map = {"first": "首点归一", "none": "逐点除光强", "off": "关闭"}
+            peak_map = {"prominence": "Prominence", "legacy": "传统局部极大", "cwt": "CWT小波"}
+            summary = (
+                f"统一参数: 定标 A={calibration.a:.6g}, B={calibration.b:.6g}, C={calibration.c:.6g}; "
+                f"光强来源={light_map.get(settings.light_source, settings.light_source)}; "
+                f"温度光强归一化={'开' if settings.temperature_photon_normalize else '关'}; "
+                f"PIE光强={pie_map.get(settings.pie_photon_mode, settings.pie_photon_mode)}; "
+                f"质量歧视D={settings.mass_discrimination:.6g}; "
+                f"主工作台寻峰={peak_map.get(peak_config.algorithm, peak_config.algorithm)}"
+            )
+        except Exception as exc:
+            summary = f"统一参数摘要读取失败: {exc}"
+        self.project_param_summary.setText(summary)
+
+    def on_project_common_parameters_saved(self) -> None:
+        self.normalization_settings = load_normalization_settings()
+        self.apply_config_defaults()
+        calibration = self.current_calibration()
+        if hasattr(self, "temperature_page"):
+            self.temperature_page.normalization_settings = self.normalization_settings
+            self.temperature_page.calibration = calibration
+        if hasattr(self, "pie_page"):
+            self.pie_page.normalization_settings = self.normalization_settings
+            self.pie_page.calibration = calibration
+        if hasattr(self, "mole_fraction_page"):
+            self.mole_fraction_page.normalization_settings = self.normalization_settings
+            self.mole_fraction_page.calibration = calibration
+        if hasattr(self, "pics_page"):
+            self.pics_page.normalization_settings = self.normalization_settings
+            self.pics_page.calibration = calibration
+        self.refresh_project_parameter_summary()
+        self.statusbar.showMessage("通用参数已保存并同步到各工具", 3000)
 
     def switch_workspace_page(self, page_name: str):
         """Switch top-level workspace page and refresh shared calibration state."""
         page_map = {
+            "project": self.project_page,
             "spectrum": self.spectrum_page,
             "temperature": self.temperature_page,
             "pie": self.pie_page,
@@ -399,20 +711,17 @@ class MainWindow(Ui_MainWindow, QMainWindow):
         self.workspace_stack.setCurrentWidget(page)
         if page_name in self.page_buttons:
             self.page_buttons[page_name].setChecked(True)
+        if hasattr(self, "project_param_summary"):
+            self.refresh_project_parameter_summary()
 
     def open_common_parameters(self):
-        dialog = CommonParametersDialog(self.normalization_settings, self.current_calibration(), self)
-        dialog.exec()
-        self.apply_config_defaults()
-        calibration = self.current_calibration()
-        if hasattr(self, "temperature_page"):
-            self.temperature_page.calibration = calibration
-        if hasattr(self, "pie_page"):
-            self.pie_page.calibration = calibration
-        if hasattr(self, "mole_fraction_page"):
-            self.mole_fraction_page.calibration = calibration
-        if hasattr(self, "pics_page"):
-            self.pics_page.calibration = calibration
+        if hasattr(self, "project_common_settings_widget"):
+            self.project_common_settings_widget.settings = self.normalization_settings
+            self.project_common_settings_widget.calibration = self.current_calibration()
+            self.project_common_settings_widget.load_from_settings()
+        self.switch_workspace_page("project")
+        if hasattr(self, "project_tabs"):
+            self.project_tabs.setCurrentWidget(self.project_common_page)
 
     def add_core_tools_launcher_dialog_buttons(self):
         """Legacy dialog launchers kept for reference; not used by the main window."""
