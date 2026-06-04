@@ -392,6 +392,10 @@ class MainWindow(Ui_MainWindow, QMainWindow):
             self.temperature_page.calibration = calibration
         if hasattr(self, "pie_page"):
             self.pie_page.calibration = calibration
+        if hasattr(self, "mole_fraction_page"):
+            self.mole_fraction_page.calibration = calibration
+        if hasattr(self, "pics_page"):
+            self.pics_page.calibration = calibration
         self.workspace_stack.setCurrentWidget(page)
         if page_name in self.page_buttons:
             self.page_buttons[page_name].setChecked(True)
@@ -405,6 +409,10 @@ class MainWindow(Ui_MainWindow, QMainWindow):
             self.temperature_page.calibration = calibration
         if hasattr(self, "pie_page"):
             self.pie_page.calibration = calibration
+        if hasattr(self, "mole_fraction_page"):
+            self.mole_fraction_page.calibration = calibration
+        if hasattr(self, "pics_page"):
+            self.pics_page.calibration = calibration
 
     def add_core_tools_launcher_dialog_buttons(self):
         """Legacy dialog launchers kept for reference; not used by the main window."""

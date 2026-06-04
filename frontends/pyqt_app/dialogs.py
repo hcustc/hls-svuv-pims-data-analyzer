@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 from PyQt6 import QtCore, QtWidgets
 
-from core.calibration import Calibration
+from core.calibration import Calibration, tof_to_mz
 from core.config import (
     PeakDetectionConfig,
     load_calibration_config,
@@ -27,6 +27,7 @@ from core.isotope import (
 from core.nist_webbook import default_nist_webbook_client
 from core.output_paths import ensure_output_dir
 from core.pie_analysis import analyze_pie_folder, build_pie_curves, identify_species_for_mz_with_curve, load_species_database, analyze_multiple_pie_folders, merge_pie_segments
+from core.pics_calculator import calc_pics_single_energy
 from core.elements import get_all_elements_from_database, filter_species_by_elements, COMMON_ELEMENTS, parse_formula as parse_formula_elements, get_elements_from_formula
 from core.normalization import NormalizationSettings, load_normalization_settings, save_normalization_settings
 from core.temperature_scan import (
@@ -4278,7 +4279,6 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
             if abs(a) < 1e-10 or abs(b) < 1e-10:
                 a, b, c = 0.0, 0.07, -48
             
-            from core.calibration import tof_to_mz
             import numpy as np
             
             loaded_count = 0
@@ -4302,8 +4302,7 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
                     if len(spectrum_data) == 0:
                         continue
                     
-                    n = len(spectrum_data)
-                    mz_values = np.array([a * (i + 1) ** 2 + b * (i + 1) + c for i in range(n)])
+                    mz_values = tof_to_mz(spectrum.x, a, b, c)
                     rounded_mz = np.round(mz_values)
                     
                     species_indices = np.where(rounded_mz == species_mz)[0]
@@ -4323,7 +4322,7 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
                         self.signal_table.setItem(row_count, 0, QtWidgets.QTableWidgetItem(f"{energy:.2f}"))
                         self.signal_table.setItem(row_count, 1, QtWidgets.QTableWidgetItem(f"{species_signal:.2f}"))
                         self.signal_table.setItem(row_count, 2, QtWidgets.QTableWidgetItem(f"{no_signal:.2f}"))
-                        self.signal_table.setItem(row_count, 3, QtWidgets.QTableWidgetItem(f"{io_current:.2f}" if io_current else "N/A"))
+                        self.signal_table.setItem(row_count, 3, QtWidgets.QTableWidgetItem(f"{io_current:.6g}" if io_current is not None else "N/A"))
                         self.signal_table.setItem(row_count, 4, QtWidgets.QTableWidgetItem(f"{temp:.1f}"))
                         loaded_count += 1
                 except Exception as e:
@@ -4483,19 +4482,24 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 corrected_species = species_signal
                 corrected_no = no_signal
                 
-                if enable_io_correction and io_current and io_current > 0:
+                if enable_io_correction and io_current is not None and io_current > 0:
                     corrected_species = species_signal / io_current
                     corrected_no = no_signal / io_current
                 
                 sigma_no = self._get_no_cross_section_at_energy(energy)
                 
-                D_no = (no_mz / 30) ** mass_disc_exp
-                D_species = (species_mz / 30) ** mass_disc_exp
-                
-                if D_species == 0 or corrected_no == 0:
+                pics = calc_pics_single_energy(
+                    corrected_species,
+                    corrected_no,
+                    species_mf,
+                    no_mf,
+                    species_mz,
+                    no_mz,
+                    sigma_no,
+                    mass_disc_exp,
+                )
+                if pics <= 0:
                     continue
-                
-                pics = sigma_no * (corrected_species / corrected_no) * (no_mf / species_mf) * (D_no / D_species)
                 
                 results.append((energy, temp, pics))
                 
@@ -4560,32 +4564,45 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
             return
         
         try:
-            energies = sorted(set(k[0] for k in self.pics_results.keys()))
-            cross_sections = [self.pics_results.get((e, min(t for _, t in self.pics_results if _ == e)), 0.0) for e in energies]
-            
             import sqlite3
-            conn = sqlite3.connect(str(db_path))
-            cursor = conn.cursor()
-            
-            cursor.execute('''
-                INSERT INTO species (mz, name, formula, ionization_energy, smiles, energies, cross_sections)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                self.new_species_mz,
-                self.new_species_name,
-                self.new_species_formula,
-                0.0,
-                "",
-                ",".join(str(e) for e in energies),
-                ",".join(str(c) for c in cross_sections)
-            ))
-            
-            conn.commit()
-            conn.close()
+
+            points_by_energy: dict[float, list[float]] = {}
+            for (energy, _temp), sigma in self.pics_results.items():
+                points_by_energy.setdefault(float(energy), []).append(float(sigma))
+            cross_section_points = [
+                (energy, float(np.mean(values)))
+                for energy, values in sorted(points_by_energy.items())
+            ]
+
+            with sqlite3.connect(str(db_path)) as conn:
+                conn.execute("PRAGMA foreign_keys = ON")
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    INSERT INTO species (mz, name, formula, ionization_energy, smiles)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        self.new_species_mz,
+                        self.new_species_name,
+                        self.new_species_formula,
+                        0.0,
+                        "",
+                    ),
+                )
+                species_id = cursor.lastrowid
+                cursor.executemany(
+                    """
+                    INSERT INTO pic_cross_sections (species_id, energy_ev, cross_section)
+                    VALUES (?, ?, ?)
+                    """,
+                    [(species_id, energy, sigma) for energy, sigma in cross_section_points],
+                )
+                conn.commit()
+
             QtWidgets.QMessageBox.information(self, "提示", "成功添加到数据库")
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "错误", f"添加到数据库失败: {str(e)}")
-
 
 class CoreToolsDialog(QtWidgets.QDialog):
     def __init__(self, calibration: Calibration, parent=None, initial_tab: str = "normalization"):
