@@ -21,7 +21,7 @@ normalization:
   temperature_kr_correct: true
   pie_photon_mode: first
   mass_discrimination: 1.0
-  kr_calibration_folder: /Users/huangchen/VscodeProject/BL03U_MSTool_clean_repo/BL03U_MassSpectrumTool/tests/fixtures/C6F11O2H/Temp_Scan/14.7eV
+  kr_calibration_folder: 
   kr_calibration_peak_file: config/peak_integration.yaml
   expansion_factors:
     550.0: 1.0

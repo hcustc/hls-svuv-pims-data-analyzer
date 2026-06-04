@@ -158,45 +158,93 @@ class ProjectSettings:
 
 
 def _nested_to_flat(data: dict) -> dict:
-    """Flatten nested project.yaml structure into dataclass field dict."""
+    """Flatten project.yaml into ProjectSettings fields.
+
+    The on-disk YAML uses user-facing names (``project.name``,
+    ``calibration.a``, ``peak_detection.algorithm``), while the dataclass uses
+    namespaced field names to avoid collisions. Keep this mapping explicit so a
+    saved project can be loaded back without silently dropping values.
+    """
     flat: dict[str, Any] = {}
 
-    for section, fields in [
-        ("project", ["project_name", "system", "description", "output_dir"]),
-        ("data_sources", [
-            "single_spectrum_file", "sum_spectrum_folder",
-            "temperature_scan_folder", "pie_scan_folder",
-            "pics_database_path", "manual_peak_file",
-        ]),
-        ("calibration", ["cal_a", "cal_b", "cal_c", "calibration_points"]),
-        ("normalization", [
-            "light_source", "temperature_photon_normalize", "temperature_kr_correct",
-            "pie_photon_mode", "mass_discrimination", "kr_calibration_folder",
-            "kr_calibration_peak_file", "expansion_factors", "selected_elements",
-        ]),
-        ("peak_detection", [
-            "peak_algorithm", "detection_min_idx", "threshold_end", "min_intensity",
-            "nearby_peak_window", "duplicate_window", "weak_tail_early_window",
-            "weak_tail_late_window", "weak_tail_ratio", "gaussian_window_max",
-            "gaussian_boundary_scale", "boundary_padding", "prominence_ratio",
-            "smoothing_window", "smoothing_poly_order", "baseline_window",
-            "baseline_percentile", "min_peak_width", "max_peak_width",
-        ]),
-    ]:
+    section_mappings: dict[str, dict[str, str]] = {
+        "project": {
+            "name": "project_name",
+            "project_name": "project_name",
+            "system": "system",
+            "description": "description",
+            "output_dir": "output_dir",
+        },
+        "data_sources": {
+            "single_spectrum_file": "single_spectrum_file",
+            "sum_spectrum_folder": "sum_spectrum_folder",
+            "temperature_scan_folder": "temperature_scan_folder",
+            "pie_scan_folder": "pie_scan_folder",
+            "pics_database_path": "pics_database_path",
+            "manual_peak_file": "manual_peak_file",
+        },
+        "calibration": {
+            "a": "cal_a",
+            "b": "cal_b",
+            "c": "cal_c",
+            "cal_a": "cal_a",
+            "cal_b": "cal_b",
+            "cal_c": "cal_c",
+            "points": "calibration_points",
+            "calibration_points": "calibration_points",
+        },
+        "normalization": {
+            "light_source": "light_source",
+            "temperature_photon_normalize": "temperature_photon_normalize",
+            "temperature_kr_correct": "temperature_kr_correct",
+            "pie_photon_mode": "pie_photon_mode",
+            "mass_discrimination": "mass_discrimination",
+            "kr_calibration_folder": "kr_calibration_folder",
+            "kr_calibration_peak_file": "kr_calibration_peak_file",
+            "expansion_factors": "expansion_factors",
+            "selected_elements": "selected_elements",
+        },
+        "peak_detection": {
+            "algorithm": "peak_algorithm",
+            "peak_algorithm": "peak_algorithm",
+            "detection_min_idx": "detection_min_idx",
+            "threshold_end": "threshold_end",
+            "min_intensity": "min_intensity",
+            "nearby_peak_window": "nearby_peak_window",
+            "duplicate_window": "duplicate_window",
+            "weak_tail_early_window": "weak_tail_early_window",
+            "weak_tail_late_window": "weak_tail_late_window",
+            "weak_tail_ratio": "weak_tail_ratio",
+            "gaussian_window_max": "gaussian_window_max",
+            "gaussian_boundary_scale": "gaussian_boundary_scale",
+            "boundary_padding": "boundary_padding",
+            "prominence_ratio": "prominence_ratio",
+            "smoothing_window": "smoothing_window",
+            "smoothing_poly_order": "smoothing_poly_order",
+            "baseline_window": "baseline_window",
+            "baseline_percentile": "baseline_percentile",
+            "min_peak_width": "min_peak_width",
+            "max_peak_width": "max_peak_width",
+        },
+    }
+
+    for section, mapping in section_mappings.items():
         section_data = data.get(section, {})
         if not isinstance(section_data, dict):
             continue
-        for key in fields:
-            if key in section_data:
-                flat[key] = section_data[key]
+        for yaml_key, field_name in mapping.items():
+            if yaml_key in section_data:
+                flat[field_name] = section_data[yaml_key]
 
     fp = data.get("function_params", {})
     if isinstance(fp, dict):
         pie = fp.get("pie", {})
         if isinstance(pie, dict):
-            for k in ("pie_energy_decimals", "pie_recursive", "pie_prefer_gaussian",
-                      "pie_multi_folder_mode", "pie_merge_method"):
-                kk = k[4:]
+            for k, kk in [("pie_energy_decimals", "energy_decimals"),
+                          ("pie_recursive", "recursive"),
+                          ("pie_prefer_gaussian", "prefer_gaussian"),
+                          ("pie_multi_folder_mode", "multi_folder_mode"),
+                          ("pie_merge_method", "merge_method")]:
                 if kk in pie:
                     flat[k] = pie[kk]
 
@@ -234,7 +282,6 @@ def _nested_to_flat(data: dict) -> dict:
             flat[key] = {float(k): float(v) for k, v in flat[key].items()}
 
     return flat
-
 
 def _flat_to_nested(settings: ProjectSettings) -> dict:
     """Convert flat ProjectSettings to nested project.yaml structure."""
