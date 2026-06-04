@@ -5,7 +5,7 @@ from PyQt6 import QtWidgets
 
 APP_QSS = """
 QWidget {
-    font-family: "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", Arial, sans-serif;
+    font-family: "PingFang SC", "Helvetica Neue", "Microsoft YaHei UI", Arial, sans-serif;
     font-size: 10pt;
     color: #1f2937;
     background: #f6f8fb;

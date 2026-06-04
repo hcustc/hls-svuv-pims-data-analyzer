@@ -23,6 +23,7 @@ class NormalizationSettings:
     kr_calibration_folder: str = ""
     kr_calibration_peak_file: str = ""
     expansion_factors: dict[float, float] = field(default_factory=dict)
+    selected_elements: list[str] = field(default_factory=list)
 
 
 def extract_light_intensity(metadata_lines: list[str], source: str = "io", fallback: float = 1.0) -> float:
