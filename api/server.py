@@ -24,6 +24,7 @@ from pydantic import BaseModel
 from starlette.responses import FileResponse, RedirectResponse
 from starlette.staticfiles import StaticFiles
 
+from core.analysis_artifacts import build_analysis_manifest, build_pie_evidence_objects
 from core.calibration import Calibration
 from core.config import (
     PROJECT_ROOT,
@@ -75,6 +76,8 @@ class PieJob:
     database_path: str = ""
     source_folder: str = ""
     peak_source: str = ""
+    manifest: Dict[str, Any] = field(default_factory=dict)
+    evidence: Dict[str, Any] = field(default_factory=dict)
 
 
 JOBS: Dict[str, PieJob] = {}
@@ -812,6 +815,63 @@ def _pie_summary(analysis_df: pd.DataFrame, curves: Dict[int, dict]) -> Dict[str
     }
 
 
+def _pie_artifacts(
+    *,
+    source_label: str,
+    peak_source: str,
+    database_reference: Dict[str, Any],
+    payload: PieStartPayload | None,
+    analysis_df: pd.DataFrame,
+    curves: Dict[int, dict],
+    fits: Dict[int, dict] | None = None,
+) -> tuple[Dict[str, Any], Dict[str, Any]]:
+    parameters: Dict[str, Any] = {"peak_source": peak_source, **database_reference}
+    if payload is not None:
+        parameters.update(
+            {
+                "recursive": payload.recursive,
+                "energy_decimals": payload.energy_decimals,
+                "prefer_gaussian": payload.gaussian,
+                "manual_peak_path": payload.manual_peak_path,
+                "target_mz": payload.target_mz,
+                "photon_mode": payload.photon_mode,
+                "light_source": payload.light_source,
+                "mass_discrimination": payload.mass_discrimination,
+            }
+        )
+    manifest = build_analysis_manifest(
+        analysis_type="pie",
+        input_path=source_label,
+        parameters=parameters,
+        analysis_df=analysis_df,
+        curves=curves,
+    )
+    evidence = build_pie_evidence_objects(curves, fits or {})
+    return manifest, evidence
+
+
+def _public_path_label(path: str | Path) -> str:
+    path_obj = Path(path)
+    try:
+        resolved = path_obj.resolve(strict=False)
+        return str(resolved.relative_to(PROJECT_ROOT))
+    except ValueError:
+        return resolved.name or path_obj.name or str(path)
+
+
+def _database_artifact_reference(
+    *,
+    database: Optional[str] = None,
+    library_id: Optional[str] = None,
+    resolved_path: Path,
+) -> Dict[str, Any]:
+    if library_id:
+        return {"database_scope": "session", "library_id": library_id}
+    if database:
+        return {"database_scope": "custom", "database_name": Path(database).name or resolved_path.name}
+    return {"database_scope": "server", "database_name": resolved_path.name}
+
+
 def _query_fit_candidates(database_path: Path, mz: int) -> List[Dict[str, Any]]:
     with sqlite3.connect(database_path) as conn:
         conn.row_factory = sqlite3.Row
@@ -970,6 +1030,18 @@ def _run_pie_job(job_id: str, payload: PieStartPayload) -> None:
         )
         curves = build_pie_curves(analysis_df)
         summary = _pie_summary(analysis_df, curves)
+        manifest, evidence = _pie_artifacts(
+            source_label=_public_path_label(folder),
+            peak_source=peak_source,
+            database_reference=_database_artifact_reference(
+                database=payload.database,
+                library_id=payload.library_id,
+                resolved_path=database_path,
+            ),
+            payload=payload,
+            analysis_df=analysis_df,
+            curves=curves,
+        )
         _update_job(
             job_id,
             status="done",
@@ -978,8 +1050,10 @@ def _run_pie_job(job_id: str, payload: PieStartPayload) -> None:
             analysis_df=analysis_df,
             curves=curves,
             database_path=str(database_path),
-            source_folder=str(folder),
+            source_folder=_public_path_label(folder),
             peak_source=peak_source,
+            manifest=manifest,
+            evidence=evidence,
         )
     except Exception as exc:
         _update_job(job_id, status="error", message="失败", error=str(exc))
@@ -1027,6 +1101,18 @@ async def upload_pie_curve(
         raise HTTPException(status_code=400, detail=str(exc))
 
     summary = _pie_summary(analysis_df, curves)
+    manifest, evidence = _pie_artifacts(
+        source_label=Path(filename).name,
+        peak_source="uploaded_curve",
+        database_reference=_database_artifact_reference(
+            database=database,
+            library_id=library_id,
+            resolved_path=database_path,
+        ),
+        payload=None,
+        analysis_df=analysis_df,
+        curves=curves,
+    )
     _cleanup_jobs()
     job_id = uuid.uuid4().hex
     with JOBS_LOCK:
@@ -1038,8 +1124,10 @@ async def upload_pie_curve(
             analysis_df=analysis_df,
             curves=curves,
             database_path=str(database_path),
-            source_folder=filename,
+            source_folder=Path(filename).name,
             peak_source="uploaded_curve",
+            manifest=manifest,
+            evidence=evidence,
         )
     return {"job_id": job_id, "status": "done", "summary": summary}
 
@@ -1067,6 +1155,19 @@ def pie_result(job_id: str):
         "summary": job.summary,
         "source_folder": job.source_folder,
         "peak_source": job.peak_source,
+    }
+
+
+@app.get("/api/pie/artifacts/{job_id}")
+def pie_artifacts(job_id: str):
+    job = _get_job(job_id)
+    if job.status != "done":
+        raise HTTPException(status_code=409, detail=f"job status is {job.status}")
+    return {
+        "job_id": job.id,
+        "summary": job.summary,
+        "manifest": job.manifest,
+        "evidence": job.evidence,
     }
 
 
@@ -1160,6 +1261,7 @@ def fit_pie_curve(job_id: str, mz: int, payload: Optional[PieFitPayload] = None)
         fit_model["selected_species_ids"] = []
     with JOBS_LOCK:
         job.fits[int(mz)] = fit_model
+        job.evidence = build_pie_evidence_objects(job.curves, job.fits)
         job.updated_at = time.time()
     return {"fit": fit_model}
 
