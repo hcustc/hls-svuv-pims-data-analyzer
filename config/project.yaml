@@ -1,0 +1,108 @@
+project:
+  name: ''
+  system: ''
+  description: ''
+  output_dir: output
+data_sources:
+  single_spectrum_file: ''
+  sum_spectrum_folder: ''
+  temperature_scan_folder: ''
+  pie_scan_folder: ''
+  pics_database_path: ''
+  manual_peak_file: ''
+calibration:
+  a: 3.66334e-07
+  b: 0.000637719
+  c: 0.272489072
+  points: []
+normalization:
+  light_source: io
+  temperature_photon_normalize: true
+  temperature_kr_correct: true
+  pie_photon_mode: first
+  mass_discrimination: 1.0
+  kr_calibration_folder: 
+  kr_calibration_peak_file: config/peak_integration.yaml
+  expansion_factors:
+    550.0: 1.0
+    600.0: 1.006062757054481
+    650.0: 0.8610833069413769
+    700.0: 0.8693145505699037
+    750.0: 0.8814520705989174
+    800.0: 0.8967398322758013
+    850.0: 0.9040653932656396
+    900.0: 0.9133398529070991
+    950.0: 0.9179382470617404
+    1000.0: 0.9229133320095494
+    1050.0: 0.9302750232338569
+    1100.0: 0.9452532044592329
+  selected_elements:
+  - H
+  - C
+  - N
+  - O
+  - F
+  - Cl
+  - Br
+  - I
+  - S
+  - P
+  - Si
+peak_detection:
+  algorithm: prominence
+  detection_min_idx: 3000
+  threshold_end: 2.0
+  min_intensity: 3.0
+  nearby_peak_window: 30
+  duplicate_window: 20
+  weak_tail_early_window: 90
+  weak_tail_late_window: 50
+  weak_tail_ratio: 5.0
+  gaussian_window_max: 30
+  gaussian_boundary_scale: 1.5
+  boundary_padding: 2
+  prominence_ratio: 0.005
+  smoothing_window: 5
+  smoothing_poly_order: 2
+  baseline_window: 301
+  baseline_percentile: 5.0
+  min_peak_width: 1
+  max_peak_width: 80
+function_params:
+  pie:
+    energy_decimals: 1
+    recursive: true
+    prefer_gaussian: true
+    multi_folder_mode: false
+    merge_method: low_energy_dominant
+  temperature_scan:
+    reference_mode: sum
+    prefer_gaussian: true
+    kr_mz: 84
+  pics:
+    no_mz: 30
+    no_formula: 'NO'
+    no_mf: 0.01
+    new_species_mf: 0.002
+  mole_fraction:
+    mass_disc_exponent: 0.77897
+    parent_mz: 128
+    parent_initial_mf: 0.002
+    reference_temperature: null
+    reference_species_mz: null
+    reference_species_tm: null
+    reference_species_mf_at_tm: 0.001
+    photon_energy: 10.0
+    kr_data:
+      550.0: 393.399604
+      600.0: 378.4250953
+      650.0: 286.9776109
+      700.0: 309.1328046
+      750.0: 282.8007667
+      800.0: 308.1926573
+      850.0: 337.9213882
+      900.0: 338.1595463
+      950.0: 360.2213739
+      1000.0: 335.0853736
+      1050.0: 372.9785567
+      1100.0: 356.4303333

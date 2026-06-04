@@ -30,6 +30,7 @@ from core.pie_analysis import analyze_pie_folder, build_pie_curves, identify_spe
 from core.pics_calculator import calc_pics_single_energy
 from core.elements import get_all_elements_from_database, filter_species_by_elements, COMMON_ELEMENTS, parse_formula as parse_formula_elements, get_elements_from_formula
 from core.normalization import NormalizationSettings, load_normalization_settings, save_normalization_settings
+from core.project_settings import ProjectSettings
 from core.temperature_scan import (
     TEMPERATURE_CURVE_CLASS_LABELS,
     analyze_temperature_folder,
@@ -684,6 +685,27 @@ class NormalizationSettingsWidget(QtWidgets.QWidget, DataFrameTableMixin):
             peak_layout.setColumnStretch(column, 1)
         layout.addWidget(peak_group)
 
+        # 元素筛选 (全局参数)
+        elements_group = QtWidgets.QGroupBox("元素筛选（影响PIE物种匹配范围）")
+        elements_layout = QtWidgets.QHBoxLayout(elements_group)
+        elements_layout.setSpacing(4)
+        self.element_checks = {}
+        for elem in COMMON_ELEMENTS:
+            chk = QtWidgets.QCheckBox(elem)
+            chk.setChecked(True)
+            self.element_checks[elem] = chk
+            elements_layout.addWidget(chk)
+        self.select_all_elements_btn = QtWidgets.QPushButton("全选")
+        self.select_all_elements_btn.setFixedWidth(50)
+        self.select_all_elements_btn.clicked.connect(lambda: self._set_all_elements(True))
+        self.clear_elements_btn = QtWidgets.QPushButton("清空")
+        self.clear_elements_btn.setFixedWidth(50)
+        self.clear_elements_btn.clicked.connect(lambda: self._set_all_elements(False))
+        elements_layout.addWidget(self.select_all_elements_btn)
+        elements_layout.addWidget(self.clear_elements_btn)
+        elements_layout.addStretch()
+        layout.addWidget(elements_group)
+
         self.factor_table = QtWidgets.QTableWidget()
         layout.addWidget(self.factor_table, stretch=1)
         self.load_from_settings()
@@ -702,6 +724,10 @@ class NormalizationSettingsWidget(QtWidgets.QWidget, DataFrameTableMixin):
         self.kr_peak_file_edit.setText(self.settings.kr_calibration_peak_file)
         self.load_peak_detection_controls()
         self.refresh_factor_table()
+        # 加载元素筛选
+        selected = self.settings.selected_elements
+        for elem, chk in self.element_checks.items():
+            chk.setChecked(not selected or elem in selected)
 
     def load_peak_detection_controls(self) -> None:
         config = self.peak_detection
@@ -756,6 +782,13 @@ class NormalizationSettingsWidget(QtWidgets.QWidget, DataFrameTableMixin):
             min_peak_width=self.peak_min_peak_width_edit.value(),
             max_peak_width=max(self.peak_min_peak_width_edit.value(), self.peak_max_peak_width_edit.value()),
         )
+        self.settings.selected_elements = [
+            elem for elem, chk in self.element_checks.items() if chk.isChecked()
+        ]
+
+    def _set_all_elements(self, checked: bool):
+        for chk in self.element_checks.values():
+            chk.setChecked(checked)
 
     def select_kr_folder(self):
         folder = QtWidgets.QFileDialog.getExistingDirectory(self, "选择Kr定标文件夹")
@@ -1006,6 +1039,18 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         if path:
             self.peak_file_edit.setText(path)
             self.peak_source_combo.setCurrentIndex(1)
+
+    def set_project_settings(self, ps: ProjectSettings) -> None:
+        """Apply ProjectSettings defaults to TemperatureScanDialog inline controls."""
+        self.project_settings = ps
+        if ps.temperature_scan_folder:
+            self.folder_edit.setText(ps.temperature_scan_folder)
+        idx = self.reference_mode_combo.findData(ps.temp_reference_mode)
+        if idx >= 0:
+            self.reference_mode_combo.setCurrentIndex(idx)
+        self.gaussian_check.setChecked(ps.temp_prefer_gaussian)
+        if hasattr(self, "spin_kr_mz"):
+            self.spin_kr_mz.setValue(ps.temp_kr_mz)
 
     def open_common_parameters(self):
         dialog = CommonParametersDialog(self.normalization_settings, self.calibration, self)
@@ -1356,11 +1401,122 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.result_df.to_csv(path, index=False, encoding="utf-8-sig")
 
 
+
+class FlowLayout(QtWidgets.QLayout):
+    """Custom flow layout: arranges widgets left-to-right, wrapping to next row."""
+
+    def __init__(self, parent=None, margin: int = 0, spacing: int = 4):
+        super().__init__(parent)
+        self._items: list[QtWidgets.QLayoutItem] = []
+        self._h_spacing = spacing
+        self._v_spacing = spacing
+        if margin >= 0:
+            self.setContentsMargins(margin, margin, margin, margin)
+
+    def addItem(self, item: QtWidgets.QLayoutItem) -> None:
+        self._items.append(item)
+
+    def count(self) -> int:
+        return len(self._items)
+
+    def itemAt(self, index: int) -> QtWidgets.QLayoutItem | None:
+        if 0 <= index < len(self._items):
+            return self._items[index]
+        return None
+
+    def takeAt(self, index: int) -> QtWidgets.QLayoutItem | None:
+        if 0 <= index < len(self._items):
+            return self._items.pop(index)
+        return None
+
+    def addWidget(self, w: QtWidgets.QWidget) -> None:
+        super().addWidget(w)
+
+    def expandingDirections(self) -> QtCore.Qt.Orientation:
+        return QtCore.Qt.Orientation(0)
+
+    def hasHeightForWidth(self) -> bool:
+        return True
+
+    def heightForWidth(self, width: int) -> int:
+        return self._do_layout(QtCore.QRect(0, 0, width, 0), apply_geometry=False)
+
+    def setGeometry(self, rect: QtCore.QRect) -> None:
+        super().setGeometry(rect)
+        self._do_layout(rect, apply_geometry=True)
+
+    def sizeHint(self) -> QtCore.QSize:
+        return self.minimumSize()
+
+    def minimumSize(self) -> QtCore.QSize:
+        size = QtCore.QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        margins = self.contentsMargins()
+        size += QtCore.QSize(margins.left() + margins.right(), margins.top() + margins.bottom())
+        return size
+
+    def _do_layout(self, rect: QtCore.QRect, apply_geometry: bool) -> int:
+        margins = self.contentsMargins()
+        x = rect.x() + margins.left()
+        y = rect.y() + margins.top()
+        line_height = 0
+        max_width = rect.width() - margins.left() - margins.right()
+
+        for item in self._items:
+            widget = item.widget()
+            if widget and not widget.isVisible():
+                continue
+            size_hint = item.sizeHint()
+            next_x = x + size_hint.width() + self._h_spacing
+            if next_x - self._h_spacing > max_width and line_height > 0:
+                x = rect.x() + margins.left()
+                y += line_height + self._v_spacing
+                line_height = 0
+            if apply_geometry:
+                item.setGeometry(QtCore.QRect(x, y, size_hint.width(), size_hint.height()))
+            x += size_hint.width() + self._h_spacing
+            line_height = max(line_height, size_hint.height())
+        return y + line_height + margins.bottom() - rect.y()
+
+
+def _run_exhaustive_fit(
+    candidates: list[dict],
+    energies,
+    intensities,
+) -> list[dict]:
+    """穷举候选物种所有组合，按R²降序排列。"""
+    from itertools import combinations as _combinations
+
+    from core.pie_analysis import fit_species_combination_with_curve
+
+    ranked: list[dict] = []
+    n = len(candidates)
+    for r in range(1, n + 1):
+        for combo_indices in _combinations(range(n), r):
+            combo = [candidates[i] for i in combo_indices]
+            model = fit_species_combination_with_curve(combo, energies, intensities)
+            r2 = model.get("r_squared", 0.0)
+            if r2 <= 0:
+                continue
+            names = [s.get("species", "?") for s in combo]
+            ranked.append({
+                "species_names": names,
+                "species_count": len(combo),
+                "r_squared": r2,
+                "rmse": model.get("rmse", 0.0),
+                "model": model,
+            })
+    ranked.sort(key=lambda x: x["r_squared"], reverse=True)
+    return ranked
+
+
 class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
     def __init__(self, calibration: Calibration, normalization_settings: NormalizationSettings | None = None, parent=None):
         super().__init__(parent)
         self.calibration = calibration
         self.normalization_settings = normalization_settings or NormalizationSettings()
+        self.project_settings: ProjectSettings | None = None
         self.peak_detection = load_peak_detection_config()
         self.database: list[dict] = []
         self.analysis_df = pd.DataFrame()
@@ -1374,28 +1530,26 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.resize(1380, 850)
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(10)
+        layout.setSpacing(8)
 
-        controls = QtWidgets.QWidget()
-        controls_layout = QtWidgets.QGridLayout(controls)
-        controls_layout.setContentsMargins(0, 0, 0, 0)
-        controls_layout.setHorizontalSpacing(8)
-        controls_layout.setVerticalSpacing(8)
         default_db = species_database_path()
         self.database_edit = QtWidgets.QLineEdit(str(default_db) if default_db.exists() else "")
         self.load_button = QtWidgets.QPushButton("加载数据库")
         self.load_button.clicked.connect(self.load_database)
-        
-        # 多文件夹选择相关
-        self.use_multi_folders = QtWidgets.QCheckBox("多文件夹模式")
+
+        self.use_multi_folders = QtWidgets.QToolButton()
+        self.use_multi_folders.setText("多文件夹")
+        self.use_multi_folders.setCheckable(True)
         self.use_multi_folders.setChecked(False)
-        self.use_multi_folders.stateChanged.connect(self.toggle_multi_folder_mode)
-        
+        self.use_multi_folders.setObjectName("ModeToggle")
+        self.use_multi_folders.toggled.connect(self.toggle_multi_folder_mode)
+
         self.folder_edit = QtWidgets.QLineEdit()
         self.folder_edit.setPlaceholderText("选择包含PIE扫描质谱文件的文件夹")
-        self.select_folder_button = QtWidgets.QPushButton("选择文件夹")
+        self.select_folder_button = QtWidgets.QPushButton("选择")
+        self.select_folder_button.setToolTip("选择PIE扫描文件夹")
         self.select_folder_button.clicked.connect(self.select_folder)
-        
+
         self.folder_list = QtWidgets.QListWidget()
         self.folder_list.setMaximumHeight(100)
         self.add_folder_button = QtWidgets.QPushButton("添加文件夹")
@@ -1404,201 +1558,228 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.remove_folder_button.clicked.connect(self.remove_folder)
         self.clear_folders_button = QtWidgets.QPushButton("清空列表")
         self.clear_folders_button.clicked.connect(self.clear_folders)
-        
+
         self.merge_method_combo = QtWidgets.QComboBox()
         self.merge_method_combo.addItem("低能段为主 (推荐)", "low_energy_dominant")
         self.merge_method_combo.addItem("第一组为主", "first_segment_dominant")
         self.merge_method_combo.addItem("简单拼接 (不缩放)", "mean")
-        
-        self.analyze_button = QtWidgets.QPushButton("生成PIE曲线")
+
+        self.analyze_button = QtWidgets.QPushButton("生成曲线")
+        self.analyze_button.setToolTip("生成PIE曲线")
         self.analyze_button.clicked.connect(self.run_analysis)
-        self.export_button = QtWidgets.QPushButton("导出曲线数据")
+        self.export_button = QtWidgets.QPushButton("导出曲线")
+        self.export_button.setToolTip("导出PIE曲线数据")
         self.export_button.clicked.connect(self.export_curve_data)
-        self.common_params_button = QtWidgets.QPushButton("通用参数")
+        self.common_params_button = QtWidgets.QPushButton("参数")
+        self.common_params_button.setToolTip("打开通用参数设置")
         self.common_params_button.clicked.connect(self.open_common_parameters)
-        self.peak_source_combo = QtWidgets.QComboBox()
-        self.peak_source_combo.addItem("自动寻峰", "auto")
-        self.peak_source_combo.addItem("手动卡峰", "manual")
-        self.peak_file_edit = QtWidgets.QLineEdit()
-        self.peak_file_edit.setPlaceholderText("可选: yaml/csv/xlsx 手动卡峰文件")
-        self.select_peak_file_button = QtWidgets.QPushButton("选择卡峰")
-        self.select_peak_file_button.clicked.connect(self.select_peak_file)
-
-        self.threshold_end_edit = QtWidgets.QDoubleSpinBox()
-        self.threshold_end_edit.setRange(0, 1_000_000)
-        self.threshold_end_edit.setDecimals(3)
-        self.threshold_end_edit.setValue(self.peak_detection.threshold_end)
-        self.min_intensity_edit = QtWidgets.QDoubleSpinBox()
-        self.min_intensity_edit.setRange(0, 1_000_000)
-        self.min_intensity_edit.setDecimals(3)
-        self.min_intensity_edit.setValue(self.peak_detection.min_intensity)
-        self.energy_decimals_edit = QtWidgets.QSpinBox()
-        self.energy_decimals_edit.setRange(0, 6)
-        self.energy_decimals_edit.setValue(1)
-        self.recursive_check = QtWidgets.QCheckBox("递归")
-        self.recursive_check.setChecked(True)
-        self.gaussian_check = QtWidgets.QCheckBox("高斯积分")
-        self.gaussian_check.setChecked(True)
         self.status_label = QtWidgets.QLabel("就绪")
+        self.status_label.setObjectName("ProjectStatus")
+        self.load_button.setObjectName("BrowseButton")
+        self.select_folder_button.setObjectName("BrowseButton")
+        self.export_button.setObjectName("BrowseButton")
+        self.common_params_button.setObjectName("BrowseButton")
 
-        controls_layout.addWidget(QtWidgets.QLabel("PICS库"), 0, 0)
-        controls_layout.addWidget(self.database_edit, 0, 1, 1, 7)
-        controls_layout.addWidget(self.load_button, 0, 8)
-        controls_layout.addWidget(QtWidgets.QLabel("PIE文件夹"), 1, 0)
-        controls_layout.addWidget(self.use_multi_folders, 1, 1)
-        controls_layout.addWidget(self.folder_edit, 1, 2, 1, 4)
-        controls_layout.addWidget(self.select_folder_button, 1, 6)
-        controls_layout.addWidget(self.analyze_button, 1, 7)
-        controls_layout.addWidget(self.export_button, 1, 8)
-        controls_layout.addWidget(self.common_params_button, 1, 9)
-        
-        # 多文件夹列表区域
-        folder_list_group = QtWidgets.QGroupBox("多段PIE文件夹列表 (按能量顺序添加)")
-        folder_list_layout = QtWidgets.QVBoxLayout(folder_list_group)
-        folder_list_layout.setContentsMargins(5, 5, 5, 5)
-        folder_list_layout.addWidget(self.folder_list)
-        folder_btn_layout = QtWidgets.QHBoxLayout()
-        folder_btn_layout.addWidget(self.add_folder_button)
-        folder_btn_layout.addWidget(self.remove_folder_button)
-        folder_btn_layout.addWidget(self.clear_folders_button)
-        folder_btn_layout.addWidget(QtWidgets.QLabel("合并方式:"))
-        folder_btn_layout.addWidget(self.merge_method_combo)
-        folder_btn_layout.addStretch()
-        folder_list_layout.addLayout(folder_btn_layout)
-        controls_layout.addWidget(folder_list_group, 2, 0, 1, 10)
-        
-        controls_layout.addWidget(QtWidgets.QLabel("能量分组小数"), 3, 0)
-        controls_layout.addWidget(self.energy_decimals_edit, 3, 1)
-        controls_layout.addWidget(self.recursive_check, 3, 2)
-        controls_layout.addWidget(self.gaussian_check, 3, 3)
-        controls_layout.addWidget(QtWidgets.QLabel("自动寻峰与归一化参数在“通用参数”页管理"), 3, 4, 1, 5)
-        controls_layout.addWidget(QtWidgets.QLabel("卡峰来源"), 4, 0)
-        controls_layout.addWidget(self.peak_source_combo, 4, 1)
-        controls_layout.addWidget(self.peak_file_edit, 4, 2, 1, 4)
-        controls_layout.addWidget(self.select_peak_file_button, 4, 6)
-        controls_layout.addWidget(self.status_label, 5, 0, 1, 10)
-        controls_layout.setColumnStretch(2, 1)
-        controls_layout.setColumnStretch(5, 1)
-        layout.addWidget(controls)
-        
-        # 元素筛选和一键拟合区域
-        fit_controls = QtWidgets.QWidget()
-        fit_controls_layout = QtWidgets.QGridLayout(fit_controls)
-        fit_controls_layout.setContentsMargins(0, 0, 0, 0)
-        fit_controls_layout.setHorizontalSpacing(10)
-        fit_controls_layout.setVerticalSpacing(5)
-        
-        # 元素筛选区域
-        elements_group = QtWidgets.QGroupBox("元素筛选")
-        elements_layout = QtWidgets.QVBoxLayout(elements_group)
-        elements_layout.setSpacing(5)
-        
-        self.element_checks = {}
-        for i, elem in enumerate(COMMON_ELEMENTS):
-            check = QtWidgets.QCheckBox(elem)
-            check.setChecked(True)
-            check.stateChanged.connect(self.on_element_filter_changed)
-            self.element_checks[elem] = check
-        
-        elements_grid = QtWidgets.QGridLayout()
-        for i, elem in enumerate(COMMON_ELEMENTS):
-            row = i // 4
-            col = i % 4
-            elements_grid.addWidget(self.element_checks[elem], row, col)
-        elements_layout.addLayout(elements_grid)
-        
-        fit_controls_layout.addWidget(elements_group, 0, 0)
-        
-        # 一键拟合按钮
-        fit_buttons = QtWidgets.QVBoxLayout()
-        self.fit_all_button = QtWidgets.QPushButton("一键拟合所有曲线")
+        # ---- 紧凑数据源控制带 ----
+        source_panel = QtWidgets.QWidget()
+        source_panel.setObjectName("ControlBar")
+        data_layout = QtWidgets.QVBoxLayout(source_panel)
+        data_layout.setContentsMargins(8, 8, 8, 8)
+        data_layout.setSpacing(6)
+
+        db_row = QtWidgets.QHBoxLayout()
+        db_row.setSpacing(6)
+        db_label = QtWidgets.QLabel("PICS库")
+        db_label.setObjectName("ReadoutLabel")
+        db_row.addWidget(db_label)
+        db_row.addWidget(self.database_edit, stretch=1)
+        db_row.addWidget(self.load_button)
+
+        self.summary_bar = QtWidgets.QWidget()
+        summary_layout = QtWidgets.QHBoxLayout(self.summary_bar)
+        summary_layout.setContentsMargins(0, 0, 0, 0)
+        summary_layout.setSpacing(6)
+        self.summary_project_label = QtWidgets.QLabel("项目: ---")
+        self.summary_system_label = QtWidgets.QLabel("体系: ---")
+        self.summary_data_label = QtWidgets.QLabel("数据源: ---")
+        self.summary_project_label.setObjectName("ReadoutValue")
+        self.summary_system_label.setObjectName("ReadoutValue")
+        self.summary_data_label.setObjectName("ReadoutValue")
+        self.summary_project_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.summary_system_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.summary_data_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        summary_layout.addWidget(self.summary_project_label)
+        summary_layout.addWidget(self.summary_system_label)
+        summary_layout.addWidget(self.summary_data_label)
+        db_row.addWidget(self.summary_bar)
+        data_layout.addLayout(db_row)
+
+        folder_row = QtWidgets.QHBoxLayout()
+        folder_row.setSpacing(6)
+        folder_label = QtWidgets.QLabel("PIE数据")
+        folder_label.setObjectName("ReadoutLabel")
+        folder_row.addWidget(folder_label)
+        folder_row.addWidget(self.use_multi_folders)
+        folder_row.addWidget(self.folder_edit, stretch=1)
+        folder_row.addWidget(self.select_folder_button)
+        folder_row.addWidget(self.analyze_button)
+        folder_row.addWidget(self.export_button)
+        folder_row.addWidget(self.common_params_button)
+        folder_row.addWidget(self.status_label)
+        data_layout.addLayout(folder_row)
+
+        # 多文件夹列表区域 (只在多文件夹模式显示)
+        self.multi_folder_section = QtWidgets.QGroupBox("多段PIE文件夹 (按能量顺序添加)")
+        multi_layout = QtWidgets.QVBoxLayout(self.multi_folder_section)
+        multi_layout.setContentsMargins(5, 5, 5, 5)
+        multi_layout.addWidget(self.folder_list)
+        folder_btn_row = QtWidgets.QHBoxLayout()
+        folder_btn_row.addWidget(self.add_folder_button)
+        folder_btn_row.addWidget(self.remove_folder_button)
+        folder_btn_row.addWidget(self.clear_folders_button)
+        folder_btn_row.addWidget(QtWidgets.QLabel("合并:"))
+        folder_btn_row.addWidget(self.merge_method_combo)
+        folder_btn_row.addStretch()
+        multi_layout.addLayout(folder_btn_row)
+        self.multi_folder_section.setVisible(False)
+        data_layout.addWidget(self.multi_folder_section)
+
+        layout.addWidget(source_panel)
+
+        # ── 曲线列表区拟合控制 ──
+        self.fit_all_button = QtWidgets.QPushButton("拟合全部")
+        self.fit_all_button.setToolTip("一键拟合所有PIE曲线")
         self.fit_all_button.clicked.connect(self.fit_all_curves)
-        self.refit_selected_button = QtWidgets.QPushButton("重新拟合选中")
-        self.refit_selected_button.clicked.connect(self.refit_selected_curves)
-        self.clear_fits_button = QtWidgets.QPushButton("清除所有拟合")
-        self.clear_fits_button.clicked.connect(self.clear_all_fits)
-        self.export_pie_button = QtWidgets.QPushButton("导出PIE鉴定结果")
+        self.fit_all_button.setFixedHeight(28)
+
+        self.export_pie_button = QtWidgets.QPushButton("导出鉴定结果")
+        self.export_pie_button.setToolTip("导出PIE物种鉴定结果")
         self.export_pie_button.clicked.connect(self.export_pie_results)
         self.export_pie_button.setStyleSheet("""
             QPushButton {
-                background-color: #4CAF50;
+                background-color: #16a34a;
                 color: white;
-                border: none;
-                padding: 5px;
-                border-radius: 3px;
+                border: 1px solid #15803d;
+                border-radius: 4px;
+                padding: 4px 10px;
             }
-            QPushButton:hover {
-                background-color: #45a049;
-            }
-            QPushButton:disabled {
-                background-color: #cccccc;
-            }
+            QPushButton:hover { background-color: #15803d; }
+            QPushButton:disabled { background-color: #cccccc; border-color: #cccccc; }
         """)
-        fit_buttons.addWidget(self.fit_all_button)
-        fit_buttons.addWidget(self.refit_selected_button)
-        fit_buttons.addWidget(self.clear_fits_button)
-        fit_buttons.addWidget(self.export_pie_button)
-        fit_buttons.addStretch()
-        fit_controls_layout.addLayout(fit_buttons, 0, 1)
-        
-        # 强制拟合物种
-        force_group = QtWidgets.QGroupBox("强制拟合物种 (双击m/z列表添加)")
-        force_layout = QtWidgets.QVBoxLayout(force_group)
-        force_layout.setSpacing(5)
-        self.force_species_list = QtWidgets.QListWidget()
-        self.force_species_list.setMaximumHeight(80)
-        self.remove_force_button = QtWidgets.QPushButton("移除选中")
-        self.remove_force_button.clicked.connect(self.remove_force_species)
-        force_layout.addWidget(self.force_species_list)
-        force_layout.addWidget(self.remove_force_button)
-        fit_controls_layout.addWidget(force_group, 0, 2)
-        
-        # 拟合统计
-        stats_group = QtWidgets.QGroupBox("拟合统计")
-        stats_layout = QtWidgets.QVBoxLayout(stats_group)
-        self.fit_stats_label = QtWidgets.QLabel("已拟合: 0 / 0 条曲线\n平均R²: N/A")
-        stats_layout.addWidget(self.fit_stats_label)
-        fit_controls_layout.addWidget(stats_group, 0, 3)
-        
-        layout.addWidget(fit_controls)
-        
+
+        self._force_species: list[str] = []
+
         # 初始化UI状态
         self.toggle_multi_folder_mode(0)
 
+        # ---- 主工作区 ----
         splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
 
         left_panel = QtWidgets.QWidget()
+        left_panel.setObjectName("SidePanel")
+        left_panel.setMinimumWidth(220)
+        left_panel.setMaximumWidth(360)
         left_layout = QtWidgets.QVBoxLayout(left_panel)
-        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setContentsMargins(8, 8, 8, 8)
         left_layout.setSpacing(8)
         self.summary_label = QtWidgets.QLabel("未生成PIE曲线")
-        left_layout.addWidget(self.summary_label)
+        self.summary_label.setObjectName("ProjectStatus")
+        list_header = QtWidgets.QHBoxLayout()
+        list_header.setSpacing(6)
+        list_title = QtWidgets.QLabel("m/z曲线")
+        list_title.setObjectName("ReadoutLabel")
+        list_header.addWidget(list_title)
+        list_header.addWidget(self.summary_label, stretch=1)
+        left_layout.addLayout(list_header)
         self.mz_list = QtWidgets.QListWidget()
+        self.mz_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
         self.mz_list.currentItemChanged.connect(self.on_mz_selected)
+        self.mz_list.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
+        self.mz_list.customContextMenuRequested.connect(self._on_mz_list_context_menu)
         left_layout.addWidget(self.mz_list, stretch=1)
-        self.fit_button = QtWidgets.QPushButton("拟合当前曲线")
+        mz_hint = QtWidgets.QLabel("按住 Cmd/Ctrl 可多选，右键快捷菜单")
+        mz_hint.setStyleSheet("color: #94a3b8; font-size: 9pt; background: transparent;")
+        left_layout.addWidget(mz_hint)
+        self.fit_button = QtWidgets.QPushButton("拟合当前")
+        self.fit_button.setToolTip("拟合当前选中的m/z曲线")
         self.fit_button.clicked.connect(self.fit_current_curve)
         left_layout.addWidget(self.fit_button)
-        self.show_fit_check = QtWidgets.QCheckBox("显示PICS拟合曲线")
-        self.show_fit_check.setChecked(True)
-        self.show_fit_check.stateChanged.connect(lambda _: self.refresh_current_plot())
-        self.show_components_check = QtWidgets.QCheckBox("显示前三个组分")
-        self.show_components_check.stateChanged.connect(lambda _: self.refresh_current_plot())
-        left_layout.addWidget(self.show_fit_check)
-        left_layout.addWidget(self.show_components_check)
+        left_layout.addWidget(self.fit_all_button)
+        self.exhaustive_button = QtWidgets.QPushButton("穷举优选")
+        self.exhaustive_button.setToolTip("穷举候选物种所有组合，按R²排序选出最优")
+        self.exhaustive_button.clicked.connect(self._exhaustive_best_fit)
+        self.exhaustive_button.setStyleSheet("""
+            QPushButton {
+                background: #fefce8;
+                color: #a16207;
+                border: 1px solid #fde047;
+                border-radius: 4px;
+            }
+            QPushButton:hover { background: #fef9c3; border-color: #eab308; }
+            QPushButton:disabled { background: #f5f5f5; color: #999999; border-color: #dddddd; }
+        """)
+        left_layout.addWidget(self.exhaustive_button)
         splitter.addWidget(left_panel)
 
         right_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
+        plot_container = QtWidgets.QWidget()
+        plot_container.setObjectName("PlotPanel")
+        plot_container.setMinimumHeight(280)
+        plot_container_layout = QtWidgets.QVBoxLayout(plot_container)
+        plot_container_layout.setContentsMargins(8, 8, 8, 8)
+        plot_container_layout.setSpacing(6)
         if pg is not None:
             self.plot_widget = pg.PlotWidget()
             self.plot_widget.setBackground("#ffffff")
             self.plot_widget.setLabel("bottom", "Photon Energy", units="eV")
             self.plot_widget.setLabel("left", "Normalized Intensity")
             self.plot_widget.showGrid(x=True, y=True)
-            right_splitter.addWidget(self.plot_widget)
+            # 悬停十字光标和坐标标签
+            self._hover_label = pg.TextItem("", anchor=(0, 1), color="#475569")
+            self._hover_label.setFont(QtWidgets.QApplication.font())
+            self.plot_widget.addItem(self._hover_label)
+            self._hover_vline = pg.InfiniteLine(angle=90, pen=pg.mkPen("#94a3b8", width=1, style=QtCore.Qt.PenStyle.DashLine))
+            self._hover_hline = pg.InfiniteLine(angle=0, pen=pg.mkPen("#94a3b8", width=1, style=QtCore.Qt.PenStyle.DashLine))
+            self.plot_widget.addItem(self._hover_vline)
+            self.plot_widget.addItem(self._hover_hline)
+            self._hover_vline.setVisible(False)
+            self._hover_hline.setVisible(False)
+            self.plot_widget.scene().sigMouseMoved.connect(self._on_pie_plot_mouse_move)
+            # 降低缩放灵敏度：锁定Y轴、减半滚轮速度
+            vb = self.plot_widget.getPlotItem().vb
+            vb.setMouseEnabled(x=True, y=False)
+            vb.state["wheelScaleFactor"] = -1.0 / 16.0
+            plot_container_layout.addWidget(self.plot_widget, stretch=1)
         else:
             self.plot_widget = None
-            right_splitter.addWidget(QtWidgets.QLabel("未安装 pyqtgraph，无法显示PIE曲线图"))
+            plot_placeholder = QtWidgets.QLabel("未安装 pyqtgraph，无法显示PIE曲线图")
+            plot_placeholder.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            plot_container_layout.addWidget(plot_placeholder, stretch=1)
+
+        # 拟合统计条属于图表区域，不作为 splitter 的独立面板，避免挤占下方功能区。
+        stats_bar = QtWidgets.QFrame()
+        stats_bar.setObjectName("StatsBar")
+        stats_bar.setStyleSheet("""
+            QFrame#StatsBar {
+                background: #f8f9fa;
+                border: 1px solid #d8dee8;
+                border-radius: 6px;
+                padding: 4px 10px;
+            }
+        """)
+        stats_bar.setFixedHeight(32)
+        stats_bar_layout = QtWidgets.QHBoxLayout(stats_bar)
+        stats_bar_layout.setContentsMargins(10, 2, 10, 2)
+        stats_bar_layout.setSpacing(12)
+        stats_title = QtWidgets.QLabel("拟合统计")
+        stats_title.setStyleSheet("font-weight: 600; color: #475569; background: transparent;")
+        self.fit_stats_label = QtWidgets.QLabel("已拟合: <b>0</b> / 0 条曲线&nbsp;&nbsp;&nbsp;平均R\u00b2: N/A")
+        self.fit_stats_label.setStyleSheet("background: transparent;")
+        self.fit_stats_label.setTextFormat(QtCore.Qt.TextFormat.RichText)
+        stats_bar_layout.addWidget(stats_title)
+        stats_bar_layout.addWidget(self.fit_stats_label, stretch=1)
+        plot_container_layout.addWidget(stats_bar)
+        right_splitter.addWidget(plot_container)
 
         self.curve_table = QtWidgets.QTableWidget()
         self.fit_table = QtWidgets.QTableWidget()
@@ -1607,15 +1788,118 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             table.setAlternatingRowColors(True)
             table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.detail_tabs = QtWidgets.QTabWidget()
+        self.detail_tabs.setMinimumHeight(170)
         self.detail_tabs.addTab(self.curve_table, "曲线数据")
         self.detail_tabs.addTab(self.fit_table, "PICS拟合")
-        right_splitter.addWidget(self.detail_tabs)
-        right_splitter.setSizes([520, 210])
+
+        # ---- 强制物种面板 ----
+        force_panel = QtWidgets.QWidget()
+        force_panel_layout = QtWidgets.QVBoxLayout(force_panel)
+        force_panel_layout.setContentsMargins(0, 4, 0, 0)
+        force_panel_layout.setSpacing(6)
+
+        force_input_row = QtWidgets.QHBoxLayout()
+        force_input_row.setSpacing(6)
+        self.force_input = QtWidgets.QLineEdit()
+        self.force_input.setPlaceholderText("输入物种名称后回车添加...")
+        self.force_input.returnPressed.connect(self._add_force_from_input)
+        force_input_row.addWidget(self.force_input, stretch=1)
+        add_force_btn = QtWidgets.QPushButton("添加")
+        add_force_btn.setObjectName("BrowseButton")
+        add_force_btn.setFixedHeight(28)
+        add_force_btn.clicked.connect(self._add_force_from_input)
+        force_input_row.addWidget(add_force_btn)
+        force_panel_layout.addLayout(force_input_row)
+
+        tag_container = QtWidgets.QWidget()
+        tag_container.setObjectName("TagCloud")
+        self.force_tag_layout = FlowLayout(tag_container, margin=0, spacing=4)
+        tag_container.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Minimum)
+        force_panel_layout.addWidget(tag_container, stretch=1)
+        self.detail_tabs.addTab(force_panel, "强制物种")
+
+        # ---- 候选物种面板 ----
+        candidate_panel = QtWidgets.QWidget()
+        candidate_layout = QtWidgets.QVBoxLayout(candidate_panel)
+        candidate_layout.setContentsMargins(0, 4, 0, 0)
+        candidate_layout.setSpacing(4)
+
+        self.candidate_table = QtWidgets.QTableWidget()
+        self.candidate_table.setColumnCount(6)
+        self.candidate_table.setHorizontalHeaderLabels(["选择", "物种", "m/z", "IE(eV)", "系数", "锁定"])
+        self.candidate_table.setWordWrap(False)
+        self.candidate_table.setAlternatingRowColors(True)
+        self.candidate_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.candidate_table.horizontalHeader().setStretchLastSection(True)
+
+        # 候选控制栏
+        candidate_controls = QtWidgets.QHBoxLayout()
+        candidate_controls.setSpacing(6)
+        candidate_controls.addWidget(QtWidgets.QLabel("系数模式:"))
+        self.coefficient_mode_combo = QtWidgets.QComboBox()
+        self.coefficient_mode_combo.addItem("自动拟合", "auto")
+        self.coefficient_mode_combo.addItem("锁定已选", "locked_fit")
+        self.coefficient_mode_combo.addItem("手动系数", "manual")
+        self.coefficient_mode_combo.currentIndexChanged.connect(self._on_coefficient_mode_changed)
+        candidate_controls.addWidget(self.coefficient_mode_combo)
+        self.candidate_select_all_btn = QtWidgets.QPushButton("全选")
+        self.candidate_select_all_btn.clicked.connect(lambda: self._set_all_candidates_checked(True))
+        self.candidate_clear_btn = QtWidgets.QPushButton("清空")
+        self.candidate_clear_btn.clicked.connect(lambda: self._set_all_candidates_checked(False))
+        self.candidate_import_coeff_btn = QtWidgets.QPushButton("导入系数")
+        self.candidate_import_coeff_btn.setToolTip("从当前拟合结果导入候选物种系数")
+        self.candidate_import_coeff_btn.clicked.connect(self._import_coefficients_from_fit)
+        self.candidate_zero_coeff_btn = QtWidgets.QPushButton("清零")
+        self.candidate_zero_coeff_btn.setToolTip("将所有候选物种系数清零")
+        self.candidate_zero_coeff_btn.clicked.connect(self._zero_all_coefficients)
+        self.candidate_apply_btn = QtWidgets.QPushButton("应用")
+        self.candidate_apply_btn.setToolTip("应用当前候选物种设置并拟合")
+        self.candidate_apply_btn.clicked.connect(self.fit_current_curve)
+        self.candidate_apply_btn.setStyleSheet("QPushButton { background-color: #2563eb; color: white; }")
+        for btn in (self.candidate_select_all_btn, self.candidate_clear_btn,
+                     self.candidate_import_coeff_btn, self.candidate_zero_coeff_btn):
+            btn.setObjectName("BrowseButton")
+        candidate_controls.addWidget(self.candidate_select_all_btn)
+        candidate_controls.addWidget(self.candidate_clear_btn)
+        candidate_controls.addWidget(self.candidate_import_coeff_btn)
+        candidate_controls.addWidget(self.candidate_zero_coeff_btn)
+        candidate_controls.addWidget(self.candidate_apply_btn)
+        candidate_controls.addStretch()
+        candidate_layout.addLayout(candidate_controls)
+        candidate_layout.addWidget(self.candidate_table, stretch=1)
+
+        self.detail_tabs.addTab(candidate_panel, "候选物种")
+
+        self._candidate_data: list[dict] = []
+        self._candidate_updating = False
+
+        detail_container = QtWidgets.QWidget()
+        detail_container.setMinimumHeight(200)
+        detail_container_layout = QtWidgets.QVBoxLayout(detail_container)
+        detail_container_layout.setContentsMargins(0, 0, 0, 0)
+        detail_container_layout.setSpacing(4)
+        detail_header = QtWidgets.QHBoxLayout()
+        detail_header.setContentsMargins(0, 0, 0, 0)
+        detail_header.setSpacing(6)
+        detail_title = QtWidgets.QLabel("结果与拟合控制")
+        detail_title.setObjectName("ReadoutLabel")
+        self.export_pie_button.setFixedHeight(26)
+        detail_header.addWidget(detail_title)
+        detail_header.addStretch()
+        detail_header.addWidget(self.export_pie_button)
+        detail_container_layout.addLayout(detail_header)
+        detail_container_layout.addWidget(self.detail_tabs, stretch=1)
+
+        right_splitter.addWidget(detail_container)
+        right_splitter.setStretchFactor(0, 3)
+        right_splitter.setStretchFactor(1, 1)
+        right_splitter.setCollapsible(0, False)
+        right_splitter.setCollapsible(1, False)
+        right_splitter.setSizes([480, 300])
 
         splitter.addWidget(right_splitter)
         splitter.setSizes([260, 1020])
         layout.addWidget(splitter, stretch=1)
-
         if self.database_edit.text():
             self.load_database(show_message=False)
 
@@ -1639,18 +1923,268 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, "错误", str(exc))
 
-    def get_selected_elements(self) -> set:
-        """获取选中的元素集合"""
-        return {elem for elem, check in self.element_checks.items() if check.isChecked()}
-    
-    def on_element_filter_changed(self):
-        """元素筛选变化时更新统计信息"""
-        selected = self.get_selected_elements()
-        self.status_label.setText(f"已加载PICS库: {len(self.database)} 个物种 | 筛选元素: {', '.join(sorted(selected)) if selected else '全部'}")
-    
+    # ---- 候选物种面板方法 ----
+
+    def _populate_candidate_table(self, mz: int):
+        """根据选中的m/z填充候选物种表格"""
+        self._candidate_updating = True
+        try:
+            filtered_db = self.get_filtered_database()
+            candidates = [item for item in filtered_db if item.get("mz") == mz]
+            self._candidate_data = candidates
+            self.candidate_table.setRowCount(len(candidates))
+            for row, species in enumerate(candidates):
+                # 选择 checkbox
+                check_widget = QtWidgets.QWidget()
+                check_layout = QtWidgets.QHBoxLayout(check_widget)
+                check_layout.setContentsMargins(0, 0, 0, 0)
+                check_layout.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+                chk = QtWidgets.QCheckBox()
+                chk.setChecked(True)
+                chk.stateChanged.connect(lambda state, r=row: self._on_candidate_changed(r))
+                check_layout.addWidget(chk)
+                self.candidate_table.setCellWidget(row, 0, check_widget)
+
+                # 物种名称
+                name_item = QtWidgets.QTableWidgetItem(str(species.get("species", "")))
+                name_item.setFlags(name_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
+                self.candidate_table.setItem(row, 1, name_item)
+
+                # m/z
+                mz_item = QtWidgets.QTableWidgetItem(str(species.get("mz", "")))
+                mz_item.setFlags(mz_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
+                self.candidate_table.setItem(row, 2, mz_item)
+
+                # IE
+                ie = species.get("ionization_energy")
+                ie_text = f"{ie:.4f}" if ie is not None else ""
+                ie_item = QtWidgets.QTableWidgetItem(ie_text)
+                ie_item.setFlags(ie_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
+                self.candidate_table.setItem(row, 3, ie_item)
+
+                # 系数 spinbox
+                coeff_spin = QtWidgets.QDoubleSpinBox()
+                coeff_spin.setRange(0, 1e6)
+                coeff_spin.setDecimals(6)
+                coeff_spin.setValue(0.0)
+                coeff_spin.setEnabled(False)
+                coeff_spin.valueChanged.connect(lambda val, r=row: self._on_candidate_changed(r))
+                self.candidate_table.setCellWidget(row, 4, coeff_spin)
+
+                # 锁定 checkbox
+                lock_widget = QtWidgets.QWidget()
+                lock_layout = QtWidgets.QHBoxLayout(lock_widget)
+                lock_layout.setContentsMargins(0, 0, 0, 0)
+                lock_layout.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+                lock_chk = QtWidgets.QCheckBox()
+                lock_chk.setEnabled(False)
+                lock_chk.stateChanged.connect(lambda state, r=row: self._on_candidate_changed(r))
+                lock_layout.addWidget(lock_chk)
+                self.candidate_table.setCellWidget(row, 5, lock_widget)
+
+            self.candidate_table.resizeColumnsToContents()
+            self.candidate_table.horizontalHeader().setStretchLastSection(True)
+        finally:
+            self._candidate_updating = False
+
+    def _on_candidate_changed(self, row: int):
+        """候选表格变化时实时刷新拟合预览"""
+        if self._candidate_updating:
+            return
+        self._rebuild_manual_fit()
+
+    def _on_coefficient_mode_changed(self, index: int):
+        """系数模式切换"""
+        mode = self.coefficient_mode_combo.currentData()
+        for row in range(self.candidate_table.rowCount()):
+            coeff_spin = self.candidate_table.cellWidget(row, 4)
+            if isinstance(coeff_spin, QtWidgets.QDoubleSpinBox):
+                coeff_spin.setEnabled(mode != "auto")
+            lock_widget = self.candidate_table.cellWidget(row, 5)
+            if lock_widget:
+                lock_chk = lock_widget.findChild(QtWidgets.QCheckBox)
+                if lock_chk:
+                    lock_chk.setEnabled(mode == "locked_fit")
+                    if mode != "locked_fit":
+                        lock_chk.setChecked(False)
+        self._rebuild_manual_fit()
+
+    def _set_all_candidates_checked(self, checked: bool):
+        """全选或清空候选物种"""
+        self._candidate_updating = True
+        try:
+            for row in range(self.candidate_table.rowCount()):
+                check_widget = self.candidate_table.cellWidget(row, 0)
+                if check_widget:
+                    chk = check_widget.findChild(QtWidgets.QCheckBox)
+                    if chk:
+                        chk.setChecked(checked)
+        finally:
+            self._candidate_updating = False
+        self._rebuild_manual_fit()
+
+    def _import_coefficients_from_fit(self):
+        """从当前拟合结果导入系数到候选面板"""
+        if self.current_fit is None:
+            return
+        species_list = self.current_fit.get("species", [])
+        if not species_list:
+            return
+        self._candidate_updating = True
+        try:
+            coeff_by_name = {sp.get("species"): float(sp.get("coefficient", 0)) for sp in species_list}
+            for row in range(self.candidate_table.rowCount()):
+                name_item = self.candidate_table.item(row, 1)
+                if name_item and name_item.text() in coeff_by_name:
+                    coeff_spin = self.candidate_table.cellWidget(row, 4)
+                    if isinstance(coeff_spin, QtWidgets.QDoubleSpinBox):
+                        coeff_spin.setValue(coeff_by_name[name_item.text()])
+        finally:
+            self._candidate_updating = False
+        self._rebuild_manual_fit()
+
+    def _zero_all_coefficients(self):
+        """将所有候选物种系数清零"""
+        self._candidate_updating = True
+        try:
+            for row in range(self.candidate_table.rowCount()):
+                coeff_spin = self.candidate_table.cellWidget(row, 4)
+                if isinstance(coeff_spin, QtWidgets.QDoubleSpinBox):
+                    coeff_spin.setValue(0.0)
+        finally:
+            self._candidate_updating = False
+        self._rebuild_manual_fit()
+
+    def _get_candidate_panel_state(self) -> dict:
+        """获取候选面板当前状态"""
+        mode = self.coefficient_mode_combo.currentData()
+        selected_species = []
+        locked_ids = []
+        coefficients = {}
+
+        for row in range(self.candidate_table.rowCount()):
+            check_widget = self.candidate_table.cellWidget(row, 0)
+            chk = check_widget.findChild(QtWidgets.QCheckBox) if check_widget else None
+            if chk and chk.isChecked() and row < len(self._candidate_data):
+                species = self._candidate_data[row]
+                species_id = int(species.get("id", row + 1))
+                selected_species.append(species)
+
+                coeff_spin = self.candidate_table.cellWidget(row, 4)
+                if isinstance(coeff_spin, QtWidgets.QDoubleSpinBox):
+                    coefficients[species_id] = coeff_spin.value()
+
+                lock_widget = self.candidate_table.cellWidget(row, 5)
+                if lock_widget:
+                    lock_chk = lock_widget.findChild(QtWidgets.QCheckBox)
+                    if lock_chk and lock_chk.isChecked():
+                        locked_ids.append(species_id)
+
+        return {
+            "mode": mode,
+            "selected_species": selected_species,
+            "coefficients": coefficients,
+            "locked_ids": locked_ids,
+        }
+
+    def _rebuild_manual_fit(self):
+        """使用候选面板状态重建拟合曲线(NNLS客户端预览)"""
+        if self.current_mz is None or self.current_mz not in self.curves:
+            return
+        if self._candidate_updating:
+            return
+
+        panel_state = self._get_candidate_panel_state()
+        selected = panel_state["selected_species"]
+
+        if not selected:
+            if self.current_fit is not None:
+                self.current_fit = None
+                self.refresh_current_plot()
+            return
+
+        curve = self.curves[self.current_mz]
+        energies = np.array(curve.get("energies", []), dtype=float)
+        intensities = np.array(curve.get("intensities", []), dtype=float)
+
+        if len(energies) == 0 or len(intensities) == 0:
+            return
+
+        point_count = min(energies.size, intensities.size)
+        energies = energies[:point_count]
+        intensities = intensities[:point_count]
+
+        design_columns = []
+        for species in selected:
+            pic_energies = np.asarray(species.get("energies", []), dtype=float)
+            pic_sections = np.asarray(species.get("cross_sections", []), dtype=float)
+            pic_count = min(pic_energies.size, pic_sections.size)
+            pic_energies = pic_energies[:pic_count]
+            pic_sections = pic_sections[:pic_count]
+            pic_valid = np.isfinite(pic_energies) & np.isfinite(pic_sections)
+            pic_energies = pic_energies[pic_valid]
+            pic_sections = pic_sections[pic_valid]
+            if pic_energies.size < 2:
+                design_columns.append(np.zeros(energies.size))
+                continue
+            order = np.argsort(pic_energies)
+            basis = np.interp(energies, pic_energies[order], pic_sections[order], left=0.0, right=0.0)
+            basis = np.nan_to_num(basis, nan=0.0, posinf=0.0, neginf=0.0)
+            design_columns.append(basis)
+
+        if not design_columns:
+            return
+
+        design = np.column_stack(design_columns)
+
+        mode = panel_state["mode"]
+        if mode == "manual":
+            # 使用用户设置的系数，不做NNLS拟合
+            coeffs = np.array([
+                panel_state["coefficients"].get(int(s.get("id", idx + 1)), 0.0)
+                for idx, s in enumerate(selected)
+            ])
+        else:
+            try:
+                from scipy.optimize import nnls
+                coeffs, _ = nnls(design, intensities)
+            except Exception:
+                return
+
+        fitted = design @ coeffs
+        ss_res = np.sum((intensities - fitted) ** 2)
+        ss_tot = np.sum((intensities - np.mean(intensities)) ** 2)
+        r_squared = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
+
+        species_results = []
+        for idx, (species, c) in enumerate(zip(selected, coeffs)):
+            component = design_columns[idx] * c
+            species_results.append({
+                "species": species.get("species", ""),
+                "coefficient": float(c),
+                "ie": species.get("ionization_energy"),
+                "component_intensities": component.tolist(),
+                "contribution_percent": float(c) / sum(coeffs) * 100 if sum(coeffs) > 0 else 0,
+                "r_squared": r_squared,
+            })
+
+        manual_model = {
+            "energies": energies.tolist(),
+            "experimental": intensities.tolist(),
+            "fitted": fitted.tolist(),
+            "species": species_results,
+            "r_squared": r_squared,
+            "candidate_count": len(selected),
+            "coefficient_mode": panel_state["mode"],
+        }
+
+        self.current_fit = manual_model
+        curve = self.curves[self.current_mz]
+        self.update_plot(curve, manual_model)
+
     def get_filtered_database(self) -> list:
-        """获取根据选中元素筛选后的数据库"""
-        selected_elements = self.get_selected_elements()
+        """获取根据全局元素设置筛选后的数据库"""
+        selected_elements = set(self.normalization_settings.selected_elements)
         if not selected_elements:
             return self.database
         return filter_species_by_elements(self.database, selected_elements)
@@ -1705,12 +2239,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             'species': fit_model.get('species', [])[:3],
             'r_squared': fit_model.get('r_squared', 0.0)
         }
-    
-    def get_force_species(self) -> list:
-        """获取强制拟合物种列表"""
-        return [self.force_species_list.item(i).text() 
-                for i in range(self.force_species_list.count())]
-    
+
     def on_fit_all_complete(self, results: dict):
         """一键拟合完成"""
         # 保存所有拟合结果
@@ -1722,7 +2251,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         all_r_squared = [r.get('r_squared', 0.0) for r in results.values() if r.get('success')]
         avg_r_squared = sum(all_r_squared) / len(all_r_squared) if all_r_squared else 0.0
         
-        self.fit_stats_label.setText(f"已拟合: {fitted_count} / {total_count} 条曲线\n平均R²: {avg_r_squared:.4f}")
+        self._update_fit_stats(fitted_count, total_count, avg_r_squared)
         
         if fitted_count > 0:
             first_mz = list(results.keys())[0]
@@ -1760,6 +2289,16 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             f"拟合完成！\n已拟合: {fitted_count} / {total_count} 条曲线"
         )
     
+    def _on_mz_list_context_menu(self, pos):
+        menu = QtWidgets.QMenu(self)
+        fit_action = menu.addAction("拟合当前曲线")
+        fit_all_action = menu.addAction("拟合全部曲线")
+        action = menu.exec(self.mz_list.mapToGlobal(pos))
+        if action == fit_action:
+            self.fit_current_curve()
+        elif action == fit_all_action:
+            self.fit_all_curves()
+
     def refit_selected_curves(self):
         """重新拟合选中的曲线"""
         selected_items = self.mz_list.selectedItems()
@@ -1801,7 +2340,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         # 更新统计信息
         all_r_squared = [r.get('r_squared', 0.0) for r in self.all_fit_results.values() if r.get('success')]
         avg_r_squared = sum(all_r_squared) / len(all_r_squared) if all_r_squared else 0.0
-        self.fit_stats_label.setText(f"已拟合: {fitted_count} / {total_count} 条曲线\n平均R²: {avg_r_squared:.4f}")
+        self._update_fit_stats(fitted_count, total_count, avg_r_squared)
         
         if fitted_count > 0:
             for mz, result in results.items():
@@ -1836,13 +2375,13 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self, "完成", 
             f"重新拟合完成！\n已拟合: {fitted_count} / {total_count} 条曲线"
         )
-    
+
     def clear_all_fits(self):
         """清除所有拟合"""
         self.current_fit = None
         self.all_fit_results = {}
         self.fit_table.setRowCount(0)
-        self.fit_stats_label.setText("已拟合: 0 / 0 条曲线\n平均R²: N/A")
+        self._update_fit_stats(0, 0, None)
         self.refresh_current_plot()
     
     def export_pie_results(self):
@@ -1895,33 +2434,125 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 "错误",
                 f"导出时发生错误：{str(e)}"
             )
-    
-    def remove_force_species(self):
-        """移除强制拟合物种"""
-        current_row = self.force_species_list.currentRow()
-        if current_row >= 0:
-            self.force_species_list.takeItem(current_row)
-    
+
+    # ── Force species tag cloud ──────────────────────────────────────────
+
+    def _add_force_from_input(self):
+        """Add species from the input field to the force-fit tag cloud."""
+        name = self.force_input.text().strip()
+        if name and name not in self.get_force_species():
+            self._force_species = list(self.get_force_species()) + [name]
+            self._rebuild_force_tags()
+        self.force_input.clear()
+
     def add_force_species(self, species_name: str):
-        """添加强制拟合物种"""
-        if species_name not in self.get_force_species():
-            self.force_species_list.addItem(species_name)
+        """Add a force-fit species (called externally, e.g. from m/z list)."""
+        current = list(self.get_force_species())
+        if species_name not in current:
+            current.append(species_name)
+        self._force_species = current
+        self._rebuild_force_tags()
+
+    def _remove_force_species_name(self, name: str):
+        """Remove a specific species from the force-fit list by name."""
+        current = list(self.get_force_species())
+        if name in current:
+            current.remove(name)
+        self._force_species = current
+        self._rebuild_force_tags()
+
+    def remove_force_species(self):
+        """Remove selected force species (kept for backward compat)."""
+        current = list(self.get_force_species())
+        if current:
+            self._force_species = current[:-1]
+            self._rebuild_force_tags()
+
+    def get_force_species(self) -> list:
+        """Return current force-fit species list."""
+        return list(getattr(self, '_force_species', []))
+
+    def _rebuild_force_tags(self):
+        """Rebuild the tag chips in the flow layout from _force_species."""
+        # Clear existing tag widgets
+        while self.force_tag_layout.count():
+            item = self.force_tag_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        for name in self.get_force_species():
+            tag = QtWidgets.QFrame()
+            tag.setStyleSheet("""
+                QFrame {
+                    background: #eef2ff;
+                    border: 1px solid #c7d2fe;
+                    border-radius: 4px;
+                    padding: 0;
+                }
+            """)
+            tag.setFixedHeight(24)
+            tag_layout = QtWidgets.QHBoxLayout(tag)
+            tag_layout.setContentsMargins(6, 1, 2, 1)
+            tag_layout.setSpacing(2)
+
+            label = QtWidgets.QLabel(name)
+            label.setStyleSheet("background: transparent; color: #3730a3; font-size: 9pt;")
+            tag_layout.addWidget(label)
+
+            close_btn = QtWidgets.QPushButton("\u2715")
+            close_btn.setFixedSize(16, 16)
+            close_btn.setStyleSheet("""
+                QPushButton {
+                    background: transparent;
+                    border: none;
+                    color: #6366f1;
+                    font-size: 8pt;
+                    padding: 0;
+                }
+                QPushButton:hover {
+                    color: #dc2626;
+                    font-weight: bold;
+                }
+            """)
+            close_btn.clicked.connect(lambda checked=False, n=name: self._remove_force_species_name(n))
+            tag_layout.addWidget(close_btn)
+
+            self.force_tag_layout.addWidget(tag)
+
+        # Force re-layout of the tag container
+        container = self.force_tag_layout.parent()
+        if container is not None:
+            container.updateGeometry()
+
+    # ── Fit stats helper ─────────────────────────────────────────────────
+
+    def _update_fit_stats(self, fitted_count: int, total_count: int, avg_r_squared: float | None = None):
+        """Update fit stats label with colored R² indicator."""
+        total_text = f"<b>{fitted_count}</b> / {total_count} 条曲线"
+        if avg_r_squared is not None:
+            if avg_r_squared >= 0.8:
+                r2_color = "#16a34a"  # green
+            elif avg_r_squared >= 0.5:
+                r2_color = "#d97706"  # amber
+            else:
+                r2_color = "#dc2626"  # red
+            r2_text = f"<span style='color:{r2_color};font-weight:bold;'>{avg_r_squared:.4f}</span>"
+        else:
+            r2_text = "N/A"
+        self.fit_stats_label.setText(
+            f"已拟合: {total_text}&nbsp;&nbsp;&nbsp;平均R\u00b2: {r2_text}"
+        )
 
     def select_folder(self):
         folder = QtWidgets.QFileDialog.getExistingDirectory(self, "选择PIE扫描文件夹")
         if folder:
             self.folder_edit.setText(folder)
     
-    def toggle_multi_folder_mode(self, state):
+    def toggle_multi_folder_mode(self, checked: bool):
         """切换多文件夹模式"""
-        is_multi = state == 2  # Qt.Checked is 2
-        self.folder_edit.setEnabled(not is_multi)
-        self.select_folder_button.setEnabled(not is_multi)
-        self.folder_list.setEnabled(is_multi)
-        self.add_folder_button.setEnabled(is_multi)
-        self.remove_folder_button.setEnabled(is_multi)
-        self.clear_folders_button.setEnabled(is_multi)
-        self.merge_method_combo.setEnabled(is_multi)
+        self.folder_edit.setEnabled(not checked)
+        self.select_folder_button.setEnabled(not checked)
+        self.multi_folder_section.setVisible(checked)
     
     def add_folder(self):
         """添加文件夹到列表"""
@@ -1942,16 +2573,23 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.folder_list.clear()
         self.pie_folders.clear()
 
-    def select_peak_file(self):
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self,
-            "选择手动卡峰文件",
-            "",
-            "Peak Files (*.yaml *.yml *.csv *.xlsx *.xls);;All Files (*)",
-        )
-        if path:
-            self.peak_file_edit.setText(path)
-            self.peak_source_combo.setCurrentIndex(1)
+    def set_project_settings(self, ps: ProjectSettings) -> None:
+        """Apply ProjectSettings defaults to summary bar and folder controls."""
+        self.project_settings = ps
+        project_name = ps.project_name or "---"
+        system = ps.system or "---"
+        pie_path = ps.pie_scan_folder or self.folder_edit.text()
+        self.summary_project_label.setText(f"项目: {project_name}")
+        self.summary_system_label.setText(f"体系: {system}")
+        self.summary_data_label.setText(f"PIE: {pie_path}")
+        self.use_multi_folders.setChecked(ps.pie_multi_folder_mode)
+        idx = self.merge_method_combo.findData(ps.pie_merge_method)
+        if idx >= 0:
+            self.merge_method_combo.setCurrentIndex(idx)
+        if ps.pie_scan_folder:
+            self.folder_edit.setText(ps.pie_scan_folder)
+        if ps.pics_database_path:
+            self.database_edit.setText(ps.pics_database_path)
 
     def open_common_parameters(self):
         dialog = CommonParametersDialog(self.normalization_settings, self.calibration, self)
@@ -1977,16 +2615,14 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             merge_method = None
             message = "正在生成PIE曲线..."
         
-        energy_decimals = self.energy_decimals_edit.value()
+        ps = self.project_settings or ProjectSettings()
+        energy_decimals = ps.pie_energy_decimals
+        recursive = ps.pie_recursive
+        prefer_gaussian = ps.pie_prefer_gaussian
+        manual_peak_path = ps.manual_peak_file or None
         peak_config = load_peak_detection_config()
         threshold_end = peak_config.threshold_end
         min_intensity = peak_config.min_intensity
-        recursive = self.recursive_check.isChecked()
-        prefer_gaussian = self.gaussian_check.isChecked()
-        manual_peak_path = self.peak_file_edit.text().strip() if self.peak_source_combo.currentData() == "manual" else None
-        if self.peak_source_combo.currentData() == "manual" and not manual_peak_path:
-            QtWidgets.QMessageBox.warning(self, "提示", "请选择手动卡峰文件")
-            return
         settings = self.normalization_settings
         photon_mode = settings.pie_photon_mode
         photon_normalize = photon_mode != "off"
@@ -2033,18 +2669,15 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.common_params_button.setDisabled(busy)
         self.fit_button.setDisabled(busy)
         self.load_button.setDisabled(busy)
-        self.peak_source_combo.setDisabled(busy)
-        self.peak_file_edit.setDisabled(busy)
-        self.select_peak_file_button.setDisabled(busy)
         self.use_multi_folders.setDisabled(busy)
         self.add_folder_button.setDisabled(busy)
         self.remove_folder_button.setDisabled(busy)
         self.clear_folders_button.setDisabled(busy)
         self.merge_method_combo.setDisabled(busy)
         self.fit_all_button.setDisabled(busy)
-        self.refit_selected_button.setDisabled(busy)
-        self.clear_fits_button.setDisabled(busy)
-        self.remove_force_button.setDisabled(busy)
+        self.export_pie_button.setDisabled(busy)
+        self.force_input.setDisabled(busy)
+        self.exhaustive_button.setDisabled(busy)
 
     def run_pie_analysis_sync(
         self,
@@ -2130,7 +2763,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.populate_mz_list()
         energy_count = self.analysis_df["energy"].nunique() if not self.analysis_df.empty else 0
         self.summary_label.setText(f"{len(self.curves)} 条m/z曲线 | {energy_count} 个能量点")
-        self.fit_stats_label.setText("已拟合: 0 / 0 条曲线\n平均R²: N/A")
+        self._update_fit_stats(0, 0, None)
         if self.curves:
             self.mz_list.setCurrentRow(0)
         QtWidgets.QMessageBox.information(self, "完成", f"生成 {len(self.curves)} 条PIE曲线")
@@ -2191,18 +2824,48 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         # 显示曲线数据
         curve = self.curves[self.current_mz]
         rows = curve["rows"].copy()
+        energies = np.round(rows["energy"].astype(float), 4).to_numpy()
+        point_columns = [f"{energy:g} eV" for energy in energies]
         curve_df = pd.DataFrame(
-            {
-                "光子能量(eV)": np.round(rows["energy"].astype(float), 4),
-                "原始积分": np.round(rows["raw_area"].astype(float), 4),
-                "IO归一化": np.round(rows["photon_normalized_intensity"].astype(float), 4),
-                "最终强度": np.round(rows["normalized_intensity"].astype(float), 4),
-            }
+            [
+                ["原始积分", *np.round(rows["raw_area"].astype(float), 4).to_numpy()],
+                ["IO归一化", *np.round(rows["photon_normalized_intensity"].astype(float), 4).to_numpy()],
+                ["最终强度", *np.round(rows["normalized_intensity"].astype(float), 4).to_numpy()],
+            ],
+            columns=["数据项", *point_columns],
         )
         self.set_dataframe(self.curve_table, curve_df)
         
+        # 填充候选物种面板
+        self._populate_candidate_table(self.current_mz)
+
         # 更新图表
         self.update_plot(curve, self.current_fit)
+
+    def _on_pie_plot_mouse_move(self, pos):
+        """鼠标悬停时显示十字光标和坐标（无数据时静默忽略）。"""
+        if self.plot_widget is None:
+            return
+        plot_item = self.plot_widget.getPlotItem()
+        # 空 plot（尚未加载数据）时不做任何交互
+        if not plot_item.listDataItems():
+            return
+        vb = plot_item.vb
+        if vb.sceneBoundingRect().contains(pos):
+            mouse_point = vb.mapSceneToView(pos)
+            x, y = mouse_point.x(), mouse_point.y()
+            if not (np.isfinite(x) and np.isfinite(y)):
+                return
+            self._hover_vline.setPos(x)
+            self._hover_hline.setPos(y)
+            self._hover_vline.setVisible(True)
+            self._hover_hline.setVisible(True)
+            self._hover_label.setText(f"  {x:.3f} eV, {y:.4f}  ")
+            self._hover_label.setPos(x, y)
+        else:
+            self._hover_vline.setVisible(False)
+            self._hover_hline.setVisible(False)
+            self._hover_label.setText("")
 
     def refresh_current_plot(self):
         if self.current_mz is not None and self.current_mz in self.curves:
@@ -2233,15 +2896,15 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.plot_widget.plot(
             x_values,
             y_values,
-            pen=pg.mkPen("#2563eb", width=2),
+            pen=pg.mkPen("#2563eb", width=2.5),
             symbol="o",
             symbolBrush="#2563eb",
             symbolPen="#1e3a8a",
-            symbolSize=8,
+            symbolSize=10,
             name="实验PIE",
         )
 
-        if fit_model is not None and self.show_fit_check.isChecked():
+        if fit_model is not None:
             fit_x = np.asarray(fit_model.get("energies", []), dtype=float)
             fit_y = np.asarray(fit_model.get("fitted", []), dtype=float)
             fit_valid = np.isfinite(fit_x) & np.isfinite(fit_y)
@@ -2256,28 +2919,28 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                     pen=pg.mkPen("#f97316", width=2.5),
                     name="PICS总拟合",
                 )
-                if self.show_components_check.isChecked():
-                    colors = ["#16a34a", "#9333ea", "#dc2626"]
-                    for idx, component in enumerate(fit_model.get("species", [])[:3]):
-                        component_y = np.asarray(component.get("component_intensities", []), dtype=float)
-                        component_count = min(fit_x.size, component_y.size)
-                        if component_count == 0:
-                            continue
-                        component_x = fit_x[:component_count]
-                        component_y = component_y[:component_count]
-                        component_valid = np.isfinite(component_x) & np.isfinite(component_y)
-                        component_x = component_x[component_valid]
-                        component_y = component_y[component_valid]
-                        if component_x.size == 0:
-                            continue
-                        x_ranges.append(component_x)
-                        y_ranges.append(component_y)
-                        self.plot_widget.plot(
-                            component_x,
-                            component_y,
-                            pen=pg.mkPen(colors[idx % len(colors)], width=1.5, style=QtCore.Qt.PenStyle.DashLine),
-                            name=str(component.get("species", ""))[:24],
-                        )
+                species = fit_model.get("species", [])
+                colors = ["#16a34a", "#9333ea", "#dc2626", "#0891b2", "#ca8a04", "#be123c", "#7c3aed", "#0369a1"]
+                for idx, component in enumerate(species):
+                    component_y = np.asarray(component.get("component_intensities", []), dtype=float)
+                    component_count = min(fit_x.size, component_y.size)
+                    if component_count == 0:
+                        continue
+                    component_x = fit_x[:component_count]
+                    component_y = component_y[:component_count]
+                    component_valid = np.isfinite(component_x) & np.isfinite(component_y)
+                    component_x = component_x[component_valid]
+                    component_y = component_y[component_valid]
+                    if component_x.size == 0:
+                        continue
+                    x_ranges.append(component_x)
+                    y_ranges.append(component_y)
+                    self.plot_widget.plot(
+                        component_x,
+                        component_y,
+                        pen=pg.mkPen(colors[idx % len(colors)], width=1.5, style=QtCore.Qt.PenStyle.DashLine),
+                        name=str(component.get("species", ""))[:24],
+                    )
 
         title = f"m/z {curve['mz']} PIE"
         if fit_model is not None and fit_model.get("fitted"):
@@ -2297,6 +2960,20 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         if y_min == y_max:
             y_min -= 1.0
             y_max += 1.0
+        # 设置缩放限制，防止过度缩放
+        vb = self.plot_widget.getPlotItem().vb
+        x_span = max(0.01, (x_max + x_pad) - (x_min - x_pad))
+        y_span = max(0.01, (y_max + y_pad) - max(0.0, y_min - y_pad))
+        vb.setLimits(
+            xMin=x_min - x_pad - x_span * 0.5,
+            xMax=x_max + x_pad + x_span * 0.5,
+            yMin=max(0.0, y_min - y_pad - y_span * 0.5),
+            yMax=y_max + y_pad + y_span * 0.5,
+            minXRange=x_span * 0.10,
+            maxXRange=x_span * 50,
+            minYRange=y_span * 0.10,
+            maxYRange=y_span * 50,
+        )
         self.plot_widget.setXRange(x_min - x_pad, x_max + x_pad, padding=0)
         self.plot_widget.setYRange(max(0.0, y_min - y_pad), y_max + y_pad, padding=0)
 
@@ -2308,19 +2985,48 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             QtWidgets.QMessageBox.warning(self, "提示", "请先选择一条m/z曲线")
             return
         try:
+            from core.pie_analysis import fit_species_combination_with_curve
+
             curve = self.curves[self.current_mz]
-            # 使用筛选后的数据库
-            filtered_db = self.get_filtered_database()
-            force_species = self.get_force_species()
-            
-            fit_model = identify_species_for_mz_with_curve(
-                filtered_db,
-                self.current_mz,
-                curve["energies"],
-                curve["intensities"],
-                forced_species=force_species,
-            )
-            
+            panel_state = self._get_candidate_panel_state()
+            mode = panel_state["mode"]
+            selected = panel_state["selected_species"]
+
+            if not selected:
+                # 未选择任何候选时自动使用全部匹配物种
+                filtered_db = self.get_filtered_database()
+                selected = [item for item in filtered_db if item.get("mz") == self.current_mz]
+                mode = "fit"
+
+            if mode == "auto" or mode == "fit":
+                fit_model = fit_species_combination_with_curve(
+                    selected,
+                    curve["energies"],
+                    curve["intensities"],
+                    coefficient_mode="fit",
+                )
+            elif mode == "manual":
+                fit_model = fit_species_combination_with_curve(
+                    selected,
+                    curve["energies"],
+                    curve["intensities"],
+                    coefficient_mode="manual",
+                    coefficients=panel_state["coefficients"],
+                )
+            elif mode == "locked_fit":
+                fit_model = fit_species_combination_with_curve(
+                    selected,
+                    curve["energies"],
+                    curve["intensities"],
+                    coefficient_mode="locked_fit",
+                    coefficients=panel_state["coefficients"],
+                    locked_species_ids=panel_state["locked_ids"],
+                )
+            else:
+                fit_model = fit_species_combination_with_curve(
+                    selected, curve["energies"], curve["intensities"]
+                )
+
             self.current_fit = fit_model
             results = fit_model.get("species", [])
             fit_df = pd.DataFrame(
@@ -2347,6 +3053,86 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 QtWidgets.QMessageBox.information(self, "结果", "当前m/z没有匹配到可拟合的物种")
         except Exception as exc:
             QtWidgets.QMessageBox.warning(self, "错误", str(exc))
+
+    def _exhaustive_best_fit(self):
+        """穷举候选物种所有组合，按R²排序，选出最优组合。"""
+        from itertools import combinations
+
+        from core.pie_analysis import fit_species_combination_with_curve
+
+        if self.current_mz is None or self.current_mz not in self.curves:
+            QtWidgets.QMessageBox.warning(self, "提示", "请先选择一条m/z曲线")
+            return
+        curve = self.curves[self.current_mz]
+        panel_state = self._get_candidate_panel_state()
+        candidates = panel_state.get("selected_species", [])
+        if not candidates:
+            filtered = self.get_filtered_database()
+            candidates = [item for item in filtered if item.get("mz") == self.current_mz]
+        if len(candidates) < 2:
+            QtWidgets.QMessageBox.information(self, "提示", "至少需要2个候选物种才能进行组合穷举")
+            return
+
+        n = len(candidates)
+        max_combos = 2**n - 1
+        if max_combos > 2047:
+            reply = QtWidgets.QMessageBox.question(
+                self, "确认",
+                f"候选物种 {n} 个, 共 {max_combos} 种组合, 计算可能较慢。是否继续?",
+                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+            )
+            if reply != QtWidgets.QMessageBox.StandardButton.Yes:
+                return
+
+        self.set_busy(True, f"穷举 {n} 个候选物种的 {max_combos} 种组合...")
+        self.worker = WorkerThread(
+            lambda: _run_exhaustive_fit(
+                candidates, curve["energies"], curve["intensities"]
+            ),
+            self,
+        )
+        self.worker.finished_with_result.connect(self._on_exhaustive_complete)
+        self.worker.failed.connect(self.on_analysis_failed)
+        self.worker.finished.connect(lambda: self.set_busy(False, "就绪"))
+        self.worker.start()
+
+    def _on_exhaustive_complete(self, ranked: list[dict]):
+        if not ranked:
+            QtWidgets.QMessageBox.information(self, "结果", "穷举拟合未产生有效结果")
+            return
+        best = ranked[0]
+        self.current_fit = best["model"]
+        curve = self.curves[self.current_mz]
+        self.update_plot(curve, best["model"])
+        # 更新PICS拟合表: 排名 / 物种组合 / 物种数 / R² / RMSE
+        fit_df = pd.DataFrame([
+            {
+                "排名": i + 1,
+                "物种组合": ", ".join(item["species_names"]),
+                "物种数": item["species_count"],
+                "R²": round(item["r_squared"], 5),
+                "RMSE": round(item["rmse"], 5),
+            }
+            for i, item in enumerate(ranked)
+        ])
+        self.set_dataframe(self.fit_table, fit_df)
+        self.fit_table.itemSelectionChanged.connect(self._on_combination_selected)
+        self._exhaustive_ranked = ranked
+        self.detail_tabs.setCurrentWidget(self.fit_table)
+        names = ", ".join(best["species_names"])
+        self.status_label.setText(
+            f"m/z {self.current_mz}: 最优组合 [{names}] R²={best['r_squared']:.4f} "
+            f"(共 {len(ranked)} 种组合)"
+        )
+
+    def _on_combination_selected(self):
+        row = self.fit_table.currentRow()
+        if row < 0 or not hasattr(self, "_exhaustive_ranked"):
+            return
+        item = self._exhaustive_ranked[row]
+        self.current_fit = item["model"]
+        if self.current_mz is not None and self.current_mz in self.curves:
+            self.update_plot(self.curves[self.current_mz], item["model"])
 
     def export_curve_data(self):
         if self.analysis_df.empty:
@@ -2405,6 +3191,16 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 self.lbl_db_status.setStyleSheet("color: #6495ed;")
         except Exception:
             pass
+
+    def set_project_settings(self, ps: ProjectSettings) -> None:
+        """Apply ProjectSettings defaults to MoleFractionDialog controls."""
+        self.project_settings = ps
+        if hasattr(self, "spin_md_exponent"):
+            self.spin_md_exponent.setValue(ps.mf_mass_disc_exponent)
+        if hasattr(self, "spin_kr_mz"):
+            self.spin_kr_mz.setValue(ps.mf_parent_mz)
+        if ps.mf_kr_data:
+            self.kr_data = dict(ps.mf_kr_data)
 
     def _create_data_tab(self):
         widget = QtWidgets.QWidget()
@@ -4001,7 +4797,7 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.calibration = calibration
         self.normalization_settings = normalization_settings
         self.settings = load_mole_fraction_settings()
-        
+
         self.new_species_name = ""
         self.new_species_formula = ""
         self.new_species_mz = 0
@@ -4009,19 +4805,35 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.new_species_mf = 0.0
         self.no_cross_sections: dict[float, float] = {}
         self.mass_disc_exponent = 0.77897
-        
+
         self.new_species_signal: dict[float, dict[float, float]] = {}
         self.no_signal: dict[float, dict[float, float]] = {}
         self.expansion_coefficients: dict[float, float] = {}
-        
+
         self.pics_results: dict[float, float] = {}
-        
+
         self.database: list[dict] = []
         self.mz_index: dict[int, list[int]] = {}
         self._load_database()
-        
+
         self._init_ui()
-    
+
+    def set_project_settings(self, ps: ProjectSettings) -> None:
+        """Apply ProjectSettings defaults to PICSCalculatorDialog controls."""
+        self.project_settings = ps
+        if ps.pie_scan_folder and hasattr(self, "txt_folder_path"):
+            self.txt_folder_path.setText(ps.pie_scan_folder)
+        if hasattr(self, "spin_no_mz"):
+            self.spin_no_mz.setValue(ps.pics_no_mz)
+        if hasattr(self, "txt_no_formula"):
+            self.txt_no_formula.setText(ps.pics_no_formula)
+        if hasattr(self, "double_no_mf"):
+            self.double_no_mf.setValue(ps.pics_no_mf)
+        if hasattr(self, "double_new_mf"):
+            self.double_new_mf.setValue(ps.pics_new_species_mf)
+        if hasattr(self, "spin_md_exponent"):
+            self.spin_md_exponent.setValue(ps.mf_mass_disc_exponent)
+
     def _init_ui(self):
         layout = QtWidgets.QVBoxLayout(self)
         self.tabs = QtWidgets.QTabWidget()
@@ -4030,7 +4842,7 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.tabs.addTab(self._create_params_tab(), "3. 参数设置")
         self.tabs.addTab(self._create_results_tab(), "4. 计算结果")
         layout.addWidget(self.tabs)
-    
+
     def _create_species_tab(self):
         widget = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(widget)
