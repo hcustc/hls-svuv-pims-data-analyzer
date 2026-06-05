@@ -10,72 +10,99 @@
   <header class="site-header">
     <div>
       <h1>HSL SVUV-PIMS Data Analyzer</h1>
-      <p id="api-base-caption" class="muted">API 后端: 自动检测</p>
     </div>
   </header>
 
   <nav class="top-nav" aria-label="Web tools" role="tablist">
-    <button id="pie-tab" class="nav-button active" type="button" role="tab" aria-selected="true" aria-controls="pie-page" data-page="pie-page">PIE / PICS 拟合</button>
-    <button id="pics-tab" class="nav-button" type="button" role="tab" aria-selected="false" aria-controls="pics-page" data-page="pics-page">PICS 查询</button>
-    <button id="pics-upload-tab" class="nav-button" type="button" role="tab" aria-selected="false" aria-controls="pics-upload-page" data-page="pics-upload-page">PICS 上传</button>
+    <button id="pics-tab" class="nav-button active" type="button" role="tab" aria-selected="true" aria-controls="pics-page" data-page="pics-page">PICS 查询</button>
+    <button id="workflow-tab" class="nav-button" type="button" role="tab" aria-selected="false" aria-controls="pie-page" data-page="pie-page">PIE / PICS 工作流</button>
   </nav>
 
-  <main id="pie-page" class="shell page active" role="tabpanel" aria-labelledby="pie-tab">
+  <nav id="workflow-tabs" class="workflow-tabs hidden" aria-label="PIE / PICS 工作流子界面" role="tablist" hidden>
+    <div class="workflow-tabs-inner">
+      <span class="workflow-tabs-label">工作流</span>
+      <button id="project-tab" class="workflow-tab-button" type="button" role="tab" aria-selected="false" aria-controls="project-page" data-page="project-page">项目管理</button>
+      <button id="pie-tab" class="workflow-tab-button active" type="button" role="tab" aria-selected="true" aria-controls="pie-page" data-page="pie-page">PIE / PICS 拟合</button>
+      <button id="pics-upload-tab" class="workflow-tab-button" type="button" role="tab" aria-selected="false" aria-controls="pics-upload-page" data-page="pics-upload-page">PICS 上传</button>
+    </div>
+  </nav>
+
+  <main id="project-page" class="shell page project-shell" role="tabpanel" aria-labelledby="project-tab">
     <section class="panel query-panel">
       <div class="panel-heading">
-        <h2>输入</h2>
-        <span class="muted">提交后由服务器执行 core 计算</span>
+        <h2>项目管理</h2>
+        <span class="muted">统一维护默认参数</span>
       </div>
 
-      <div class="source-switch" role="group" aria-label="PIE 输入方式">
-        <button class="source-button active" type="button" aria-pressed="true" data-pie-source="folder">谱文件夹生成</button>
-        <button class="source-button" type="button" aria-pressed="false" data-pie-source="upload">上传 PIE 曲线</button>
+      <div class="settings-tabs" role="tablist" aria-label="项目设置分类">
+        <button class="settings-tab-button active" type="button" role="tab" aria-selected="true" aria-controls="project-settings-basic" data-settings-tab="project-settings-basic">项目设置</button>
+        <button class="settings-tab-button" type="button" role="tab" aria-selected="false" aria-controls="project-settings-data" data-settings-tab="project-settings-data">数据源</button>
+        <button class="settings-tab-button" type="button" role="tab" aria-selected="false" aria-controls="project-settings-common" data-settings-tab="project-settings-common">通用参数</button>
+        <button class="settings-tab-button" type="button" role="tab" aria-selected="false" aria-controls="project-settings-function" data-settings-tab="project-settings-function">功能参数</button>
       </div>
 
-      <form id="query-form" class="source-pane active" aria-describedby="pie-form-help">
-        <p id="pie-form-help" class="sr-only">填写 PIE 扫描来源和归一化参数后生成 PIE 曲线。</p>
-        <label>
-          PIE 扫描文件夹
-          <input id="folder" name="folder" value="tests/fixtures/C6F11O2H/PIE_Scan/1050" autocomplete="off">
-        </label>
+      <div class="settings-actions">
+        <button id="save-project-settings" type="button">保存设置</button>
+        <button id="apply-project-settings" class="secondary" type="button">应用到工具</button>
+        <button id="reset-project-settings" class="secondary" type="button">重置默认值</button>
+      </div>
+      <p id="project-settings-status" class="muted">设置保存在当前浏览器。</p>
+    </section>
 
-        <div class="field-row">
+    <section class="panel result-panel">
+      <section id="project-settings-basic" class="settings-section active" role="tabpanel">
+        <div class="panel-heading">
+          <h2>项目设置</h2>
+          <span class="muted">对应 PyQt6 项目身份信息</span>
+        </div>
+        <div class="settings-card">
           <label>
-            卡峰来源
-            <select id="peak-source" name="peak_source">
-              <option value="auto">自动寻峰</option>
-              <option value="manual">手动卡峰</option>
-            </select>
+            项目名
+            <input id="project-name" autocomplete="off" placeholder="例如 C6F11O2H PIE 分析">
           </label>
           <label>
-            能量小数
-            <input id="energy-decimals" name="energy_decimals" type="number" min="0" max="6" value="1">
+            实验体系
+            <input id="project-system" autocomplete="off" placeholder="例如 SVUV-PIMS">
+          </label>
+          <label>
+            项目描述
+            <textarea id="project-description" rows="4" placeholder="记录实验条件、样品批次或分析备注"></textarea>
+          </label>
+          <label>
+            输出目录
+            <input id="project-output-dir" autocomplete="off" value="output">
           </label>
         </div>
+      </section>
 
-        <label id="manual-peak-wrap" class="hidden">
-          手动卡峰文件
-          <input id="manual-peak-path" name="manual_peak_path" value="config/peak_integration.yaml" autocomplete="off">
-        </label>
-
-        <label>
-          目标 m/z
-          <input id="target-mz" name="target_mz" placeholder="留空则生成全部曲线，例如 15, 29, 44" autocomplete="off">
-        </label>
-
-        <div class="check-grid">
-          <label class="check-label">
-            <input id="recursive" name="recursive" type="checkbox" checked>
-            递归读取
-          </label>
-          <label class="check-label">
-            <input id="gaussian" name="gaussian" type="checkbox" checked>
-            高斯积分
-          </label>
+      <section id="project-settings-data" class="settings-section hidden" role="tabpanel">
+        <div class="panel-heading">
+          <h2>数据源</h2>
+          <span class="muted">工具页默认读取路径</span>
         </div>
+        <div class="settings-card">
+          <label>
+            PIE 扫描文件夹
+            <input id="folder" name="folder" value="tests/fixtures/C6F11O2H/PIE_Scan/1050" autocomplete="off">
+          </label>
+          <label id="manual-peak-wrap">
+            手动卡峰文件
+            <input id="manual-peak-path" name="manual_peak_path" value="config/peak_integration.yaml" autocomplete="off">
+          </label>
+          <label>
+            PICS 数据库路径
+            <input id="pics-database-path" autocomplete="off" placeholder="留空则使用服务器维护库">
+          </label>
+          <p class="field-help">临时工作库由上传页维护，不写入项目数据库路径。</p>
+        </div>
+      </section>
 
-        <details>
-          <summary>归一化选项</summary>
+      <section id="project-settings-common" class="settings-section hidden" role="tabpanel">
+        <div class="panel-heading">
+          <h2>通用参数</h2>
+          <span class="muted">PIE 归一化默认设置</span>
+        </div>
+        <div class="settings-card">
           <label>
             光强处理
             <select id="photon-mode" name="photon_mode">
@@ -95,7 +122,83 @@
             质量歧视因子 D
             <input id="mass-discrimination" name="mass_discrimination" type="number" min="0.000001" step="0.000001" value="1">
           </label>
-        </details>
+        </div>
+      </section>
+
+      <section id="project-settings-function" class="settings-section hidden" role="tabpanel">
+        <div class="panel-heading">
+          <h2>功能参数</h2>
+          <span class="muted">PIE / PICS 默认值</span>
+        </div>
+        <div class="settings-card two-column">
+          <div class="settings-group">
+            <h3>PIE 默认参数</h3>
+            <label>
+              能量小数
+              <input id="energy-decimals" name="energy_decimals" type="number" min="0" max="6" value="1">
+            </label>
+            <div class="check-grid">
+              <label class="check-label">
+                <input id="recursive" name="recursive" type="checkbox" checked>
+                递归读取
+              </label>
+              <label class="check-label">
+                <input id="gaussian" name="gaussian" type="checkbox" checked>
+                高斯积分
+              </label>
+            </div>
+          </div>
+          <div class="settings-group">
+            <h3>PICS 查询默认参数</h3>
+            <label>
+              默认容差
+              <input id="project-pics-tolerance" type="number" min="0" value="0">
+            </label>
+            <label>
+              默认返回数
+              <input id="project-pics-limit" type="number" min="1" max="500" value="100">
+            </label>
+            <p class="field-help">应用到工具后会更新 PICS 查询页输入框。</p>
+          </div>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <main id="pie-page" class="shell page" role="tabpanel" aria-labelledby="pie-tab">
+    <section class="panel query-panel">
+      <div class="panel-heading">
+        <h2>输入</h2>
+        <span class="muted">提交后由服务器执行 core 计算</span>
+      </div>
+
+      <div class="source-switch" role="group" aria-label="PIE 输入方式">
+        <button class="source-button active" type="button" aria-pressed="true" data-pie-source="folder">谱文件夹生成</button>
+        <button class="source-button" type="button" aria-pressed="false" data-pie-source="upload">上传 PIE 曲线</button>
+      </div>
+
+      <form id="query-form" class="source-pane active" aria-describedby="pie-form-help">
+        <p id="pie-form-help" class="sr-only">选择卡峰方式和目标 m/z 后，使用项目管理中的默认数据源与归一化参数生成 PIE 曲线。</p>
+        <label>
+          卡峰来源
+          <select id="peak-source" name="peak_source">
+            <option value="auto">自动寻峰</option>
+            <option value="manual">手动卡峰</option>
+          </select>
+        </label>
+
+        <label>
+          目标 m/z
+          <input id="target-mz" name="target_mz" placeholder="留空则生成全部曲线，例如 15, 29, 44" autocomplete="off">
+        </label>
+
+        <div class="setting-summary compact" aria-label="当前 PIE 项目设置">
+          <div>
+            <span>当前设置</span>
+            <strong id="pie-settings-summary">使用项目管理中的 PIE 默认参数</strong>
+          </div>
+          <button id="edit-pie-settings" class="small-button secondary" type="button">编辑设置</button>
+        </div>
 
         <button id="start-button" type="submit" aria-label="生成 PIE 曲线">生成 PIE 曲线</button>
       </form>
@@ -197,6 +300,13 @@
           <button id="manual-fit-button" type="button" aria-describedby="fit-help" disabled>按候选拟合</button>
           <span id="manual-fit-caption" class="muted">尚未选择候选</span>
         </div>
+        <div class="table-filter-row" aria-label="候选 PICS 筛选和统计">
+          <label class="compact-filter">
+            筛选候选
+            <input id="candidate-filter" type="search" placeholder="按物种、id、IE 过滤" autocomplete="off">
+          </label>
+          <span id="candidate-stats" class="caption-chip">0 条候选</span>
+        </div>
         <div id="candidate-view" class="table-view compact-table">
           <div class="empty">切换到手动模式后显示候选 PICS。</div>
         </div>
@@ -214,11 +324,19 @@
     </section>
   </main>
 
-  <main id="pics-page" class="shell page" role="tabpanel" aria-labelledby="pics-tab">
+  <main id="pics-page" class="shell page active" role="tabpanel" aria-labelledby="pics-tab">
     <section class="panel query-panel">
       <div class="panel-heading">
         <h2>PICS 查询</h2>
         <span id="pics-library-caption" class="muted">当前使用服务器维护库</span>
+      </div>
+
+      <div id="pics-project-summary" class="setting-summary compact" aria-label="当前 PICS 项目设置">
+        <div>
+          <span>查询默认值</span>
+          <strong id="pics-settings-summary">服务器维护库；容差 0；最多 100 条</strong>
+        </div>
+        <button id="edit-pics-settings" class="small-button secondary" type="button">编辑设置</button>
       </div>
 
       <form id="pics-form" aria-describedby="pics-form-help">
@@ -277,6 +395,11 @@
       </div>
 
       <div class="table-toolbar">
+        <label class="compact-filter">
+          筛选结果
+          <input id="pics-filter" type="search" placeholder="按物种、id、m/z、IE 过滤" autocomplete="off">
+        </label>
+        <span id="pics-result-stats" class="caption-chip">0 条结果</span>
         <button id="pics-download-button" type="button" disabled>下载查询结果</button>
       </div>
       <div id="pics-table-view" class="table-view">
