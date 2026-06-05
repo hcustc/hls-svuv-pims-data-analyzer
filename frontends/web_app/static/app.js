@@ -1,5 +1,23 @@
 const PROJECT_SETTINGS_STORAGE_KEY = "bl03u_web_project_settings_v1";
 
+function readStorage(key, fallback = "") {
+  try {
+    return localStorage.getItem(key) || fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeStorage(key, value) {
+  try {
+    if (value == null || value === "") localStorage.removeItem(key);
+    else localStorage.setItem(key, value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 const state = {
   projectSettings: loadWebProjectSettings(),
   jobId: null,
@@ -20,7 +38,7 @@ const state = {
   manualPreviewFit: null,
   previewFrame: null,
   lockedCandidateIds: new Set(),
-  picsLibraryId: localStorage.getItem("bl03u_pics_library_id") || "",
+  picsLibraryId: readStorage("bl03u_pics_library_id"),
   progressValue: 0,
   uploadProgressValue: 0,
   logEntries: [],
@@ -44,20 +62,11 @@ function resolveApiBase() {
   } catch {
     queryBase = "";
   }
-  let storedBase = "";
-  try {
-    storedBase = localStorage.getItem(API_BASE_STORAGE_KEY) || "";
-  } catch {
-    storedBase = "";
-  }
+  let storedBase = readStorage(API_BASE_STORAGE_KEY);
   const globalBase = typeof window.BL03U_API_BASE_URL === "string" ? window.BL03U_API_BASE_URL : "";
   const base = queryBase || globalBase || storedBase || defaultBase;
   if (queryBase) {
-    try {
-      localStorage.setItem(API_BASE_STORAGE_KEY, queryBase);
-    } catch {
-      // Ignore storage errors in private browsing or file:// contexts.
-    }
+    writeStorage(API_BASE_STORAGE_KEY, queryBase);
   }
   return base.replace(/\/+$/, "");
 }
@@ -129,7 +138,7 @@ function mergeWebProjectSettings(stored) {
 
 function loadWebProjectSettings() {
   try {
-    const raw = localStorage.getItem(PROJECT_SETTINGS_STORAGE_KEY);
+    const raw = readStorage(PROJECT_SETTINGS_STORAGE_KEY);
     return mergeWebProjectSettings(raw ? JSON.parse(raw) : null);
   } catch {
     return defaultWebProjectSettings();
@@ -138,8 +147,7 @@ function loadWebProjectSettings() {
 
 function saveWebProjectSettings(settings = state.projectSettings) {
   try {
-    localStorage.setItem(PROJECT_SETTINGS_STORAGE_KEY, JSON.stringify(settings));
-    return true;
+    return writeStorage(PROJECT_SETTINGS_STORAGE_KEY, JSON.stringify(settings));
   } catch {
     return false;
   }
@@ -157,6 +165,12 @@ function fieldValue(id, fallback = "") {
   if (!field) return fallback;
   if (field.type === "checkbox") return field.checked;
   return field.value;
+}
+
+function numericFieldValue(id, fallback, { min = -Infinity, max = Infinity } = {}) {
+  const value = Number(fieldValue(id, fallback));
+  if (!Number.isFinite(value)) return fallback;
+  return Math.min(max, Math.max(min, value));
 }
 
 function applyProjectSettingsToForms() {
@@ -199,20 +213,20 @@ function collectProjectSettingsFromForms() {
     normalization: {
       pie_photon_mode: fieldValue("photon-mode", "first"),
       light_source: fieldValue("light-source", "io"),
-      mass_discrimination: Number(fieldValue("mass-discrimination", 1)) || 1,
+      mass_discrimination: numericFieldValue("mass-discrimination", 1, { min: 0.000001 }),
     },
     function_params: {
       ...current.function_params,
       pie: {
         ...current.function_params.pie,
-        energy_decimals: Number(fieldValue("energy-decimals", 1)) || 1,
+        energy_decimals: numericFieldValue("energy-decimals", 1, { min: 0, max: 6 }),
         recursive: Boolean(fieldValue("recursive", true)),
         prefer_gaussian: Boolean(fieldValue("gaussian", true)),
       },
       pics: {
         ...current.function_params.pics,
-        tolerance: Number(fieldValue("project-pics-tolerance", 0)) || 0,
-        query_limit: Number(fieldValue("project-pics-limit", 100)) || 100,
+        tolerance: numericFieldValue("project-pics-tolerance", 0, { min: 0 }),
+        query_limit: numericFieldValue("project-pics-limit", 100, { min: 1, max: 500 }),
       },
     },
   });
@@ -1689,11 +1703,7 @@ function uploadLog(message) {
 
 function setPicsLibrary(libraryId) {
   state.picsLibraryId = libraryId || "";
-  if (state.picsLibraryId) {
-    localStorage.setItem("bl03u_pics_library_id", state.picsLibraryId);
-  } else {
-    localStorage.removeItem("bl03u_pics_library_id");
-  }
+  writeStorage("bl03u_pics_library_id", state.picsLibraryId);
   updatePicsLibraryCaptions();
   updateProjectSettingSummaries();
 }
