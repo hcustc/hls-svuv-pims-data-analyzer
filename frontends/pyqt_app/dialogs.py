@@ -2219,12 +2219,27 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         design = np.column_stack(design_columns)
 
         mode = panel_state["mode"]
+        species_ids = [int(s.get("id", idx + 1)) for idx, s in enumerate(selected)]
         if mode == "manual":
             # 使用用户设置的系数，不做NNLS拟合
             coeffs = np.array([
-                panel_state["coefficients"].get(int(s.get("id", idx + 1)), 0.0)
-                for idx, s in enumerate(selected)
-            ])
+                panel_state["coefficients"].get(species_id, 0.0)
+                for species_id in species_ids
+            ], dtype=float)
+        elif mode == "locked_fit":
+            try:
+                from scipy.optimize import nnls
+            except Exception:
+                return
+            coeffs = np.zeros(len(selected), dtype=float)
+            locked_ids = set(panel_state["locked_ids"])
+            locked_indices = [idx for idx, species_id in enumerate(species_ids) if species_id in locked_ids]
+            free_indices = [idx for idx, species_id in enumerate(species_ids) if species_id not in locked_ids]
+            for idx in locked_indices:
+                coeffs[idx] = panel_state["coefficients"].get(species_ids[idx], 0.0)
+            residual_target = intensities - design[:, locked_indices] @ coeffs[locked_indices] if locked_indices else intensities
+            if free_indices:
+                coeffs[free_indices], _ = nnls(design[:, free_indices], residual_target)
         else:
             try:
                 from scipy.optimize import nnls
@@ -2335,10 +2350,11 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self._update_fit_stats(fitted_count, total_count, avg_r_squared)
         
         if fitted_count > 0:
-            first_mz = list(results.keys())[0]
+            first_mz, first_result = next(
+                (mz, result) for mz, result in results.items() if result.get('success') and result.get('model')
+            )
             self.current_mz = first_mz
             
-            first_result = results[first_mz]
             if first_result.get('success') and first_result.get('model'):
                 self.current_fit = first_result['model']
                 
@@ -2389,10 +2405,12 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         
         mz_list = []
         for item in selected_items:
+            mz = item.data(QtCore.Qt.ItemDataRole.UserRole)
+            if mz is None:
+                continue
             try:
-                mz = int(item.text())
-                mz_list.append(mz)
-            except ValueError:
+                mz_list.append(int(mz))
+            except (TypeError, ValueError):
                 continue
         
         if not mz_list:
