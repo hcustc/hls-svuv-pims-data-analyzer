@@ -51,6 +51,7 @@ from core.mole_fraction import (
     load_mole_fraction_settings,
     save_mole_fraction_settings,
 )
+from frontends.pyqt_app.theme import get_plot_theme
 from frontends.pyqt_app.workers import WorkerThread
 
 try:
@@ -541,7 +542,7 @@ class NormalizationSettingsWidget(QtWidgets.QWidget, DataFrameTableMixin):
 
         self.kr_folder_edit = QtWidgets.QLineEdit()
         self.kr_folder_edit.setPlaceholderText("选择用于计算Kr膨胀系数的温度扫描文件夹")
-        self.kr_folder_button = QtWidgets.QPushButton("选择文件夹")
+        self.kr_folder_button = QtWidgets.QPushButton("浏览...")
         self.kr_folder_button.clicked.connect(self.select_kr_folder)
         self.kr_peak_file_edit = QtWidgets.QLineEdit()
         self.kr_peak_file_edit.setPlaceholderText("可选: Kr手动卡峰文件")
@@ -910,20 +911,26 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         controls_layout.setVerticalSpacing(8)
         self.folder_edit = QtWidgets.QLineEdit()
         self.folder_edit.setPlaceholderText("选择包含温度扫描 txt 文件的文件夹")
-        self.browse_button = QtWidgets.QPushButton("选择文件夹")
+        self.browse_button = QtWidgets.QPushButton("浏览...")
+        self.browse_button.setToolTip("选择包含温度扫描txt文件的文件夹")
         self.browse_button.clicked.connect(self.select_folder)
         self.run_button = QtWidgets.QPushButton("开始分析")
+        self.run_button.setToolTip("开始分析温度扫描数据，生成温度-信号曲线")
         self.run_button.clicked.connect(self.run_analysis)
         self.export_button = QtWidgets.QPushButton("导出")
+        self.export_button.setToolTip("导出温度扫描分析结果为CSV文件")
         self.export_button.clicked.connect(self.export_result)
         self.common_params_button = QtWidgets.QPushButton("通用参数")
+        self.common_params_button.setToolTip("打开通用参数设置（光强归一化、Kr定标、寻峰参数等）")
         self.common_params_button.clicked.connect(self.open_common_parameters)
         self.peak_source_combo = QtWidgets.QComboBox()
+        self.peak_source_combo.setToolTip("自动寻峰：程序自动检测峰位；手动卡峰：使用预先标定的峰文件")
         self.peak_source_combo.addItem("自动寻峰", "auto")
         self.peak_source_combo.addItem("手动卡峰", "manual")
         self.peak_file_edit = QtWidgets.QLineEdit()
         self.peak_file_edit.setPlaceholderText("可选: yaml/csv/xlsx 手动卡峰文件")
         self.select_peak_file_button = QtWidgets.QPushButton("选择卡峰")
+        self.select_peak_file_button.setToolTip("选择手动卡峰文件（支持yaml/csv/xlsx格式）")
         self.select_peak_file_button.clicked.connect(self.select_peak_file)
 
         self.threshold_end_edit = QtWidgets.QDoubleSpinBox()
@@ -935,9 +942,11 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.min_intensity_edit.setDecimals(3)
         self.min_intensity_edit.setValue(self.peak_detection.min_intensity)
         self.reference_mode_combo = QtWidgets.QComboBox()
+        self.reference_mode_combo.setToolTip("累加谱寻峰：所有温度累加后统一寻峰；最高温谱寻峰：用最高温度谱独立寻峰")
         self.reference_mode_combo.addItem("累加谱寻峰", "sum")
         self.reference_mode_combo.addItem("最高温谱寻峰", "max_temperature")
         self.gaussian_check = QtWidgets.QCheckBox("高斯积分")
+        self.gaussian_check.setToolTip("使用高斯峰面积而非简单峰值强度作为信号量，更准确反映积分强度")
         self.gaussian_check.setChecked(True)
         self.status_label = QtWidgets.QLabel("就绪")
 
@@ -959,6 +968,48 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         controls_layout.setColumnStretch(1, 1)
         controls_layout.setColumnStretch(4, 1)
         layout.addWidget(controls)
+
+        # 摘要栏
+        self.summary_bar = QtWidgets.QWidget()
+        summary_layout = QtWidgets.QHBoxLayout(self.summary_bar)
+        summary_layout.setContentsMargins(0, 0, 0, 0)
+        summary_layout.setSpacing(6)
+        self.summary_project_label = QtWidgets.QLabel("项目: ---")
+        self.summary_system_label = QtWidgets.QLabel("体系: ---")
+        self.summary_data_label = QtWidgets.QLabel("数据源: ---")
+        self.summary_project_label.setObjectName("ReadoutValue")
+        self.summary_system_label.setObjectName("ReadoutValue")
+        self.summary_data_label.setObjectName("ReadoutValue")
+        self.summary_project_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.summary_system_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.summary_data_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        summary_layout.addWidget(self.summary_project_label)
+        summary_layout.addWidget(self.summary_system_label)
+        summary_layout.addWidget(self.summary_data_label)
+        self.summary_open_project_btn = QtWidgets.QPushButton("打开项目设置")
+        self.summary_open_project_btn.setObjectName("WorkflowButton")
+        self.summary_open_project_btn.clicked.connect(self._open_project_settings)
+        summary_layout.addWidget(self.summary_open_project_btn)
+        summary_layout.addStretch()
+        layout.addWidget(self.summary_bar)
+
+        # 内联状态提示
+        self.inline_status_bar = QtWidgets.QWidget()
+        inline_layout = QtWidgets.QHBoxLayout(self.inline_status_bar)
+        inline_layout.setContentsMargins(0, 0, 0, 0)
+        inline_layout.setSpacing(6)
+        self.inline_status_icon = QtWidgets.QLabel("")
+        self.inline_status_text = QtWidgets.QLabel("就绪")
+        self.inline_retry_button = QtWidgets.QPushButton("重试")
+        self.inline_retry_button.setMaximumWidth(60)
+        self.inline_retry_button.hide()
+        self.inline_action_hint = QtWidgets.QLabel('请选择温度扫描文件夹，点击"开始分析"')
+        self.inline_action_hint.setStyleSheet("color: #6b7280;")
+        inline_layout.addWidget(self.inline_status_icon)
+        inline_layout.addWidget(self.inline_status_text, stretch=1)
+        inline_layout.addWidget(self.inline_retry_button)
+        inline_layout.addStretch(2)
+        layout.addWidget(self.inline_status_bar)
 
         splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
         left_panel = QtWidgets.QWidget()
@@ -1051,6 +1102,61 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.gaussian_check.setChecked(ps.temp_prefer_gaussian)
         if hasattr(self, "spin_kr_mz"):
             self.spin_kr_mz.setValue(ps.temp_kr_mz)
+        # 更新摘要栏
+        if hasattr(self, "summary_project_label"):
+            project_name = ps.project_name or "---"
+            system = ps.system or "---"
+            self.summary_project_label.setText(f"项目: {project_name}")
+            self.summary_system_label.setText(f"体系: {system}")
+            data_path = ps.temperature_scan_folder or "---"
+            self.summary_data_label.setText(f"数据源: {data_path}")
+
+    def _open_project_settings(self):
+        """跳转到项目管理页面。"""
+        win = self.window()
+        if hasattr(win, "switch_workspace_page"):
+            win.switch_workspace_page("project")
+
+    def _show_inline_error(self, msg: str, retry_callback=None):
+        self.inline_status_icon.setText("\u26a0\ufe0f")
+        self.inline_status_text.setText(msg)
+        self.inline_status_text.setStyleSheet("color: #dc2626;")
+        self.inline_action_hint.hide()
+        if retry_callback:
+            self.inline_retry_button.show()
+            try:
+                self.inline_retry_button.clicked.disconnect()
+            except (TypeError, RuntimeError):
+                pass
+            self.inline_retry_button.clicked.connect(retry_callback)
+        else:
+            self.inline_retry_button.hide()
+
+    def _show_inline_success(self, msg: str):
+        self.inline_status_icon.setText("\u2705")
+        self.inline_status_text.setText(msg)
+        self.inline_status_text.setStyleSheet("color: #16a34a;")
+        self.inline_action_hint.hide()
+        self.inline_retry_button.hide()
+        QtCore.QTimer.singleShot(5000, self._clear_inline_status)
+
+    def _show_inline_empty(self, msg: str = ""):
+        self.inline_status_icon.setText("")
+        self.inline_status_text.setText("就绪")
+        self.inline_status_text.setStyleSheet("")
+        if msg:
+            self.inline_action_hint.setText(msg)
+            self.inline_action_hint.show()
+        else:
+            self.inline_action_hint.hide()
+        self.inline_retry_button.hide()
+
+    def _clear_inline_status(self):
+        self.inline_status_icon.setText("")
+        self.inline_status_text.setText("就绪")
+        self.inline_status_text.setStyleSheet("")
+        self.inline_action_hint.hide()
+        self.inline_retry_button.hide()
 
     def open_common_parameters(self):
         dialog = CommonParametersDialog(self.normalization_settings, self.calibration, self)
@@ -1060,7 +1166,7 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
     def run_analysis(self):
         folder = self.folder_edit.text().strip()
         if not folder:
-            QtWidgets.QMessageBox.warning(self, "提示", "请先选择文件夹")
+            self._show_inline_error("请先选择温度扫描文件夹", lambda: self.select_folder())
             return
         peak_config = load_peak_detection_config()
         threshold_end = peak_config.threshold_end
@@ -1069,7 +1175,7 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         prefer_gaussian = self.gaussian_check.isChecked()
         manual_peak_path = self.peak_file_edit.text().strip() if self.peak_source_combo.currentData() == "manual" else None
         if self.peak_source_combo.currentData() == "manual" and not manual_peak_path:
-            QtWidgets.QMessageBox.warning(self, "提示", "请选择手动卡峰文件")
+            self._show_inline_error("请选择手动卡峰文件", lambda: self.select_peak_file())
             return
         settings = self.normalization_settings
         photon_normalize = settings.temperature_photon_normalize
@@ -1195,10 +1301,10 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         temperature_count = self.result_df["temperature"].nunique() if not self.result_df.empty else 0
         self.summary_label.setText(f"{len(self.curves)} 条m/z曲线 | {temperature_count} 个温度点")
         self.update_group_summary()
-        QtWidgets.QMessageBox.information(self, "完成", f"生成 {len(self.result_df)} 行温度扫描结果")
+        self._show_inline_success(f"已完成分析，生成 {len(self.result_df)} 行温度扫描结果")
 
     def on_analysis_failed(self, message: str) -> None:
-        QtWidgets.QMessageBox.critical(self, "错误", message)
+        self._show_inline_error(f"分析失败: {message}", lambda: self.run_analysis())
 
     def populate_mz_list(self):
         self.mz_list.clear()
@@ -1534,7 +1640,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
         default_db = species_database_path()
         self.database_edit = QtWidgets.QLineEdit(str(default_db) if default_db.exists() else "")
-        self.load_button = QtWidgets.QPushButton("加载数据库")
+        self.load_button = QtWidgets.QPushButton("加载")
         self.load_button.clicked.connect(self.load_database)
 
         self.use_multi_folders = QtWidgets.QToolButton()
@@ -1546,7 +1652,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
         self.folder_edit = QtWidgets.QLineEdit()
         self.folder_edit.setPlaceholderText("选择包含PIE扫描质谱文件的文件夹")
-        self.select_folder_button = QtWidgets.QPushButton("选择")
+        self.select_folder_button = QtWidgets.QPushButton("浏览...")
         self.select_folder_button.setToolTip("选择PIE扫描文件夹")
         self.select_folder_button.clicked.connect(self.select_folder)
 
@@ -1653,19 +1759,9 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.fit_all_button.setFixedHeight(28)
 
         self.export_pie_button = QtWidgets.QPushButton("导出鉴定结果")
+        self.export_pie_button.setObjectName("ExportButton")
         self.export_pie_button.setToolTip("导出PIE物种鉴定结果")
         self.export_pie_button.clicked.connect(self.export_pie_results)
-        self.export_pie_button.setStyleSheet("""
-            QPushButton {
-                background-color: #16a34a;
-                color: white;
-                border: 1px solid #15803d;
-                border-radius: 4px;
-                padding: 4px 10px;
-            }
-            QPushButton:hover { background-color: #15803d; }
-            QPushButton:disabled { background-color: #cccccc; border-color: #cccccc; }
-        """)
 
         self._force_species: list[str] = []
 
@@ -1698,7 +1794,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.mz_list.customContextMenuRequested.connect(self._on_mz_list_context_menu)
         left_layout.addWidget(self.mz_list, stretch=1)
         mz_hint = QtWidgets.QLabel("按住 Cmd/Ctrl 可多选，右键快捷菜单")
-        mz_hint.setStyleSheet("color: #94a3b8; font-size: 9pt; background: transparent;")
+        mz_hint.setObjectName("HintLabel")
         left_layout.addWidget(mz_hint)
         self.fit_button = QtWidgets.QPushButton("拟合当前")
         self.fit_button.setToolTip("拟合当前选中的m/z曲线")
@@ -1706,18 +1802,9 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         left_layout.addWidget(self.fit_button)
         left_layout.addWidget(self.fit_all_button)
         self.exhaustive_button = QtWidgets.QPushButton("穷举优选")
+        self.exhaustive_button.setObjectName("WarningButton")
         self.exhaustive_button.setToolTip("穷举候选物种所有组合，按R²排序选出最优")
         self.exhaustive_button.clicked.connect(self._exhaustive_best_fit)
-        self.exhaustive_button.setStyleSheet("""
-            QPushButton {
-                background: #fefce8;
-                color: #a16207;
-                border: 1px solid #fde047;
-                border-radius: 4px;
-            }
-            QPushButton:hover { background: #fef9c3; border-color: #eab308; }
-            QPushButton:disabled { background: #f5f5f5; color: #999999; border-color: #dddddd; }
-        """)
         left_layout.addWidget(self.exhaustive_button)
         splitter.addWidget(left_panel)
 
@@ -1729,17 +1816,19 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         plot_container_layout.setContentsMargins(8, 8, 8, 8)
         plot_container_layout.setSpacing(6)
         if pg is not None:
+            plot_theme = get_plot_theme()
             self.plot_widget = pg.PlotWidget()
-            self.plot_widget.setBackground("#ffffff")
+            self.plot_widget.setBackground(plot_theme.background)
             self.plot_widget.setLabel("bottom", "Photon Energy", units="eV")
             self.plot_widget.setLabel("left", "Normalized Intensity")
             self.plot_widget.showGrid(x=True, y=True)
             # 悬停十字光标和坐标标签
-            self._hover_label = pg.TextItem("", anchor=(0, 1), color="#475569")
+            self._hover_label = pg.TextItem("", anchor=(0, 1), color=plot_theme.foreground)
             self._hover_label.setFont(QtWidgets.QApplication.font())
             self.plot_widget.addItem(self._hover_label)
-            self._hover_vline = pg.InfiniteLine(angle=90, pen=pg.mkPen("#94a3b8", width=1, style=QtCore.Qt.PenStyle.DashLine))
-            self._hover_hline = pg.InfiniteLine(angle=0, pen=pg.mkPen("#94a3b8", width=1, style=QtCore.Qt.PenStyle.DashLine))
+            hover_pen = pg.mkPen(plot_theme.hover_line, width=1, style=QtCore.Qt.PenStyle.DashLine)
+            self._hover_vline = pg.InfiniteLine(angle=90, pen=hover_pen)
+            self._hover_hline = pg.InfiniteLine(angle=0, pen=hover_pen)
             self.plot_widget.addItem(self._hover_vline)
             self.plot_widget.addItem(self._hover_hline)
             self._hover_vline.setVisible(False)
@@ -1759,22 +1848,14 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         # 拟合统计条属于图表区域，不作为 splitter 的独立面板，避免挤占下方功能区。
         stats_bar = QtWidgets.QFrame()
         stats_bar.setObjectName("StatsBar")
-        stats_bar.setStyleSheet("""
-            QFrame#StatsBar {
-                background: #f8f9fa;
-                border: 1px solid #d8dee8;
-                border-radius: 6px;
-                padding: 4px 10px;
-            }
-        """)
         stats_bar.setFixedHeight(32)
         stats_bar_layout = QtWidgets.QHBoxLayout(stats_bar)
         stats_bar_layout.setContentsMargins(10, 2, 10, 2)
         stats_bar_layout.setSpacing(12)
         stats_title = QtWidgets.QLabel("拟合统计")
-        stats_title.setStyleSheet("font-weight: 600; color: #475569; background: transparent;")
+        stats_title.setObjectName("StatsTitle")
         self.fit_stats_label = QtWidgets.QLabel("已拟合: <b>0</b> / 0 条曲线&nbsp;&nbsp;&nbsp;平均R\u00b2: N/A")
-        self.fit_stats_label.setStyleSheet("background: transparent;")
+        self.fit_stats_label.setObjectName("HintLabel")
         self.fit_stats_label.setTextFormat(QtCore.Qt.TextFormat.RichText)
         stats_bar_layout.addWidget(stats_title)
         stats_bar_layout.addWidget(self.fit_stats_label, stretch=1)
@@ -1853,9 +1934,9 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.candidate_zero_coeff_btn.setToolTip("将所有候选物种系数清零")
         self.candidate_zero_coeff_btn.clicked.connect(self._zero_all_coefficients)
         self.candidate_apply_btn = QtWidgets.QPushButton("应用")
+        self.candidate_apply_btn.setObjectName("PrimaryToolbarButton")
         self.candidate_apply_btn.setToolTip("应用当前候选物种设置并拟合")
         self.candidate_apply_btn.clicked.connect(self.fit_current_curve)
-        self.candidate_apply_btn.setStyleSheet("QPushButton { background-color: #2563eb; color: white; }")
         for btn in (self.candidate_select_all_btn, self.candidate_clear_btn,
                      self.candidate_import_coeff_btn, self.candidate_zero_coeff_btn):
             btn.setObjectName("BrowseButton")
@@ -3174,6 +3255,31 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
     def _init_ui(self):
         layout = QtWidgets.QVBoxLayout(self)
+
+        # 摘要栏
+        self.summary_bar = QtWidgets.QWidget()
+        summary_layout = QtWidgets.QHBoxLayout(self.summary_bar)
+        summary_layout.setContentsMargins(0, 0, 0, 0)
+        summary_layout.setSpacing(6)
+        self.summary_project_label = QtWidgets.QLabel("项目: ---")
+        self.summary_system_label = QtWidgets.QLabel("体系: ---")
+        self.summary_data_label = QtWidgets.QLabel("数据源: ---")
+        self.summary_project_label.setObjectName("ReadoutValue")
+        self.summary_system_label.setObjectName("ReadoutValue")
+        self.summary_data_label.setObjectName("ReadoutValue")
+        self.summary_project_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.summary_system_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.summary_data_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        summary_layout.addWidget(self.summary_project_label)
+        summary_layout.addWidget(self.summary_system_label)
+        summary_layout.addWidget(self.summary_data_label)
+        self.summary_open_project_btn = QtWidgets.QPushButton("打开项目设置")
+        self.summary_open_project_btn.setObjectName("WorkflowButton")
+        self.summary_open_project_btn.clicked.connect(self._open_project_settings)
+        summary_layout.addWidget(self.summary_open_project_btn)
+        summary_layout.addStretch()
+        layout.addWidget(self.summary_bar)
+
         self.tabs = QtWidgets.QTabWidget()
         self.tabs.addTab(self._create_data_tab(), "1. 数据加载")
         self.tabs.addTab(self._create_params_tab(), "2. 参数设置")
@@ -3181,6 +3287,10 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.tabs.addTab(self._create_auto_mf_tab(), "4. 自动计算摩尔分数")
         self.tabs.addTab(self._create_results_tab(), "5. 结果汇总")
         layout.addWidget(self.tabs)
+
+        self.status_label = QtWidgets.QLabel("就绪")
+        self.status_label.setObjectName("ProjectStatus")
+        layout.addWidget(self.status_label)
 
     def _auto_load_database(self):
         try:
@@ -3201,6 +3311,25 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.spin_kr_mz.setValue(ps.mf_parent_mz)
         if ps.mf_kr_data:
             self.kr_data = dict(ps.mf_kr_data)
+        # 更新摘要栏
+        if hasattr(self, "summary_project_label"):
+            project_name = ps.project_name or "---"
+            system = ps.system or "---"
+            self.summary_project_label.setText(f"项目: {project_name}")
+            self.summary_system_label.setText(f"体系: {system}")
+            data_path = (ps.temperature_scan_folder or ps.pie_scan_folder or "---")
+            self.summary_data_label.setText(f"数据源: {data_path}")
+
+    def _open_project_settings(self):
+        """跳转到项目管理页面。"""
+        win = self.window()
+        if hasattr(win, "switch_workspace_page"):
+            win.switch_workspace_page("project")
+
+    def set_busy(self, busy: bool, message: str) -> None:
+        """Disable UI during long-running computation."""
+        self.status_label.setText(message)
+        self.tabs.setDisabled(busy)
 
     def _create_data_tab(self):
         widget = QtWidgets.QWidget()
@@ -3211,6 +3340,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.lbl_db_status = QtWidgets.QLabel("未加载数据库")
         self.lbl_db_status.setStyleSheet("color: rgba(232, 232, 232, 0.6);")
         btn_load_db = QtWidgets.QPushButton("加载物种数据库")
+        btn_load_db.setToolTip("加载PICS物种数据库，用于获取物种的电离能、分子式等信息")
         btn_load_db.clicked.connect(self._load_database)
         db_layout.addWidget(btn_load_db)
         db_layout.addWidget(self.lbl_db_status, 1)
@@ -3220,9 +3350,11 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         ts_layout = QtWidgets.QVBoxLayout(ts_group)
         ts_top = QtWidgets.QHBoxLayout()
         btn_add_folder = QtWidgets.QPushButton("添加能量文件夹")
+        btn_add_folder.setToolTip("添加包含温度扫描txt文件的能量文件夹")
         btn_add_folder.clicked.connect(self._add_energy_folder)
         ts_top.addWidget(btn_add_folder)
         btn_clear = QtWidgets.QPushButton("清空数据")
+        btn_clear.setToolTip("清空所有已加载的温度扫描数据")
         btn_clear.clicked.connect(self._clear_temperature_scan)
         ts_top.addWidget(btn_clear)
         self.lbl_ts_folder = QtWidgets.QLabel("未选择文件夹")
@@ -3305,13 +3437,14 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         md_layout = QtWidgets.QGridLayout(md_group)
         md_layout.addWidget(QtWidgets.QLabel("实验条件:"), 0, 0)
         self.combo_md_preset = QtWidgets.QComboBox()
+        self.combo_md_preset.setToolTip("选择实验条件预设值，自动设置质量歧视指数n")
         for name in MASS_DISCRIMINATION_PRESETS:
             self.combo_md_preset.addItem(name)
         self.combo_md_preset.currentTextChanged.connect(self._on_md_preset_changed)
         md_layout.addWidget(self.combo_md_preset, 0, 1)
         md_layout.addWidget(QtWidgets.QLabel("指数 n:"), 1, 0)
         self.spin_md_exponent = QtWidgets.QDoubleSpinBox()
-        self.spin_md_exponent.setRange(0.0, 2.0)
+        self.spin_md_exponent.setToolTip("质量歧视因子公式 D_i = (MW/30)^n 中的指数n，n值取决于离子源类型和质量分析器特性")
         self.spin_md_exponent.setDecimals(5)
         self.spin_md_exponent.setValue(self.settings.mass_disc_exponent)
         self.spin_md_exponent.setSingleStep(0.001)
@@ -3334,6 +3467,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         ec_top = QtWidgets.QHBoxLayout()
         ec_top.addWidget(QtWidgets.QLabel("Kr数据来源:"))
         self.combo_kr_source = QtWidgets.QComboBox()
+        self.combo_kr_source.setToolTip("选择Kr膨胀系数λ(T)的数据来源：内置默认数据/自定义文件/从温度扫描数据提取")
         self.combo_kr_source.addItems(["使用默认数据", "从文件加载", "从高能量温度扫描提取"])
         self.combo_kr_source.currentTextChanged.connect(self._on_kr_source_changed)
         ec_top.addWidget(self.combo_kr_source)
@@ -3378,16 +3512,19 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         cfg_layout = QtWidgets.QGridLayout(cfg_group)
         cfg_layout.addWidget(QtWidgets.QLabel("母体质量数 m/z:"), 0, 0)
         self.spin_parent_mz = QtWidgets.QSpinBox()
+        self.spin_parent_mz.setToolTip("母体物种（反应物）的质量数")
         self.spin_parent_mz.setRange(1, 500)
         self.spin_parent_mz.setValue(self.settings.parent_mz)
         cfg_layout.addWidget(self.spin_parent_mz, 0, 1)
         cfg_layout.addWidget(QtWidgets.QLabel("参考温度 T₀ (°C):"), 1, 0)
         self.spin_parent_t0 = QtWidgets.QSpinBox()
+        self.spin_parent_t0.setToolTip("选定一个参考温度点，用于计算母体摩尔分数的基准")
         self.spin_parent_t0.setRange(0, 2000)
         self.spin_parent_t0.setValue(int(self.settings.reference_temperature or 550))
         cfg_layout.addWidget(self.spin_parent_t0, 1, 1)
         cfg_layout.addWidget(QtWidgets.QLabel("初始摩尔分数 X(T₀):"), 2, 0)
         self.spin_parent_mf0 = QtWidgets.QDoubleSpinBox()
+        self.spin_parent_mf0.setToolTip("母体物种在参考温度T₀处的摩尔分数（已知或假设值）")
         self.spin_parent_mf0.setRange(0.0, 1.0)
         self.spin_parent_mf0.setDecimals(6)
         self.spin_parent_mf0.setValue(self.settings.parent_initial_mf)
@@ -3395,6 +3532,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         cfg_layout.addWidget(self.spin_parent_mf0, 2, 1)
         cfg_layout.addWidget(QtWidgets.QLabel("光子能量 E (eV):"), 3, 0)
         self.spin_parent_energy = QtWidgets.QDoubleSpinBox()
+        self.spin_parent_energy.setToolTip("实验使用的VUV光子能量 (eV)，用于查找物种在此能量下的光电离截面")
         self.spin_parent_energy.setRange(0.0, 30.0)
         self.spin_parent_energy.setDecimals(2)
         self.spin_parent_energy.setValue(self.settings.photon_energy)
@@ -3402,7 +3540,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         cfg_layout.addWidget(self.spin_parent_energy, 3, 1)
         layout.addWidget(cfg_group)
 
-        btn_calc_parent = QtWidgets.QPushButton("计算母体摩尔分数")
+        btn_calc_parent = QtWidgets.QPushButton("开始计算")
         btn_calc_parent.clicked.connect(self._calc_parent_mole_fraction)
         layout.addWidget(btn_calc_parent)
 
@@ -3420,7 +3558,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
         ctrl_group = QtWidgets.QGroupBox("自动计算控制")
         ctrl_layout = QtWidgets.QHBoxLayout(ctrl_group)
-        btn_calc_auto = QtWidgets.QPushButton("自动计算所有物种摩尔分数")
+        btn_calc_auto = QtWidgets.QPushButton("开始计算")
         btn_calc_auto.clicked.connect(self._calculate_auto_mf)
         ctrl_layout.addWidget(btn_calc_auto)
         self.lbl_auto_status = QtWidgets.QLabel("未计算")
@@ -3442,7 +3580,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         plot_layout = QtWidgets.QVBoxLayout(plot_group)
         if pg is not None:
             self.auto_mf_plot_widget = pg.PlotWidget()
-            self.auto_mf_plot_widget.setBackground("#141928")
+            self.auto_mf_plot_widget.setBackground("#ffffff")
             self.auto_mf_plot_widget.setMinimumHeight(250)
             self.auto_mf_plot_widget.setLabel("bottom", "温度", units="°C")
             self.auto_mf_plot_widget.setLabel("left", "摩尔分数")
@@ -3486,7 +3624,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         plot_layout = QtWidgets.QVBoxLayout(plot_group)
         if pg is not None:
             self.mf_plot_widget = pg.PlotWidget()
-            self.mf_plot_widget.setBackground("#141928")
+            self.mf_plot_widget.setBackground("#ffffff")
             self.mf_plot_widget.setMinimumHeight(300)
             self.mf_plot_widget.setLabel("bottom", "温度", units="°C")
             self.mf_plot_widget.setLabel("left", "摩尔分数")
@@ -4097,120 +4235,132 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         if not self.temperature_scan_data:
             QtWidgets.QMessageBox.warning(self, "提示", "请先在数据加载选项卡中加载温度扫描数据")
             return
-        kr_mz = self.spin_kr_mz.value()
-        self.kr_data = {}
-        target_peak = None
-        target_energy = None
+        self.set_busy(True, "正在从温度扫描提取Kr信号...")
+        try:
+            kr_mz = self.spin_kr_mz.value()
+            self.kr_data = {}
+            target_peak = None
+            target_energy = None
 
-        energies_sorted = sorted(self.available_energies, reverse=True)
+            energies_sorted = sorted(self.available_energies, reverse=True)
 
-        for energy in energies_sorted:
-            if energy not in self.temperature_scan_data:
-                continue
-            temps = list(self.temperature_scan_data[energy].keys())
-            if not temps:
-                continue
-            best_temp = None
-            best_count = -1
-            for t in temps:
-                t_peaks = self.temperature_scan_data[energy][t].get("peaks_info", [])
-                if len(t_peaks) > best_count:
-                    best_count = len(t_peaks)
-                    best_temp = t
-            if best_temp is None:
-                continue
-            peaks_info = self.temperature_scan_data[energy][best_temp].get("peaks_info", [])
-
-            for peak in peaks_info:
-                if peak["mz_rounded"] == kr_mz and not peak.get("overlapped", False):
-                    target_peak = peak
-                    target_energy = energy
-                    break
-            if target_peak is not None:
-                break
-
-        if target_peak is None:
-            QtWidgets.QMessageBox.warning(self, "提示", f"在峰最多的温度点未找到质量数 {kr_mz} 的峰")
-            return
-
-        for energy in energies_sorted:
-            if energy not in self.temperature_scan_data:
-                continue
-            for temp, info in self.temperature_scan_data[energy].items():
-                if temp in self.kr_data:
+            for energy in energies_sorted:
+                if energy not in self.temperature_scan_data:
                     continue
-                data = info["avg_data"]
-                io = info.get("avg_io", 100.0)
+                temps = list(self.temperature_scan_data[energy].keys())
+                if not temps:
+                    continue
+                best_temp = None
+                best_count = -1
+                for t in temps:
+                    t_peaks = self.temperature_scan_data[energy][t].get("peaks_info", [])
+                    if len(t_peaks) > best_count:
+                        best_count = len(t_peaks)
+                        best_temp = t
+                if best_temp is None:
+                    continue
+                peaks_info = self.temperature_scan_data[energy][best_temp].get("peaks_info", [])
 
-                left_idx = target_peak["left_idx"]
-                right_idx = target_peak["right_idx"]
-                peak_integral = sum(data[left_idx : right_idx + 1])
-                kr_signal = peak_integral / io if io > 0 else peak_integral
-                self.kr_data[temp] = {"filename": info.get("filenames", ""), "signal": kr_signal}
+                for peak in peaks_info:
+                    if peak["mz_rounded"] == kr_mz and not peak.get("overlapped", False):
+                        target_peak = peak
+                        target_energy = energy
+                        break
+                if target_peak is not None:
+                    break
 
-        self._fill_kr_table()
-        QtWidgets.QMessageBox.information(
-            self, "成功",
-            f"从 {len(self.kr_data)} 个温度扫描文件中提取了Kr信号\n"
-            f"质量数: {kr_mz}, 积分范围: {target_peak['left_idx']} - {target_peak['right_idx']}\n"
-            f"参考能量: {target_energy:.2f} eV"
-        )
+            if target_peak is None:
+                QtWidgets.QMessageBox.warning(self, "提示", f"在峰最多的温度点未找到质量数 {kr_mz} 的峰")
+                return
+
+            for energy in energies_sorted:
+                if energy not in self.temperature_scan_data:
+                    continue
+                for temp, info in self.temperature_scan_data[energy].items():
+                    if temp in self.kr_data:
+                        continue
+                    data = info["avg_data"]
+                    io = info.get("avg_io", 100.0)
+
+                    left_idx = target_peak["left_idx"]
+                    right_idx = target_peak["right_idx"]
+                    peak_integral = sum(data[left_idx : right_idx + 1])
+                    kr_signal = peak_integral / io if io > 0 else peak_integral
+                    self.kr_data[temp] = {"filename": info.get("filenames", ""), "signal": kr_signal}
+
+            self._fill_kr_table()
+            QtWidgets.QMessageBox.information(
+                self, "成功",
+                f"从 {len(self.kr_data)} 个温度扫描文件中提取了Kr信号\n"
+                f"质量数: {kr_mz}, 积分范围: {target_peak['left_idx']} - {target_peak['right_idx']}\n"
+                f"参考能量: {target_energy:.2f} eV"
+            )
+        finally:
+            self.set_busy(False, "就绪")
 
     def _calc_expansion_coefficients(self):
-        kr_signal_data: dict[float, float] = {}
-        for temp, data in self.kr_data.items():
-            if isinstance(data, dict):
-                kr_signal_data[temp] = data.get("signal", 0)
-            else:
-                kr_signal_data[temp] = data
-        self.expansion_coefficients = calc_expansion_coefficients(kr_signal_data)
-        for row in range(self.kr_table.rowCount()):
-            temp_item = self.kr_table.item(row, 0)
-            if temp_item:
-                temp = float(temp_item.text())
-                if temp in self.expansion_coefficients:
-                    self.kr_table.setItem(row, 3, QtWidgets.QTableWidgetItem(f"{self.expansion_coefficients[temp]:.6f}"))
-        QtWidgets.QMessageBox.information(self, "成功", f"计算了 {len(self.expansion_coefficients)} 个温度点的膨胀系数")
+        self.set_busy(True, "正在计算膨胀系数...")
+        try:
+            kr_signal_data: dict[float, float] = {}
+            for temp, data in self.kr_data.items():
+                if isinstance(data, dict):
+                    kr_signal_data[temp] = data.get("signal", 0)
+                else:
+                    kr_signal_data[temp] = data
+            self.expansion_coefficients = calc_expansion_coefficients(kr_signal_data)
+            for row in range(self.kr_table.rowCount()):
+                temp_item = self.kr_table.item(row, 0)
+                if temp_item:
+                    temp = float(temp_item.text())
+                    if temp in self.expansion_coefficients:
+                        self.kr_table.setItem(row, 3, QtWidgets.QTableWidgetItem(f"{self.expansion_coefficients[temp]:.6f}"))
+            QtWidgets.QMessageBox.information(self, "成功", f"计算了 {len(self.expansion_coefficients)} 个温度点的膨胀系数")
+        finally:
+            self.set_busy(False, "就绪")
 
     def _calc_parent_mole_fraction(self):
         if not self.expansion_coefficients:
             QtWidgets.QMessageBox.warning(self, "提示", "请先在参数设置中计算膨胀系数")
             return
-        mz = self.spin_parent_mz.value()
-        T0 = self.spin_parent_t0.value()
-        X0 = self.spin_parent_mf0.value()
-        energy = self.spin_parent_energy.value()
+        self.set_busy(True, "正在计算母体摩尔分数...")
+        try:
+            mz = self.spin_parent_mz.value()
+            T0 = self.spin_parent_t0.value()
+            X0 = self.spin_parent_mf0.value()
+            energy = self.spin_parent_energy.value()
 
-        if energy not in self.temperature_scan_data:
-            QtWidgets.QMessageBox.warning(
-                self, "提示",
-                f"未找到能量 {energy:.2f} eV 的温度扫描数据\n"
-                f"已加载的能量: {', '.join(f'{e:.2f} eV' for e in self.available_energies)}"
+            if energy not in self.temperature_scan_data:
+                QtWidgets.QMessageBox.warning(
+                    self, "提示",
+                    f"未找到能量 {energy:.2f} eV 的温度扫描数据\n"
+                    f"已加载的能量: {', '.join(f'{e:.2f} eV' for e in self.available_energies)}"
+                )
+                return
+
+            signal_data = self._get_signal_from_scan_data(mz, energy)
+            if not signal_data:
+                QtWidgets.QMessageBox.warning(self, "提示", f"在能量 {energy:.2f} eV 下未找到质量数 {mz} 的峰")
+                return
+
+            self.parent_mf_results = calc_parent_mole_fraction(
+                signal_data,
+                reference_temperature=float(T0),
+                parent_initial_mf=X0,
+                expansion_coefficients=self.expansion_coefficients,
             )
-            return
 
-        signal_data = self._get_signal_from_scan_data(mz, energy)
-        if not signal_data:
-            QtWidgets.QMessageBox.warning(self, "提示", f"在能量 {energy:.2f} eV 下未找到质量数 {mz} 的峰")
-            return
+            self.parent_result_table.setRowCount(0)
+            for temp in sorted(self.parent_mf_results.keys()):
+                row = self.parent_result_table.rowCount()
+                self.parent_result_table.insertRow(row)
+                self.parent_result_table.setItem(row, 0, QtWidgets.QTableWidgetItem(f"{int(temp)}"))
+                self.parent_result_table.setItem(row, 1, QtWidgets.QTableWidgetItem(f"{signal_data.get(temp, 0):.6f}"))
+                self.parent_result_table.setItem(row, 2, QtWidgets.QTableWidgetItem(f"{get_expansion_coefficient(temp, self.expansion_coefficients):.6f}"))
+                self.parent_result_table.setItem(row, 3, QtWidgets.QTableWidgetItem(f"{self.parent_mf_results[temp]:.6f}"))
 
-        self.parent_mf_results = calc_parent_mole_fraction(
-            signal_data,
-            reference_temperature=float(T0),
-            parent_initial_mf=X0,
-            expansion_coefficients=self.expansion_coefficients,
-        )
-
-        self.parent_result_table.setRowCount(0)
-        for temp in sorted(self.parent_mf_results.keys()):
-            row = self.parent_result_table.rowCount()
-            self.parent_result_table.insertRow(row)
-            self.parent_result_table.setItem(row, 0, QtWidgets.QTableWidgetItem(f"{int(temp)}"))
-            self.parent_result_table.setItem(row, 1, QtWidgets.QTableWidgetItem(f"{signal_data.get(temp, 0):.6f}"))
-            self.parent_result_table.setItem(row, 2, QtWidgets.QTableWidgetItem(f"{get_expansion_coefficient(temp, self.expansion_coefficients):.6f}"))
-            self.parent_result_table.setItem(row, 3, QtWidgets.QTableWidgetItem(f"{self.parent_mf_results[temp]:.6f}"))
-
-        QtWidgets.QMessageBox.information(self, "成功", f"计算了 {len(self.parent_mf_results)} 个温度点的母体摩尔分数")
+            QtWidgets.QMessageBox.information(self, "成功", f"计算了 {len(self.parent_mf_results)} 个温度点的母体摩尔分数")
+        finally:
+            self.set_busy(False, "就绪")
 
     def _calculate_auto_mf(self):
         if not self.pie_species_data:
@@ -4225,6 +4375,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             QtWidgets.QMessageBox.warning(self, "提示", "请先计算母体摩尔分数")
             return
 
+        self.set_busy(True, "正在自动计算所有物种的摩尔分数...")
         try:
             self.txt_warnings.clear()
             warnings: list[str] = []
@@ -4303,6 +4454,8 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         except Exception as e:
             import traceback
             QtWidgets.QMessageBox.critical(self, "错误", f"计算摩尔分数时出错: {e}\n\n{traceback.format_exc()}")
+        finally:
+            self.set_busy(False, "就绪")
 
     def _calc_product_mf_auto(self, mz, species, ref_mz, ref_mw,
                                ref_energy, ref_signal_data, ref_mf_at_tm,
@@ -4833,15 +4986,63 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.double_new_mf.setValue(ps.pics_new_species_mf)
         if hasattr(self, "spin_md_exponent"):
             self.spin_md_exponent.setValue(ps.mf_mass_disc_exponent)
+        # 更新摘要栏
+        if hasattr(self, "summary_project_label"):
+            project_name = ps.project_name or "---"
+            system = ps.system or "---"
+            self.summary_project_label.setText(f"项目: {project_name}")
+            self.summary_system_label.setText(f"体系: {system}")
+            data_path = ps.pie_scan_folder or "---"
+            self.summary_data_label.setText(f"数据源: {data_path}")
+
+    def _open_project_settings(self):
+        """跳转到项目管理页面。"""
+        win = self.window()
+        if hasattr(win, "switch_workspace_page"):
+            win.switch_workspace_page("project")
 
     def _init_ui(self):
         layout = QtWidgets.QVBoxLayout(self)
+
+        # 摘要栏
+        self.summary_bar = QtWidgets.QWidget()
+        summary_layout = QtWidgets.QHBoxLayout(self.summary_bar)
+        summary_layout.setContentsMargins(0, 0, 0, 0)
+        summary_layout.setSpacing(6)
+        self.summary_project_label = QtWidgets.QLabel("项目: ---")
+        self.summary_system_label = QtWidgets.QLabel("体系: ---")
+        self.summary_data_label = QtWidgets.QLabel("数据源: ---")
+        self.summary_project_label.setObjectName("ReadoutValue")
+        self.summary_system_label.setObjectName("ReadoutValue")
+        self.summary_data_label.setObjectName("ReadoutValue")
+        self.summary_project_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.summary_system_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.summary_data_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        summary_layout.addWidget(self.summary_project_label)
+        summary_layout.addWidget(self.summary_system_label)
+        summary_layout.addWidget(self.summary_data_label)
+        self.summary_open_project_btn = QtWidgets.QPushButton("打开项目设置")
+        self.summary_open_project_btn.setObjectName("WorkflowButton")
+        self.summary_open_project_btn.clicked.connect(self._open_project_settings)
+        summary_layout.addWidget(self.summary_open_project_btn)
+        summary_layout.addStretch()
+        layout.addWidget(self.summary_bar)
+
         self.tabs = QtWidgets.QTabWidget()
         self.tabs.addTab(self._create_species_tab(), "1. 物种信息")
         self.tabs.addTab(self._create_data_tab(), "2. 信号数据")
         self.tabs.addTab(self._create_params_tab(), "3. 参数设置")
         self.tabs.addTab(self._create_results_tab(), "4. 计算结果")
         layout.addWidget(self.tabs)
+
+        self.status_label = QtWidgets.QLabel("就绪")
+        self.status_label.setObjectName("ProjectStatus")
+        layout.addWidget(self.status_label)
+
+    def set_busy(self, busy: bool, message: str) -> None:
+        """Disable UI during long-running computation."""
+        self.status_label.setText(message)
+        self.tabs.setDisabled(busy)
 
     def _create_species_tab(self):
         widget = QtWidgets.QWidget()
@@ -4852,70 +5053,78 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
         
         self.txt_new_name = QtWidgets.QLineEdit()
         self.txt_new_name.setPlaceholderText("输入新物种名称")
+        self.txt_new_name.setToolTip("待计算PICS的新物种名称")
         new_layout.addRow("物种名称:", self.txt_new_name)
-        
+
         self.txt_new_formula = QtWidgets.QLineEdit()
         self.txt_new_formula.setPlaceholderText("输入分子式，如 C6H5ClO")
+        self.txt_new_formula.setToolTip("新物种的分子式，用于从数据库查询光电离截面")
         new_layout.addRow("分子式:", self.txt_new_formula)
-        
+
         self.spin_new_mz = QtWidgets.QSpinBox()
+        self.spin_new_mz.setToolTip("新物种的质量数，用于从PIE数据中提取该m/z的信号")
         self.spin_new_mz.setRange(1, 500)
         new_layout.addRow("质量数 m/z:", self.spin_new_mz)
-        
+
         layout.addWidget(new_group)
-        
+
         no_group = QtWidgets.QGroupBox("参考物种 NO")
         no_layout = QtWidgets.QFormLayout(no_group)
-        
+
         self.txt_no_formula = QtWidgets.QLineEdit("NO")
         self.txt_no_formula.setReadOnly(True)
         no_layout.addRow("分子式:", self.txt_no_formula)
-        
+
         self.spin_no_mz = QtWidgets.QSpinBox()
+        self.spin_no_mz.setToolTip("参考物种NO的质量数，作为PICS计算中信号比的分母")
         self.spin_no_mz.setRange(1, 100)
         self.spin_no_mz.setValue(30)
         self.spin_no_mz.setEnabled(False)
         no_layout.addRow("质量数 m/z:", self.spin_no_mz)
-        
+
         layout.addWidget(no_group)
-        
+
         no_cs_group = QtWidgets.QGroupBox("NO光电离截面 (从数据库获取)")
         no_cs_layout = QtWidgets.QVBoxLayout(no_cs_group)
-        
+
         self.no_cs_table = QtWidgets.QTableWidget()
         self.no_cs_table.setColumnCount(2)
         self.no_cs_table.setHorizontalHeaderLabels(["光子能量(eV)", "光电离截面(Mb)"])
         self.no_cs_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
         no_cs_layout.addWidget(self.no_cs_table)
-        
+
         self.lbl_no_cs_status = QtWidgets.QLabel("")
         self.lbl_no_cs_status.setStyleSheet("color: #6495ed;")
         no_cs_layout.addWidget(self.lbl_no_cs_status)
-        
+
         btn_load_no_cs = QtWidgets.QPushButton("从数据库加载NO光电离截面")
+        btn_load_no_cs.setToolTip("从物种数据库加载NO在不同光子能量下的光电离截面数据")
         btn_load_no_cs.clicked.connect(self._load_no_cross_sections)
         no_cs_layout.addWidget(btn_load_no_cs)
-        
+
         layout.addWidget(no_cs_group)
-        
+
         mf_group = QtWidgets.QGroupBox("摩尔分数 (输入量比例)")
         mf_layout = QtWidgets.QFormLayout(mf_group)
-        
+
         self.double_new_mf = QtWidgets.QDoubleSpinBox()
+        self.double_new_mf.setToolTip("新物种在反应器中的输入摩尔分数（已知或假设值）")
         self.double_new_mf.setRange(0.00001, 1.0)
         self.double_new_mf.setValue(0.002)
         self.double_new_mf.setDecimals(6)
         mf_layout.addRow("新物种摩尔分数:", self.double_new_mf)
-        
+
         self.double_no_mf = QtWidgets.QDoubleSpinBox()
+        self.double_no_mf.setToolTip("参考物种NO在反应器中的输入摩尔分数（已知量）")
         self.double_no_mf.setRange(0.00001, 1.0)
         self.double_no_mf.setValue(0.01)
         self.double_no_mf.setDecimals(6)
         mf_layout.addRow("NO摩尔分数:", self.double_no_mf)
-        
+
         layout.addWidget(mf_group)
-        
+
         btn_update = QtWidgets.QPushButton("更新参数")
+        btn_update.setToolTip("将当前设置的参数应用到计算中")
         btn_update.clicked.connect(self._update_parameters)
         layout.addWidget(btn_update)
         
@@ -5003,7 +5212,7 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
         widget = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(widget)
         
-        calc_btn = QtWidgets.QPushButton("计算PICS")
+        calc_btn = QtWidgets.QPushButton("开始计算")
         calc_btn.clicked.connect(self._calculate_pics)
         layout.addWidget(calc_btn)
         
@@ -5259,20 +5468,20 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
     
     def _calculate_pics(self):
         self._update_parameters()
-        
+        self.set_busy(True, "正在计算PICS...")
         self.result_table.setRowCount(0)
         self.pics_results = {}
-        
+
         species_mz = self.spin_new_mz.value()
         no_mz = self.spin_no_mz.value()
         species_mf = self.double_new_mf.value()
         no_mf = self.double_no_mf.value()
         mass_disc_exp = self.spin_md_exponent.value()
-        
+
         enable_io_correction = self.chk_enable_io_correction.isChecked() if hasattr(self, 'chk_enable_io_correction') else True
-        
+
         results = []
-        
+
         for row in range(self.signal_table.rowCount()):
             try:
                 energy = float(self.signal_table.item(row, 0).text()) if self.signal_table.item(row, 0) else 0.0
@@ -5280,26 +5489,26 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 no_signal = float(self.signal_table.item(row, 2).text()) if self.signal_table.item(row, 2) else 0.0
                 io_current_text = self.signal_table.item(row, 3).text() if self.signal_table.item(row, 3) else ""
                 temp = float(self.signal_table.item(row, 4).text()) if self.signal_table.item(row, 4) else 200.0
-                
+
                 if energy <= 0 or species_signal <= 0 or no_signal <= 0:
                     continue
-                
+
                 io_current = None
                 if io_current_text and io_current_text != "N/A":
                     try:
                         io_current = float(io_current_text)
                     except:
                         io_current = None
-                
+
                 corrected_species = species_signal
                 corrected_no = no_signal
-                
+
                 if enable_io_correction and io_current is not None and io_current > 0:
                     corrected_species = species_signal / io_current
                     corrected_no = no_signal / io_current
-                
+
                 sigma_no = self._get_no_cross_section_at_energy(energy)
-                
+
                 pics = calc_pics_single_energy(
                     corrected_species,
                     corrected_no,
@@ -5312,33 +5521,35 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 )
                 if pics <= 0:
                     continue
-                
+
                 results.append((energy, temp, pics))
-                
+
                 row_count = self.result_table.rowCount()
                 self.result_table.insertRow(row_count)
                 self.result_table.setItem(row_count, 0, QtWidgets.QTableWidgetItem(f"{energy:.2f}"))
                 self.result_table.setItem(row_count, 1, QtWidgets.QTableWidgetItem(f"{temp:.1f}"))
                 self.result_table.setItem(row_count, 2, QtWidgets.QTableWidgetItem(f"{pics:.4f}"))
                 self.result_table.setItem(row_count, 3, QtWidgets.QTableWidgetItem("-"))
-                
+
                 self.pics_results[(energy, temp)] = pics
-                
+
             except (ValueError, AttributeError) as e:
                 continue
-        
+
         if not results:
             QtWidgets.QMessageBox.warning(self, "警告", "没有有效的数据可以计算")
+            self.set_busy(False, "就绪")
             return
-        
+
         pics_values = [r[2] for r in results]
-        
+
         self.lbl_avg_pics.setText(f"{np.mean(pics_values):.4f} Mb")
         self.lbl_min_pics.setText(f"{min(pics_values):.4f} Mb")
         self.lbl_max_pics.setText(f"{max(pics_values):.4f} Mb")
-        
+
         status = "已启用光强校正" if enable_io_correction else "未启用光强校正"
         QtWidgets.QMessageBox.information(self, "计算完成", f"已完成 {len(results)} 个数据点的PICS计算（{status}）")
+        self.set_busy(False, "就绪")
     
     def _export_results_csv(self):
         if not self.pics_results:
