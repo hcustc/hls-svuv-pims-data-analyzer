@@ -1,4 +1,25 @@
+const PROJECT_SETTINGS_STORAGE_KEY = "bl03u_web_project_settings_v1";
+
+function readStorage(key, fallback = "") {
+  try {
+    return localStorage.getItem(key) || fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeStorage(key, value) {
+  try {
+    if (value == null || value === "") localStorage.removeItem(key);
+    else localStorage.setItem(key, value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 const state = {
+  projectSettings: loadWebProjectSettings(),
   jobId: null,
   summary: null,
   result: null,
@@ -17,11 +38,15 @@ const state = {
   manualPreviewFit: null,
   previewFrame: null,
   lockedCandidateIds: new Set(),
-  picsLibraryId: localStorage.getItem("bl03u_pics_library_id") || "",
+  picsLibraryId: readStorage("bl03u_pics_library_id"),
   progressValue: 0,
   uploadProgressValue: 0,
   logEntries: [],
   uploadLogEntries: [],
+  picsFilterText: "",
+  candidateFilterText: "",
+  candidateLoading: false,
+  resizeFrame: null,
 };
 
 const API_BASE_STORAGE_KEY = "bl03u_api_base_url";
@@ -37,20 +62,11 @@ function resolveApiBase() {
   } catch {
     queryBase = "";
   }
-  let storedBase = "";
-  try {
-    storedBase = localStorage.getItem(API_BASE_STORAGE_KEY) || "";
-  } catch {
-    storedBase = "";
-  }
+  let storedBase = readStorage(API_BASE_STORAGE_KEY);
   const globalBase = typeof window.BL03U_API_BASE_URL === "string" ? window.BL03U_API_BASE_URL : "";
   const base = queryBase || globalBase || storedBase || defaultBase;
   if (queryBase) {
-    try {
-      localStorage.setItem(API_BASE_STORAGE_KEY, queryBase);
-    } catch {
-      // Ignore storage errors in private browsing or file:// contexts.
-    }
+    writeStorage(API_BASE_STORAGE_KEY, queryBase);
   }
   return base.replace(/\/+$/, "");
 }
@@ -67,6 +83,236 @@ function apiUrl(path) {
 
 const $ = (id) => document.getElementById(id);
 
+function defaultWebProjectSettings() {
+  return {
+    version: 1,
+    project: {
+      project_name: "",
+      system: "",
+      description: "",
+      output_dir: "output",
+    },
+    data_sources: {
+      pie_scan_folder: "tests/fixtures/C6F11O2H/PIE_Scan/1050",
+      pics_database_path: "",
+      manual_peak_file: "config/peak_integration.yaml",
+    },
+    normalization: {
+      pie_photon_mode: "first",
+      light_source: "io",
+      mass_discrimination: 1,
+    },
+    function_params: {
+      pie: {
+        energy_decimals: 1,
+        recursive: true,
+        prefer_gaussian: true,
+        multi_folder_mode: false,
+        merge_method: "low_energy_dominant",
+      },
+      pics: {
+        query_limit: 100,
+        tolerance: 0,
+      },
+    },
+  };
+}
+
+function mergeWebProjectSettings(stored) {
+  const defaults = defaultWebProjectSettings();
+  const source = stored && typeof stored === "object" ? stored : {};
+  return {
+    ...defaults,
+    ...source,
+    project: { ...defaults.project, ...(source.project || {}) },
+    data_sources: { ...defaults.data_sources, ...(source.data_sources || {}) },
+    normalization: { ...defaults.normalization, ...(source.normalization || {}) },
+    function_params: {
+      ...defaults.function_params,
+      ...(source.function_params || {}),
+      pie: { ...defaults.function_params.pie, ...((source.function_params || {}).pie || {}) },
+      pics: { ...defaults.function_params.pics, ...((source.function_params || {}).pics || {}) },
+    },
+  };
+}
+
+function loadWebProjectSettings() {
+  try {
+    const raw = readStorage(PROJECT_SETTINGS_STORAGE_KEY);
+    return mergeWebProjectSettings(raw ? JSON.parse(raw) : null);
+  } catch {
+    return defaultWebProjectSettings();
+  }
+}
+
+function saveWebProjectSettings(settings = state.projectSettings) {
+  try {
+    return writeStorage(PROJECT_SETTINGS_STORAGE_KEY, JSON.stringify(settings));
+  } catch {
+    return false;
+  }
+}
+
+function setFieldValue(id, value) {
+  const field = $(id);
+  if (!field) return;
+  if (field.type === "checkbox") field.checked = Boolean(value);
+  else field.value = value ?? "";
+}
+
+function fieldValue(id, fallback = "") {
+  const field = $(id);
+  if (!field) return fallback;
+  if (field.type === "checkbox") return field.checked;
+  return field.value;
+}
+
+function numericFieldValue(id, fallback, { min = -Infinity, max = Infinity } = {}) {
+  const value = Number(fieldValue(id, fallback));
+  if (!Number.isFinite(value)) return fallback;
+  return Math.min(max, Math.max(min, value));
+}
+
+function applyProjectSettingsToForms() {
+  const settings = state.projectSettings;
+  setFieldValue("project-name", settings.project.project_name);
+  setFieldValue("project-system", settings.project.system);
+  setFieldValue("project-description", settings.project.description);
+  setFieldValue("project-output-dir", settings.project.output_dir);
+  setFieldValue("folder", settings.data_sources.pie_scan_folder);
+  setFieldValue("manual-peak-path", settings.data_sources.manual_peak_file);
+  setFieldValue("pics-database-path", settings.data_sources.pics_database_path);
+  setFieldValue("photon-mode", settings.normalization.pie_photon_mode);
+  setFieldValue("light-source", settings.normalization.light_source);
+  setFieldValue("mass-discrimination", settings.normalization.mass_discrimination);
+  setFieldValue("energy-decimals", settings.function_params.pie.energy_decimals);
+  setFieldValue("recursive", settings.function_params.pie.recursive);
+  setFieldValue("gaussian", settings.function_params.pie.prefer_gaussian);
+  setFieldValue("project-pics-tolerance", settings.function_params.pics.tolerance);
+  setFieldValue("project-pics-limit", settings.function_params.pics.query_limit);
+  setFieldValue("pics-tolerance", settings.function_params.pics.tolerance);
+  setFieldValue("pics-limit", settings.function_params.pics.query_limit);
+  updateProjectSettingSummaries();
+}
+
+function collectProjectSettingsFromForms() {
+  const current = state.projectSettings;
+  return mergeWebProjectSettings({
+    ...current,
+    project: {
+      project_name: fieldValue("project-name").trim(),
+      system: fieldValue("project-system").trim(),
+      description: fieldValue("project-description").trim(),
+      output_dir: fieldValue("project-output-dir", "output").trim() || "output",
+    },
+    data_sources: {
+      pie_scan_folder: fieldValue("folder").trim(),
+      manual_peak_file: fieldValue("manual-peak-path").trim(),
+      pics_database_path: fieldValue("pics-database-path").trim(),
+    },
+    normalization: {
+      pie_photon_mode: fieldValue("photon-mode", "first"),
+      light_source: fieldValue("light-source", "io"),
+      mass_discrimination: numericFieldValue("mass-discrimination", 1, { min: 0.000001 }),
+    },
+    function_params: {
+      ...current.function_params,
+      pie: {
+        ...current.function_params.pie,
+        energy_decimals: numericFieldValue("energy-decimals", 1, { min: 0, max: 6 }),
+        recursive: Boolean(fieldValue("recursive", true)),
+        prefer_gaussian: Boolean(fieldValue("gaussian", true)),
+      },
+      pics: {
+        ...current.function_params.pics,
+        tolerance: numericFieldValue("project-pics-tolerance", 0, { min: 0 }),
+        query_limit: numericFieldValue("project-pics-limit", 100, { min: 1, max: 500 }),
+      },
+    },
+  });
+}
+
+function settingsStatus(text, kind = "") {
+  const status = $("project-settings-status");
+  if (!status) return;
+  status.textContent = text;
+  status.dataset.status = kind;
+}
+
+function updateProjectSettingSummaries() {
+  const settings = state.projectSettings;
+  const projectName = settings.project.project_name || "未命名项目";
+  const pieSummary = $("pie-settings-summary");
+  if (pieSummary) {
+    pieSummary.textContent = `${projectName}；${settings.data_sources.pie_scan_folder || "未设置 PIE 目录"}；${settings.normalization.light_source} / D=${settings.normalization.mass_discrimination}；能量小数 ${settings.function_params.pie.energy_decimals}`;
+  }
+  const libraryText = state.picsLibraryId ? `临时工作库 ${state.picsLibraryId.slice(0, 8)}` : "服务器维护库";
+  const picsSummary = $("pics-settings-summary");
+  if (picsSummary) {
+    picsSummary.textContent = `${libraryText}；容差 ${settings.function_params.pics.tolerance}；最多 ${settings.function_params.pics.query_limit} 条`;
+  }
+}
+
+function commitProjectSettings(save = false) {
+  state.projectSettings = collectProjectSettingsFromForms();
+  if (save) {
+    const ok = saveWebProjectSettings();
+    settingsStatus(ok ? "设置已保存并应用。" : "设置已应用，但浏览器无法保存。", ok ? "success" : "error");
+  } else {
+    settingsStatus("设置已应用到当前工具。", "success");
+  }
+  applyProjectSettingsToForms();
+}
+
+function setTabIndex(selector, activePredicate) {
+  document.querySelectorAll(selector).forEach((item) => {
+    item.tabIndex = activePredicate(item) ? 0 : -1;
+  });
+}
+
+function bindRovingControls(selector) {
+  document.querySelectorAll(selector).forEach((control) => {
+    control.addEventListener("keydown", (event) => {
+      if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', ' ', 'Enter'].includes(event.key)) return;
+      const controls = Array.from(document.querySelectorAll(selector)).filter((item) => !item.disabled && !item.hidden && item.offsetParent !== null);
+      const currentIndex = controls.indexOf(event.currentTarget);
+      if (currentIndex < 0) return;
+      if (event.key === ' ' || event.key === 'Enter') {
+        event.preventDefault();
+        event.currentTarget.click();
+        return;
+      }
+      event.preventDefault();
+      let nextIndex = currentIndex;
+      if (event.key === 'Home') nextIndex = 0;
+      else if (event.key === 'End') nextIndex = controls.length - 1;
+      else if (event.key === 'ArrowRight' || event.key === 'ArrowDown') nextIndex = (currentIndex + 1) % controls.length;
+      else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') nextIndex = (currentIndex - 1 + controls.length) % controls.length;
+      controls[nextIndex].focus();
+    });
+  });
+}
+
+function switchProjectSettingsTab(tabId) {
+  document.querySelectorAll(".settings-section").forEach((section) => {
+    const active = section.id === tabId;
+    section.classList.toggle("active", active);
+    section.classList.toggle("hidden", !active);
+    section.hidden = !active;
+  });
+  document.querySelectorAll(".settings-tab-button").forEach((button) => {
+    const active = button.dataset.settingsTab === tabId;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", String(active));
+    button.tabIndex = active ? 0 : -1;
+  });
+}
+
+function editProjectSettings(tabId) {
+  switchPage("project-page");
+  switchProjectSettingsTab(tabId);
+}
+
 function statusPresentation(status) {
   const map = {
     idle: ["idle", "Idle"],
@@ -78,45 +324,93 @@ function statusPresentation(status) {
   return map[status] || ["idle", String(status || "Idle")];
 }
 
-function setStatus(status, text) {
-  const pill = $("status-pill");
-  const [className, label] = statusPresentation(status);
-  pill.className = `pill ${className}`;
-  pill.textContent = label;
-  $("status-text").textContent = text;
+function setStatusView(config, status, text) {
+  const pill = $(config.pillId);
+  const label = $(config.textId);
+  const [className, statusLabel] = statusPresentation(status);
+  if (pill) {
+    pill.className = `pill ${className}`;
+    pill.textContent = statusLabel;
+  }
+  if (label) label.textContent = text;
 }
 
-function setProgress(value, step, status = "running", elapsedText = "") {
+function setProgressView(config, value, step, status = "running", extra = "") {
   const clamped = Math.max(0, Math.min(100, Math.round(Number(value) || 0)));
-  state.progressValue = clamped;
-  const bar = $("progress-bar");
+  state[config.stateKey] = clamped;
+  const bar = $(config.barId);
+  if (!bar) return;
   bar.style.width = `${clamped}%`;
   bar.classList.toggle("error", status === "error");
-  $("progress-percent").textContent = `${clamped}%`;
-  $("progress-step").textContent = step || "等待任务";
-  $("progress-elapsed").textContent = elapsedText || "--";
+  const percent = $(config.percentId);
+  if (percent) percent.textContent = `${clamped}%`;
+  const stepLabel = $(config.stepId);
+  const stepText = step || config.defaultStep;
+  if (stepLabel) stepLabel.textContent = stepText;
+  if (config.extraId) {
+    const extraLabel = $(config.extraId);
+    if (extraLabel) extraLabel.textContent = extra || "--";
+  }
   const meter = bar.closest(".progress-meter");
   if (meter) {
     meter.setAttribute("role", "progressbar");
     meter.setAttribute("aria-valuemin", "0");
     meter.setAttribute("aria-valuemax", "100");
     meter.setAttribute("aria-valuenow", String(clamped));
-    meter.setAttribute("aria-valuetext", `${step || "任务进度"} ${clamped}%`);
+    meter.setAttribute("aria-valuetext", `${stepText} ${clamped}%`);
   }
 }
 
-function log(message) {
+function appendLog(config, message) {
   const stamp = new Date().toLocaleTimeString();
   const text = String(message || "").trim();
   if (!text) return;
-  if (state.logEntries.length && state.logEntries[state.logEntries.length - 1].endsWith(`  ${text}`)) {
+  if (state[config.stateKey].length && state[config.stateKey][state[config.stateKey].length - 1].endsWith(`  ${text}`)) {
     return;
   }
-  state.logEntries.push(`${stamp}  ${text}`);
-  state.logEntries = state.logEntries.slice(-10);
-  const view = $("progress-log");
-  view.textContent = state.logEntries.join("\n");
+  state[config.stateKey].push(`${stamp}  ${text}`);
+  state[config.stateKey] = state[config.stateKey].slice(-10);
+  const view = $(config.viewId);
+  if (!view) return;
+  view.textContent = state[config.stateKey].join("\n");
   view.scrollTop = view.scrollHeight;
+}
+
+const pieStatusView = {
+  pillId: "status-pill",
+  textId: "status-text",
+  barId: "progress-bar",
+  percentId: "progress-percent",
+  stepId: "progress-step",
+  extraId: "progress-elapsed",
+  stateKey: "progressValue",
+  defaultStep: "等待任务",
+  logStateKey: "logEntries",
+  logViewId: "progress-log",
+};
+
+const uploadStatusView = {
+  pillId: "upload-status-pill",
+  textId: "upload-status-text",
+  barId: "upload-progress-bar",
+  percentId: "upload-progress-percent",
+  stepId: "upload-progress-step",
+  stateKey: "uploadProgressValue",
+  defaultStep: "等待上传",
+  logStateKey: "uploadLogEntries",
+  logViewId: "upload-progress-log",
+};
+
+function setStatus(status, text) {
+  setStatusView(pieStatusView, status, text);
+}
+
+function setProgress(value, step, status = "running", elapsedText = "") {
+  setProgressView(pieStatusView, value, step, status, elapsedText);
+}
+
+function log(message) {
+  appendLog({ stateKey: pieStatusView.logStateKey, viewId: pieStatusView.logViewId }, message);
 }
 
 function escapeHtml(value) {
@@ -142,6 +436,194 @@ function fitCanvasText(ctx, text, maxWidth) {
     clipped = clipped.slice(0, -1);
   }
   return `${clipped}...`;
+}
+
+function cssToken(name, fallback) {
+  const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return value || fallback;
+}
+
+function chartTheme() {
+  return {
+    axis: cssToken("--chart-axis", "#c8d2df"),
+    grid: cssToken("--chart-grid", "#e6edf5"),
+    text: cssToken("--chart-text", "#526174"),
+    primary: cssToken("--chart-series-primary", "#2563eb"),
+    fit: cssToken("--chart-series-fit", "#f97316"),
+    alts: [
+      cssToken("--chart-series-alt-1", "#059669"),
+      cssToken("--chart-series-alt-2", "#7c3aed"),
+      cssToken("--chart-series-alt-3", "#dc2626"),
+    ],
+    title: cssToken("--ink", "#111827"),
+  };
+}
+
+function setupChartCanvas(canvas, smallHeight, largeHeight) {
+  const parent = canvas.parentElement;
+  const dpr = window.devicePixelRatio || 1;
+  const width = Math.max(220, parent.clientWidth - 24);
+  const height = width < 560 ? smallHeight : largeHeight;
+  canvas.width = Math.floor(width * dpr);
+  canvas.height = Math.floor(height * dpr);
+  canvas.style.width = `${width}px`;
+  canvas.style.height = `${height}px`;
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+  ctx.font = "12px -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif";
+  return { ctx, width, height };
+}
+
+function chartBounds(xValues, yValues, minY = 0, minXPad = 0.1, minYPad = 0.1) {
+  let xMin = Math.min(...xValues);
+  let xMax = Math.max(...xValues);
+  let yMin = Math.min(minY, Math.min(...yValues));
+  let yMax = Math.max(...yValues);
+  const xPad = Math.max(minXPad, (xMax - xMin) * 0.08);
+  const yPad = Math.max(minYPad, (yMax - yMin) * 0.12);
+  xMin -= xPad;
+  xMax += xPad;
+  yMax += yPad;
+  if (xMin === xMax) xMax = xMin + 1;
+  if (yMin === yMax) yMax = yMin + 1;
+  return { xMin, xMax, yMin, yMax };
+}
+
+function chartScales(width, height, margin, bounds) {
+  const plotW = width - margin.left - margin.right;
+  const plotH = height - margin.top - margin.bottom;
+  return {
+    plotW,
+    plotH,
+    sx: (value) => margin.left + ((value - bounds.xMin) / (bounds.xMax - bounds.xMin)) * plotW,
+    sy: (value) => margin.top + plotH - ((value - bounds.yMin) / (bounds.yMax - bounds.yMin)) * plotH,
+  };
+}
+
+function chartMargin(ctx, width, top, yTicks) {
+  const yLabelWidth = Math.max(...yTicks.map((value) => ctx.measureText(fmt(value, 3)).width));
+  return width < 360
+    ? { left: Math.max(64, Math.ceil(yLabelWidth) + 42), right: 12, top, bottom: 48 }
+    : { left: Math.max(90, Math.ceil(yLabelWidth) + 50), right: 22, top, bottom: 54 };
+}
+
+function drawAxes(ctx, width, height, margin, scales, bounds, yTicks, xLabel, yLabel, theme) {
+  ctx.strokeStyle = theme.axis;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(margin.left, margin.top);
+  ctx.lineTo(margin.left, margin.top + scales.plotH);
+  ctx.lineTo(margin.left + scales.plotW, margin.top + scales.plotH);
+  ctx.stroke();
+
+  ctx.fillStyle = theme.text;
+  ctx.textAlign = "right";
+  yTicks.forEach((value) => {
+    const y = scales.sy(value);
+    ctx.strokeStyle = theme.grid;
+    ctx.beginPath();
+    ctx.moveTo(margin.left, y);
+    ctx.lineTo(margin.left + scales.plotW, y);
+    ctx.stroke();
+    ctx.fillText(fmt(value, 3), margin.left - 12, y + 4);
+  });
+  ctx.textAlign = "center";
+  for (let i = 0; i <= 5; i += 1) {
+    const value = bounds.xMin + ((bounds.xMax - bounds.xMin) * i) / 5;
+    ctx.fillText(fmt(value, 4), scales.sx(value), height - 24);
+  }
+  ctx.fillText(xLabel, margin.left + scales.plotW / 2, height - 7);
+  ctx.save();
+  ctx.translate(18, margin.top + scales.plotH / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.textAlign = "center";
+  ctx.fillText(yLabel, 0, 0);
+  ctx.restore();
+  ctx.textAlign = "start";
+}
+
+function drawLineSeries(ctx, series, scales) {
+  series.forEach((item) => {
+    ctx.strokeStyle = item.color;
+    ctx.lineWidth = item.dash ? 1.6 : 2.4;
+    ctx.setLineDash(item.dash ? [6, 4] : []);
+    ctx.beginPath();
+    let started = false;
+    const count = Math.min(item.x.length, item.y.length);
+    for (let i = 0; i < count; i += 1) {
+      const x = Number(item.x[i]);
+      const y = Number(item.y[i]);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+      if (!started) {
+        ctx.moveTo(scales.sx(x), scales.sy(y));
+        started = true;
+      } else {
+        ctx.lineTo(scales.sx(x), scales.sy(y));
+      }
+    }
+    ctx.stroke();
+    ctx.setLineDash([]);
+    if (item.points) {
+      ctx.fillStyle = item.color;
+      for (let i = 0; i < count; i += 1) {
+        const x = Number(item.x[i]);
+        const y = Number(item.y[i]);
+        if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+        ctx.beginPath();
+        ctx.arc(scales.sx(x), scales.sy(y), item.pointRadius || 3.2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  });
+}
+
+function legendRows(ctx, series, availableWidth) {
+  let rows = 1;
+  let rowWidth = 0;
+  series.forEach((item) => {
+    const itemWidth = Math.min(260, ctx.measureText(String(item.label)).width + 50);
+    if (rowWidth > 0 && rowWidth + itemWidth > availableWidth) {
+      rows += 1;
+      rowWidth = 0;
+    }
+    rowWidth += itemWidth;
+  });
+  return rows;
+}
+
+function drawLegend(ctx, series, width, margin, availableWidth, theme) {
+  let legendX = margin.left;
+  let legendY = 22;
+  series.forEach((item) => {
+    const label = fitCanvasText(ctx, item.label, Math.min(220, availableWidth - 44));
+    const itemWidth = Math.min(260, ctx.measureText(label).width + 50);
+    if (legendX > margin.left && legendX + itemWidth > width - margin.right) {
+      legendX = margin.left;
+      legendY += 20;
+    }
+    ctx.strokeStyle = item.color;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(legendX, legendY);
+    ctx.lineTo(legendX + 22, legendY);
+    ctx.stroke();
+    ctx.fillStyle = theme.title;
+    ctx.fillText(label, legendX + 28, legendY + 4);
+    legendX += itemWidth;
+  });
+}
+
+function validNumbers(values) {
+  return values.map(Number).filter(Number.isFinite);
+}
+
+function yTicksFor(bounds) {
+  return Array.from({ length: 6 }, (_, i) => bounds.yMin + ((bounds.yMax - bounds.yMin) * i) / 5);
+}
+
+function interpolatePieSeriesColor(index, theme) {
+  return theme.alts[index % theme.alts.length];
 }
 
 function interpolateSeries(sourceX, sourceY, targetX) {
@@ -242,18 +724,21 @@ function handleMissingPicsLibrary(error, writer = log) {
 }
 
 function payloadFromForm() {
+  state.projectSettings = collectProjectSettingsFromForms();
+  const settings = state.projectSettings;
+  const peakSource = $("peak-source").value;
   return {
-    folder: $("folder").value.trim(),
+    folder: settings.data_sources.pie_scan_folder.trim(),
     library_id: state.picsLibraryId || null,
-    peak_source: $("peak-source").value,
-    manual_peak_path: $("manual-peak-path").value.trim() || null,
+    peak_source: peakSource,
+    manual_peak_path: peakSource === "manual" ? settings.data_sources.manual_peak_file.trim() || null : null,
     target_mz: $("target-mz").value.trim() || null,
-    recursive: $("recursive").checked,
-    energy_decimals: Number($("energy-decimals").value || 1),
-    gaussian: $("gaussian").checked,
-    photon_mode: $("photon-mode").value,
-    light_source: $("light-source").value,
-    mass_discrimination: Number($("mass-discrimination").value || 1),
+    recursive: Boolean(settings.function_params.pie.recursive),
+    energy_decimals: Number(settings.function_params.pie.energy_decimals || 1),
+    gaussian: Boolean(settings.function_params.pie.prefer_gaussian),
+    photon_mode: settings.normalization.pie_photon_mode,
+    light_source: settings.normalization.light_source,
+    mass_discrimination: Number(settings.normalization.mass_discrimination || 1),
   };
 }
 
@@ -266,13 +751,20 @@ function updateFitActionState() {
   const selectedCount = selectedCandidateIds().length;
   const lockedCount = state.lockedCandidateIds.size;
   const label = currentFitButtonLabel();
-  $("fit-button").textContent = label;
-  $("fit-button").disabled = !state.currentCurve;
+  const fitButton = $("fit-button");
+  fitButton.textContent = label;
+  fitButton.disabled = !state.currentCurve;
+  fitButton.title = state.currentCurve ? "拟合当前 m/z 曲线" : "请先生成或上传 PIE 曲线";
 
   const manualButton = $("manual-fit-button");
   if (manualButton) {
     manualButton.textContent = label;
     manualButton.disabled = state.fitMode !== "manual" || !state.currentCurve || selectedCount === 0;
+    manualButton.title = !state.currentCurve
+      ? "请先生成或上传 PIE 曲线"
+      : selectedCount === 0
+        ? "请先选择至少一个 PICS 候选"
+        : "使用当前候选和系数设置拟合";
   }
   const manualCaption = $("manual-fit-caption");
   if (manualCaption) {
@@ -712,15 +1204,32 @@ async function loadCandidates() {
     renderCandidatePanel();
     return;
   }
+  state.candidateLoading = true;
   $("candidate-caption").textContent = "正在读取";
-  const data = await fetchJson(
-    `/api/pie/candidates/${encodeURIComponent(state.jobId)}/${encodeURIComponent(state.currentMz)}`,
-  );
-  state.candidateRows = data.rows || [];
-  state.selectedCandidateIds = new Set(state.candidateRows.map((row) => Number(row.id)));
-  await loadCandidateCurves();
-  scheduleManualPreview();
   renderCandidatePanel();
+  try {
+    const data = await fetchJson(
+      `/api/pie/candidates/${encodeURIComponent(state.jobId)}/${encodeURIComponent(state.currentMz)}`,
+    );
+    state.candidateRows = data.rows || [];
+    state.selectedCandidateIds = new Set(state.candidateRows.map((row) => Number(row.id)));
+    await loadCandidateCurves();
+    scheduleManualPreview();
+  } finally {
+    state.candidateLoading = false;
+    renderCandidatePanel();
+  }
+}
+
+function filterRows(rows, filterText) {
+  const query = String(filterText || "").trim().toLowerCase();
+  if (!query) return rows;
+  return rows.filter((row) => Object.values(row).some((value) => String(value ?? "").toLowerCase().includes(query)));
+}
+
+function setCaptionChip(id, text) {
+  const chip = $(id);
+  if (chip) chip.textContent = text;
 }
 
 function renderCandidatePanel() {
@@ -731,16 +1240,38 @@ function renderCandidatePanel() {
     return;
   }
 
-  const rows = state.candidateRows || [];
-  $("candidate-caption").textContent = rows.length
-    ? `m/z ${state.currentMz} | ${rows.length} 条`
-    : "无候选";
+  const allRows = state.candidateRows || [];
+  const rows = filterRows(allRows, state.candidateFilterText);
+  const selectedCount = selectedCandidateIds().length;
+  const lockedCount = state.lockedCandidateIds.size;
+  $("candidate-caption").textContent = allRows.length
+    ? `m/z ${state.currentMz} | ${allRows.length} 条`
+    : state.candidateLoading ? "正在读取" : "无候选";
+  setCaptionChip(
+    "candidate-stats",
+    state.candidateLoading
+      ? "读取候选中"
+      : `${rows.length}/${allRows.length} 条显示 · 已选 ${selectedCount} · 锁定 ${lockedCount}`,
+  );
   const view = $("candidate-view");
-  if (!rows.length) {
+  if (state.candidateLoading) {
+    view.innerHTML = '<div class="empty loading-state">正在读取当前 m/z 的 PICS 候选...</div>';
+    updateFitActionState();
+    return;
+  }
+  if (!allRows.length) {
     view.innerHTML = '<div class="empty">当前 m/z 没有 PICS 候选。</div>';
     updateFitActionState();
     return;
   }
+  if (!rows.length) {
+    view.innerHTML = '<div class="empty">没有匹配当前筛选条件的候选。</div>';
+    updateFitActionState();
+    return;
+  }
+  const mode = $("coefficient-mode").value;
+  const coefficientClass = mode === "manual" ? " emphasized-cell" : "";
+  const lockClass = mode === "locked_fit" ? " emphasized-cell" : "";
   const tbody = rows.map((row) => {
     const id = Number(row.id);
     const checked = state.selectedCandidateIds.has(id) ? " checked" : "";
@@ -748,8 +1279,8 @@ function renderCandidatePanel() {
     const coefficient = state.candidateCoefficients[id] ?? "";
     return `<tr>
       <td><input type="checkbox" aria-label="选择候选 ${escapeHtml(row.name)}" data-candidate-check="${row.id}"${checked}></td>
-      <td><input class="coefficient-input" type="number" min="0" step="0.000001" value="${escapeHtml(coefficient)}" aria-label="${escapeHtml(row.name)} 的拟合系数" data-candidate-coefficient="${row.id}"></td>
-      <td class="lock-cell"><input type="checkbox" aria-label="锁定 ${escapeHtml(row.name)} 的拟合系数" data-candidate-lock="${row.id}"${locked}></td>
+      <td class="${coefficientClass.trim()}"><input class="coefficient-input" type="number" min="0" step="0.000001" value="${escapeHtml(coefficient)}" aria-label="${escapeHtml(row.name)} 的拟合系数" data-candidate-coefficient="${row.id}"></td>
+      <td class="lock-cell${lockClass}"><input type="checkbox" aria-label="锁定 ${escapeHtml(row.name)} 的拟合系数" data-candidate-lock="${row.id}"${locked}></td>
       <td>${row.id}</td>
       <td>${row.mz}</td>
       <td>${escapeHtml(row.name)}</td>
@@ -772,8 +1303,10 @@ async function setFitMode(mode) {
   state.fitMode = mode;
   if (mode !== "manual") state.manualPreviewFit = null;
   document.querySelectorAll(".segment-button").forEach((button) => {
-    button.classList.toggle("active", button.dataset.fitMode === mode);
-    button.setAttribute("aria-pressed", String(button.dataset.fitMode === mode));
+    const active = button.dataset.fitMode === mode;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+    button.tabIndex = active ? 0 : -1;
   });
   updateFitActionState();
   if (mode === "manual" && state.currentCurve && !state.candidateRows.length) {
@@ -798,33 +1331,24 @@ function clearChart() {
 
 function drawChart() {
   const canvas = $("pie-chart");
-  const parent = canvas.parentElement;
-  const dpr = window.devicePixelRatio || 1;
-  const width = Math.max(220, parent.clientWidth - 24);
-  const height = width < 560 ? 320 : 420;
-  canvas.width = Math.floor(width * dpr);
-  canvas.height = Math.floor(height * dpr);
-  canvas.style.width = `${width}px`;
-  canvas.style.height = `${height}px`;
+  const { ctx, width, height } = setupChartCanvas(canvas, 320, 420);
   canvas.setAttribute(
     "aria-label",
     state.currentCurve ? `PIE 曲线图，当前 m/z ${state.currentMz}` : "PIE 曲线图，暂无数据",
   );
-  const ctx = canvas.getContext("2d");
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, width, height);
 
   if (!state.currentCurve) {
     drawEmptyChart(ctx, width, height, "生成曲线后显示 PIE 图");
     return;
   }
 
+  const theme = chartTheme();
   const series = [
     {
       label: "实验 PIE",
       x: state.currentCurve.energies,
       y: state.currentCurve.intensities,
-      color: "#1d5fbf",
+      color: theme.primary,
       points: true,
     },
   ];
@@ -834,156 +1358,44 @@ function drawChart() {
       label: chartFit.preview ? "实时预览" : "PICS 总拟合",
       x: chartFit.energies,
       y: chartFit.fitted,
-      color: "#f97316",
+      color: theme.fit,
       points: false,
     });
   }
   if ($("show-components").checked && chartFit && chartFit.species) {
-    const colors = ["#059669", "#7c3aed", "#dc2626"];
     chartFit.species.slice(0, 6).forEach((item, index) => {
       series.push({
         label: item.species,
         x: chartFit.energies,
         y: item.component_intensities || [],
-        color: colors[index % colors.length],
+        color: interpolatePieSeriesColor(index, theme),
         points: false,
         dash: true,
       });
     });
   }
 
-  const allX = series.flatMap((item) => item.x.map(Number)).filter(Number.isFinite);
-  const allY = series.flatMap((item) => item.y.map(Number)).filter(Number.isFinite);
+  const allX = validNumbers(series.flatMap((item) => item.x));
+  const allY = validNumbers(series.flatMap((item) => item.y));
   if (!allX.length || !allY.length) {
     drawEmptyChart(ctx, width, height, "当前曲线没有有效数据");
     return;
   }
 
-  let xMin = Math.min(...allX);
-  let xMax = Math.max(...allX);
-  let yMin = Math.min(0, Math.min(...allY));
-  let yMax = Math.max(...allY);
-  const xPad = Math.max(0.1, (xMax - xMin) * 0.08);
-  const yPad = Math.max(1, (yMax - yMin) * 0.12);
-  xMin -= xPad;
-  xMax += xPad;
-  yMax += yPad;
-  if (xMin === xMax) xMax = xMin + 1;
-  if (yMin === yMax) yMax = yMin + 1;
-
-  ctx.font = "12px -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif";
-  const yTicks = Array.from({ length: 6 }, (_, i) => yMin + ((yMax - yMin) * i) / 5);
-  const yLabelWidth = Math.max(...yTicks.map((value) => ctx.measureText(fmt(value, 3)).width));
-  const margin = width < 360
-    ? { left: Math.max(64, Math.ceil(yLabelWidth) + 42), right: 12, top: 30, bottom: 48 }
-    : { left: Math.max(90, Math.ceil(yLabelWidth) + 50), right: 22, top: 34, bottom: 54 };
+  const bounds = chartBounds(allX, allY, 0, 0.1, 1);
+  const yTicks = yTicksFor(bounds);
+  const margin = chartMargin(ctx, width, 34, yTicks);
   const legendAvailableWidth = Math.max(120, width - margin.left - margin.right);
-  let legendRows = 1;
-  let legendRowWidth = 0;
-  series.forEach((item) => {
-    const itemWidth = Math.min(260, ctx.measureText(String(item.label)).width + 50);
-    if (legendRowWidth > 0 && legendRowWidth + itemWidth > legendAvailableWidth) {
-      legendRows += 1;
-      legendRowWidth = 0;
-    }
-    legendRowWidth += itemWidth;
-  });
-  margin.top += legendRows * 20;
-  const plotW = width - margin.left - margin.right;
-  const plotH = height - margin.top - margin.bottom;
-  const sx = (value) => margin.left + ((value - xMin) / (xMax - xMin)) * plotW;
-  const sy = (value) => margin.top + plotH - ((value - yMin) / (yMax - yMin)) * plotH;
-
-  ctx.strokeStyle = "#d8dee8";
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(margin.left, margin.top);
-  ctx.lineTo(margin.left, margin.top + plotH);
-  ctx.lineTo(margin.left + plotW, margin.top + plotH);
-  ctx.stroke();
-
-  ctx.fillStyle = "#667085";
-  ctx.textAlign = "right";
-  yTicks.forEach((value) => {
-    const y = sy(value);
-    ctx.strokeStyle = "#eef1f5";
-    ctx.beginPath();
-    ctx.moveTo(margin.left, y);
-    ctx.lineTo(margin.left + plotW, y);
-    ctx.stroke();
-    ctx.fillText(fmt(value, 3), margin.left - 12, y + 4);
-  });
-  ctx.textAlign = "center";
-  for (let i = 0; i <= 5; i += 1) {
-    const value = xMin + ((xMax - xMin) * i) / 5;
-    const x = sx(value);
-    ctx.fillText(fmt(value, 4), x, height - 24);
-  }
-  ctx.fillText("Photon energy (eV)", margin.left + plotW / 2, height - 7);
-  ctx.save();
-  ctx.translate(18, margin.top + plotH / 2);
-  ctx.rotate(-Math.PI / 2);
-  ctx.textAlign = "center";
-  ctx.fillText("Normalized intensity", 0, 0);
-  ctx.restore();
-  ctx.textAlign = "start";
-
-  series.forEach((item) => {
-    ctx.strokeStyle = item.color;
-    ctx.lineWidth = item.dash ? 1.6 : 2.4;
-    ctx.setLineDash(item.dash ? [6, 4] : []);
-    ctx.beginPath();
-    let started = false;
-    const count = Math.min(item.x.length, item.y.length);
-    for (let i = 0; i < count; i += 1) {
-      const x = Number(item.x[i]);
-      const y = Number(item.y[i]);
-      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-      if (!started) {
-        ctx.moveTo(sx(x), sy(y));
-        started = true;
-      } else {
-        ctx.lineTo(sx(x), sy(y));
-      }
-    }
-    ctx.stroke();
-    ctx.setLineDash([]);
-    if (item.points) {
-      ctx.fillStyle = item.color;
-      for (let i = 0; i < count; i += 1) {
-        const x = Number(item.x[i]);
-        const y = Number(item.y[i]);
-        if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-        ctx.beginPath();
-        ctx.arc(sx(x), sy(y), 3.5, 0, Math.PI * 2);
-        ctx.fill();
-      }
-    }
-  });
-
-  let legendX = margin.left;
-  let legendY = 22;
-  series.forEach((item) => {
-    const label = fitCanvasText(ctx, item.label, Math.min(220, legendAvailableWidth - 44));
-    const itemWidth = Math.min(260, ctx.measureText(label).width + 50);
-    if (legendX > margin.left && legendX + itemWidth > width - margin.right) {
-      legendX = margin.left;
-      legendY += 20;
-    }
-    ctx.strokeStyle = item.color;
-    ctx.lineWidth = 3;
-    ctx.beginPath();
-    ctx.moveTo(legendX, legendY);
-    ctx.lineTo(legendX + 22, legendY);
-    ctx.stroke();
-    ctx.fillStyle = "#344054";
-    ctx.fillText(label, legendX + 28, legendY + 4);
-    legendX += itemWidth;
-  });
+  margin.top += legendRows(ctx, series, legendAvailableWidth) * 20;
+  const scales = chartScales(width, height, margin, bounds);
+  drawAxes(ctx, width, height, margin, scales, bounds, yTicks, "Photon energy (eV)", "Normalized intensity", theme);
+  drawLineSeries(ctx, series, scales);
+  drawLegend(ctx, series, width, margin, legendAvailableWidth, theme);
 }
 
 function drawEmptyChart(ctx, width, height, text) {
-  ctx.fillStyle = "#667085";
+  const theme = chartTheme();
+  ctx.fillStyle = theme.text;
   ctx.font = "14px -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif";
   ctx.textAlign = "center";
   ctx.fillText(text, width / 2, height / 2);
@@ -1012,9 +1424,11 @@ function rowsForTable() {
 function renderTable() {
   const rows = rowsForTable();
   const view = $("table-view");
+  const downloadButton = $("download-button");
   if (!rows.length) {
     view.innerHTML = `<div class="empty">${state.tableMode === "species" ? "当前曲线尚未拟合或无匹配物种。" : "没有可显示的数据。"}</div>`;
-    $("download-button").disabled = true;
+    downloadButton.disabled = true;
+    downloadButton.title = "当前表暂无数据";
     return;
   }
   const columns = Object.keys(rows[0]);
@@ -1023,7 +1437,8 @@ function renderTable() {
     .map((row) => `<tr>${columns.map((col) => `<td>${escapeHtml(row[col])}</td>`).join("")}</tr>`)
     .join("")}</tbody>`;
   view.innerHTML = `<table>${thead}${tbody}</table>`;
-  $("download-button").disabled = false;
+  downloadButton.disabled = false;
+  downloadButton.title = "下载当前表格";
 }
 
 async function setTableMode(mode) {
@@ -1032,6 +1447,7 @@ async function setTableMode(mode) {
     const active = button.dataset.table === mode;
     button.classList.toggle("active", active);
     button.setAttribute("aria-pressed", String(active));
+    button.tabIndex = active ? 0 : -1;
   });
   if (mode === "all" && state.jobId && !state.allRows.length) {
     const data = await fetchJson(`/api/pie/export/${encodeURIComponent(state.jobId)}`);
@@ -1056,17 +1472,30 @@ function downloadCurrentTable() {
   URL.revokeObjectURL(link.href);
 }
 
+const WORKFLOW_PAGES = new Set(["project-page", "pie-page", "pics-upload-page"]);
+
 function switchPage(pageId) {
+  const inWorkflow = WORKFLOW_PAGES.has(pageId);
   document.querySelectorAll(".page").forEach((page) => {
     const active = page.id === pageId;
     page.classList.toggle("active", active);
     page.hidden = !active;
   });
   document.querySelectorAll(".nav-button").forEach((button) => {
+    const active = button.id === "workflow-tab" ? inWorkflow : button.dataset.page === pageId;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", String(active));
+    button.tabIndex = active ? 0 : -1;
+  });
+  document.querySelectorAll(".workflow-tab-button").forEach((button) => {
     const active = button.dataset.page === pageId;
     button.classList.toggle("active", active);
     button.setAttribute("aria-selected", String(active));
+    button.tabIndex = active ? 0 : -1;
   });
+  const workflowTabs = $("workflow-tabs");
+  workflowTabs.hidden = !inWorkflow;
+  workflowTabs.classList.toggle("hidden", !inWorkflow);
   if (pageId === "pie-page") {
     drawChart();
   } else if (pageId === "pics-page") {
@@ -1162,12 +1591,21 @@ async function loadPicsSpecies(speciesId) {
 
 function renderPicsTable() {
   const view = $("pics-table-view");
+  const downloadButton = $("pics-download-button");
+  const rows = filterRows(state.picsRows, state.picsFilterText);
+  setCaptionChip("pics-result-stats", `${rows.length}/${state.picsRows.length} 条显示`);
   if (!state.picsRows.length) {
     view.innerHTML = '<div class="empty">输入条件后查询 PICS 数据库。</div>';
-    $("pics-download-button").disabled = true;
+    downloadButton.disabled = true;
+    downloadButton.title = "当前表暂无数据";
     return;
   }
-  const rows = state.picsRows;
+  if (!rows.length) {
+    view.innerHTML = '<div class="empty">没有匹配当前筛选条件的 PICS 记录。</div>';
+    downloadButton.disabled = false;
+    downloadButton.title = "下载全部查询结果";
+    return;
+  }
   const headers = ["id", "m/z", "物种", "IE(eV)", "能量范围(eV)", "点数", "最大截面", "操作"];
   const tbody = rows.map((row) => {
     const active = state.currentPics && state.currentPics.species.id === row.id ? " class=\"selected-row\"" : "";
@@ -1183,115 +1621,46 @@ function renderPicsTable() {
     </tr>`;
   }).join("");
   view.innerHTML = `<table aria-label="PICS 查询结果表"><thead><tr>${headers.map((item) => `<th scope="col">${item}</th>`).join("")}</tr></thead><tbody>${tbody}</tbody></table>`;
-  $("pics-download-button").disabled = false;
+  downloadButton.disabled = false;
+  downloadButton.title = "下载全部查询结果";
 }
 
 function drawPicsChart() {
   const canvas = $("pics-chart");
   if (!canvas) return;
-  const parent = canvas.parentElement;
-  const dpr = window.devicePixelRatio || 1;
-  const width = Math.max(220, parent.clientWidth - 24);
-  const height = width < 560 ? 300 : 380;
-  canvas.width = Math.floor(width * dpr);
-  canvas.height = Math.floor(height * dpr);
-  canvas.style.width = `${width}px`;
-  canvas.style.height = `${height}px`;
+  const { ctx, width, height } = setupChartCanvas(canvas, 300, 380);
   canvas.setAttribute(
     "aria-label",
     state.currentPics && state.currentPics.species
       ? `PICS 曲线图，当前物种 ${state.currentPics.species.name}`
       : "PICS 曲线图，暂无数据",
   );
-  const ctx = canvas.getContext("2d");
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, width, height);
   if (!state.currentPics || !state.currentPics.points || !state.currentPics.points.length) {
     drawEmptyChart(ctx, width, height, "选择物种后显示 PICS 曲线");
     return;
   }
-  const xValues = state.currentPics.points.map((point) => Number(point.energy_ev)).filter(Number.isFinite);
-  const yValues = state.currentPics.points.map((point) => Number(point.cross_section)).filter(Number.isFinite);
+  const xValues = validNumbers(state.currentPics.points.map((point) => point.energy_ev));
+  const yValues = validNumbers(state.currentPics.points.map((point) => point.cross_section));
   if (!xValues.length || !yValues.length) {
     drawEmptyChart(ctx, width, height, "当前物种没有有效 PICS 数据");
     return;
   }
-  let xMin = Math.min(...xValues);
-  let xMax = Math.max(...xValues);
-  let yMin = Math.min(0, Math.min(...yValues));
-  let yMax = Math.max(...yValues);
-  const xPad = Math.max(0.1, (xMax - xMin) * 0.08);
-  const yPad = Math.max(0.1, (yMax - yMin) * 0.12);
-  xMin -= xPad;
-  xMax += xPad;
-  yMax += yPad;
-  if (xMin === xMax) xMax = xMin + 1;
-  if (yMin === yMax) yMax = yMin + 1;
-  ctx.font = "12px -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif";
-  const yTicks = Array.from({ length: 6 }, (_, i) => yMin + ((yMax - yMin) * i) / 5);
-  const yLabelWidth = Math.max(...yTicks.map((value) => ctx.measureText(fmt(value, 3)).width));
-  const margin = width < 360
-    ? { left: Math.max(64, Math.ceil(yLabelWidth) + 42), right: 12, top: 48, bottom: 48 }
-    : { left: Math.max(90, Math.ceil(yLabelWidth) + 50), right: 22, top: 48, bottom: 54 };
-  const plotW = width - margin.left - margin.right;
-  const plotH = height - margin.top - margin.bottom;
-  const sx = (value) => margin.left + ((value - xMin) / (xMax - xMin)) * plotW;
-  const sy = (value) => margin.top + plotH - ((value - yMin) / (yMax - yMin)) * plotH;
 
-  ctx.strokeStyle = "#d8dee8";
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(margin.left, margin.top);
-  ctx.lineTo(margin.left, margin.top + plotH);
-  ctx.lineTo(margin.left + plotW, margin.top + plotH);
-  ctx.stroke();
-
-  ctx.fillStyle = "#667085";
-  ctx.textAlign = "right";
-  yTicks.forEach((value) => {
-    const y = sy(value);
-    ctx.strokeStyle = "#eef1f5";
-    ctx.beginPath();
-    ctx.moveTo(margin.left, y);
-    ctx.lineTo(margin.left + plotW, y);
-    ctx.stroke();
-    ctx.fillText(fmt(value, 3), margin.left - 12, y + 4);
-  });
-  ctx.textAlign = "center";
-  for (let i = 0; i <= 5; i += 1) {
-    const value = xMin + ((xMax - xMin) * i) / 5;
-    const x = sx(value);
-    ctx.fillText(fmt(value, 4), x, height - 24);
-  }
-  ctx.fillText("Photon energy (eV)", margin.left + plotW / 2, height - 7);
-  ctx.save();
-  ctx.translate(18, margin.top + plotH / 2);
-  ctx.rotate(-Math.PI / 2);
-  ctx.textAlign = "center";
-  ctx.fillText("Cross section", 0, 0);
-  ctx.restore();
-  ctx.textAlign = "start";
-
-  ctx.strokeStyle = "#1d5fbf";
-  ctx.lineWidth = 2.4;
-  ctx.beginPath();
-  state.currentPics.points.forEach((point, index) => {
-    const x = sx(Number(point.energy_ev));
-    const y = sy(Number(point.cross_section));
-    if (index === 0) ctx.moveTo(x, y);
-    else ctx.lineTo(x, y);
-  });
-  ctx.stroke();
-  ctx.fillStyle = "#1d5fbf";
-  state.currentPics.points.forEach((point) => {
-    const x = sx(Number(point.energy_ev));
-    const y = sy(Number(point.cross_section));
-    ctx.beginPath();
-    ctx.arc(x, y, 2.8, 0, Math.PI * 2);
-    ctx.fill();
-  });
+  const theme = chartTheme();
+  const bounds = chartBounds(xValues, yValues, 0, 0.1, 0.1);
+  const yTicks = yTicksFor(bounds);
+  const margin = chartMargin(ctx, width, 48, yTicks);
+  const scales = chartScales(width, height, margin, bounds);
+  drawAxes(ctx, width, height, margin, scales, bounds, yTicks, "Photon energy (eV)", "Cross section", theme);
+  drawLineSeries(ctx, [{
+    x: state.currentPics.points.map((point) => point.energy_ev),
+    y: state.currentPics.points.map((point) => point.cross_section),
+    color: theme.primary,
+    points: true,
+    pointRadius: 2.8,
+  }], scales);
   const species = state.currentPics.species;
-  ctx.fillStyle = "#344054";
+  ctx.fillStyle = theme.title;
   ctx.fillText(fitCanvasText(ctx, `${species.name} | m/z ${species.mz}`, width - margin.left - margin.right), margin.left, 24);
 }
 
@@ -1321,56 +1690,22 @@ function downloadPicsRows() {
 }
 
 function setUploadStatus(status, text) {
-  const pill = $("upload-status-pill");
-  const [className, label] = statusPresentation(status);
-  pill.className = `pill ${className}`;
-  pill.textContent = label;
-  $("upload-status-text").textContent = text;
+  setStatusView(uploadStatusView, status, text);
 }
 
 function setUploadProgress(value, step, status = "running") {
-  const clamped = Math.max(0, Math.min(100, Math.round(Number(value) || 0)));
-  state.uploadProgressValue = clamped;
-  const bar = $("upload-progress-bar");
-  bar.style.width = `${clamped}%`;
-  bar.classList.toggle("error", status === "error");
-  $("upload-progress-percent").textContent = `${clamped}%`;
-  $("upload-progress-step").textContent = step || "等待上传";
-  const meter = bar.closest(".progress-meter");
-  if (meter) {
-    meter.setAttribute("role", "progressbar");
-    meter.setAttribute("aria-valuemin", "0");
-    meter.setAttribute("aria-valuemax", "100");
-    meter.setAttribute("aria-valuenow", String(clamped));
-    meter.setAttribute("aria-valuetext", `${step || "上传进度"} ${clamped}%`);
-  }
+  setProgressView(uploadStatusView, value, step, status);
 }
 
 function uploadLog(message) {
-  const stamp = new Date().toLocaleTimeString();
-  const text = String(message || "").trim();
-  if (!text) return;
-  if (
-    state.uploadLogEntries.length
-    && state.uploadLogEntries[state.uploadLogEntries.length - 1].endsWith(`  ${text}`)
-  ) {
-    return;
-  }
-  state.uploadLogEntries.push(`${stamp}  ${text}`);
-  state.uploadLogEntries = state.uploadLogEntries.slice(-10);
-  const view = $("upload-progress-log");
-  view.textContent = state.uploadLogEntries.join("\n");
-  view.scrollTop = view.scrollHeight;
+  appendLog({ stateKey: uploadStatusView.logStateKey, viewId: uploadStatusView.logViewId }, message);
 }
 
 function setPicsLibrary(libraryId) {
   state.picsLibraryId = libraryId || "";
-  if (state.picsLibraryId) {
-    localStorage.setItem("bl03u_pics_library_id", state.picsLibraryId);
-  } else {
-    localStorage.removeItem("bl03u_pics_library_id");
-  }
+  writeStorage("bl03u_pics_library_id", state.picsLibraryId);
   updatePicsLibraryCaptions();
+  updateProjectSettingSummaries();
 }
 
 function updatePicsLibraryCaptions() {
@@ -1382,7 +1717,12 @@ function updatePicsLibraryCaptions() {
   const activeLine = $("active-pics-library");
   if (activeLine) activeLine.textContent = `${text}。`;
   const useServerButton = $("use-server-library");
-  if (useServerButton) useServerButton.disabled = !state.picsLibraryId;
+  if (useServerButton) {
+    useServerButton.disabled = !state.picsLibraryId;
+    useServerButton.title = state.picsLibraryId
+      ? "切回服务器维护的 PICS 数据库"
+      : "当前已经使用服务器维护库";
+  }
 }
 
 function updateUploadScopeUi() {
@@ -1489,15 +1829,9 @@ function csvCell(value) {
   return /[",\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
 }
 
-function updateApiBaseCaption() {
-  const caption = $("api-base-caption");
-  if (!caption) return;
-  caption.textContent = `API 后端: ${API_BASE}`;
-}
-
 function activePageId() {
   const page = document.querySelector(".page.active");
-  return page ? page.id : "pie-page";
+  return page ? page.id : "pics-page";
 }
 
 function requestActiveSubmit() {
@@ -1525,7 +1859,7 @@ function downloadActiveTable() {
   return false;
 }
 
-document.querySelectorAll(".nav-button").forEach((button) => {
+document.querySelectorAll("[data-page]").forEach((button) => {
   button.addEventListener("click", () => switchPage(button.dataset.page));
 });
 document.querySelectorAll(".source-button").forEach((button) => {
@@ -1535,6 +1869,7 @@ document.querySelectorAll(".source-button").forEach((button) => {
       const active = item.dataset.pieSource === source;
       item.classList.toggle("active", active);
       item.setAttribute("aria-pressed", String(active));
+      item.tabIndex = active ? 0 : -1;
     });
     $("query-form").classList.toggle("hidden", source !== "folder");
     $("query-form").classList.toggle("active", source === "folder");
@@ -1542,11 +1877,23 @@ document.querySelectorAll(".source-button").forEach((button) => {
     $("curve-upload-form").classList.toggle("active", source === "upload");
   });
 });
+document.querySelectorAll(".settings-tab-button").forEach((button) => {
+  button.addEventListener("click", () => switchProjectSettingsTab(button.dataset.settingsTab));
+});
+$("save-project-settings").addEventListener("click", () => commitProjectSettings(true));
+$("apply-project-settings").addEventListener("click", () => commitProjectSettings(false));
+$("reset-project-settings").addEventListener("click", () => {
+  state.projectSettings = defaultWebProjectSettings();
+  saveWebProjectSettings();
+  applyProjectSettingsToForms();
+  settingsStatus("已恢复默认设置。", "success");
+});
+$("edit-pie-settings").addEventListener("click", () => editProjectSettings("project-settings-data"));
+$("edit-pics-settings").addEventListener("click", () => editProjectSettings("project-settings-function"));
+
 $("query-form").addEventListener("submit", startJob);
 $("curve-upload-form").addEventListener("submit", uploadPieCurve);
-$("peak-source").addEventListener("change", () => {
-  $("manual-peak-wrap").classList.toggle("hidden", $("peak-source").value !== "manual");
-});
+$("peak-source").addEventListener("change", updateProjectSettingSummaries);
 $("mz-select").addEventListener("change", (event) => loadCurve(event.target.value));
 $("fit-button").addEventListener("click", fitCurrentCurve);
 $("manual-fit-button").addEventListener("click", fitCurrentCurve);
@@ -1592,6 +1939,10 @@ $("candidate-view").addEventListener("input", (event) => {
   state.candidateCoefficients[id] = Number.isFinite(value) ? Math.max(0, value) : 0;
   scheduleManualPreview();
 });
+$("candidate-filter").addEventListener("input", (event) => {
+  state.candidateFilterText = event.target.value;
+  renderCandidatePanel();
+});
 $("select-all-candidates").addEventListener("click", () => {
   state.selectedCandidateIds = new Set(state.candidateRows.map((row) => Number(row.id)));
   renderCandidatePanel();
@@ -1631,6 +1982,10 @@ $("pics-table-view").addEventListener("click", (event) => {
     });
   }
 });
+$("pics-filter").addEventListener("input", (event) => {
+  state.picsFilterText = event.target.value;
+  renderPicsTable();
+});
 $("pics-upload-form").addEventListener("submit", uploadPics);
 $("pics-upload-scope").addEventListener("change", updateUploadScopeUi);
 $("pics-upload-mode").addEventListener("change", () => {
@@ -1642,6 +1997,15 @@ $("use-server-library").addEventListener("click", () => {
   setUploadProgress(0, "等待上传", "idle");
   uploadLog("后续查询和拟合将使用服务器维护库");
 });
+function scheduleChartResize() {
+  if (state.resizeFrame) cancelAnimationFrame(state.resizeFrame);
+  state.resizeFrame = requestAnimationFrame(() => {
+    state.resizeFrame = null;
+    drawChart();
+    drawPicsChart();
+  });
+}
+
 document.addEventListener("keydown", (event) => {
   const commandKey = event.ctrlKey || event.metaKey;
   if (!commandKey) return;
@@ -1653,16 +2017,25 @@ document.addEventListener("keydown", (event) => {
     event.preventDefault();
   }
 });
-window.addEventListener("resize", () => {
-  drawChart();
-  drawPicsChart();
-});
+window.addEventListener("resize", scheduleChartResize);
 document.querySelectorAll(".page").forEach((page) => {
   page.hidden = !page.classList.contains("active");
 });
+bindRovingControls(".nav-button");
+bindRovingControls(".workflow-tab-button");
+bindRovingControls(".settings-tab-button");
+bindRovingControls(".source-button");
+bindRovingControls(".segment-button");
+bindRovingControls(".tab-button");
+setTabIndex(".nav-button", (item) => item.classList.contains("active"));
+setTabIndex(".workflow-tab-button", (item) => item.classList.contains("active"));
+setTabIndex(".settings-tab-button", (item) => item.classList.contains("active"));
+setTabIndex(".source-button", (item) => item.classList.contains("active"));
+setTabIndex(".segment-button", (item) => item.classList.contains("active"));
+setTabIndex(".tab-button", (item) => item.classList.contains("active"));
+applyProjectSettingsToForms();
 updatePicsLibraryCaptions();
 updateUploadScopeUi();
-updateApiBaseCaption();
 setProgress(0, "等待任务", "idle");
 setUploadProgress(0, "等待上传", "idle");
 drawChart();
