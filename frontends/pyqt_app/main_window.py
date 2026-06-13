@@ -35,6 +35,7 @@ from core.output_paths import ensure_output_dir
 from core.peak_detection import add_manual_peak as core_add_manual_peak
 from core.peak_detection import detect_peaks_in_range
 from core.peak_detection import detect_peaks_prominence
+from core.peak_detection import detect_peaks_ensemble
 from core.runtime_paths import resource_path
 from core.spectrum_io import read_bl03u_txt, sum_spectra
 from core.normalization import load_normalization_settings
@@ -1056,7 +1057,7 @@ class MainWindow(Ui_MainWindow, QMainWindow):
             calibration = ps.to_calibration()
             light_map = {"io": "IO光电流", "beam_current": "Beam Current"}
             pie_map = {"first": "首点归一", "none": "逐点除光强", "off": "关闭"}
-            peak_map = {"prominence": "Prominence", "legacy": "传统局部极大", "cwt": "CWT小波"}
+            peak_map = {"prominence": "Prominence", "legacy": "传统局部极大", "cwt": "CWT小波", "ensemble": "Ensemble融合检测"}
             temp_map = {"sum": "Sum谱参考", "individual": "独立参考"}
             merge_map = {
                 "low_energy_dominant": "低能段为主",
@@ -2561,6 +2562,36 @@ class MainWindow(Ui_MainWindow, QMainWindow):
             "gaussian_boundary_scale": peak_config.gaussian_boundary_scale,
             "boundary_padding": peak_config.boundary_padding,
         }
+
+        # 融合寻峰 - 结合三个算法的优势
+        if algorithm == "ensemble":
+            ensemble_params = {
+                "vote_threshold": getattr(peak_config, "vote_threshold", 0.667),
+                "min_intensity_for_single_vote": getattr(peak_config, "min_intensity_for_single_vote", 5.0),
+                "mz_tolerance": getattr(peak_config, "mz_tolerance", 0.2),
+                "weak_tail_early_window": peak_config.weak_tail_early_window,
+                "weak_tail_late_window": peak_config.weak_tail_late_window,
+                "weak_tail_ratio": peak_config.weak_tail_ratio,
+                "nearby_peak_window": peak_config.nearby_peak_window,
+                "prominence_ratio": peak_config.prominence_ratio,
+                "smoothing_window": peak_config.smoothing_window,
+                "smoothing_poly_order": peak_config.smoothing_poly_order,
+                "baseline_window": peak_config.baseline_window,
+                "baseline_percentile": peak_config.baseline_percentile,
+                "min_peak_width": peak_config.min_peak_width,
+                "max_peak_width": peak_config.max_peak_width,
+                "cwt_snr_threshold": getattr(peak_config, "cwt_snr_threshold", 0.02),
+                "cwt_wavelet_max_width": getattr(peak_config, "cwt_wavelet_max_width", 30),
+            }
+            return detect_peaks_ensemble(
+                y_data,
+                use_legacy=True,
+                use_prominence=True,
+                use_cwt=True,
+                **ensemble_params,
+                **common,
+            )
+
         if algorithm == "legacy":
             return detect_peaks_in_range(
                 y_data,
