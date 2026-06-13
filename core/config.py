@@ -36,6 +36,10 @@ class PeakDetectionConfig:
     baseline_percentile: float = 5.0
     min_peak_width: int = 1
     max_peak_width: int = 80
+    # Ensemble-specific parameters
+    vote_threshold: float = 0.667
+    min_intensity_for_single_vote: float = 5.0
+    mz_tolerance: float = 0.2
 
 
 def project_path(path: str | Path) -> Path:
