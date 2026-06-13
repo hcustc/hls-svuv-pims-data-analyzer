@@ -1057,7 +1057,7 @@ class MainWindow(Ui_MainWindow, QMainWindow):
             calibration = ps.to_calibration()
             light_map = {"io": "IO光电流", "beam_current": "Beam Current"}
             pie_map = {"first": "首点归一", "none": "逐点除光强", "off": "关闭"}
-            peak_map = {"prominence": "Prominence", "legacy": "传统局部极大", "cwt": "CWT小波", "ensemble": "Ensemble融合检测"}
+            peak_map = {"ensemble": "Ensemble融合检测", "prominence": "Prominence", "legacy": "传统局部极大", "cwt": "CWT小波"}
             temp_map = {"sum": "Sum谱参考", "individual": "独立参考"}
             merge_map = {
                 "low_energy_dominant": "低能段为主",

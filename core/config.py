@@ -17,7 +17,7 @@ DEFAULT_APP_CONFIG = CONFIG_ROOT / "app.yaml"
 
 @dataclass
 class PeakDetectionConfig:
-    algorithm: str = "prominence"
+    algorithm: str = "ensemble"
     detection_min_idx: int = 3000
     threshold_end: float = 2.0
     min_intensity: float = 3.0
