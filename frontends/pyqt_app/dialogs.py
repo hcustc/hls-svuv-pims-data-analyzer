@@ -587,10 +587,10 @@ class NormalizationSettingsWidget(QtWidgets.QWidget, DataFrameTableMixin):
         peak_layout.setVerticalSpacing(8)
 
         self.peak_algorithm_combo = QtWidgets.QComboBox()
-        self.peak_algorithm_combo.addItem("Prominence（推荐）", "prominence")
+        self.peak_algorithm_combo.addItem("Ensemble融合检测（推荐）", "ensemble")
+        self.peak_algorithm_combo.addItem("Prominence", "prominence")
         self.peak_algorithm_combo.addItem("传统局部极大", "legacy")
         self.peak_algorithm_combo.addItem("CWT小波", "cwt")
-        self.peak_algorithm_combo.addItem("Ensemble融合检测", "ensemble")
         self.peak_algorithm_combo.setToolTip("主工作台自动寻峰使用的算法")
         self.peak_detection_min_idx_edit = QtWidgets.QSpinBox()
         self.peak_detection_min_idx_edit.setRange(0, 10_000_000)
