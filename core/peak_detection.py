@@ -228,6 +228,7 @@ def detect_peaks_in_range(
     gaussian_window_max: int = 30,
     gaussian_boundary_scale: float = 1.5,
     boundary_padding: int = 2,
+    weak_tail_cutoff_idx: int = 15000,
 ) -> list[Peak]:
     """Detect peaks using the BL03U local-maxima and Gaussian-boundary logic."""
     data = np.asarray(list(y_data), dtype=float)
@@ -270,7 +271,7 @@ def detect_peaks_in_range(
         if has_higher_nearby:
             continue
 
-        weak_tail_range = weak_tail_early_window if max_idx <= 15000 else weak_tail_late_window
+        weak_tail_range = weak_tail_early_window if max_idx <= weak_tail_cutoff_idx else weak_tail_late_window
         if any(
             max_idx > prev
             and max_idx - prev <= weak_tail_range
@@ -358,6 +359,347 @@ def add_manual_peak(
         is_auto=False,
         gaussian_params=fit,
     )
+
+
+def detect_peaks_by_algorithm(
+    y_data: Iterable[float],
+    *,
+    algorithm: str = "legacy",
+    calibration: Calibration = Calibration(),
+    start_idx: int = 0,
+    end_idx: int | None = None,
+    detection_min_idx: int = 3000,
+    time_offset: float = 0.0,
+    threshold_end: float = 2,
+    min_intensity: float = 3,
+    nearby_peak_window: int = 30,
+    duplicate_window: int = 20,
+    weak_tail_early_window: int = 90,
+    weak_tail_late_window: int = 50,
+    weak_tail_ratio: float = 5,
+    gaussian_window_max: int = 30,
+    gaussian_boundary_scale: float = 1.5,
+    boundary_padding: int = 2,
+    prominence_ratio: float = 0.005,
+    smoothing_window: int = 5,
+    smoothing_poly_order: int = 2,
+    baseline_window: int = 301,
+    baseline_percentile: float = 5.0,
+    min_peak_width: int = 1,
+    max_peak_width: int = 80,
+    cwt_snr_threshold: float = 0.02,
+    cwt_wavelet_max_width: int = 30,
+    weak_tail_cutoff_idx: int = 15000,
+) -> list[Peak]:
+    """Dispatch BL03U peak detection to legacy, prominence, or CWT algorithms."""
+    algorithm = (algorithm or "legacy").lower()
+    if algorithm == "legacy":
+        return detect_peaks_in_range(
+            y_data,
+            calibration=calibration,
+            start_idx=start_idx,
+            end_idx=end_idx,
+            detection_min_idx=detection_min_idx,
+            time_offset=time_offset,
+            threshold_end=threshold_end,
+            min_intensity=min_intensity,
+            nearby_peak_window=nearby_peak_window,
+            duplicate_window=duplicate_window,
+            weak_tail_early_window=weak_tail_early_window,
+            weak_tail_late_window=weak_tail_late_window,
+            weak_tail_ratio=weak_tail_ratio,
+            gaussian_window_max=gaussian_window_max,
+            gaussian_boundary_scale=gaussian_boundary_scale,
+            boundary_padding=boundary_padding,
+            weak_tail_cutoff_idx=weak_tail_cutoff_idx,
+        )
+    if algorithm == "prominence":
+        return detect_peaks_prominence(
+            y_data,
+            calibration=calibration,
+            start_idx=start_idx,
+            end_idx=end_idx,
+            detection_min_idx=detection_min_idx,
+            time_offset=time_offset,
+            threshold_end=threshold_end,
+            min_intensity=min_intensity,
+            duplicate_window=duplicate_window,
+            gaussian_window_max=gaussian_window_max,
+            gaussian_boundary_scale=gaussian_boundary_scale,
+            boundary_padding=boundary_padding,
+            prominence_ratio=prominence_ratio,
+            smoothing_window=smoothing_window,
+            smoothing_poly_order=smoothing_poly_order,
+            baseline_window=baseline_window,
+            baseline_percentile=baseline_percentile,
+            min_peak_width=min_peak_width,
+            max_peak_width=max_peak_width,
+        )
+    if algorithm == "cwt":
+        from .cwt_peak_detection import CwtPeakDetectionConfig, detect_peaks_cwt
+
+        data = np.asarray(list(y_data), dtype=float)
+        start_idx = max(0, int(start_idx))
+        end_idx = len(data) if end_idx is None else min(int(end_idx), len(data))
+        detection_start = max(int(detection_min_idx), start_idx)
+        if detection_start >= end_idx:
+            return []
+        segment = data[detection_start:end_idx]
+        min_peak_width = max(1, int(min_peak_width))
+        max_peak_width = max(min_peak_width, int(max_peak_width))
+        window_size = max(3, int(smoothing_window))
+        wavelet_max_width = max(2, int(cwt_wavelet_max_width))
+        config = CwtPeakDetectionConfig(
+            window_size=window_size,
+            poly_order=max(1, int(smoothing_poly_order)),
+            snr_threshold=max(0.0, float(cwt_snr_threshold)),
+            prominence_ratio=max(0.0, float(prominence_ratio)),
+            min_peak_distance=max(1, int(duplicate_window)),
+            min_peak_width=min_peak_width,
+            max_peak_width=max_peak_width,
+            wavelet_widths=tuple(range(1, wavelet_max_width + 1)),
+            baseline_percentile=baseline_percentile,
+            baseline_window_factor=max(1, int(baseline_window / window_size)),
+        )
+        return detect_peaks_cwt(
+            segment,
+            calibration=calibration,
+            start_idx=detection_start,
+            time_offset=time_offset,
+            config=config,
+        )
+    raise ValueError("algorithm must be 'legacy', 'prominence', or 'cwt'")
+
+
+def _cluster_peaks_by_mz(
+    peaks: list[Peak],
+    tolerance: float = 0.2,
+) -> list[list[Peak]]:
+    """按m/z将峰聚类，同一聚类内的峰距离<=tolerance。"""
+    if not peaks:
+        return []
+
+    sorted_peaks = sorted(peaks, key=lambda p: p.mz)
+    clusters: list[list[Peak]] = []
+    current_cluster = [sorted_peaks[0]]
+
+    for peak in sorted_peaks[1:]:
+        if peak.mz - current_cluster[0].mz <= tolerance:
+            current_cluster.append(peak)
+        else:
+            clusters.append(current_cluster)
+            current_cluster = [peak]
+
+    if current_cluster:
+        clusters.append(current_cluster)
+
+    return clusters
+
+
+def _merge_cluster_peaks(cluster: list[Peak]) -> Peak:
+    """合并一个聚类中的多个峰。选择m/z加权均值，强度取最大值，边界取最强峰。"""
+    if not cluster:
+        raise ValueError("cluster must not be empty")
+
+    if len(cluster) == 1:
+        return cluster[0]
+
+    # m/z按强度加权均值
+    total_intensity = sum(p.intensity for p in cluster)
+    if total_intensity > 0:
+        weighted_mz = sum(p.mz * p.intensity for p in cluster) / total_intensity
+    else:
+        weighted_mz = np.mean([p.mz for p in cluster])
+
+    # time按强度加权均值
+    weighted_time = sum(p.time * p.intensity for p in cluster) / total_intensity if total_intensity > 0 else np.mean([p.time for p in cluster])
+
+    # intensity取最大值
+    max_intensity = max(p.intensity for p in cluster)
+
+    # 选择最强的峰作为主峰
+    max_peak = max(cluster, key=lambda p: p.intensity)
+
+    return Peak(
+        index=max_peak.index,
+        time=weighted_time,
+        mz=weighted_mz,
+        intensity=max_intensity,
+        fwhm=max_peak.fwhm,
+        left_bound=max_peak.left_bound,
+        right_bound=max_peak.right_bound,
+        is_auto=True,
+        gaussian_params=max_peak.gaussian_params,
+        species=max_peak.species,
+    )
+
+
+def detect_peaks_ensemble(
+    y_data: Iterable[float],
+    *,
+    calibration: Calibration = Calibration(),
+    start_idx: int = 0,
+    end_idx: int | None = None,
+    detection_min_idx: int = 3000,
+    time_offset: float = 0.0,
+    # 融合参数
+    use_legacy: bool = True,
+    use_prominence: bool = True,
+    use_cwt: bool = True,
+    mz_tolerance: float = 0.2,
+    vote_threshold: float = 0.667,
+    min_intensity_for_single_vote: float = 5.0,
+    # Legacy参数（recall-focused）
+    threshold_end: float = 1.0,
+    min_intensity: float = 1.0,
+    nearby_peak_window: int = 30,
+    duplicate_window: int = 20,
+    weak_tail_early_window: int = 120,
+    weak_tail_late_window: int = 80,
+    weak_tail_ratio: float = 3.0,
+    weak_tail_cutoff_idx: int = 15000,
+    gaussian_window_max: int = 30,
+    gaussian_boundary_scale: float = 1.5,
+    boundary_padding: int = 2,
+    # Prominence参数（recall-focused）
+    prominence_ratio: float = 0.002,
+    smoothing_window: int = 7,
+    smoothing_poly_order: int = 2,
+    baseline_window: int = 301,
+    baseline_percentile: float = 5.0,
+    min_peak_width: int = 1,
+    max_peak_width: int = 100,
+    # CWT参数（recall-focused）
+    cwt_snr_threshold: float = 0.01,
+    cwt_wavelet_max_width: int = 60,
+) -> list[Peak]:
+    """检测峰的融合方法：结合Legacy、Prominence、CWT三个算法的优势。
+
+    通过投票规则最大化峰召回率（recall）：
+    - 2/3算法同意 → 高置信峰
+    - 1/3算法 + 强度>阈值 → 低置信峰
+
+    Args:
+        y_data: 光谱强度数据
+        calibration: 质量标度校准对象
+        start_idx, end_idx: 检测范围
+        detection_min_idx: 检测起始索引（TOF时间阈值）
+        time_offset: 时间偏移
+        use_legacy, use_prominence, use_cwt: 启用哪些算法
+        mz_tolerance: m/z聚类容差（默认0.2）
+        vote_threshold: 投票阈值（默认0.667 = 2/3）
+        min_intensity_for_single_vote: 单个算法检出时的强度下界
+        [其他参数]: 三个算法各自的参数（recall-focused初始值）
+
+    Returns:
+        融合后的峰列表，按time排序
+    """
+    data = np.asarray(y_data, dtype=float)
+    if data.size == 0 or np.max(data) <= 0:
+        return []
+
+    # 统计启用的算法数
+    enabled_algorithms = sum([use_legacy, use_prominence, use_cwt])
+    if enabled_algorithms == 0:
+        return []
+
+    # 分别运行各算法
+    peaks_by_algo: dict[str, list[Peak]] = {}
+
+    if use_legacy:
+        peaks_by_algo["legacy"] = detect_peaks_in_range(
+            y_data,
+            calibration=calibration,
+            start_idx=start_idx,
+            end_idx=end_idx,
+            detection_min_idx=detection_min_idx,
+            time_offset=time_offset,
+            threshold_end=threshold_end,
+            min_intensity=min_intensity,
+            nearby_peak_window=nearby_peak_window,
+            duplicate_window=duplicate_window,
+            weak_tail_early_window=weak_tail_early_window,
+            weak_tail_late_window=weak_tail_late_window,
+            weak_tail_ratio=weak_tail_ratio,
+            gaussian_window_max=gaussian_window_max,
+            gaussian_boundary_scale=gaussian_boundary_scale,
+            boundary_padding=boundary_padding,
+            weak_tail_cutoff_idx=weak_tail_cutoff_idx,
+        )
+
+    if use_prominence:
+        peaks_by_algo["prominence"] = detect_peaks_prominence(
+            y_data,
+            calibration=calibration,
+            start_idx=start_idx,
+            end_idx=end_idx,
+            detection_min_idx=detection_min_idx,
+            time_offset=time_offset,
+            threshold_end=threshold_end,
+            min_intensity=min_intensity,
+            duplicate_window=duplicate_window,
+            gaussian_window_max=gaussian_window_max,
+            gaussian_boundary_scale=gaussian_boundary_scale,
+            boundary_padding=boundary_padding,
+            prominence_ratio=prominence_ratio,
+            smoothing_window=smoothing_window,
+            smoothing_poly_order=smoothing_poly_order,
+            baseline_window=baseline_window,
+            baseline_percentile=baseline_percentile,
+            min_peak_width=min_peak_width,
+            max_peak_width=max_peak_width,
+        )
+
+    if use_cwt:
+        peaks_by_algo["cwt"] = detect_peaks_by_algorithm(
+            y_data,
+            algorithm="cwt",
+            calibration=calibration,
+            start_idx=start_idx,
+            end_idx=end_idx,
+            detection_min_idx=detection_min_idx,
+            time_offset=time_offset,
+            cwt_snr_threshold=cwt_snr_threshold,
+            cwt_wavelet_max_width=cwt_wavelet_max_width,
+            min_peak_width=min_peak_width,
+            max_peak_width=max_peak_width,
+            smoothing_window=smoothing_window,
+            smoothing_poly_order=smoothing_poly_order,
+            baseline_window=baseline_window,
+            baseline_percentile=baseline_percentile,
+            prominence_ratio=prominence_ratio,
+            duplicate_window=duplicate_window,
+        )
+
+    # 合并所有峰并聚类
+    all_peaks = []
+    for peaks in peaks_by_algo.values():
+        all_peaks.extend(peaks)
+
+    if not all_peaks:
+        return []
+
+    # 按m/z聚类
+    clusters = _cluster_peaks_by_mz(all_peaks, tolerance=mz_tolerance)
+
+    # 投票规则应用
+    vote_threshold_count = max(1, int(np.ceil(enabled_algorithms * vote_threshold)))
+    final_peaks: list[Peak] = []
+
+    for cluster in clusters:
+        vote_count = len(cluster)
+
+        # 规则1：足够的投票 → 保留
+        if vote_count >= vote_threshold_count:
+            merged = _merge_cluster_peaks(cluster)
+            final_peaks.append(merged)
+        # 规则2：单个算法检出但强度足够 → 保留
+        elif vote_count == 1:
+            peak = cluster[0]
+            if peak.intensity >= min_intensity_for_single_vote:
+                final_peaks.append(peak)
+
+    return sorted(final_peaks, key=lambda peak: peak.time)
 
 
 def peaks_to_dataframe(peaks: Iterable[Peak]) -> pd.DataFrame:
