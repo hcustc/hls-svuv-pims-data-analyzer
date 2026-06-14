@@ -34,7 +34,13 @@ database/DATA_CLEANING_*.md
 
 output/*
 !output/.gitkeep
-# Local generated analysis/debug artifacts
-*.spec
+# Generated result files
+*.json
 *.xlsx
-database/*.backup.*.sqlite
+ensemble_*.json
+optimization_*.json
+validation_*.json
+benchmark_*.json
+*_result.json
+*_report.json
+
