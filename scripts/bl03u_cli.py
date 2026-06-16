@@ -81,6 +81,7 @@ def _write_json(path: str | Path, payload: Any) -> Path:
 def _peak_kwargs() -> dict[str, Any]:
     config = load_peak_detection_config()
     return {
+        "algorithm": config.algorithm,
         "threshold_end": config.threshold_end,
         "min_intensity": config.min_intensity,
         "detection_min_idx": config.detection_min_idx,
@@ -92,6 +93,17 @@ def _peak_kwargs() -> dict[str, Any]:
         "gaussian_window_max": config.gaussian_window_max,
         "gaussian_boundary_scale": config.gaussian_boundary_scale,
         "boundary_padding": config.boundary_padding,
+        "prominence_ratio": config.prominence_ratio,
+        "smoothing_window": config.smoothing_window,
+        "smoothing_poly_order": config.smoothing_poly_order,
+        "baseline_window": config.baseline_window,
+        "baseline_percentile": config.baseline_percentile,
+        "min_peak_width": config.min_peak_width,
+        "max_peak_width": config.max_peak_width,
+        # Ensemble-specific parameters
+        "vote_threshold": config.vote_threshold,
+        "min_intensity_for_single_vote": config.min_intensity_for_single_vote,
+        "mz_tolerance": config.mz_tolerance,
     }
 
 
