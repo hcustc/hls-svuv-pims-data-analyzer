@@ -10,7 +10,7 @@ from .calibration import Calibration
 from .integration import integrate_peak
 from .normalization import extract_light_intensity
 from .peak_ranges import load_peak_ranges, peak_ranges_to_peaks
-from .peak_detection import detect_peaks_in_range
+from .peak_detection import detect_peaks_in_range, detect_peaks_by_algorithm
 from .spectrum_io import Spectrum, list_spectrum_files, read_spectrum
 
 
@@ -53,6 +53,7 @@ def analyze_temperature_folder(
     folder: str | Path,
     *,
     calibration: Calibration = Calibration(),
+    algorithm: str = "legacy",
     threshold_end: float = 2,
     min_intensity: float = 3,
     prefer_gaussian: bool = True,
@@ -66,6 +67,13 @@ def analyze_temperature_folder(
     gaussian_window_max: int = 30,
     gaussian_boundary_scale: float = 1.5,
     boundary_padding: int = 2,
+    prominence_ratio: float = 0.005,
+    smoothing_window: int = 5,
+    smoothing_poly_order: int = 2,
+    baseline_window: int = 301,
+    baseline_percentile: float = 5.0,
+    min_peak_width: int = 1,
+    max_peak_width: int = 80,
     manual_peak_path: str | Path | None = None,
     photon_normalize: bool = False,
     kr_correct: bool = False,
@@ -73,6 +81,9 @@ def analyze_temperature_folder(
     mass_discrimination: float = 1.0,
     light_source: str = "io",
     expansion_factors: dict[float, float] | None = None,
+    vote_threshold: float = 0.667,
+    min_intensity_for_single_vote: float = 5.0,
+    mz_tolerance: float = 0.2,
 ) -> pd.DataFrame:
     files = list_spectrum_files(folder, (".txt",))
     spectra = []
@@ -114,8 +125,9 @@ def analyze_temperature_folder(
         reference_source = Path(manual_peak_path).name
     else:
         ref_temperature, ref_spectrum, reference_source = _build_reference_spectrum(spectra, reference_mode)
-        reference_peaks = detect_peaks_in_range(
+        reference_peaks = detect_peaks_by_algorithm(
             ref_spectrum.y,
+            algorithm=algorithm,
             calibration=calibration,
             start_idx=0,
             end_idx=len(ref_spectrum.y) - 1,
@@ -130,6 +142,16 @@ def analyze_temperature_folder(
             gaussian_window_max=gaussian_window_max,
             gaussian_boundary_scale=gaussian_boundary_scale,
             boundary_padding=boundary_padding,
+            prominence_ratio=prominence_ratio,
+            smoothing_window=smoothing_window,
+            smoothing_poly_order=smoothing_poly_order,
+            baseline_window=baseline_window,
+            baseline_percentile=baseline_percentile,
+            min_peak_width=min_peak_width,
+            max_peak_width=max_peak_width,
+            vote_threshold=vote_threshold,
+            min_intensity_for_single_vote=min_intensity_for_single_vote,
+            mz_tolerance=mz_tolerance,
         )
 
     rows = []

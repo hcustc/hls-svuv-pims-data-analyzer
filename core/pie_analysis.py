@@ -12,7 +12,7 @@ from .calibration import Calibration
 from .integration import baseline_corrected_area, gaussian_area
 from .normalization import extract_light_intensity
 from .peak_ranges import load_peak_ranges, peak_ranges_to_peaks
-from .peak_detection import detect_peaks_in_range, fit_gaussian
+from .peak_detection import detect_peaks_in_range, detect_peaks_by_algorithm, fit_gaussian
 from .spectrum_io import Spectrum, extract_first_number, read_spectrum
 
 
@@ -211,6 +211,7 @@ def analyze_pie_folder(
     suffixes: tuple[str, ...] = (".txt", ".asc", ".888"),
     recursive: bool = True,
     energy_decimals: int = 1,
+    algorithm: str = "legacy",
     threshold_end: float = 2,
     min_intensity: float = 3,
     detection_min_idx: int = 3000,
@@ -222,6 +223,13 @@ def analyze_pie_folder(
     gaussian_window_max: int = 30,
     gaussian_boundary_scale: float = 1.5,
     boundary_padding: int = 2,
+    prominence_ratio: float = 0.005,
+    smoothing_window: int = 5,
+    smoothing_poly_order: int = 2,
+    baseline_window: int = 301,
+    baseline_percentile: float = 5.0,
+    min_peak_width: int = 1,
+    max_peak_width: int = 80,
     prefer_gaussian: bool = True,
     manual_peak_path: str | Path | None = None,
     photon_normalize: bool = True,
@@ -229,6 +237,9 @@ def analyze_pie_folder(
     mass_discrimination: float = 1.0,
     light_source: str = "io",
     target_mz_values: list[int] | None = None,
+    vote_threshold: float = 0.667,
+    min_intensity_for_single_vote: float = 5.0,
+    mz_tolerance: float = 0.2,
 ) -> pd.DataFrame:
     """Generate experimental PIE curves from a folder of energy-resolved spectra."""
     groups = _group_spectra_by_energy(
@@ -251,8 +262,9 @@ def analyze_pie_folder(
     else:
         reference_group = max(groups, key=lambda x: x["energy"])
         reference_spectrum = reference_group["spectrum"]
-        reference_peaks = detect_peaks_in_range(
+        reference_peaks = detect_peaks_by_algorithm(
             reference_spectrum.y,
+            algorithm=algorithm,
             calibration=calibration,
             start_idx=0,
             end_idx=len(reference_spectrum.y),
@@ -267,6 +279,16 @@ def analyze_pie_folder(
             gaussian_window_max=gaussian_window_max,
             gaussian_boundary_scale=gaussian_boundary_scale,
             boundary_padding=boundary_padding,
+            prominence_ratio=prominence_ratio,
+            smoothing_window=smoothing_window,
+            smoothing_poly_order=smoothing_poly_order,
+            baseline_window=baseline_window,
+            baseline_percentile=baseline_percentile,
+            min_peak_width=min_peak_width,
+            max_peak_width=max_peak_width,
+            vote_threshold=vote_threshold,
+            min_intensity_for_single_vote=min_intensity_for_single_vote,
+            mz_tolerance=mz_tolerance,
         )
         reference_source = "auto"
     if target_mz_values:

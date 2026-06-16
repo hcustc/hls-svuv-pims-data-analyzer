@@ -390,8 +390,12 @@ def detect_peaks_by_algorithm(
     cwt_snr_threshold: float = 0.02,
     cwt_wavelet_max_width: int = 30,
     weak_tail_cutoff_idx: int = 15000,
+    # Ensemble parameters
+    vote_threshold: float = 0.667,
+    min_intensity_for_single_vote: float = 5.0,
+    mz_tolerance: float = 0.2,
 ) -> list[Peak]:
-    """Dispatch BL03U peak detection to legacy, prominence, or CWT algorithms."""
+    """Dispatch BL03U peak detection to legacy, prominence, CWT, or ensemble algorithms."""
     algorithm = (algorithm or "legacy").lower()
     if algorithm == "legacy":
         return detect_peaks_in_range(
@@ -468,7 +472,39 @@ def detect_peaks_by_algorithm(
             time_offset=time_offset,
             config=config,
         )
-    raise ValueError("algorithm must be 'legacy', 'prominence', or 'cwt'")
+    if algorithm == "ensemble":
+        return detect_peaks_ensemble(
+            y_data,
+            calibration=calibration,
+            start_idx=start_idx,
+            end_idx=end_idx,
+            detection_min_idx=detection_min_idx,
+            time_offset=time_offset,
+            threshold_end=threshold_end,
+            min_intensity=min_intensity,
+            nearby_peak_window=nearby_peak_window,
+            duplicate_window=duplicate_window,
+            weak_tail_early_window=weak_tail_early_window,
+            weak_tail_late_window=weak_tail_late_window,
+            weak_tail_ratio=weak_tail_ratio,
+            gaussian_window_max=gaussian_window_max,
+            gaussian_boundary_scale=gaussian_boundary_scale,
+            boundary_padding=boundary_padding,
+            weak_tail_cutoff_idx=weak_tail_cutoff_idx,
+            prominence_ratio=prominence_ratio,
+            smoothing_window=smoothing_window,
+            smoothing_poly_order=smoothing_poly_order,
+            baseline_window=baseline_window,
+            baseline_percentile=baseline_percentile,
+            min_peak_width=min_peak_width,
+            max_peak_width=max_peak_width,
+            cwt_snr_threshold=cwt_snr_threshold,
+            cwt_wavelet_max_width=cwt_wavelet_max_width,
+            vote_threshold=vote_threshold,
+            min_intensity_for_single_vote=min_intensity_for_single_vote,
+            mz_tolerance=mz_tolerance,
+        )
+    raise ValueError("algorithm must be 'legacy', 'prominence', 'cwt', or 'ensemble'")
 
 
 def _cluster_peaks_by_mz(
