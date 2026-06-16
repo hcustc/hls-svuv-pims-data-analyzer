@@ -168,6 +168,9 @@ def load_peak_detection_config(path: str | Path | None = None) -> PeakDetectionC
         baseline_percentile=float(defaults["baseline_percentile"]),
         min_peak_width=int(defaults["min_peak_width"]),
         max_peak_width=int(defaults["max_peak_width"]),
+        vote_threshold=float(defaults["vote_threshold"]),
+        min_intensity_for_single_vote=float(defaults["min_intensity_for_single_vote"]),
+        mz_tolerance=float(defaults["mz_tolerance"]),
     )
 
 
