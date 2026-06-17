@@ -9,14 +9,13 @@ APP_NAME = "BL03U-MassSpectrumTool"
 
 datas = [
     (str(ROOT / "icons"), "icons"),
-    (str(ROOT / "config"), "config"),
-    (str(ROOT / "database" / "species_database.sqlite"), "database"),
+    (str(ROOT / "src" / "bl03u_masstool" / "resources"), "resources"),
     (str(ROOT / "data" / "examples"), "data/examples"),
 ]
 
 a = Analysis(
     [str(ROOT / "main.py")],
-    pathex=[str(ROOT)],
+    pathex=[str(ROOT / "src"), str(ROOT)],
     binaries=[],
     datas=datas,
     hiddenimports=[],

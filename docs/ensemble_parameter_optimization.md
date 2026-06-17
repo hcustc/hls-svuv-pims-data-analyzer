@@ -2,7 +2,7 @@
 
 ## 完成成果
 
-### 1. 参数优化框架 - `core/ensemble_optimization.py`
+### 1. 参数优化框架 - `src/bl03u_masstool/core/ensemble_optimization.py`
 
 **搜索空间**：
 - 两种级别：完整（14维）+ 快速（10维）
@@ -88,11 +88,11 @@ best_params = extract_ensemble_parameters(result)
 }
 ```
 
-### 5. 优化脚本 - `scripts/optimize_ensemble_parameters.py`
+### 5. 优化脚本 - `src/bl03u_masstool/scripts/optimize_ensemble_parameters.py`
 
 自动化的参数优化流程：
 ```bash
-python scripts/optimize_ensemble_parameters.py
+python -m bl03u_masstool.scripts.optimize_ensemble_parameters
 ```
 
 **输出**：
@@ -158,8 +158,8 @@ cwt_wavelet_max_width: 61
 ### 快速开始
 
 ```python
-from core.peak_detection import detect_peaks_ensemble
-from core.ensemble_optimization import extract_ensemble_parameters
+from bl03u_masstool.core.peak_detection import detect_peaks_ensemble
+from bl03u_masstool.core.ensemble_optimization import extract_ensemble_parameters
 import json
 
 # 加载优化后的参数
@@ -178,7 +178,7 @@ peaks = detect_peaks_ensemble(
 ### 自定义优化
 
 ```python
-from core.ensemble_optimization import optimize_ensemble_parameters
+from bl03u_masstool.core.ensemble_optimization import optimize_ensemble_parameters
 
 # 完整搜索（14维，更精细）
 result = optimize_ensemble_parameters(
@@ -195,7 +195,7 @@ result = optimize_ensemble_parameters(
 ```bash
 # 自动优化并输出结果
 cd BL03U_MassSpectrumTool
-python scripts/optimize_ensemble_parameters.py
+python -m bl03u_masstool.scripts.optimize_ensemble_parameters
 
 # 查看结果
 cat ensemble_optimization_result.json
@@ -308,9 +308,9 @@ ensemble:
 ## 文件清单
 
 **新增**：
-- ✅ `core/ensemble_optimization.py` - 参数优化框架
+- ✅ `src/bl03u_masstool/core/ensemble_optimization.py` - 参数优化框架
 - ✅ `tests/test_ensemble_optimization.py` - 优化测试（4个）
-- ✅ `scripts/optimize_ensemble_parameters.py` - 自动化脚本
+- ✅ `src/bl03u_masstool/scripts/optimize_ensemble_parameters.py` - 自动化脚本
 - ✅ `docs/ensemble_parameter_optimization.md` - 本文档
 
 **修改**：

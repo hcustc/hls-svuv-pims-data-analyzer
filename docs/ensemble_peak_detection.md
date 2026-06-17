@@ -7,7 +7,7 @@
 ### 实现成果
 
 #### 1. **融合检测函数** - `detect_peaks_ensemble()`
-位置：`core/peak_detection.py`
+位置：`src/bl03u_masstool/core/peak_detection.py`
 
 **核心特性**：
 - 并行运行三个算法（可选启用）
@@ -88,8 +88,8 @@ detect_peaks_ensemble(
 
 ### 基本用法
 ```python
-from core.peak_detection import detect_peaks_ensemble
-from core.calibration import Calibration
+from bl03u_masstool.core.peak_detection import detect_peaks_ensemble
+from bl03u_masstool.core.calibration import Calibration
 
 calibration = Calibration()
 peaks = detect_peaks_ensemble(
@@ -250,4 +250,3 @@ A: 可以！框架可扩展：
 1. 在融合函数中添加新算法分支
 2. 更新 `enabled_algorithms` 计数
 3. 投票规则自动适配
-
