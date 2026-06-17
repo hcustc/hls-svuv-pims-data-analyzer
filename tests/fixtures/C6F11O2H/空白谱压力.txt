@@ -1,3 +1,0 @@
-Diffusion chamber: 2.31E-2 Pa
-Ionization chamber: 1.173E-4 Pa
-TOF Chamber: 1.276E-5 Pa

@@ -41,13 +41,14 @@ public distribution.
 The PyInstaller spec includes:
 
 - `icons/`
-- `config/`
-- `database/species_database.sqlite`
+- `src/bl03u_masstool/resources/` as bundled `resources/`
 - `data/examples/`
 
 When running as a packaged app, read-only bundled resources are loaded from the
-PyInstaller bundle, while writable outputs and copied runtime data are stored in
-the user's application data directory.
+PyInstaller bundle. Writable config, generated SQLite databases, and outputs are
+stored in the user's application data directory. If the configured PICS SQLite
+database is missing, it is rebuilt from `resources/pics/species_seed.csv` and
+`resources/pics/schema.sql`.
 
 Set `BL03U_USER_DATA_DIR` to override the user data directory during local
 testing.
