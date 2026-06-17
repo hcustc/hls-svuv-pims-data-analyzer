@@ -1,18 +1,18 @@
 # BL03U MassSpectrumTool 批处理 CLI
 
-`scripts/bl03u_cli.py` 提供不依赖图形界面的批处理入口，适合论文结果复现、远程服务器运行和批量导出。
+`bl03u` 提供不依赖图形界面的批处理入口，适合论文结果复现、远程服务器运行和批量导出。
 
 推荐在项目根目录运行：
 
 ```bash
 conda activate pyqt_env
-python scripts/bl03u_cli.py --help
+bl03u --help
 ```
 
 ## PIE 曲线生成
 
 ```bash
-python scripts/bl03u_cli.py pie tests/fixtures/C6F11O2H/PIE_Scan/400 \
+bl03u pie tests/fixtures/bl03u_sample/C6F11O2H/PIE_Scan/400 \
   --no-recursive \
   --no-gaussian \
   --output output/exports/pie_400.csv \
@@ -24,7 +24,7 @@ python scripts/bl03u_cli.py pie tests/fixtures/C6F11O2H/PIE_Scan/400 \
 建议论文复现、批量分析和 Agent 辅助解析时同时导出分析清单、m/z 级证据对象和 Markdown 摘要报告：
 
 ```bash
-python scripts/bl03u_cli.py pie tests/fixtures/C6F11O2H/PIE_Scan/400 \
+bl03u pie tests/fixtures/bl03u_sample/C6F11O2H/PIE_Scan/400 \
   --no-recursive \
   --no-gaussian \
   --photon-mode off \
@@ -38,7 +38,7 @@ python scripts/bl03u_cli.py pie tests/fixtures/C6F11O2H/PIE_Scan/400 \
 如需在导出证据时自动进行 PICS 候选拟合，增加数据库参数：
 
 ```bash
-python scripts/bl03u_cli.py pie tests/fixtures/C6F11O2H/PIE_Scan/400 \
+bl03u pie tests/fixtures/bl03u_sample/C6F11O2H/PIE_Scan/400 \
   --no-recursive \
   --no-gaussian \
   --photon-mode off \
@@ -68,7 +68,7 @@ python scripts/bl03u_cli.py pie tests/fixtures/C6F11O2H/PIE_Scan/400 \
 ## 温度扫描
 
 ```bash
-python scripts/bl03u_cli.py temperature tests/fixtures/C6F11O2H/Temp_Scan/12.5eV \
+bl03u temperature tests/fixtures/bl03u_sample/C6F11O2H/Temp_Scan/12.5eV \
   --reference-mode sum \
   --no-gaussian \
   --output output/exports/temp_12_5ev.csv \
@@ -78,7 +78,7 @@ python scripts/bl03u_cli.py temperature tests/fixtures/C6F11O2H/Temp_Scan/12.5eV
 温度扫描同样支持证据导出：
 
 ```bash
-python scripts/bl03u_cli.py temperature tests/fixtures/C6F11O2H/Temp_Scan/12.5eV \
+bl03u temperature tests/fixtures/bl03u_sample/C6F11O2H/Temp_Scan/12.5eV \
   --reference-mode sum \
   --no-gaussian \
   --output output/exports/temp_12_5ev.csv \
@@ -100,9 +100,9 @@ python scripts/bl03u_cli.py temperature tests/fixtures/C6F11O2H/Temp_Scan/12.5eV
 ## 分子式与同位素
 
 ```bash
-python scripts/bl03u_cli.py formula 'Ca(OH)2'
-python scripts/bl03u_cli.py formula 'CuSO4.5H2O' --isotopes --output output/exports/cuso4_hydrate.json
-python scripts/bl03u_cli.py formula '[13C]H4'
+bl03u formula 'Ca(OH)2'
+bl03u formula 'CuSO4.5H2O' --isotopes --output output/exports/cuso4_hydrate.json
+bl03u formula '[13C]H4'
 ```
 
 分子式解析支持括号分组、水合点、简单电荷尾缀和方括号同位素标签，例如 `Ca(OH)2`、`CuSO4.5H2O`、`NH4+`、`[13C]H4`。

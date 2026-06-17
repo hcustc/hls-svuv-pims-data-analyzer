@@ -17,7 +17,13 @@ skills/
 !.env.example
 
 # Database maintenance byproducts and local notes
+database/species_database.sqlite
 database/*.backup_*.sqlite
+database/*.local.sqlite
+database/*.tmp.sqlite
+database/*.session.sqlite
+database/*_upload.sqlite
+database/*_uploaded.sqlite
 database/cleaning_report_*.txt
 database/backups/
 database/CLEANING_*.md
@@ -43,4 +49,3 @@ validation_*.json
 benchmark_*.json
 *_result.json
 *_report.json
-

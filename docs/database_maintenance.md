@@ -1,12 +1,27 @@
 # SQLite 数据库维护
 
-本项目使用本地 SQLite PICS 数据库进行物种查询和 PIE/PICS 拟合。默认维护库为：
+本项目使用本地 SQLite PICS 数据库进行物种查询和 PIE/PICS 拟合。运行时工作库默认位于：
 
 ```text
 database/species_database.sqlite
 ```
 
 默认路径由 `config/app.yaml` 中的 `database.pics` 配置。
+
+可审查的默认数据源随包放在：
+
+```text
+src/bl03u_masstool/resources/pics/schema.sql
+src/bl03u_masstool/resources/pics/species_seed.csv
+```
+
+如果工作库不存在，程序会从 seed 自动生成 SQLite。也可以显式重建：
+
+```bash
+bl03u-build-species-db --output database/species_database.sqlite
+# 或
+python -m bl03u_masstool.scripts.build_species_database --output database/species_database.sqlite
+```
 
 ## 表结构
 
@@ -17,7 +32,10 @@ CREATE TABLE species (
     id INTEGER PRIMARY KEY,
     mz INTEGER NOT NULL,
     name TEXT NOT NULL,
-    ionization_energy REAL
+    ionization_energy REAL,
+    formula TEXT,
+    elements TEXT,
+    smiles TEXT
 );
 
 CREATE TABLE pic_cross_sections (
@@ -32,14 +50,15 @@ CREATE INDEX idx_species_mz ON species(mz);
 CREATE INDEX idx_pics_species_energy ON pic_cross_sections(species_id, energy_ev);
 ```
 
-`species` 保存候选物种元数据，`pic_cross_sections` 保存每个物种的 PICS 曲线点。
+`species` 保存候选物种元数据，`pic_cross_sections` 保存每个物种的 PICS 曲线点。表结构的
+权威版本是 `resources/pics/schema.sql`；默认数据的权威版本是 `resources/pics/species_seed.csv`。
 
 ## 查询
 
 交互式查询和 CSV 导出可使用：
 
 ```bash
-python scripts/query_species_database.py
+python -m bl03u_masstool.scripts.query_species_database
 ```
 
 常用直接检查：
@@ -52,6 +71,9 @@ sqlite3 database/species_database.sqlite "PRAGMA foreign_key_check;"
 ```
 
 ## 更新
+
+默认数据库变更应优先修改 `species_seed.csv` 或生成该 CSV 的上游清洗流程，再重建 SQLite。这样
+Git diff 可读，也方便代码审查。SQLite 文件应视为运行工作库或发布产物，而不是唯一数据源。
 
 通过 Web 上传维护 PICS 数据时，优先使用内置上传流程：
 
@@ -73,7 +95,7 @@ cp database/species_database.sqlite database/species_database.backup_$(date +%Y%
 只有在明确需要规范化维护库数据时，才运行清洗脚本：
 
 ```bash
-python scripts/clean_species_database.py
+python -m bl03u_masstool.scripts.clean_species_database
 ```
 
 ## 备份与恢复
