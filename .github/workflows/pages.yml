@@ -4,7 +4,7 @@ on:
   push:
     branches: [master]
     paths:
-      - "frontends/web_app/static/**"
+      - "src/bl03u_masstool/frontends/web_app/static/**"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
@@ -30,7 +30,7 @@ jobs:
       - name: Prepare site
         run: |
           mkdir -p _site
-          cp -R frontends/web_app/static/. _site/
+          cp -R src/bl03u_masstool/frontends/web_app/static/. _site/
           touch _site/.nojekyll
 
       - name: Upload Pages artifact

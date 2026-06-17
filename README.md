@@ -36,6 +36,7 @@ uv pip install -r requirements.txt
 
 ```bash
 python main.py              # 启动完整 GUI
+bl03u-gui                   # 安装后启动完整 GUI
 python main.py --pics       # 直接打开 PICS 计算工具
 python main.py --tools      # 直接打开核心工具集
 python main.py --help       # 查看帮助
@@ -44,26 +45,27 @@ python main.py --help       # 查看帮助
 ### Web 服务
 
 ```bash
-uvicorn api.server:app --reload
+uvicorn bl03u_masstool.api.app:app --reload
 # 浏览器打开 http://127.0.0.1:8000/
 ```
 
 ### 命令行批处理
 
 ```bash
-python scripts/bl03u_cli.py pie <文件夹> --output result.csv
-python scripts/bl03u_cli.py temperature <文件夹> --output result.csv
-python scripts/bl03u_cli.py formula 'C6H6' --isotopes
-python scripts/bl03u_cli.py --help
+bl03u pie <文件夹> --output result.csv
+bl03u temperature <文件夹> --output result.csv
+bl03u formula 'C6H6' --isotopes
+bl03u --help
 ```
 
 ## 配置
 
-配置文件位于 `config/` 目录（YAML 格式）：
+默认配置随包放在 `src/bl03u_masstool/resources/config/`。开发态或用户覆盖配置位于 `config/`
+目录（YAML 格式）；如果工作副本不存在，程序会回退到内置默认资源。
 
 | 文件 | 说明 |
 |------|------|
-| `app.yaml` | 主配置，指向数据库路径、输出目录等 |
+| `app.yaml` | 主配置，指向用户数据库路径、输出目录等 |
 | `calibration.yaml` | TOF → m/z 标定系数 |
 | `calibration_points.yaml` | 标定参考点 |
 | `peak_detection.yaml` | 寻峰算法参数 |
@@ -75,6 +77,19 @@ python scripts/bl03u_cli.py --help
 
 ```bash
 pytest tests/
+```
+
+## 默认 PICS 数据库
+
+默认 PICS 数据源为可审查的 seed 文件：
+
+- `src/bl03u_masstool/resources/pics/schema.sql`
+- `src/bl03u_masstool/resources/pics/species_seed.csv`
+
+SQLite 工作库可由 seed 生成：
+
+```bash
+python -m bl03u_masstool.scripts.build_species_database --output database/species_database.sqlite
 ```
 
 ## Docker 部署
@@ -91,15 +106,17 @@ docker compose up -d --build
 
 ```
 ├── main.py                # 桌面 GUI 入口
-├── core/                  # 核心算法（无 Qt 依赖）
-├── frontends/
-│   ├── pyqt_app/          # PyQt6 桌面界面
-│   └── web_app/           # Web 前端（静态 SPA）
-├── api/                   # FastAPI 服务端
-├── scripts/               # CLI 工具与数据库脚本
-├── config/                # YAML 配置文件
-├── database/              # SQLite 物种数据库
-├── tests/                 # pytest 测试
+├── pyproject.toml         # Python 包、依赖与工具配置
+├── src/bl03u_masstool/
+│   ├── core/              # 核心算法（无 Qt 依赖）
+│   ├── frontends/         # PyQt6 桌面界面与 Web 静态资源
+│   ├── api/               # FastAPI 服务端
+│   ├── resources/         # 内置默认配置、PICS seed/schema
+│   └── scripts/           # CLI 工具与数据库脚本
+├── config/                # 开发/用户覆盖 YAML 配置
+├── database/              # 开发/用户 SQLite 工作库（可由 seed 生成）
+├── output/                # 运行产物，仅保留 .gitkeep
+├── tests/                 # pytest 测试（unit/ 与 integration/ 分层）
 ├── docs/                  # 详细文档
 └── packaging/             # PyInstaller 打包配置
 ```

@@ -1,0 +1,23 @@
+mole_fraction:
+  mass_disc_exponent: 0.77897
+  parent_mz: 128
+  parent_initial_mf: 0.002
+  reference_temperature: null
+  reference_species_mz: null
+  reference_species_tm: null
+  reference_species_mf_at_tm: 0.001
+  photon_energy: 10.0
+  expansion_factors: {}
+  kr_data:
+    550: 393.399604
+    600: 378.4250953
+    650: 286.9776109
+    700: 309.1328046
+    750: 282.8007667
+    800: 308.1926573
+    850: 337.9213882
+    900: 338.1595463
+    950: 360.2213739
+    1000: 335.0853736
+    1050: 372.9785567
+    1100: 356.4303333

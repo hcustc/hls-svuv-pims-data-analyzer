@@ -4,13 +4,13 @@
 
 ## 代码依据
 
-- `core/peak_detection.py`: 传统局部极大值寻峰、prominence 寻峰、高斯拟合与峰边界估计。
-- `core/cwt_peak_detection.py`: CWT 连续小波寻峰候选方案。
-- `core/integration.py`: 峰面积积分、基线扣除、高斯面积计算。
-- `core/pie_analysis.py`: PIE 曲线生成、PICS 数据库读取、物种组合最优拟合。
-- `core/temperature_scan.py`: 温度扫描曲线生成、光强归一化、Kr 膨胀系数校正。
-- `core/calibration.py`: TOF 到 m/z 的二次定标及定标系数拟合。
-- `core/isotope.py`: 分子式解析、精确质量/名义质量计算和同位素分布卷积。
+- `src/bl03u_masstool/core/peak_detection.py`: 传统局部极大值寻峰、prominence 寻峰、高斯拟合与峰边界估计。
+- `src/bl03u_masstool/core/cwt_peak_detection.py`: CWT 连续小波寻峰候选方案。
+- `src/bl03u_masstool/core/integration.py`: 峰面积积分、基线扣除、高斯面积计算。
+- `src/bl03u_masstool/core/pie_analysis.py`: PIE 曲线生成、PICS 数据库读取、物种组合最优拟合。
+- `src/bl03u_masstool/core/temperature_scan.py`: 温度扫描曲线生成、光强归一化、Kr 膨胀系数校正。
+- `src/bl03u_masstool/core/calibration.py`: TOF 到 m/z 的二次定标及定标系数拟合。
+- `src/bl03u_masstool/core/isotope.py`: 分子式解析、精确质量/名义质量计算和同位素分布卷积。
 - `config/peak_detection.yaml`: 自动寻峰默认参数。
 
 ## 1. TOF 到 m/z 的二次定标
@@ -42,7 +42,7 @@ cwt         # 连续小波变换
 
 ### 2.1 Prominence 寻峰
 
-实现位于 `core/peak_detection.py::detect_peaks_prominence`。流程：
+实现位于 `src/bl03u_masstool/core/peak_detection.py::detect_peaks_prominence`。流程：
 
 1. 从 `detection_min_idx` 之后开始分析，避免低 TOF 噪声。
 2. 使用 Savitzky-Golay 对强度序列平滑。
@@ -68,7 +68,7 @@ baseline_percentile
 
 ### 2.2 传统局部极大值寻峰
 
-实现位于 `core/peak_detection.py::detect_peaks_in_range`。候选峰满足：
+实现位于 `src/bl03u_masstool/core/peak_detection.py::detect_peaks_in_range`。候选峰满足：
 
 ```text
 y[i] > min_intensity
@@ -88,7 +88,7 @@ current_peak * weak_tail_ratio <= previous_peak
 
 ### 2.3 CWT 小波寻峰
 
-实现位于 `core/cwt_peak_detection.py::detect_peaks_cwt`。流程：
+实现位于 `src/bl03u_masstool/core/cwt_peak_detection.py::detect_peaks_cwt`。流程：
 
 1. Savitzky-Golay 平滑。
 2. rolling percentile 基线校正。
@@ -130,7 +130,7 @@ right = mean + gaussian_boundary_scale * FWHM
 
 ## 4. 峰面积积分
 
-实现位于 `core/integration.py`。
+实现位于 `src/bl03u_masstool/core/integration.py`。
 
 基线扣除梯形积分：
 
@@ -158,7 +158,7 @@ y_exp ~= X * coef
 
 ## 6. 分子式、质量和同位素分布
 
-实现位于 `core/isotope.py`。
+实现位于 `src/bl03u_masstool/core/isotope.py`。
 
 - 分子式解析：将 `C6F11O2H` 等字符串解析为元素-计数字典。
 - 单同位素精确质量：按各元素最丰同位素质量求和。
@@ -170,7 +170,7 @@ y_exp ~= X * coef
 
 ## 7. 温度曲线自动分组
 
-实现位于 `core/temperature_scan.py::classify_temperature_curve`。软件按 m/z 聚合温度扫描积分结果后，基于曲线形状分为：
+实现位于 `src/bl03u_masstool/core/temperature_scan.py::classify_temperature_curve`。软件按 m/z 聚合温度扫描积分结果后，基于曲线形状分为：
 
 ```text
 formation      生成(升高)
