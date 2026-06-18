@@ -1,0 +1,41 @@
+# This file is generated from the project .venv metadata.
+# Update it after dependency changes with: python scripts/lock_from_venv.py
+# Scope: runtime dependencies
+
+annotated-doc==0.0.4
+annotated-types==0.7.0
+anyio==4.13.0
+beautifulsoup4==4.14.3
+certifi==2026.5.20
+charset-normalizer==3.4.7
+click==8.4.1
+colorama==0.4.6
+et-xmlfile==2.0.0
+fastapi==0.136.3
+h11==0.16.0
+idna==3.18
+joblib==1.5.3
+narwhals==2.22.0
+numpy==2.4.6
+openpyxl==3.1.5
+pandas==3.0.3
+pydantic==2.13.4
+pydantic-core==2.46.4
+pyqt6==6.11.0
+pyqt6-qt6==6.11.1
+pyqt6-sip==13.11.1
+pyqtgraph==0.14.0
+python-dateutil==2.9.0.post0
+pywavelets==1.9.0
+pyyaml==6.0.3
+requests==2.34.2
+scikit-learn==1.9.0
+scipy==1.17.1
+six==1.17.0
+soupsieve==2.8.4
+starlette==1.2.1
+threadpoolctl==3.6.0
+typing-extensions==4.15.0
+typing-inspection==0.4.2
+urllib3==2.7.0
+uvicorn==0.49.0

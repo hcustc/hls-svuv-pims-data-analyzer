@@ -1,4 +1,4 @@
--r requirements.txt
-pytest
-httpx
-pyinstaller
+# Development dependencies are declared in pyproject.toml and locked by requirements-dev.lock.
+# Strict locked installs should use requirements-dev.lock plus: python -m pip install --no-deps -e .
+-r requirements-dev.lock
+-e .
