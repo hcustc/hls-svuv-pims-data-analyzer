@@ -1,14 +1,20 @@
 from __future__ import annotations
 
 import sys
+import logging
 
 from PyQt6 import QtWidgets
 
 from bl03u_masstool.core.config import load_calibration_config
 from bl03u_masstool.core.output_paths import ensure_output_structure
+from bl03u_masstool.exception_reporting import install_global_exception_hook
 from bl03u_masstool.frontends.pyqt_app.core_tools.dialog import CoreToolsDialog
 from bl03u_masstool.frontends.pyqt_app.spectrum.workbench import MainWindow
 from bl03u_masstool.frontends.pyqt_app.theme import apply_application_theme
+from bl03u_masstool.logging_config import configure_logging
+
+
+logger = logging.getLogger(__name__)
 
 
 def show_help() -> None:
@@ -33,12 +39,15 @@ BL03U 数据分析仪启动脚本
 
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
+    configure_logging()
+    install_global_exception_hook()
 
     if "-h" in args or "--help" in args:
         show_help()
         return 0
 
     ensure_output_structure()
+    logger.info("Starting BL03U desktop app")
     app = QtWidgets.QApplication(sys.argv)
     apply_application_theme(app)
 

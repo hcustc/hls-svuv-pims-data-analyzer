@@ -2,37 +2,33 @@
 
 本文档面向实验站内网或受控公网部署。公网开放前应先确认数据目录、管理员 token、上传限制和备份策略。
 
-如果你准备使用 Docker / 阿里云轻量应用服务器（容器环境），请优先查看 [Docker 部署方案](docs/docker_deployment.md)。
+如果你准备使用 Docker / 阿里云轻量应用服务器（容器环境），请优先查看 [Docker 部署方案](docker_deployment.md)。
 
 ## 环境
 
-推荐使用已有 conda 环境：
+项目统一使用 Python 3.12（见仓库根目录 `.python-version`）和 `requirements*.lock` 锁定依赖。推荐安装方式：
 
 ```bash
-conda activate pyqt_env
-python -m pytest tests/unit tests/integration
+python -m pip install -r requirements-dev.lock
+python -m pip install --no-deps -e .
+python -m pytest
 ```
 
-若需要新建运行/部署环境：
+若必须使用 conda，可只让 conda 提供 Python 运行时，再由 pip 按锁文件同步依赖：
 
 ```bash
-conda create -n bl03u python=3.9
+conda create -n bl03u python=3.12
 conda activate bl03u
-pip install -r requirements.txt
+python -m pip install -r requirements.lock
+python -m pip install --no-deps -e .
 ```
 
-若需要新建开发/测试环境，`requirements-dev.txt` 已包含运行依赖：
+`requirements.txt` 和 `requirements-dev.txt` 是薄入口，真实版本锁定在 `requirements.lock` 和 `requirements-dev.lock`；CI/Docker/发布检查均使用这些锁文件。
 
-```bash
-conda create -n bl03u-dev python=3.9
-conda activate bl03u-dev
-pip install -r requirements-dev.txt
-```
 
 ## 启动 Web 服务
 
 ```bash
-conda activate pyqt_env
 uvicorn bl03u_masstool.api.app:app --host 127.0.0.1 --port 8000
 ```
 
@@ -77,8 +73,8 @@ export BL03U_MAX_PIE_JOBS=100
 
 ```bash
 git diff --check
-env PYTHONPYCACHEPREFIX=/private/tmp/bl03u_pycache python3 -m compileall -q src tests main.py
-conda run -n pyqt_env python -m pytest tests/unit tests/integration
+python -m compileall -q src tests main.py
+python -m pytest
 ```
 
 Web UI 变更还应手动打开 `http://127.0.0.1:8000/`，检查 PIE/PICS 查询、临时 PICS 上传、服务器库 token 拒绝和成功路径。
