@@ -14,20 +14,23 @@
 
 ## 环境要求
 
-- Python 3.12+
-- uv（推荐）或 pip
+- Python 3.12（见 `.python-version`）
+- `requirements.lock` / `requirements-dev.lock` 锁定运行、测试与打包依赖
 
 ## 安装
 
 ```bash
-# 创建虚拟环境
+# 创建 Python 3.12 虚拟环境
 uv venv --python 3.12
 source .venv/bin/activate
 
-# 安装依赖
-uv pip install -r requirements-dev.txt    # 含测试/打包工具
-# 或仅生产依赖
-uv pip install -r requirements.txt
+# 安装开发、测试、打包依赖
+uv pip install -r requirements-dev.lock
+uv pip install --no-deps -e .
+
+# 或仅安装运行依赖
+uv pip install -r requirements.lock
+uv pip install --no-deps -e .
 ```
 
 ## 运行
@@ -76,8 +79,12 @@ bl03u --help
 ## 运行测试
 
 ```bash
-pytest tests/
+python -m pytest
 ```
+
+## 工程状态
+
+当前 Python/依赖锁定、CI、PyQt 拆分和日志策略见 [`docs/engineering_maturity.md`](docs/engineering_maturity.md)。`docs/completion/` 下的文件是寻峰算法专项历史记录，不作为当前全项目完成状态声明。
 
 ## 默认 PICS 数据库
 
