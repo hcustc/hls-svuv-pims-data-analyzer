@@ -1,14 +1,5 @@
-beautifulsoup4
-fastapi
-numpy
-openpyxl
-pandas
-pydantic
-PyQt6
-pyqtgraph
-PyWavelets
-PyYAML
-requests
-scikit-learn
-scipy
-uvicorn
+# Runtime dependencies are declared in pyproject.toml and locked by requirements.lock.
+# This file is kept only for pip-based compatibility workflows.
+# Strict locked installs should use requirements.lock plus: python -m pip install --no-deps -e .
+-r requirements.lock
+-e .

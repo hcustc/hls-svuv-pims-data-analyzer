@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from io import BytesIO
+import logging
 import math
 import os
 from pathlib import Path
@@ -59,7 +60,11 @@ from bl03u_masstool.core.pie_analysis import (
     load_species_database,
 )
 from bl03u_masstool.core.spectrum_io import read_bl03u_txt, sum_spectra
+from bl03u_masstool.logging_config import configure_logging
 
+
+configure_logging()
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="BL03U MassSpectrumTool API")
 app.add_middleware(
@@ -72,6 +77,15 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 WEB_ROOT = PACKAGE_ROOT / "frontends" / "web_app" / "static"
 if WEB_ROOT.exists():
     app.mount("/static", StaticFiles(directory=WEB_ROOT), name="static")
+
+
+@app.middleware("http")
+async def log_unhandled_errors(request: Request, call_next):
+    try:
+        return await call_next(request)
+    except Exception:
+        logger.exception("Unhandled API error: %s %s", request.method, request.url.path)
+        raise
 
 EXECUTOR = ThreadPoolExecutor(max_workers=2)
 MAX_UPLOAD_BYTES = int(float(os.environ.get("BL03U_MAX_UPLOAD_MB", "20")) * 1024 * 1024)
