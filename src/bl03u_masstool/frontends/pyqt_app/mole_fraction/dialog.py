@@ -54,15 +54,11 @@ from bl03u_masstool.core.mole_fraction import (
     select_calc_energy,
     separate_coexisting_species_signals,
 )
-from bl03u_masstool.frontends.pyqt_app.theme import get_plot_theme
 from bl03u_masstool.frontends.pyqt_app.workers import WorkerThread
-
-try:
-    import pyqtgraph as pg
-except Exception:  # pragma: no cover - only used when optional plotting is unavailable
-    pg = None
+from bl03u_masstool.frontends.pyqt_app.project_artifacts import record_project_artifact
 
 from bl03u_masstool.frontends.pyqt_app.common.widgets import DataFrameTableMixin
+from bl03u_masstool.frontends.pyqt_app.common.static_plot import StaticCurvePlot
 
 class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
     def __init__(self, calibration: Calibration, normalization_settings, parent=None):
@@ -70,6 +66,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.calibration = calibration
         self.normalization_settings = normalization_settings
         self.settings = load_mole_fraction_settings()
+        self.project_settings: ProjectSettings | None = None
         self.database: list[dict] = []
         self.mz_index: dict[int, list[int]] = {}
         self.expansion_coefficients: dict[float, float] = {}
@@ -133,9 +130,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             db_path = species_database_path()
             if db_path.exists():
                 self.database, self.mz_index = load_species_database(str(db_path))
-                self.lbl_db_status.setText(f"已加载 {len(self.database)} 个物种")
-                self.lbl_db_status.setStyleSheet("color: #6495ed;")
-                if hasattr(self, "combo_parent_species"):
+                if hasattr(self, "_update_parent_species_list"):
                     self._update_parent_species_list()
                 if hasattr(self, "energy_parent_table"):
                     self._refresh_energy_parent_table()
@@ -157,8 +152,27 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             system = ps.system or "---"
             self.summary_project_label.setText(f"项目: {project_name}")
             self.summary_system_label.setText(f"体系: {system}")
-            data_path = (ps.temperature_scan_folder or ps.pie_scan_folder or "---")
-            self.summary_data_label.setText(f"数据源: {data_path}")
+            artifacts = []
+            if ps.temperature_scan_result_file:
+                artifacts.append("温度结果")
+            if ps.pie_identification_result_file:
+                artifacts.append("PIE结果")
+            if ps.mole_fraction_result_file:
+                artifacts.append("摩尔分数结果")
+            data_flow = ", ".join(artifacts) if artifacts else (ps.temperature_scan_folder or ps.pie_scan_folder or "---")
+            self.summary_data_label.setText(f"数据流: {data_flow}")
+        if hasattr(self, "btn_load_project_ts_result"):
+            has_ts_result = bool(ps.temperature_scan_result_file)
+            self.btn_load_project_ts_result.setEnabled(has_ts_result)
+            self.lbl_ts_project_artifact.setText(
+                Path(ps.temperature_scan_result_file).name if has_ts_result else "项目未登记温度结果"
+            )
+        if hasattr(self, "btn_load_project_pie_result"):
+            has_pie_result = bool(ps.pie_identification_result_file)
+            self.btn_load_project_pie_result.setEnabled(has_pie_result)
+            self.lbl_pie_project_artifact.setText(
+                Path(ps.pie_identification_result_file).name if has_pie_result else "项目未登记PIE结果"
+            )
 
     def _open_project_settings(self):
         """跳转到项目管理页面。"""
@@ -180,14 +194,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         source_layout = QtWidgets.QHBoxLayout(source_bar)
         source_layout.setContentsMargins(0, 0, 0, 0)
         source_layout.setSpacing(8)
-        source_layout.addWidget(QtWidgets.QLabel("物种数据库:"))
-        self.lbl_db_status = QtWidgets.QLabel("未加载数据库")
-        self.lbl_db_status.setStyleSheet("color: rgba(232, 232, 232, 0.6);")
-        btn_load_db = QtWidgets.QPushButton("加载物种数据库")
-        btn_load_db.setToolTip("加载PICS物种数据库，用于获取物种的电离能、分子式等信息")
-        btn_load_db.clicked.connect(self._load_database)
-        source_layout.addWidget(btn_load_db)
-        source_layout.addWidget(self.lbl_db_status)
+        # PICS database is auto-loaded (built-in, not user-selectable)
         source_layout.addStretch()
         source_bar.setMaximumHeight(42)
         source_bar.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
@@ -207,9 +214,18 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
         file_peak_layout = QtWidgets.QHBoxLayout()
         file_peak_layout.setSpacing(8)
-        file_peak_layout.addWidget(QtWidgets.QLabel("文件:"))
+        file_peak_layout.addWidget(QtWidgets.QLabel("温度结果:"))
+        self.btn_load_project_ts_result = QtWidgets.QPushButton("从项目载入")
+        self.btn_load_project_ts_result.setToolTip("读取项目管理中登记的温度扫描结果文件")
+        self.btn_load_project_ts_result.clicked.connect(self._load_project_temperature_result)
+        self.btn_load_project_ts_result.setEnabled(False)
+        file_peak_layout.addWidget(self.btn_load_project_ts_result)
+        btn_load_ts_result = QtWidgets.QPushButton("选择结果文件")
+        btn_load_ts_result.setToolTip("选择温度扫描导出的xlsx/csv结果文件")
+        btn_load_ts_result.clicked.connect(self._load_temperature_result_file)
+        file_peak_layout.addWidget(btn_load_ts_result)
         btn_add_folder = QtWidgets.QPushButton("添加能量文件夹")
-        btn_add_folder.setToolTip("添加包含温度扫描txt文件的能量文件夹")
+        btn_add_folder.setToolTip("备用入口：添加包含温度扫描txt文件的能量文件夹并重新分析")
         btn_add_folder.clicked.connect(self._add_energy_folder)
         file_peak_layout.addWidget(btn_add_folder)
         btn_clear = QtWidgets.QPushButton("清空数据")
@@ -221,6 +237,9 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.lbl_ts_folder.setMinimumWidth(120)
         self.lbl_ts_folder.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Preferred)
         file_peak_layout.addWidget(self.lbl_ts_folder, 1)
+        self.lbl_ts_project_artifact = QtWidgets.QLabel("项目未登记温度结果")
+        self.lbl_ts_project_artifact.setStyleSheet("color: rgba(232, 232, 232, 0.6);")
+        file_peak_layout.addWidget(self.lbl_ts_project_artifact)
 
         file_peak_layout.addSpacing(16)
         file_peak_layout.addWidget(QtWidgets.QLabel("卡峰:"))
@@ -275,12 +294,20 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         pie_control_layout = QtWidgets.QHBoxLayout(pie_control_panel)
         pie_control_layout.setContentsMargins(10, 8, 10, 8)
         pie_control_layout.setSpacing(8)
+        self.btn_load_project_pie_result = QtWidgets.QPushButton("从项目载入")
+        self.btn_load_project_pie_result.setToolTip("读取项目管理中登记的PIE鉴定结果文件")
+        self.btn_load_project_pie_result.clicked.connect(self._load_project_pie_results)
+        self.btn_load_project_pie_result.setEnabled(False)
+        pie_control_layout.addWidget(self.btn_load_project_pie_result)
         btn_load_pie = QtWidgets.QPushButton("加载PIE鉴定结果")
         btn_load_pie.clicked.connect(self._load_pie_results)
         pie_control_layout.addWidget(btn_load_pie)
         self.lbl_pie_status = QtWidgets.QLabel("未加载")
         self.lbl_pie_status.setStyleSheet("color: rgba(232, 232, 232, 0.6);")
         pie_control_layout.addWidget(self.lbl_pie_status)
+        self.lbl_pie_project_artifact = QtWidgets.QLabel("项目未登记PIE结果")
+        self.lbl_pie_project_artifact.setStyleSheet("color: rgba(232, 232, 232, 0.6);")
+        pie_control_layout.addWidget(self.lbl_pie_project_artifact)
         pie_control_layout.addStretch()
         pie_layout.addWidget(pie_control_panel)
 
@@ -792,20 +819,8 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         plot_panel = QtWidgets.QWidget()
         plot_layout = QtWidgets.QVBoxLayout(plot_panel)
         plot_layout.setContentsMargins(8, 8, 8, 8)
-        if pg is not None:
-            self.auto_mf_plot_widget = pg.PlotWidget()
-            self.auto_mf_plot_widget.setBackground("#ffffff")
-            self.auto_mf_plot_widget.setMinimumHeight(250)
-            self.auto_mf_plot_widget.setLabel("bottom", "温度", units="°C")
-            self.auto_mf_plot_widget.setLabel("left", "摩尔分数")
-            self.auto_mf_plot_widget.showGrid(x=True, y=True, alpha=0.3)
-            self.auto_mf_plot_widget.addLegend()
-            plot_layout.addWidget(self.auto_mf_plot_widget)
-        else:
-            self.auto_mf_plot_widget = None
-            placeholder = QtWidgets.QLabel("pyqtgraph 未安装，无法显示绘图")
-            placeholder.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-            plot_layout.addWidget(placeholder)
+        self.auto_mf_plot_widget = StaticCurvePlot("温度 (°C)", "摩尔分数", min_height=250)
+        plot_layout.addWidget(self.auto_mf_plot_widget)
         detail_tabs.addTab(plot_panel, "摩尔分数-温度曲线")
 
         warning_panel = QtWidgets.QWidget()
@@ -833,6 +848,9 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         btn_export = QtWidgets.QPushButton("导出结果 (Excel/CSV)")
         btn_export.clicked.connect(self._export_results)
         btn_layout.addWidget(btn_export)
+        btn_export_plot = QtWidgets.QPushButton("导出图表 (PNG/PDF)")
+        btn_export_plot.clicked.connect(self._export_plot)
+        btn_layout.addWidget(btn_export_plot)
         btn_refresh_results = QtWidgets.QPushButton("刷新结果")
         btn_refresh_results.clicked.connect(self._refresh_results_view)
         btn_layout.addWidget(btn_refresh_results)
@@ -865,19 +883,8 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         plot_body_layout = QtWidgets.QHBoxLayout(plot_body)
         plot_body_layout.setContentsMargins(0, 0, 0, 0)
         plot_body_layout.setSpacing(8)
-        if pg is not None:
-            self.mf_plot_widget = pg.PlotWidget()
-            self.mf_plot_widget.setBackground("#ffffff")
-            self.mf_plot_widget.setMinimumHeight(300)
-            self.mf_plot_widget.setLabel("bottom", "温度", units="°C")
-            self.mf_plot_widget.setLabel("left", "摩尔分数")
-            self.mf_plot_widget.showGrid(x=True, y=True, alpha=0.3)
-            plot_body_layout.addWidget(self.mf_plot_widget, 1)
-        else:
-            self.mf_plot_widget = None
-            placeholder = QtWidgets.QLabel("pyqtgraph 未安装，无法显示绘图")
-            placeholder.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-            plot_body_layout.addWidget(placeholder, 1)
+        self.mf_plot_widget = StaticCurvePlot("温度 (°C)", "摩尔分数", min_height=300)
+        plot_body_layout.addWidget(self.mf_plot_widget, 1)
         series_group = QtWidgets.QGroupBox("曲线列表")
         series_layout = QtWidgets.QVBoxLayout(series_group)
         series_layout.setContentsMargins(8, 8, 8, 8)
@@ -1063,25 +1070,223 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             return
         try:
             self.database, self.mz_index = load_species_database(file_path)
-            self.lbl_db_status.setText(f"已加载 {len(self.database)} 个物种")
-            self.lbl_db_status.setStyleSheet("color: #6495ed;")
             self._update_parent_species_list()
             self._refresh_energy_parent_table()
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "错误", f"加载数据库失败: {e}")
 
-    def _load_pie_results(self):
-        file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, "选择PIE鉴定结果文件", "",
-            "Excel Files (*.xlsx);;CSV Files (*.csv);;All Files (*)"
-        )
+    def _project_artifact_path(self, field_name: str) -> str:
+        ps = self.project_settings
+        return str(getattr(ps, field_name, "") or "") if ps is not None else ""
+
+    def _read_table_file(self, file_path: str | Path) -> pd.DataFrame:
+        path = Path(file_path)
+        if path.suffix.lower() in {".xlsx", ".xls"}:
+            return pd.read_excel(path)
+        return pd.read_csv(path, encoding="utf-8-sig")
+
+    def _find_df_column(self, df: pd.DataFrame, candidates: list[str]) -> str | None:
+        normalized = {str(col).strip().lower(): col for col in df.columns}
+        for candidate in candidates:
+            key = candidate.strip().lower()
+            if key in normalized:
+                return normalized[key]
+        return None
+
+    def _load_project_temperature_result(self):
+        file_path = self._project_artifact_path("temperature_scan_result_file")
+        if not file_path:
+            QtWidgets.QMessageBox.warning(self, "提示", "项目管理中尚未登记温度扫描结果文件")
+            return
+        if not Path(file_path).exists():
+            QtWidgets.QMessageBox.warning(self, "提示", f"项目登记的温度扫描结果文件不存在:\n{file_path}")
+            return
+        self._load_temperature_result_file(file_path, show_message=False)
+
+    def _load_temperature_result_file(self, file_path: str | Path | None = None, *, show_message: bool = True):
+        if isinstance(file_path, bool):
+            file_path = None
+        if file_path is None:
+            start_path = self._project_artifact_path("temperature_scan_result_file")
+            file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
+                self,
+                "选择温度扫描结果文件",
+                str(Path(start_path).parent) if start_path else "",
+                "Excel Files (*.xlsx);;CSV Files (*.csv);;All Files (*)",
+            )
+        if not file_path:
+            return
+
+        try:
+            df = self._read_table_file(file_path)
+            temp_col = self._find_df_column(df, ["temperature", "温度", "温度(°C)", "温度(C)"])
+            mz_col = self._find_df_column(df, ["mz_rounded", "mz", "m/z", "质量数"])
+            signal_col = self._find_df_column(
+                df,
+                ["area", "normalized_area", "最终强度", "photon_normalized_area", "IO归一化", "raw_area", "原始积分"],
+            )
+            if temp_col is None or mz_col is None or signal_col is None:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "提示",
+                    "温度扫描结果缺少必需列。需要 temperature/温度、mz/mz_rounded/质量数、area/normalized_area。",
+                )
+                return
+
+            energy_col = self._find_df_column(df, ["photon_energy", "energy", "能量(eV)", "光子能量"])
+            file_col = self._find_df_column(df, ["file", "filename", "文件", "文件名"])
+            io_col = self._find_df_column(df, ["io", "IO(nA)", "光强"])
+            left_col = self._find_df_column(df, ["left_bound", "left_idx", "起始通道"])
+            right_col = self._find_df_column(df, ["right_bound", "right_idx", "结束通道"])
+            default_energy = (
+                self.project_settings.mf_photon_energy
+                if self.project_settings is not None
+                else self.settings.photon_energy
+            )
+
+            loaded: dict[float, dict] = {}
+            skipped = 0
+            for _, row in df.iterrows():
+                try:
+                    temperature = float(row[temp_col])
+                    mz_raw = float(row[mz_col])
+                    mz = int(round(mz_raw))
+                    signal = float(row[signal_col])
+                except Exception:
+                    skipped += 1
+                    continue
+                if not np.isfinite(temperature) or not np.isfinite(mz_raw) or not np.isfinite(signal):
+                    skipped += 1
+                    continue
+
+                energy = default_energy
+                if energy_col is not None and pd.notna(row.get(energy_col)):
+                    try:
+                        candidate_energy = float(row[energy_col])
+                        if np.isfinite(candidate_energy) and candidate_energy > 0:
+                            energy = candidate_energy
+                    except Exception:
+                        pass
+
+                energy_data = loaded.setdefault(float(energy), {})
+                info = energy_data.setdefault(
+                    float(temperature),
+                    {
+                        "repeats": [],
+                        "avg_data": [],
+                        "avg_io": 1.0,
+                        "filenames": Path(file_path).name,
+                        "repeat_count": 1,
+                        "peaks_info": [],
+                        "precomputed_signals": {},
+                        "_peak_map": {},
+                        "_filenames": set(),
+                        "_io_values": [],
+                    },
+                )
+                if file_col is not None and pd.notna(row.get(file_col)):
+                    info["_filenames"].add(str(row[file_col]))
+                if io_col is not None and pd.notna(row.get(io_col)):
+                    try:
+                        io_value = float(row[io_col])
+                        if np.isfinite(io_value):
+                            info["_io_values"].append(io_value)
+                    except Exception:
+                        pass
+
+                info["precomputed_signals"][mz] = float(info["precomputed_signals"].get(mz, 0.0)) + signal
+                peak_map = info["_peak_map"]
+                if mz not in peak_map:
+                    left_idx = 0
+                    right_idx = 0
+                    if left_col is not None and pd.notna(row.get(left_col)):
+                        left_idx = int(float(row[left_col]))
+                    if right_col is not None and pd.notna(row.get(right_col)):
+                        right_idx = int(float(row[right_col]))
+                    peak_map[mz] = {
+                        "index": 0,
+                        "mz_raw": mz_raw,
+                        "mz_rounded": mz,
+                        "left_idx": left_idx,
+                        "right_idx": right_idx,
+                        "integral": 0.0,
+                        "overlapped": False,
+                    }
+                peak_map[mz]["integral"] += signal
+
+            if not loaded:
+                QtWidgets.QMessageBox.warning(self, "提示", "未从温度扫描结果中读取到有效数据")
+                return
+
+            for energy_data in loaded.values():
+                for info in energy_data.values():
+                    filenames = sorted(info.pop("_filenames"))
+                    if filenames:
+                        info["filenames"] = ", ".join(filenames)
+                        info["repeat_count"] = len(filenames)
+                    io_values = info.pop("_io_values")
+                    if io_values:
+                        info["avg_io"] = float(np.mean(io_values))
+                    peak_map = info.pop("_peak_map")
+                    info["peaks_info"] = sorted(peak_map.values(), key=lambda item: item["mz_rounded"])
+
+            self.temperature_scan_data = loaded
+            self.available_energies = sorted(self.temperature_scan_data.keys())
+            self.combo_energy_select.clear()
+            self.combo_energy_select.addItem("全部能量")
+            for energy in self.available_energies:
+                self.combo_energy_select.addItem(f"{energy:.2f} eV")
+            self.lbl_energy_count.setText(f"共 {len(self.available_energies)} 个能量点")
+            self.lbl_ts_folder.setText(f"已加载温度结果: {Path(file_path).name}")
+            self.lbl_ts_folder.setStyleSheet("color: #6495ed;")
+            self.parent_mf_by_energy = {}
+            self.parent_signal_by_energy = {}
+            self.parent_config_by_energy = {}
+            self._update_ts_table_with_species()
+            self._refresh_ts_table()
+            self._refresh_energy_parent_table()
+            record_project_artifact(
+                self,
+                "temperature_scan_result_file",
+                file_path,
+                message="温度扫描结果已登记到项目管理",
+            )
+            self.status_label.setText(f"已加载温度扫描结果: {len(df) - skipped} 行")
+            if show_message:
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "成功",
+                    f"加载了 {len(self.available_energies)} 个能量点的温度扫描结果",
+                )
+        except Exception as e:
+            import traceback
+            QtWidgets.QMessageBox.critical(self, "错误", f"加载温度扫描结果失败: {e}\n{traceback.format_exc()}")
+
+    def _load_project_pie_results(self):
+        file_path = self._project_artifact_path("pie_identification_result_file")
+        if not file_path:
+            QtWidgets.QMessageBox.warning(self, "提示", "项目管理中尚未登记PIE鉴定结果文件")
+            return
+        if not Path(file_path).exists():
+            QtWidgets.QMessageBox.warning(self, "提示", f"项目登记的PIE鉴定结果文件不存在:\n{file_path}")
+            return
+        self._load_pie_results(file_path, show_message=False)
+
+    def _load_pie_results(self, file_path: str | Path | None = None, *, show_message: bool = True):
+        if isinstance(file_path, bool):
+            file_path = None
+        if file_path is None:
+            start_path = self._project_artifact_path("pie_identification_result_file")
+            file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
+                self,
+                "选择PIE鉴定结果文件",
+                str(Path(start_path).parent) if start_path else "",
+                "Excel Files (*.xlsx);;CSV Files (*.csv);;All Files (*)",
+            )
         if not file_path:
             return
         try:
-            if file_path.endswith(".xlsx"):
-                df = pd.read_excel(file_path)
-            else:
-                df = pd.read_csv(file_path, encoding="utf-8-sig")
+            df = self._read_table_file(file_path)
 
             required_cols = ["质量数", "物种名称"]
             for col in required_cols:
@@ -1126,8 +1331,16 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self._update_ts_table_with_species()
             self._update_parent_species_list()
             self._refresh_energy_parent_table()
+            record_project_artifact(
+                self,
+                "pie_identification_result_file",
+                file_path,
+                message="PIE鉴定结果已登记到项目管理",
+            )
+            self.status_label.setText(f"已加载PIE鉴定结果: {unique_mz} 个质量数")
 
-            QtWidgets.QMessageBox.information(self, "成功", f"加载了 {len(self.pie_species_data)} 条鉴定结果\n{unique_mz} 个质量数, {unique_species} 个物种")
+            if show_message:
+                QtWidgets.QMessageBox.information(self, "成功", f"加载了 {len(self.pie_species_data)} 条鉴定结果\n{unique_mz} 个质量数, {unique_species} 个物种")
         except Exception as e:
             import traceback
             QtWidgets.QMessageBox.critical(self, "错误", f"加载PIE鉴定结果失败: {e}\n{traceback.format_exc()}")
@@ -1564,6 +1777,23 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         else:
             energies_to_check = self.available_energies
 
+        has_precomputed = any(
+            int(mz) in info.get("precomputed_signals", {})
+            for e in energies_to_check
+            if e in self.temperature_scan_data
+            for info in self.temperature_scan_data[e].values()
+        )
+        if has_precomputed:
+            target_mz = int(mz)
+            for e in energies_to_check:
+                if e not in self.temperature_scan_data:
+                    continue
+                for temp, info in self.temperature_scan_data[e].items():
+                    signals = info.get("precomputed_signals", {})
+                    if target_mz in signals and temp not in result:
+                        result[temp] = float(signals[target_mz])
+            return result
+
         target_peak = None
 
         for e in energies_to_check:
@@ -1599,7 +1829,9 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             for temp, info in self.temperature_scan_data[e].items():
                 if temp in result:
                     continue
-                data = info["avg_data"]
+                data = info.get("avg_data", [])
+                if not data:
+                    continue
                 io = info.get("avg_io", 100.0)
 
                 left_idx = target_peak["left_idx"]
@@ -1730,7 +1962,14 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 for temp, info in self.temperature_scan_data[energy].items():
                     if temp in self.kr_data:
                         continue
-                    data = info["avg_data"]
+                    signals = info.get("precomputed_signals", {})
+                    if kr_mz in signals:
+                        self.kr_data[temp] = {"filename": info.get("filenames", ""), "signal": float(signals[kr_mz])}
+                        continue
+
+                    data = info.get("avg_data", [])
+                    if not data:
+                        continue
                     io = info.get("avg_io", 100.0)
 
                     left_idx = target_peak["left_idx"]
@@ -2426,18 +2665,16 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self._plot_single_auto_mf(key)
 
     def _plot_all_auto_mf(self):
-        if pg is None or self.auto_mf_plot_widget is None:
+        if self.auto_mf_plot_widget is None:
             return
         if not self.all_species_mf:
             return
 
-        self.auto_mf_plot_widget.clear()
-        self.auto_mf_plot_widget.addLegend()
-        self.auto_mf_plot_widget.setTitle("")
+        self.auto_mf_plot_widget.clear_plot(xlabel="温度 (°C)", ylabel="摩尔分数")
 
         plot_keys = self._auto_plot_keys_for_scope()
         if not plot_keys:
-            self.auto_mf_plot_widget.setTitle("没有可显示的曲线")
+            self.auto_mf_plot_widget.show_empty("没有可显示的曲线")
             return
 
         colors = [
@@ -2456,6 +2693,8 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
         all_temps: list[float] = []
         all_values: list[float] = []
+        x_ranges = []
+        y_ranges = []
         for species, entries in species_energies.items():
             entries.sort(key=lambda x: x[1])
             for mz, energy in entries:
@@ -2474,22 +2713,22 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 all_values.extend(float(v) for v in mfs_arr)
 
                 label = f"{species} ({energy:.1f}eV)"
-                self.auto_mf_plot_widget.plot(
-                    temps_arr, mfs_arr,
-                    pen=pg.mkPen(color, width=2),
-                    symbol="o", symbolSize=5, symbolBrush=color,
-                    name=label,
+                plot_x, plot_y = self.auto_mf_plot_widget.plot_series(
+                    temps_arr,
+                    mfs_arr,
+                    color=color,
+                    linewidth=2,
+                    markersize=4.5,
+                    label=label,
                 )
-        if all_temps:
-            self.auto_mf_plot_widget.setXRange(min(all_temps) - 50, max(all_temps) + 50)
-        if all_values:
-            min_mf = min(all_values)
-            max_mf = max(all_values)
-            padding = (max_mf - min_mf) * 0.1 if max_mf > min_mf else max(max_mf * 0.1, 1e-9)
-            self.auto_mf_plot_widget.setYRange(max(0, min_mf - padding), max_mf + padding)
+                x_ranges.append(plot_x)
+                y_ranges.append(plot_y)
+        if all_temps and all_values:
+            self.auto_mf_plot_widget.apply_data_limits(x_ranges, y_ranges, x_pad_min=50.0, y_pad_min=1e-9)
+        self.auto_mf_plot_widget.finish(legend=True)
 
     def _plot_single_auto_mf(self, key):
-        if pg is None or self.auto_mf_plot_widget is None:
+        if self.auto_mf_plot_widget is None:
             return
         if key not in self.all_species_mf:
             return
@@ -2499,8 +2738,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
         mz, species, energy = key
 
-        self.auto_mf_plot_widget.clear()
-        self.auto_mf_plot_widget.addLegend()
+        self.auto_mf_plot_widget.clear_plot(xlabel="温度 (°C)", ylabel="摩尔分数")
 
         sorted_temps = sorted(mf.keys())
         temps_arr = np.array(sorted_temps)
@@ -2508,12 +2746,16 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
         color = (100, 200, 255)
         label = f"m/z={mz} {species} @ {energy:.2f} eV"
-        self.auto_mf_plot_widget.plot(
-            temps_arr, mfs_arr,
-            pen=pg.mkPen(color, width=3),
-            symbol="o", symbolSize=6, symbolBrush=color,
-            name=label,
+        plot_x, plot_y = self.auto_mf_plot_widget.plot_series(
+            temps_arr,
+            mfs_arr,
+            color=color,
+            linewidth=2.8,
+            markersize=5.5,
+            label=label,
         )
+        self.auto_mf_plot_widget.apply_data_limits([plot_x], [plot_y], x_pad_min=50.0, y_pad_min=1e-9)
+        self.auto_mf_plot_widget.finish(legend=True)
 
     def _collect_all_results(self) -> dict[str, dict[float, float]]:
         return {series["label"]: series["values"] for series in self._collect_result_series()}
@@ -2635,17 +2877,17 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.lbl_results_status.setText(f"已显示 {len(result_series)} 条结果，{len(all_temps)} 个温度点")
 
     def _plot_results_mf(self):
-        if pg is None or self.mf_plot_widget is None:
+        if self.mf_plot_widget is None:
             return
 
         result_series = self._collect_result_series()
         if hasattr(self, "mf_series_list"):
             self.mf_series_list.clear()
         if not result_series:
-            self.mf_plot_widget.clear()
+            self.mf_plot_widget.clear_plot(title="暂无摩尔分数结果", xlabel="温度 (°C)", ylabel="摩尔分数")
             return
 
-        self.mf_plot_widget.clear()
+        self.mf_plot_widget.clear_plot(title="摩尔分数-温度曲线", xlabel="温度 (°C)", ylabel="摩尔分数")
 
         colors = [
             (255, 100, 100), (100, 180, 255), (255, 200, 50),
@@ -2656,6 +2898,8 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
         all_temps = []
         all_mfs = []
+        x_ranges = []
+        y_ranges = []
         for idx, series in enumerate(result_series):
             color = colors[idx % len(colors)]
             name = str(series["label"])
@@ -2665,11 +2909,15 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             temps_arr = np.array(sorted_temps)
             mfs_arr = np.array([res[t] for t in sorted_temps])
             all_mfs.extend(mfs_arr.tolist())
-            self.mf_plot_widget.plot(
-                temps_arr, mfs_arr,
-                pen=pg.mkPen(color, width=2),
-                symbol="o", symbolSize=4, symbolBrush=color,
+            plot_x, plot_y = self.mf_plot_widget.plot_series(
+                temps_arr,
+                mfs_arr,
+                color=color,
+                linewidth=2,
+                markersize=4.2,
             )
+            x_ranges.append(plot_x)
+            y_ranges.append(plot_y)
             if hasattr(self, "mf_series_list"):
                 pixmap = QtGui.QPixmap(12, 12)
                 pixmap.fill(QtGui.QColor(*color))
@@ -2677,13 +2925,9 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 item.setToolTip(name)
                 self.mf_series_list.addItem(item)
 
-        if all_temps:
-            self.mf_plot_widget.setXRange(min(all_temps) - 50, max(all_temps) + 50)
-        if all_mfs:
-            min_mf = min(all_mfs)
-            max_mf = max(all_mfs)
-            padding = (max_mf - min_mf) * 0.1 if max_mf > min_mf else 0.1
-            self.mf_plot_widget.setYRange(max(0, min_mf - padding), max_mf + padding)
+        if all_temps and all_mfs:
+            self.mf_plot_widget.apply_data_limits(x_ranges, y_ranges, x_pad_min=50.0, y_pad_min=0.1)
+        self.mf_plot_widget.finish()
 
     def _export_results(self):
         all_results = self._collect_all_results()
@@ -2705,9 +2949,32 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 df.to_excel(file_path, index=False)
             else:
                 df.to_csv(file_path, index=False, encoding="utf-8-sig")
-            QtWidgets.QMessageBox.information(self, "成功", "摩尔分数结果导出成功！")
+            record_project_artifact(
+                self,
+                "mole_fraction_result_file",
+                file_path,
+                message="摩尔分数结果已登记到项目管理",
+            )
+            QtWidgets.QMessageBox.information(self, "成功", "摩尔分数结果导出成功，并已登记到项目管理。")
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "错误", f"导出失败: {e}")
+
+    def _export_plot(self):
+        if self.auto_mf_plot_widget is None or self.auto_mf_plot_widget.figure is None:
+            QtWidgets.QMessageBox.warning(self, "提示", "没有可导出的图表")
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "导出摩尔分数-温度曲线图",
+            str(ensure_output_dir("exports", "mole_fraction") / "mole_fraction_plot.png"),
+            "PNG Images (*.png);;PDF Files (*.pdf)",
+        )
+        if not path:
+            return
+        if self.auto_mf_plot_widget.save_plot(path):
+            QtWidgets.QMessageBox.information(self, "成功", f"曲线图已导出：{path}")
+        else:
+            QtWidgets.QMessageBox.warning(self, "错误", "导出图表失败")
 
     def set_temperature_scan_df(self, df: pd.DataFrame):
         self._temperature_scan_df = df
@@ -2717,7 +2984,5 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             path = species_database_path()
         try:
             self.database, self.mz_index = load_species_database(path)
-            self.lbl_db_status.setText(f"已加载 {len(self.database)} 个物种")
-            self.lbl_db_status.setStyleSheet("color: #6495ed;")
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "错误", f"加载数据库失败: {e}")

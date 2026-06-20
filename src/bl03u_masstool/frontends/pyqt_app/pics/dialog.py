@@ -168,7 +168,6 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.species_tabs = QtWidgets.QTabWidget()
         self.species_tabs.addTab(self._create_species_basics_tab(), "基础参数")
         self.species_tabs.addTab(self._create_reference_pics_tab(), "NO截面库")
-        self.species_tabs.addTab(self._create_pics_import_tab(), "外部导入")
         layout.addWidget(self.species_tabs)
 
         return widget
@@ -271,29 +270,6 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
         no_cs_layout.addWidget(btn_load_no_cs)
 
         layout.addWidget(no_cs_group)
-
-        return widget
-
-    def _create_pics_import_tab(self):
-        widget = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(widget)
-
-        import_group = QtWidgets.QGroupBox("导入外部 PICS 数据")
-        import_layout = QtWidgets.QVBoxLayout(import_group)
-        import_note = QtWidgets.QLabel(
-            "从 CSV / XLSX 文件导入物种的光电离截面数据到本地数据库。\n"
-            "支持宽表（每行一物种，能量值作列名）和长表（每行一能量点）格式。"
-        )
-        import_note.setWordWrap(True)
-        import_note.setStyleSheet("color: #6495ed;")
-        import_layout.addWidget(import_note)
-        btn_import = QtWidgets.QPushButton("从文件导入 PICS 到数据库…")
-        btn_import.setObjectName("WorkflowButton")
-        btn_import.setToolTip("选择 XLSX/CSV 文件，解析后写入本地 PICS 数据库（upsert 模式）")
-        btn_import.clicked.connect(self._import_pics_from_file)
-        import_layout.addWidget(btn_import)
-        layout.addWidget(import_group)
-        layout.addStretch()
 
         return widget
 
@@ -742,57 +718,6 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
             df = pd.DataFrame(rows)
             df.to_csv(file_path, index=False, encoding="utf-8-sig")
             QtWidgets.QMessageBox.information(self, "提示", "导出成功")
-
-    def _import_pics_from_file(self):
-        file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self,
-            "选择 PICS 数据文件",
-            "",
-            "数据文件 (*.xlsx *.xls *.csv *.tsv *.txt);;所有文件 (*)",
-        )
-        if not file_path:
-            return
-
-        try:
-            from bl03u_masstool.core.pics_import import parse_pics_upload, write_pics_records
-
-            content = Path(file_path).read_bytes()
-            records = parse_pics_upload(content, Path(file_path).name)
-        except Exception as e:
-            QtWidgets.QMessageBox.warning(self, "解析失败", f"无法解析文件：\n{e}")
-            return
-
-        # 预览对话框
-        lines = [f"解析到 {len(records)} 个物种：\n"]
-        for r in records[:20]:
-            ie_str = f"IE={r['ie']} eV" if r['ie'] else "IE 未知"
-            lines.append(f"  m/z={r['mz']}  {r['species']}  {ie_str}  ({len(r['energies'])} 点)")
-        if len(records) > 20:
-            lines.append(f"  … 还有 {len(records) - 20} 个物种")
-        lines.append("\n是否以 upsert 模式写入本地数据库？\n（同名同 m/z 物种将被替换）")
-
-        reply = QtWidgets.QMessageBox.question(
-            self,
-            "确认导入",
-            "\n".join(lines),
-            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
-        )
-        if reply != QtWidgets.QMessageBox.StandardButton.Yes:
-            return
-
-        try:
-            db_path = species_database_path()
-            result = write_pics_records(records, db_path, mode="upsert")
-            self._load_database()
-            QtWidgets.QMessageBox.information(
-                self,
-                "导入完成",
-                f"写入物种: {result['inserted_species']}\n"
-                f"替换旧记录: {result['replaced_species']}\n"
-                f"数据点: {result['inserted_points']}",
-            )
-        except Exception as e:
-            QtWidgets.QMessageBox.warning(self, "写入失败", f"写入数据库失败：\n{e}")
 
     def _export_to_database(self):
         if not self.pics_results:

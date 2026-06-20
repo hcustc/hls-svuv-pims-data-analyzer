@@ -137,18 +137,29 @@ def query_species_by_mz(path: str | Path, mz: int) -> list[dict]:
 
 
 def extract_photon_energy(metadata_lines: list[str], path: str | Path | None = None, fallback: float | None = None) -> float:
-    """Extract nominal photon energy for PIE grouping."""
+    """Extract nominal photon energy for PIE grouping.
+
+    Priority:
+    1. File metadata (most accurate) - Energy field in spectrum header
+    2. Directory path (fallback) - e.g., "8.0eV" in directory name
+    3. Fallback value
+    """
+    # First try: extract from file metadata (most accurate)
+    for line in metadata_lines:
+        if "energy" in line.lower():
+            value = extract_first_number(line)
+            if value is not None:
+                return value
+
+    # Second try: extract from path (useful for legacy folder structures)
     if path is not None:
         path_obj = Path(path)
         for part in reversed(path_obj.parts):
             match = EV_RE.search(part)
             if match:
                 return float(match.group(1))
-    for line in metadata_lines:
-        if "energy" in line.lower():
-            value = extract_first_number(line)
-            if value is not None:
-                return value
+
+    # Last resort: fallback
     if fallback is not None:
         return float(fallback)
     raise ValueError("cannot extract photon energy")
@@ -260,6 +271,9 @@ def analyze_pie_folder(
     vote_threshold: float = 0.667,
     min_intensity_for_single_vote: float = 5.0,
     mz_tolerance: float = 0.2,
+    cwt_snr_threshold: float = 0.02,
+    cwt_wavelet_max_width: int = 30,
+    weak_tail_cutoff_idx: int = 15000,
 ) -> pd.DataFrame:
     """Generate experimental PIE curves from a folder of energy-resolved spectra."""
     groups = _group_spectra_by_energy(
@@ -310,6 +324,9 @@ def analyze_pie_folder(
             vote_threshold=vote_threshold,
             min_intensity_for_single_vote=min_intensity_for_single_vote,
             mz_tolerance=mz_tolerance,
+            cwt_snr_threshold=cwt_snr_threshold,
+            cwt_wavelet_max_width=cwt_wavelet_max_width,
+            weak_tail_cutoff_idx=weak_tail_cutoff_idx,
         )
         reference_source = "auto"
     if target_mz_values:
@@ -797,6 +814,9 @@ def analyze_multiple_pie_folders(
     vote_threshold: float = 0.667,
     min_intensity_for_single_vote: float = 5.0,
     mz_tolerance: float = 0.2,
+    cwt_snr_threshold: float = 0.02,
+    cwt_wavelet_max_width: int = 30,
+    weak_tail_cutoff_idx: int = 15000,
 ) -> pd.DataFrame:
     """Analyze multiple PIE folders and merge them with overlap scaling."""
     all_spectra_by_folder: list[tuple[int, Path, list[dict]]] = []
@@ -849,6 +869,9 @@ def analyze_multiple_pie_folders(
             vote_threshold=vote_threshold,
             min_intensity_for_single_vote=min_intensity_for_single_vote,
             mz_tolerance=mz_tolerance,
+            cwt_snr_threshold=cwt_snr_threshold,
+            cwt_wavelet_max_width=cwt_wavelet_max_width,
+            weak_tail_cutoff_idx=weak_tail_cutoff_idx,
         )
         reference_source = "auto"
 

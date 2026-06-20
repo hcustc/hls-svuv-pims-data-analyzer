@@ -30,8 +30,14 @@ class ProjectSettings:
     sum_spectrum_folder: str = ""
     temperature_scan_folder: str = ""
     pie_scan_folder: str = ""
+    sample_info_file: str = ""
     pics_database_path: str = ""
     manual_peak_file: str = ""
+
+    # === Analysis Artifact Paths ===
+    temperature_scan_result_file: str = ""
+    pie_identification_result_file: str = ""
+    mole_fraction_result_file: str = ""
 
     # === Calibration ===
     cal_a: float = 3.66334e-7
@@ -51,7 +57,7 @@ class ProjectSettings:
     selected_elements: list[str] = field(default_factory=lambda: list(COMMON_ELEMENTS))
 
     # === Peak Detection ===
-    peak_algorithm: str = "prominence"
+    peak_algorithm: str = "ensemble"
     detection_min_idx: int = 3000
     threshold_end: float = 2.0
     min_intensity: float = 3.0
@@ -70,6 +76,12 @@ class ProjectSettings:
     baseline_percentile: float = 5.0
     min_peak_width: int = 1
     max_peak_width: int = 80
+    cwt_snr_threshold: float = 0.02
+    cwt_wavelet_max_width: int = 30
+    weak_tail_cutoff_idx: int = 15000
+    vote_threshold: float = 0.667
+    min_intensity_for_single_vote: float = 5.0
+    mz_tolerance: float = 0.2
 
     # === PIE Defaults ===
     pie_energy_decimals: int = 1
@@ -79,7 +91,8 @@ class ProjectSettings:
     pie_merge_method: str = "low_energy_dominant"
 
     # === Temperature Scan Defaults ===
-    temp_reference_mode: str = "sum"
+    temp_peak_source: str = "auto"  # "auto" or "manual"
+    temp_reference_mode: str = "sum"  # Only used when temp_peak_source == "auto"
     temp_prefer_gaussian: bool = True
     temp_kr_mz: int = 84
 
@@ -126,6 +139,12 @@ class ProjectSettings:
             baseline_percentile=self.baseline_percentile,
             min_peak_width=self.min_peak_width,
             max_peak_width=self.max_peak_width,
+            cwt_snr_threshold=self.cwt_snr_threshold,
+            cwt_wavelet_max_width=self.cwt_wavelet_max_width,
+            weak_tail_cutoff_idx=self.weak_tail_cutoff_idx,
+            vote_threshold=self.vote_threshold,
+            min_intensity_for_single_vote=self.min_intensity_for_single_vote,
+            mz_tolerance=self.mz_tolerance,
         )
 
     def to_normalization_settings(self) -> NormalizationSettings:
@@ -180,8 +199,14 @@ def _nested_to_flat(data: dict) -> dict:
             "sum_spectrum_folder": "sum_spectrum_folder",
             "temperature_scan_folder": "temperature_scan_folder",
             "pie_scan_folder": "pie_scan_folder",
+            "sample_info_file": "sample_info_file",
             "pics_database_path": "pics_database_path",
             "manual_peak_file": "manual_peak_file",
+        },
+        "analysis_artifacts": {
+            "temperature_scan_result_file": "temperature_scan_result_file",
+            "pie_identification_result_file": "pie_identification_result_file",
+            "mole_fraction_result_file": "mole_fraction_result_file",
         },
         "calibration": {
             "a": "cal_a",
@@ -225,6 +250,12 @@ def _nested_to_flat(data: dict) -> dict:
             "baseline_percentile": "baseline_percentile",
             "min_peak_width": "min_peak_width",
             "max_peak_width": "max_peak_width",
+            "cwt_snr_threshold": "cwt_snr_threshold",
+            "cwt_wavelet_max_width": "cwt_wavelet_max_width",
+            "weak_tail_cutoff_idx": "weak_tail_cutoff_idx",
+            "vote_threshold": "vote_threshold",
+            "min_intensity_for_single_vote": "min_intensity_for_single_vote",
+            "mz_tolerance": "mz_tolerance",
         },
     }
 
@@ -235,6 +266,12 @@ def _nested_to_flat(data: dict) -> dict:
         for yaml_key, field_name in mapping.items():
             if yaml_key in section_data:
                 flat[field_name] = section_data[yaml_key]
+
+    legacy_artifacts = data.get("artifacts", {})
+    if isinstance(legacy_artifacts, dict):
+        for yaml_key, field_name in section_mappings["analysis_artifacts"].items():
+            if yaml_key in legacy_artifacts and field_name not in flat:
+                flat[field_name] = legacy_artifacts[yaml_key]
 
     fp = data.get("function_params", {})
     if isinstance(fp, dict):
@@ -250,7 +287,8 @@ def _nested_to_flat(data: dict) -> dict:
 
         temp = fp.get("temperature_scan", {})
         if isinstance(temp, dict):
-            for k, kk in [("temp_reference_mode", "reference_mode"),
+            for k, kk in [("temp_peak_source", "peak_source"),
+                          ("temp_reference_mode", "reference_mode"),
                           ("temp_prefer_gaussian", "prefer_gaussian"),
                           ("temp_kr_mz", "kr_mz")]:
                 if kk in temp:
@@ -302,8 +340,14 @@ def _flat_to_nested(settings: ProjectSettings) -> dict:
             "sum_spectrum_folder": d["sum_spectrum_folder"],
             "temperature_scan_folder": d["temperature_scan_folder"],
             "pie_scan_folder": d["pie_scan_folder"],
+            "sample_info_file": d["sample_info_file"],
             "pics_database_path": d["pics_database_path"],
             "manual_peak_file": d["manual_peak_file"],
+        },
+        "analysis_artifacts": {
+            "temperature_scan_result_file": d["temperature_scan_result_file"],
+            "pie_identification_result_file": d["pie_identification_result_file"],
+            "mole_fraction_result_file": d["mole_fraction_result_file"],
         },
         "calibration": {
             "a": d["cal_a"],
@@ -342,6 +386,12 @@ def _flat_to_nested(settings: ProjectSettings) -> dict:
             "baseline_percentile": d["baseline_percentile"],
             "min_peak_width": d["min_peak_width"],
             "max_peak_width": d["max_peak_width"],
+            "cwt_snr_threshold": d["cwt_snr_threshold"],
+            "cwt_wavelet_max_width": d["cwt_wavelet_max_width"],
+            "weak_tail_cutoff_idx": d["weak_tail_cutoff_idx"],
+            "vote_threshold": d["vote_threshold"],
+            "min_intensity_for_single_vote": d["min_intensity_for_single_vote"],
+            "mz_tolerance": d["mz_tolerance"],
         },
         "function_params": {
             "pie": {
@@ -352,6 +402,7 @@ def _flat_to_nested(settings: ProjectSettings) -> dict:
                 "merge_method": d["pie_merge_method"],
             },
             "temperature_scan": {
+                "peak_source": d["temp_peak_source"],
                 "reference_mode": d["temp_reference_mode"],
                 "prefer_gaussian": d["temp_prefer_gaussian"],
                 "kr_mz": d["temp_kr_mz"],
