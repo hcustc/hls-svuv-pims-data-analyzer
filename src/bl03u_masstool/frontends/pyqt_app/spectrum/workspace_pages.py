@@ -42,6 +42,7 @@ from bl03u_masstool.frontends.pyqt_app.mole_fraction.dialog import MoleFractionD
 from bl03u_masstool.frontends.pyqt_app.nist.widget import IonizationEnergyLookupWidget
 from bl03u_masstool.frontends.pyqt_app.normalization.widget import NormalizationSettingsWidget
 from bl03u_masstool.frontends.pyqt_app.pics.dialog import PICSCalculatorDialog
+from bl03u_masstool.frontends.pyqt_app.pics.import_widget import PICSImportWidget
 from bl03u_masstool.frontends.pyqt_app.pie.dialog import PIESpeciesFitDialog
 from bl03u_masstool.frontends.pyqt_app.temperature.dialog import TemperatureScanDialog
 
@@ -190,6 +191,7 @@ class WorkspacePagesMixin:
             self.workspace_stack,
         )
         self.pics_page.set_project_settings(self.project_settings_manager.get())
+        self.pics_import_page = PICSImportWidget(self.workspace_stack)
         self.project_page = QtWidgets.QWidget(self.workspace_stack)
         self.project_page.setObjectName("ProjectPage")
         self._build_project_page()
@@ -201,11 +203,12 @@ class WorkspacePagesMixin:
             ("pie", "PIE拟合", self.pie_page),
             ("mole_fraction", "摩尔分数", self.mole_fraction_page),
             ("pics", "PICS计算", self.pics_page),
+            ("pics_import", "PICS导入", self.pics_import_page),
             ("ionization", "IE查询", self.ionization_page),
             ("isotope", "分子/同位素", self.isotope_page),
         ]
         # Pages that get a separator inserted AFTER them in the nav bar
-        _nav_separators_after = {"spectrum", "mole_fraction"}
+        _nav_separators_after = {"project", "mole_fraction"}
 
         self.page_buttons: dict[str, QtWidgets.QToolButton] = {}
         self.page_button_group = QtWidgets.QButtonGroup(self.page_nav)
