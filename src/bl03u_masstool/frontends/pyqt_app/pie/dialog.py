@@ -316,8 +316,30 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         plot_container_layout = QtWidgets.QVBoxLayout(plot_container)
         plot_container_layout.setContentsMargins(8, 8, 8, 8)
         plot_container_layout.setSpacing(6)
+
+        # Plot stack: empty state + actual plot
+        self._plot_stack = QtWidgets.QStackedLayout()
+
+        # Empty state
+        self._empty_state = QtWidgets.QWidget()
+        empty_layout = QtWidgets.QVBoxLayout(self._empty_state)
+        empty_layout.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        empty_icon = QtWidgets.QLabel("📈")
+        empty_icon.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        empty_icon.setStyleSheet("font-size: 48px;")
+        empty_msg = QtWidgets.QLabel('尚未生成PIE曲线\n\n选择包含PIE数据的文件夹后，点击"生成曲线"')
+        empty_msg.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        empty_msg.setObjectName("ProjectHint")
+        empty_msg.setWordWrap(True)
+        empty_layout.addWidget(empty_icon)
+        empty_layout.addWidget(empty_msg)
+        self._plot_stack.addWidget(self._empty_state)
+
         self.plot_widget = StaticCurvePlot("Photon Energy (eV)", "Normalized Intensity", min_height=280)
-        plot_container_layout.addWidget(self.plot_widget, stretch=1)
+        self._plot_stack.addWidget(self.plot_widget)
+        self._plot_stack.setCurrentIndex(0)  # Show empty state initially
+
+        plot_container_layout.addLayout(self._plot_stack, stretch=1)
 
         # 拟合统计条属于图表区域，不作为 splitter 的独立面板，避免挤占下方功能区。
         stats_bar = QtWidgets.QFrame()
@@ -1445,6 +1467,9 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.current_fit = None
         self.all_fit_results = {}  # 重置拟合结果
         self.populate_mz_list()
+        # Switch from empty state to plot display
+        if hasattr(self, "_plot_stack"):
+            self._plot_stack.setCurrentIndex(1)
         energy_count = self.analysis_df["energy"].nunique() if not self.analysis_df.empty else 0
         self.summary_label.setText(f"{len(self.curves)} 条m/z曲线 | {energy_count} 个能量点")
         self._update_fit_stats(0, 0, None)
