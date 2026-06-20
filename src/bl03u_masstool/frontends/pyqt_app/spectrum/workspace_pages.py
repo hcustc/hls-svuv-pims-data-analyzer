@@ -610,67 +610,42 @@ class WorkspacePagesMixin:
 
         card_layout = QVBoxLayout(self.datasource_card)
         card_layout.setContentsMargins(10, 8, 10, 10)
-        card_layout.setSpacing(12)
+        card_layout.setSpacing(10)
 
-        # ── 导入状态卡片 ──
-        status_card = QtWidgets.QFrame(self.datasource_card)
-        status_card.setObjectName("ProjectCard")
-        status_layout = QVBoxLayout(status_card)
-        status_layout.setContentsMargins(10, 8, 10, 10)
-        status_layout.setSpacing(8)
+        # ── 顶部操作栏：主按钮 + 状态 ──
+        top_bar = QHBoxLayout()
+        top_bar.setContentsMargins(0, 0, 0, 0)
+        top_bar.setSpacing(10)
 
-        status_header = QtWidgets.QLabel("导入状态", status_card)
-        status_header.setObjectName("ProjectTitle")
-        self.datasource_status_label = QtWidgets.QLabel("未初始化", status_card)
-        self.datasource_status_label.setObjectName("ProjectStatus")
-        self.datasource_status_label.setWordWrap(True)
-
-        status_layout.addWidget(status_header)
-        status_layout.addWidget(self.datasource_status_label)
-
-        # 数据源摘要表格
-        self.datasource_summary_table = QtWidgets.QTableWidget(0, 4, status_card)
-        self.datasource_summary_table.setHorizontalHeaderLabels(["数据源", "状态", "文件数", "修改时间"])
-        self.datasource_summary_table.verticalHeader().setVisible(False)
-        self.datasource_summary_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.datasource_summary_table.setMaximumHeight(150)
-        self.datasource_summary_table.setAlternatingRowColors(True)
-        self.datasource_summary_table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
-        self.datasource_summary_table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
-        self.datasource_summary_table.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
-        self.datasource_summary_table.horizontalHeader().setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.Stretch)
-        status_layout.addWidget(self.datasource_summary_table)
-
-        # 主操作按钮和导入提示
-        action_row = QHBoxLayout()
-        action_row.setContentsMargins(0, 0, 0, 0)
-        self.datasource_import_button = QPushButton("启动导入向导", status_card)
-        self.datasource_import_button.setFixedHeight(28)
-        self.datasource_import_button.setMinimumWidth(120)
+        self.datasource_import_button = QPushButton("启动导入向导", self.datasource_card)
+        self.datasource_import_button.setObjectName("BrowseButton")
+        self.datasource_import_button.setFixedHeight(32)
+        self.datasource_import_button.setMinimumWidth(140)
         self.datasource_import_button.clicked.connect(self.open_project_import_wizard)
 
-        self.datasource_hint_label = QtWidgets.QLabel("", status_card)
-        self.datasource_hint_label.setObjectName("ProjectHint")
-        self.datasource_hint_label.setWordWrap(True)
+        self.datasource_status_label = QtWidgets.QLabel("", self.datasource_card)
+        self.datasource_status_label.setObjectName("ProjectHint")
+        self.datasource_status_label.setWordWrap(False)
 
-        action_row.addWidget(self.datasource_import_button)
-        action_row.addWidget(self.datasource_hint_label, stretch=1)
-        status_layout.addLayout(action_row)
+        top_bar.addWidget(self.datasource_import_button)
+        top_bar.addWidget(self.datasource_status_label, stretch=1)
+        card_layout.addLayout(top_bar)
 
-        card_layout.addWidget(status_card)
+        # ── 工作流能力标签行 ──
+        self.datasource_workflow_bar = QHBoxLayout()
+        self.datasource_workflow_bar.setContentsMargins(0, 0, 0, 0)
+        self.datasource_workflow_bar.setSpacing(6)
+        self.datasource_workflow_bar.addStretch(1)
+        card_layout.addLayout(self.datasource_workflow_bar)
 
-        # ── 详细配置卡片（现有的路径编辑功能）──
-        detail_header = QtWidgets.QLabel("数据源路径配置", self.datasource_card)
-        detail_header.setObjectName("ProjectTitle")
-        card_layout.addWidget(detail_header)
+        # 分割线
+        sep = QtWidgets.QFrame(self.datasource_card)
+        sep.setFrameShape(QtWidgets.QFrame.Shape.HLine)
+        sep.setObjectName("NavSeparator")
+        card_layout.addWidget(sep)
 
-        hint = QtWidgets.QLabel(
-            '可在下方编辑数据源路径。"启动导入向导"会将原始数据复制到项目目录并自动回填路径；分析产物由上游工具导出后可手动指定。',
-            self.datasource_card,
-        )
-        hint.setObjectName("ProjectHint")
-        hint.setWordWrap(True)
-        card_layout.addWidget(hint)
+        # ── 路径配置区：每行含内联状态 ──
+        self.datasource_row_status_labels: dict[str, QtWidgets.QLabel] = {}
 
         self.project_single_file_edit = QLineEdit(self.datasource_card)
         self.project_single_file_edit.setPlaceholderText("选择 .txt/.asc/.888 单谱文件")
@@ -687,25 +662,38 @@ class WorkspacePagesMixin:
         self.project_manual_peak_edit = QLineEdit(self.datasource_card)
         self.project_manual_peak_edit.setPlaceholderText("选择 yaml/csv/xlsx 卡峰文件")
 
-        def _browse_btn(text="选择"):
-            b = QPushButton(text, self.datasource_card)
+        def _browse_btn():
+            b = QPushButton("选择", self.datasource_card)
             b.setObjectName("BrowseButton")
-            b.setFixedHeight(28)
+            b.setFixedHeight(26)
+            b.setFixedWidth(44)
             return b
+
+        def _status_label():
+            lbl = QtWidgets.QLabel("—", self.datasource_card)
+            lbl.setObjectName("ProjectHint")
+            lbl.setFixedWidth(90)
+            lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter)
+            return lbl
 
         def _path_group(title: str):
             group = QtWidgets.QGroupBox(title, self.datasource_card)
             layout = QtWidgets.QGridLayout(group)
             layout.setContentsMargins(8, 8, 8, 8)
-            layout.setHorizontalSpacing(8)
-            layout.setVerticalSpacing(6)
-            layout.setColumnStretch(1, 1)
+            layout.setHorizontalSpacing(6)
+            layout.setVerticalSpacing(5)
+            layout.setColumnStretch(1, 1)  # path edit stretches
             return group, layout
 
-        def _add_path_row(layout, row: int, label: str, edit: QLineEdit, button: QPushButton):
-            layout.addWidget(QtWidgets.QLabel(label, self.datasource_card), row, 0)
+        def _add_path_row(layout, row: int, source_key: str, label: str, edit: QLineEdit, button: QPushButton):
+            lbl = QtWidgets.QLabel(label, self.datasource_card)
+            lbl.setFixedWidth(88)
+            status_lbl = _status_label()
+            self.datasource_row_status_labels[source_key] = status_lbl
+            layout.addWidget(lbl, row, 0)
             layout.addWidget(edit, row, 1)
             layout.addWidget(button, row, 2)
+            layout.addWidget(status_lbl, row, 3)
 
         self.project_single_file_button = _browse_btn()
         self.project_sum_folder_button = _browse_btn()
@@ -716,18 +704,17 @@ class WorkspacePagesMixin:
         self.project_manual_peak_button = _browse_btn()
 
         workbench_group, workbench_layout = _path_group("质谱工作台")
-        _add_path_row(workbench_layout, 0, "单谱文件", self.project_single_file_edit, self.project_single_file_button)
-        _add_path_row(workbench_layout, 1, "累计谱文件夹", self.project_sum_folder_edit, self.project_sum_folder_button)
+        _add_path_row(workbench_layout, 0, "single_spectrum", "单谱文件", self.project_single_file_edit, self.project_single_file_button)
+        _add_path_row(workbench_layout, 1, "sum_spectrum", "累计谱文件夹", self.project_sum_folder_edit, self.project_sum_folder_button)
         card_layout.addWidget(workbench_group)
 
         analysis_group, analysis_layout = _path_group("分析模块")
-        _add_path_row(analysis_layout, 0, "温度扫描目录", self.project_temperature_folder_edit, self.project_temperature_folder_button)
-        _add_path_row(analysis_layout, 1, "PIE扫描目录", self.project_pie_folder_edit, self.project_pie_folder_button)
-        _add_path_row(analysis_layout, 2, "样品信息", self.project_sample_info_edit, self.project_sample_info_button)
-        _add_path_row(analysis_layout, 3, "PICS数据库", self.project_pics_database_edit, self.project_database_button)
-        _add_path_row(analysis_layout, 4, "手动卡峰文件", self.project_manual_peak_edit, self.project_manual_peak_button)
+        _add_path_row(analysis_layout, 0, "temperature_scan", "温度扫描目录", self.project_temperature_folder_edit, self.project_temperature_folder_button)
+        _add_path_row(analysis_layout, 1, "pie_scan", "PIE扫描目录", self.project_pie_folder_edit, self.project_pie_folder_button)
+        _add_path_row(analysis_layout, 2, "sample_info", "样品信息", self.project_sample_info_edit, self.project_sample_info_button)
+        _add_path_row(analysis_layout, 3, "pics_database", "PICS数据库", self.project_pics_database_edit, self.project_database_button)
+        _add_path_row(analysis_layout, 4, "manual_peak", "手动卡峰文件", self.project_manual_peak_edit, self.project_manual_peak_button)
         card_layout.addWidget(analysis_group)
-
 
         self.project_single_file_button.clicked.connect(self.select_project_single_file)
         self.project_sum_folder_button.clicked.connect(
@@ -1020,135 +1007,118 @@ class WorkspacePagesMixin:
         if ps is None:
             ps = self.project_settings_manager.get()
 
-        # Get validation results for all data sources
         validation_records = validate_all_data_sources(ps)
         validation_status = get_data_source_validation_status(ps)
-
-        # Get workflow capability analysis
         workflow_result = analyze_workflow_capabilities(ps)
 
-        # Store for reference
         self.current_data_source_status = validation_status
         self.current_validation_records = validation_records
         self.current_workflow_result = workflow_result
 
-        # Check if project is initialized
+        # 项目未初始化
         root_exists = project_root(ps).exists()
         if not root_exists:
-            # Project not initialized
             if hasattr(self, "datasource_import_button"):
                 self.datasource_import_button.setEnabled(False)
                 self.datasource_import_button.setText("初始化项目后可导入")
             if hasattr(self, "datasource_status_label"):
-                self.datasource_status_label.setText("❌ 未初始化 - 请先在'项目设置'页初始化项目")
-            if hasattr(self, "datasource_hint_label"):
-                self.datasource_hint_label.setText("")
-            if hasattr(self, "datasource_summary_table"):
-                self.datasource_summary_table.setRowCount(0)
+                self.datasource_status_label.setText("请先在「项目设置」页初始化项目")
+            self._clear_datasource_row_statuses()
+            self._refresh_workflow_chips([])
             return
 
-        # 更新状态标签
+        # 顶部状态文字（单行简洁）
         if hasattr(self, "datasource_status_label"):
-            if validation_status == DataSourceValidationStatus.UNCONFIGURED:
-                status_text = "⚠️ 未配置 - 还未指定任何数据源"
-            elif validation_status == DataSourceValidationStatus.PARTIAL:
-                status_text = "⏳ 部分完成 - 已导入部分数据源，还需完成其他项"
-            elif validation_status == DataSourceValidationStatus.INVALID:
-                status_text = "❌ 路径失效 - 某些已配置的路径不存在或不可读，请重新导入"
-            else:  # COMPLETE
-                status_text = "✅ 数据已就绪 - 所有必需数据源均已导入"
-
-            # 添加工作流能力信息
-            if workflow_result.available_workflows:
-                status_text += "\n\n可执行的分析工作流："
-                for profile in workflow_result.available_workflows:
-                    if profile == WorkflowProfile.SPECTRUM_ONLY:
-                        status_text += "\n  ✓ 质谱工作台"
-                    elif profile == WorkflowProfile.TEMPERATURE_SCAN:
-                        status_text += "\n  ✓ 温度扫描"
-                    elif profile == WorkflowProfile.PIE_ANALYSIS:
-                        status_text += "\n  ✓ PIE拟合"
-                    elif profile == WorkflowProfile.FULL_ANALYSIS:
-                        status_text += "\n  ✓ 完整分析流程"
-
-            if workflow_result.unavailable_workflows:
-                status_text += "\n\n尚不可执行的工作流："
-                for profile, reason in workflow_result.unavailable_workflows.items():
-                    reason_text = reason if reason else "缺少必需数据源"
-                    if profile == WorkflowProfile.SPECTRUM_ONLY:
-                        status_text += f"\n  ○ 质谱工作台：{reason_text}"
-                    elif profile == WorkflowProfile.TEMPERATURE_SCAN:
-                        status_text += f"\n  ○ 温度扫描：{reason_text}"
-                    elif profile == WorkflowProfile.PIE_ANALYSIS:
-                        status_text += f"\n  ○ PIE拟合：{reason_text}"
-                    elif profile == WorkflowProfile.FULL_ANALYSIS:
-                        status_text += f"\n  ○ 完整分析流程：{reason_text}"
-
-            if workflow_result.recommended_next_step:
-                status_text += f"\n\n建议：{workflow_result.recommended_next_step}"
-
-            self.datasource_status_label.setText(status_text)
-
-        # 更新摘要表格
-        if hasattr(self, "datasource_summary_table"):
-            essential_sources = {"single_spectrum", "sum_spectrum", "temperature_scan", "pie_scan"}
-            self.datasource_summary_table.setRowCount(0)
-
-            for record in validation_records:
-                if record.source_key not in essential_sources:
-                    continue
-
-                row = self.datasource_summary_table.rowCount()
-                self.datasource_summary_table.insertRow(row)
-
-                # 数据源名称
-                name_item = QtWidgets.QTableWidgetItem(record.source_label)
-                self.datasource_summary_table.setItem(row, 0, name_item)
-
-                # 状态
-                if not record.path:
-                    status_text = "未配置"
-                    status_item = QtWidgets.QTableWidgetItem(status_text)
-                elif not record.is_valid:
-                    status_text = "⚠️ 失效"
-                    status_item = QtWidgets.QTableWidgetItem(status_text)
-                    status_item.setForeground(QtGui.QColor("red"))
-                else:
-                    status_text = "✓ 有效"
-                    status_item = QtWidgets.QTableWidgetItem(status_text)
-                    status_item.setForeground(QtGui.QColor("green"))
-                self.datasource_summary_table.setItem(row, 1, status_item)
-
-                # 文件数
-                file_count = str(record.file_count) if record.is_valid else "—"
-                self.datasource_summary_table.setItem(row, 2, QtWidgets.QTableWidgetItem(file_count))
-
-                # 修改时间
-                mtime_text = record.last_modified if record.last_modified else "—"
-                self.datasource_summary_table.setItem(row, 3, QtWidgets.QTableWidgetItem(mtime_text))
-
-        # 更新按钮状态和提示
-        if hasattr(self, "datasource_import_button"):
-            if validation_status == DataSourceValidationStatus.COMPLETE:
-                self.datasource_import_button.setText("更新导入数据")
-                self.datasource_import_button.setEnabled(True)
-            else:
-                self.datasource_import_button.setText("启动导入向导")
-                self.datasource_import_button.setEnabled(True)
-
-        if hasattr(self, "datasource_hint_label"):
-            # 计算统计信息
             valid_records = [r for r in validation_records if r.is_valid]
             invalid_records = [r for r in validation_records if r.path and not r.is_valid]
             total_files = sum(r.file_count for r in valid_records)
 
-            if valid_records:
-                hint_text = f"已导入 {len(valid_records)} 个数据源，共 {total_files} 个文件"
-                if invalid_records:
-                    hint_text += f"；{len(invalid_records)} 个路径失效"
-                self.datasource_hint_label.setText(hint_text)
+            if validation_status == DataSourceValidationStatus.UNCONFIGURED:
+                status_text = "尚未导入任何数据源，点击「启动导入向导」开始"
+            elif validation_status == DataSourceValidationStatus.INVALID:
+                status_text = f"⚠ {len(invalid_records)} 个路径失效，请重新导入"
+            elif validation_status == DataSourceValidationStatus.PARTIAL:
+                status_text = f"{len(valid_records)} 个数据源就绪，共 {total_files} 个文件"
             else:
-                self.datasource_hint_label.setText("")
+                status_text = f"✓ 全部就绪 — {len(valid_records)} 个数据源，共 {total_files} 个文件"
+            self.datasource_status_label.setText(status_text)
+
+        # 导入按钮文字
+        if hasattr(self, "datasource_import_button"):
+            self.datasource_import_button.setEnabled(True)
+            if validation_status == DataSourceValidationStatus.COMPLETE:
+                self.datasource_import_button.setText("更新导入数据")
+            else:
+                self.datasource_import_button.setText("启动导入向导")
+
+        # 每行内联状态
+        record_map = {r.source_key: r for r in validation_records}
+        key_map = {
+            "single_spectrum": "single_spectrum",
+            "sum_spectrum": "sum_spectrum",
+            "temperature_scan": "temperature_scan",
+            "pie_scan": "pie_scan",
+            "sample_info": "sample_info",
+            "pics_database": "pics_database",
+            "manual_peak": "manual_peak",
+        }
+        if hasattr(self, "datasource_row_status_labels"):
+            for ui_key, source_key in key_map.items():
+                lbl = self.datasource_row_status_labels.get(ui_key)
+                if lbl is None:
+                    continue
+                record = record_map.get(source_key)
+                if record is None or not record.path:
+                    lbl.setText("—")
+                    lbl.setStyleSheet("")
+                elif not record.is_valid:
+                    lbl.setText("⚠ 路径失效")
+                    lbl.setStyleSheet("color: #c0392b;")
+                else:
+                    count_text = f"{record.file_count}个文件" if record.file_count > 1 else "已配置"
+                    lbl.setText(f"✓ {count_text}")
+                    lbl.setStyleSheet("color: #27ae60;")
+
+        # 工作流能力 chips
+        available = []
+        for profile in (workflow_result.available_workflows or []):
+            if profile == WorkflowProfile.SPECTRUM_ONLY:
+                available.append("质谱工作台")
+            elif profile == WorkflowProfile.TEMPERATURE_SCAN:
+                available.append("温度扫描")
+            elif profile == WorkflowProfile.PIE_ANALYSIS:
+                available.append("PIE拟合")
+            elif profile == WorkflowProfile.FULL_ANALYSIS:
+                available.append("完整流程")
+        self._refresh_workflow_chips(available)
+
+    def _clear_datasource_row_statuses(self) -> None:
+        if hasattr(self, "datasource_row_status_labels"):
+            for lbl in self.datasource_row_status_labels.values():
+                lbl.setText("—")
+                lbl.setStyleSheet("")
+
+    def _refresh_workflow_chips(self, available: list[str]) -> None:
+        if not hasattr(self, "datasource_workflow_bar"):
+            return
+        # 清空旧 chips（保留末尾 stretch）
+        while self.datasource_workflow_bar.count() > 1:
+            item = self.datasource_workflow_bar.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        if not available:
+            return
+        prefix = QtWidgets.QLabel("可用工作流：", None)
+        prefix.setObjectName("ProjectHint")
+        self.datasource_workflow_bar.insertWidget(0, prefix)
+        for i, name in enumerate(available):
+            chip = QtWidgets.QLabel(name, None)
+            chip.setObjectName("WorkflowChip")
+            chip.setStyleSheet(
+                "QLabel { background: #27ae60; color: white; border-radius: 10px;"
+                " padding: 1px 8px; font-size: 11px; }"
+            )
+            self.datasource_workflow_bar.insertWidget(i + 1, chip)
 
     def _on_project_main_action_clicked(self) -> None:
         """Handle main action button click based on current project state"""
