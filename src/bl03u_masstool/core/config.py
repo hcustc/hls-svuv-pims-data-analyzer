@@ -36,10 +36,18 @@ class PeakDetectionConfig:
     baseline_percentile: float = 5.0
     min_peak_width: int = 1
     max_peak_width: int = 80
+    # CWT parameters
+    cwt_snr_threshold: float = 0.02
+    cwt_wavelet_max_width: int = 30
+    weak_tail_cutoff_idx: int = 15000
     # Ensemble-specific parameters
     vote_threshold: float = 0.667
     min_intensity_for_single_vote: float = 5.0
     mz_tolerance: float = 0.2
+
+    def to_peak_kwargs(self) -> dict[str, Any]:
+        """Convert to kwargs dict for detect_peaks_by_algorithm()."""
+        return asdict(self)
 
 
 def project_path(path: str | Path) -> Path:
@@ -172,6 +180,9 @@ def load_peak_detection_config(path: str | Path | None = None) -> PeakDetectionC
         baseline_percentile=float(defaults["baseline_percentile"]),
         min_peak_width=int(defaults["min_peak_width"]),
         max_peak_width=int(defaults["max_peak_width"]),
+        cwt_snr_threshold=float(defaults["cwt_snr_threshold"]),
+        cwt_wavelet_max_width=int(defaults["cwt_wavelet_max_width"]),
+        weak_tail_cutoff_idx=int(defaults["weak_tail_cutoff_idx"]),
         vote_threshold=float(defaults["vote_threshold"]),
         min_intensity_for_single_vote=float(defaults["min_intensity_for_single_vote"]),
         mz_tolerance=float(defaults["mz_tolerance"]),

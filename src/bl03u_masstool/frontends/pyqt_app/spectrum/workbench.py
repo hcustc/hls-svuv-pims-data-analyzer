@@ -36,9 +36,7 @@ from bl03u_masstool.core.config import (
 )
 from bl03u_masstool.core.output_paths import ensure_output_dir
 from bl03u_masstool.core.peak_detection import add_manual_peak as core_add_manual_peak
-from bl03u_masstool.core.peak_detection import detect_peaks_in_range
-from bl03u_masstool.core.peak_detection import detect_peaks_prominence
-from bl03u_masstool.core.peak_detection import detect_peaks_ensemble
+from bl03u_masstool.core.peak_detection import detect_peaks_by_algorithm
 from bl03u_masstool.core.runtime_paths import resource_path
 from bl03u_masstool.core.spectrum_io import read_bl03u_txt, sum_spectra
 from bl03u_masstool.frontends.pyqt_app.spectrum.axis import SpectrumBottomAxis
@@ -202,7 +200,7 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
             QtWidgets.QSizePolicy.Policy.Preferred,
         )
         self.widget_3.setMinimumWidth(340)
-        self.widget_3.setMaximumWidth(460)
+        self.widget_3.setMaximumWidth(560)
 
         for table in (self.peakData, self.region):
             table.setAlternatingRowColors(True)
@@ -266,8 +264,8 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
             QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Fixed,
         )
-        self.widget.setMinimumHeight(106)
-        self.widget.setMaximumHeight(128)
+        self.widget.setMinimumHeight(88)
+        self.widget.setMaximumHeight(104)
         self._take_all_items(self.horizontalLayout_17)
         self.horizontalLayout_17.setContentsMargins(8, 7, 8, 7)
         self.horizontalLayout_17.setSpacing(0)
@@ -587,7 +585,7 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         splitter.addWidget(self.widget_3)
         splitter.setCollapsible(0, False)
         splitter.setCollapsible(1, True)
-        splitter.setSizes([900, 340])
+        splitter.setSizes([880, 400])
         self.horizontalLayout_13.addWidget(splitter)
         self.main_splitter = splitter
         splitter_state = self._qsettings.value("window/splitter_state")
@@ -596,7 +594,7 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
 
     def _rebuild_side_panel(self):
         self.widget_3.setMinimumWidth(340)
-        self.widget_3.setMaximumWidth(460)
+        self.widget_3.setMaximumWidth(560)
         self._take_all_items(self.verticalLayout)
         self.verticalLayout.setContentsMargins(6, 6, 6, 6)
         self.verticalLayout.setSpacing(6)
@@ -1610,95 +1608,14 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
             QMessageBox.warning(self, 'Error', f'自动寻峰失败: {str(e)}')
 
     def detect_peaks_for_config(self, y_data, peak_config):
-        algorithm = getattr(peak_config, "algorithm", "legacy")
-        common = {
-            "calibration": self.current_calibration(),
-            "start_idx": 0,
-            "end_idx": len(y_data),
-            "detection_min_idx": peak_config.detection_min_idx,
-            "time_offset": self.current_time_offset,
-            "threshold_end": peak_config.threshold_end,
-            "min_intensity": peak_config.min_intensity,
-            "duplicate_window": peak_config.duplicate_window,
-            "gaussian_window_max": peak_config.gaussian_window_max,
-            "gaussian_boundary_scale": peak_config.gaussian_boundary_scale,
-            "boundary_padding": peak_config.boundary_padding,
-        }
-
-        # 融合寻峰 - 结合三个算法的优势
-        if algorithm == "ensemble":
-            ensemble_params = {
-                "vote_threshold": getattr(peak_config, "vote_threshold", 0.667),
-                "min_intensity_for_single_vote": getattr(peak_config, "min_intensity_for_single_vote", 5.0),
-                "mz_tolerance": getattr(peak_config, "mz_tolerance", 0.2),
-                "weak_tail_early_window": peak_config.weak_tail_early_window,
-                "weak_tail_late_window": peak_config.weak_tail_late_window,
-                "weak_tail_ratio": peak_config.weak_tail_ratio,
-                "nearby_peak_window": peak_config.nearby_peak_window,
-                "prominence_ratio": peak_config.prominence_ratio,
-                "smoothing_window": peak_config.smoothing_window,
-                "smoothing_poly_order": peak_config.smoothing_poly_order,
-                "baseline_window": peak_config.baseline_window,
-                "baseline_percentile": peak_config.baseline_percentile,
-                "min_peak_width": peak_config.min_peak_width,
-                "max_peak_width": peak_config.max_peak_width,
-                "cwt_snr_threshold": getattr(peak_config, "cwt_snr_threshold", 0.02),
-                "cwt_wavelet_max_width": getattr(peak_config, "cwt_wavelet_max_width", 30),
-            }
-            return detect_peaks_ensemble(
-                y_data,
-                use_legacy=True,
-                use_prominence=True,
-                use_cwt=True,
-                **ensemble_params,
-                **common,
-            )
-
-        if algorithm == "legacy":
-            return detect_peaks_in_range(
-                y_data,
-                nearby_peak_window=peak_config.nearby_peak_window,
-                weak_tail_early_window=peak_config.weak_tail_early_window,
-                weak_tail_late_window=peak_config.weak_tail_late_window,
-                weak_tail_ratio=peak_config.weak_tail_ratio,
-                **common,
-            )
-        if algorithm == "cwt":
-            try:
-                from bl03u_masstool.core.cwt_peak_detection import CwtPeakDetectionConfig, detect_peaks_cwt
-            except ImportError as exc:
-                raise RuntimeError("CWT寻峰需要安装 PyWavelets") from exc
-            detection_start = max(0, int(peak_config.detection_min_idx))
-            cwt_config = CwtPeakDetectionConfig(
-                window_size=peak_config.smoothing_window,
-                poly_order=peak_config.smoothing_poly_order,
-                prominence_ratio=peak_config.prominence_ratio,
-                min_peak_distance=max(1, peak_config.duplicate_window),
-                min_peak_width=peak_config.min_peak_width,
-                max_peak_width=peak_config.max_peak_width,
-                baseline_percentile=peak_config.baseline_percentile,
-                baseline_window_factor=max(
-                    1,
-                    int(peak_config.baseline_window / max(1, peak_config.smoothing_window)),
-                ),
-            )
-            return detect_peaks_cwt(
-                y_data[detection_start:],
-                calibration=self.current_calibration(),
-                start_idx=detection_start,
-                time_offset=self.current_time_offset,
-                config=cwt_config,
-            )
-        return detect_peaks_prominence(
+        peak_kwargs = peak_config.to_peak_kwargs()
+        return detect_peaks_by_algorithm(
             y_data,
-            prominence_ratio=peak_config.prominence_ratio,
-            smoothing_window=peak_config.smoothing_window,
-            smoothing_poly_order=peak_config.smoothing_poly_order,
-            baseline_window=peak_config.baseline_window,
-            baseline_percentile=peak_config.baseline_percentile,
-            min_peak_width=peak_config.min_peak_width,
-            max_peak_width=peak_config.max_peak_width,
-            **common,
+            calibration=self.current_calibration(),
+            start_idx=0,
+            end_idx=len(y_data),
+            time_offset=self.current_time_offset,
+            **peak_kwargs,
         )
 
     def display_peaks(self, peaks):

@@ -53,6 +53,7 @@ from bl03u_masstool.core.mole_fraction import (
 )
 from bl03u_masstool.frontends.pyqt_app.theme import get_plot_theme
 from bl03u_masstool.frontends.pyqt_app.workers import WorkerThread
+from bl03u_masstool.frontends.pyqt_app.project_artifacts import record_project_artifact
 
 try:
     import pyqtgraph as pg
@@ -108,6 +109,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.all_fit_results: dict[int, dict] = {}  # 保存所有拟合结果
         self.worker: WorkerThread | None = None
         self.pie_folders: list[str] = []
+        self._busy = False
         self.setWindowTitle("PIE物种拟合")
         self.resize(1380, 850)
         layout = QtWidgets.QVBoxLayout(self)
@@ -147,20 +149,26 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.merge_method_combo.addItem("简单拼接 (不缩放)", "mean")
 
         self.analyze_button = QtWidgets.QPushButton("生成曲线")
+        self.analyze_button.setObjectName("WorkflowButton")
         self.analyze_button.setToolTip("生成PIE曲线")
         self.analyze_button.clicked.connect(self.run_analysis)
         self.export_button = QtWidgets.QPushButton("导出曲线")
+        self.export_button.setObjectName("ExportButton")
         self.export_button.setToolTip("导出PIE曲线数据")
+        self.export_button.setEnabled(False)
         self.export_button.clicked.connect(self.export_curve_data)
         self.common_params_button = QtWidgets.QPushButton("参数")
+        self.common_params_button.setObjectName("BrowseButton")
         self.common_params_button.setToolTip("打开通用参数设置")
         self.common_params_button.clicked.connect(self.open_common_parameters)
+        self.summary_open_project_btn = QtWidgets.QPushButton("项目设置")
+        self.summary_open_project_btn.setObjectName("BrowseButton")
+        self.summary_open_project_btn.setToolTip("修改项目名、体系、数据源等")
+        self.summary_open_project_btn.clicked.connect(self._open_project_settings)
         self.status_label = QtWidgets.QLabel("就绪")
         self.status_label.setObjectName("ProjectStatus")
         self.load_button.setObjectName("BrowseButton")
         self.select_folder_button.setObjectName("BrowseButton")
-        self.export_button.setObjectName("BrowseButton")
-        self.common_params_button.setObjectName("BrowseButton")
 
         # ---- 紧凑数据源控制带 ----
         source_panel = QtWidgets.QWidget()
@@ -207,6 +215,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         folder_row.addWidget(self.analyze_button)
         folder_row.addWidget(self.export_button)
         folder_row.addWidget(self.common_params_button)
+        folder_row.addWidget(self.summary_open_project_btn)
         folder_row.addWidget(self.status_label)
         data_layout.addLayout(folder_row)
 
@@ -233,11 +242,25 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.fit_all_button.setToolTip("一键拟合所有PIE曲线")
         self.fit_all_button.clicked.connect(self.fit_all_curves)
         self.fit_all_button.setFixedHeight(28)
+        self.fit_all_button.setEnabled(False)
+
+        self.refit_selected_button = QtWidgets.QPushButton("重拟合选中")
+        self.refit_selected_button.setObjectName("BrowseButton")
+        self.refit_selected_button.setToolTip("重新拟合左侧选中的 m/z 曲线")
+        self.refit_selected_button.clicked.connect(self.refit_selected_curves)
+        self.refit_selected_button.setEnabled(False)
+
+        self.clear_fits_button = QtWidgets.QPushButton("清除拟合")
+        self.clear_fits_button.setObjectName("WarningButton")
+        self.clear_fits_button.setToolTip("清除当前页面所有拟合结果")
+        self.clear_fits_button.clicked.connect(self.clear_all_fits)
+        self.clear_fits_button.setEnabled(False)
 
         self.export_pie_button = QtWidgets.QPushButton("导出鉴定结果")
         self.export_pie_button.setObjectName("ExportButton")
         self.export_pie_button.setToolTip("导出PIE物种鉴定结果")
         self.export_pie_button.clicked.connect(self.export_pie_results)
+        self.export_pie_button.setEnabled(False)
 
         self._force_species: list[str] = []
 
@@ -263,6 +286,11 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         list_header.addWidget(list_title)
         list_header.addWidget(self.summary_label, stretch=1)
         left_layout.addLayout(list_header)
+        self.mz_filter_edit = QtWidgets.QLineEdit()
+        self.mz_filter_edit.setObjectName("CurveSearch")
+        self.mz_filter_edit.setPlaceholderText("搜索 m/z / 物种")
+        self.mz_filter_edit.textChanged.connect(self.populate_mz_list)
+        left_layout.addWidget(self.mz_filter_edit)
         self.mz_list = QtWidgets.QListWidget()
         self.mz_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
         self.mz_list.currentItemChanged.connect(self.on_mz_selected)
@@ -273,18 +301,26 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         mz_hint.setObjectName("HintLabel")
         left_layout.addWidget(mz_hint)
         self.fit_button = QtWidgets.QPushButton("拟合当前")
+        self.fit_button.setObjectName("PrimaryToolbarButton")
         self.fit_button.setToolTip("拟合当前选中的m/z曲线")
         self.fit_button.clicked.connect(self.fit_current_curve)
+        self.fit_button.setEnabled(False)
         left_layout.addWidget(self.fit_button)
         left_layout.addWidget(self.fit_all_button)
+        refit_row = QtWidgets.QHBoxLayout()
+        refit_row.setSpacing(6)
+        refit_row.addWidget(self.refit_selected_button)
+        refit_row.addWidget(self.clear_fits_button)
+        left_layout.addLayout(refit_row)
         self.exhaustive_button = QtWidgets.QPushButton("穷举优选")
         self.exhaustive_button.setObjectName("WarningButton")
         self.exhaustive_button.setToolTip("穷举候选物种所有组合，按R²排序选出最优")
         self.exhaustive_button.clicked.connect(self._exhaustive_best_fit)
+        self.exhaustive_button.setEnabled(False)
         left_layout.addWidget(self.exhaustive_button)
         splitter.addWidget(left_panel)
 
-        right_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
+        self.right_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
         plot_container = QtWidgets.QWidget()
         plot_container.setObjectName("PlotPanel")
         plot_container.setMinimumHeight(280)
@@ -336,7 +372,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         stats_bar_layout.addWidget(stats_title)
         stats_bar_layout.addWidget(self.fit_stats_label, stretch=1)
         plot_container_layout.addWidget(stats_bar)
-        right_splitter.addWidget(plot_container)
+        self.right_splitter.addWidget(plot_container)
 
         self.curve_table = QtWidgets.QTableWidget()
         self.fit_table = QtWidgets.QTableWidget()
@@ -430,9 +466,9 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self._candidate_data: list[dict] = []
         self._candidate_updating = False
 
-        detail_container = QtWidgets.QWidget()
-        detail_container.setMinimumHeight(200)
-        detail_container_layout = QtWidgets.QVBoxLayout(detail_container)
+        self.detail_container = QtWidgets.QWidget()
+        self.detail_container.setObjectName("ResultPanel")
+        detail_container_layout = QtWidgets.QVBoxLayout(self.detail_container)
         detail_container_layout.setContentsMargins(0, 0, 0, 0)
         detail_container_layout.setSpacing(4)
         detail_header = QtWidgets.QHBoxLayout()
@@ -443,22 +479,75 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.export_pie_button.setFixedHeight(26)
         detail_header.addWidget(detail_title)
         detail_header.addStretch()
+
+        self.pie_toggle_table_button = QtWidgets.QPushButton("展开表格")
+        self.pie_toggle_table_button.setCheckable(True)
+        self.pie_toggle_table_button.setToolTip("点击显示/隐藏结果与拟合控制表格")
+        self.pie_toggle_table_button.setFixedWidth(86)
+        self.pie_toggle_table_button.setFixedHeight(26)
+        self.pie_toggle_table_button.setObjectName("BrowseButton")
+        self.pie_toggle_table_button.clicked.connect(self._toggle_pie_table_visibility)
+        detail_header.addWidget(self.pie_toggle_table_button)
+
         detail_header.addWidget(self.export_pie_button)
         detail_container_layout.addLayout(detail_header)
         detail_container_layout.addWidget(self.detail_tabs, stretch=1)
 
-        right_splitter.addWidget(detail_container)
-        right_splitter.setStretchFactor(0, 3)
-        right_splitter.setStretchFactor(1, 1)
-        right_splitter.setCollapsible(0, False)
-        right_splitter.setCollapsible(1, False)
-        right_splitter.setSizes([480, 300])
+        self.right_splitter.addWidget(self.detail_container)
+        self.right_splitter.setStretchFactor(0, 3)
+        self.right_splitter.setStretchFactor(1, 1)
+        self.right_splitter.setCollapsible(0, False)
+        self.right_splitter.setCollapsible(1, False)
+        self.pie_table_visible = False
+        self._apply_detail_panel_state(expanded=False)
+        QtCore.QTimer.singleShot(0, lambda: self._resize_detail_panel(expanded=False))
 
-        splitter.addWidget(right_splitter)
+        splitter.addWidget(self.right_splitter)
         splitter.setSizes([260, 1020])
         layout.addWidget(splitter, stretch=1)
         if self.database_edit.text():
             self.load_database(show_message=False)
+        self._update_action_state()
+
+    def _open_project_settings(self):
+        """跳转到项目管理页面。"""
+        win = self.window()
+        if hasattr(win, "switch_workspace_page"):
+            win.switch_workspace_page("project")
+
+    def _toggle_pie_table_visibility(self, checked: bool | None = None) -> None:
+        """Toggle the visibility of the detail tabs and adjust splitter."""
+        expanded = (not self.pie_table_visible) if checked is None else bool(checked)
+        self._apply_detail_panel_state(expanded=expanded)
+
+    def _apply_detail_panel_state(self, *, expanded: bool) -> None:
+        self.pie_table_visible = expanded
+        self.pie_toggle_table_button.setChecked(expanded)
+        self.detail_tabs.setVisible(self.pie_table_visible)
+        self.pie_toggle_table_button.setText("收起表格" if expanded else "展开表格")
+        if expanded:
+            self.detail_container.setMinimumHeight(220)
+            self.detail_container.setMaximumHeight(16777215)
+            self.detail_container.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Expanding,
+                QtWidgets.QSizePolicy.Policy.Expanding,
+            )
+        else:
+            self.detail_container.setMinimumHeight(34)
+            self.detail_container.setMaximumHeight(34)
+            self.detail_container.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Expanding,
+                QtWidgets.QSizePolicy.Policy.Fixed,
+            )
+        self._resize_detail_panel(expanded=expanded)
+
+    def _resize_detail_panel(self, *, expanded: bool) -> None:
+        if expanded:
+            total_height = max(1, self.right_splitter.height())
+            detail_height = min(max(240, int(total_height * 0.34)), 360)
+            self.right_splitter.setSizes([max(360, total_height - detail_height), detail_height])
+        else:
+            self.right_splitter.setSizes([10000, 34])
 
     def load_database(self, show_message: bool = True):
         path = self.database_edit.text().strip()
@@ -857,6 +946,9 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.refresh_current_plot()
             self.mz_list.setCurrentRow(0)
 
+        self.populate_mz_list()
+        self._update_action_state()
+
         QtWidgets.QMessageBox.information(
             self, "完成",
             f"拟合完成！\n已拟合: {fitted_count} / {total_count} 条曲线"
@@ -945,6 +1037,8 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                     break
 
         self.refresh_current_plot()
+        self.populate_mz_list()
+        self._update_action_state()
 
         QtWidgets.QMessageBox.information(
             self, "完成",
@@ -958,6 +1052,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.fit_table.setRowCount(0)
         self._update_fit_stats(0, 0, None)
         self.refresh_current_plot()
+        self._update_action_state()
 
     def export_pie_results(self):
         """导出PIE物种鉴定结果到Excel"""
@@ -992,10 +1087,16 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             result = export_pie_results_to_excel(self, file_path)
 
             if result['success']:
+                record_project_artifact(
+                    self,
+                    "pie_identification_result_file",
+                    result.get("file_path", file_path),
+                    message="PIE鉴定结果已登记到项目管理",
+                )
                 QtWidgets.QMessageBox.information(
                     self,
                     "导出成功",
-                    result['message']
+                    f"{result['message']}\n\n已登记到项目管理。"
                 )
             else:
                 QtWidgets.QMessageBox.warning(
@@ -1057,38 +1158,19 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
         for name in self.get_force_species():
             tag = QtWidgets.QFrame()
-            tag.setStyleSheet("""
-                QFrame {
-                    background: #eef2ff;
-                    border: 1px solid #c7d2fe;
-                    border-radius: 4px;
-                    padding: 0;
-                }
-            """)
+            tag.setObjectName("ForceTag")
             tag.setFixedHeight(24)
             tag_layout = QtWidgets.QHBoxLayout(tag)
             tag_layout.setContentsMargins(6, 1, 2, 1)
             tag_layout.setSpacing(2)
 
             label = QtWidgets.QLabel(name)
-            label.setStyleSheet("background: transparent; color: #3730a3; font-size: 9pt;")
+            label.setObjectName("ForceTagText")
             tag_layout.addWidget(label)
 
             close_btn = QtWidgets.QPushButton("\u2715")
+            close_btn.setObjectName("TagCloseButton")
             close_btn.setFixedSize(16, 16)
-            close_btn.setStyleSheet("""
-                QPushButton {
-                    background: transparent;
-                    border: none;
-                    color: #6366f1;
-                    font-size: 8pt;
-                    padding: 0;
-                }
-                QPushButton:hover {
-                    color: #dc2626;
-                    font-weight: bold;
-                }
-            """)
             close_btn.clicked.connect(lambda checked=False, n=name: self._remove_force_species_name(n))
             tag_layout.addWidget(close_btn)
 
@@ -1125,8 +1207,13 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
     def toggle_multi_folder_mode(self, checked: bool):
         """切换多文件夹模式"""
-        self.folder_edit.setEnabled(not checked)
-        self.select_folder_button.setEnabled(not checked)
+        busy = getattr(self, "_busy", False)
+        self.folder_edit.setEnabled(not checked and not busy)
+        self.select_folder_button.setEnabled(not checked and not busy)
+        self.add_folder_button.setEnabled(checked and not busy)
+        self.remove_folder_button.setEnabled(checked and not busy)
+        self.clear_folders_button.setEnabled(checked and not busy)
+        self.merge_method_combo.setEnabled(checked and not busy)
         self.multi_folder_section.setVisible(checked)
 
     def add_folder(self):
@@ -1165,6 +1252,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.folder_edit.setText(ps.pie_scan_folder)
         if ps.pics_database_path:
             self.database_edit.setText(ps.pics_database_path)
+        self._update_action_state()
 
     def open_common_parameters(self):
         dialog = CommonParametersDialog(self.normalization_settings, self.calibration, self)
@@ -1248,22 +1336,32 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.worker.start()
 
     def set_busy(self, busy: bool, message: str) -> None:
+        self._busy = busy
         self.status_label.setText(message)
-        self.analyze_button.setDisabled(busy)
-        self.select_folder_button.setDisabled(busy)
-        self.export_button.setDisabled(busy)
-        self.common_params_button.setDisabled(busy)
-        self.fit_button.setDisabled(busy)
-        self.load_button.setDisabled(busy)
-        self.use_multi_folders.setDisabled(busy)
-        self.add_folder_button.setDisabled(busy)
-        self.remove_folder_button.setDisabled(busy)
-        self.clear_folders_button.setDisabled(busy)
-        self.merge_method_combo.setDisabled(busy)
-        self.fit_all_button.setDisabled(busy)
-        self.export_pie_button.setDisabled(busy)
-        self.force_input.setDisabled(busy)
-        self.exhaustive_button.setDisabled(busy)
+        self.analyze_button.setEnabled(not busy)
+        self.common_params_button.setEnabled(not busy)
+        self.load_button.setEnabled(not busy)
+        self.database_edit.setEnabled(not busy)
+        self.use_multi_folders.setEnabled(not busy)
+        self.summary_open_project_btn.setEnabled(not busy)
+        self.force_input.setEnabled(not busy)
+        self.toggle_multi_folder_mode(self.use_multi_folders.isChecked())
+        self._update_action_state()
+
+    def _update_action_state(self) -> None:
+        busy = getattr(self, "_busy", False)
+        has_curves = bool(self.curves)
+        has_fit_records = bool(self.all_fit_results)
+        has_successful_fits = any(result.get("success") for result in self.all_fit_results.values())
+        self.export_button.setEnabled(has_curves and not busy)
+        self.fit_button.setEnabled(has_curves and not busy)
+        self.fit_all_button.setEnabled(has_curves and not busy)
+        self.refit_selected_button.setEnabled(has_curves and not busy)
+        self.exhaustive_button.setEnabled(has_curves and not busy)
+        self.clear_fits_button.setEnabled(has_fit_records and not busy)
+        self.export_pie_button.setEnabled(has_successful_fits and not busy)
+        if hasattr(self, "candidate_apply_btn"):
+            self.candidate_apply_btn.setEnabled(has_curves and not busy)
 
     def run_pie_analysis_sync(
         self,
@@ -1383,26 +1481,62 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         energy_count = self.analysis_df["energy"].nunique() if not self.analysis_df.empty else 0
         self.summary_label.setText(f"{len(self.curves)} 条m/z曲线 | {energy_count} 个能量点")
         self._update_fit_stats(0, 0, None)
+        self._update_action_state()
         if self.curves:
             self.mz_list.setCurrentRow(0)
         QtWidgets.QMessageBox.information(self, "完成", f"生成 {len(self.curves)} 条PIE曲线")
 
     def on_analysis_failed(self, message: str) -> None:
+        self.status_label.setText(f"失败: {message}")
+        self._update_action_state()
         QtWidgets.QMessageBox.critical(self, "错误", message)
 
     def populate_mz_list(self):
+        current_mz = self.current_mz
         self.mz_list.clear()
         for mz in sorted(self.curves):
             curve = self.curves[mz]
+            if not self._pie_curve_matches_filter(mz, curve):
+                continue
             label = curve.get("species") or ""
             suffix = f" {label}" if label and label != "Unknown" else ""
-            item = QtWidgets.QListWidgetItem(f"{mz}{suffix}  ({len(curve['energies'])}点)")
+            fit_state = "已拟合" if mz in self.all_fit_results and self.all_fit_results[mz].get("success") else "待拟合"
+            item = QtWidgets.QListWidgetItem(f"{mz}{suffix}  ({len(curve['energies'])}点)  {fit_state}")
             item.setData(QtCore.Qt.ItemDataRole.UserRole, mz)
+            item.setToolTip(f"m/z {mz} | {fit_state}")
             self.mz_list.addItem(item)
+            if current_mz == mz:
+                self.mz_list.setCurrentItem(item)
+        if self.mz_list.count() == 0:
+            self.on_mz_selected(None)
+
+    def _pie_curve_matches_filter(self, mz: int, curve: dict) -> bool:
+        query = self.mz_filter_edit.text().strip().lower() if hasattr(self, "mz_filter_edit") else ""
+        if not query:
+            return True
+        haystack = " ".join(
+            str(value)
+            for value in (
+                mz,
+                curve.get("species", ""),
+                "已拟合" if mz in self.all_fit_results else "待拟合",
+            )
+        ).lower()
+        return query in haystack
 
     def on_mz_selected(self, current, previous=None):
         if current is None:
             self.current_mz = None
+            self.current_fit = None
+            for table in (self.curve_table, self.fit_table):
+                table.clear()
+                table.setRowCount(0)
+                table.setColumnCount(0)
+            self.candidate_table.clearContents()
+            self.candidate_table.setRowCount(0)
+            if self.plot_widget is not None:
+                self.plot_widget.clear()
+                self.plot_widget.setTitle("未选择 PIE 曲线")
             return
         self.current_mz = int(current.data(QtCore.Qt.ItemDataRole.UserRole))
 
@@ -1499,6 +1633,13 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         x_values = x_values[valid]
         y_values = y_values[valid]
         self.plot_widget.clear()
+        if hasattr(self, "_hover_label"):
+            self.plot_widget.addItem(self._hover_label)
+            self.plot_widget.addItem(self._hover_vline)
+            self.plot_widget.addItem(self._hover_hline)
+            self._hover_vline.setVisible(False)
+            self._hover_hline.setVisible(False)
+            self._hover_label.setText("")
         plot_item = self.plot_widget.getPlotItem()
         if plot_item.legend is None:
             plot_item.addLegend(offset=(-10, 10))
@@ -1646,8 +1787,14 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                     selected, curve["energies"], curve["intensities"]
                 )
 
-            self.current_fit = fit_model
             results = fit_model.get("species", [])
+            self.current_fit = fit_model
+            self.all_fit_results[self.current_mz] = {
+                "success": bool(results),
+                "model": fit_model,
+                "species": results[:3],
+                "r_squared": fit_model.get("r_squared", 0.0),
+            }
             fit_df = pd.DataFrame(
                 [
                     {
@@ -1668,6 +1815,13 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 f"m/z {self.current_mz}: PICS候选 {fit_model.get('candidate_count', 0)} 个，"
                 f"命中 {len(results)} 个，R²={fit_model.get('r_squared', 0.0):.4f}"
             )
+            fitted_count = sum(1 for r in self.all_fit_results.values() if r.get("success"))
+            total_count = len(self.curves)
+            all_r_squared = [r.get("r_squared", 0.0) for r in self.all_fit_results.values() if r.get("success")]
+            avg_r_squared = sum(all_r_squared) / len(all_r_squared) if all_r_squared else 0.0
+            self._update_fit_stats(fitted_count, total_count, avg_r_squared if all_r_squared else None)
+            self.populate_mz_list()
+            self._update_action_state()
             if not results:
                 QtWidgets.QMessageBox.information(self, "结果", "当前m/z没有匹配到可拟合的物种")
         except Exception as exc:
@@ -1721,6 +1875,12 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             return
         best = ranked[0]
         self.current_fit = best["model"]
+        self.all_fit_results[self.current_mz] = {
+            "success": True,
+            "model": best["model"],
+            "species": best["model"].get("species", [])[:3],
+            "r_squared": best["r_squared"],
+        }
         curve = self.curves[self.current_mz]
         self.update_plot(curve, best["model"])
         # 更新PICS拟合表: 排名 / 物种组合 / 物种数 / R² / RMSE
@@ -1743,6 +1903,12 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             f"m/z {self.current_mz}: 最优组合 [{names}] R²={best['r_squared']:.4f} "
             f"(共 {len(ranked)} 种组合)"
         )
+        fitted_count = sum(1 for r in self.all_fit_results.values() if r.get("success"))
+        all_r_squared = [r.get("r_squared", 0.0) for r in self.all_fit_results.values() if r.get("success")]
+        avg_r_squared = sum(all_r_squared) / len(all_r_squared) if all_r_squared else None
+        self._update_fit_stats(fitted_count, len(self.curves), avg_r_squared)
+        self.populate_mz_list()
+        self._update_action_state()
 
     def _on_combination_selected(self):
         row = self.fit_table.currentRow()

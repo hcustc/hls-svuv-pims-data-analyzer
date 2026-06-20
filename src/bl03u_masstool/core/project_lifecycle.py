@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from enum import Enum
+import os
 from pathlib import Path
 import re
 import shutil
@@ -25,6 +26,36 @@ class ProjectUIState(Enum):
     def __init__(self, button_text: str, description: str):
         self.button_text = button_text
         self.description = description
+
+
+class DataSourceValidationStatus(Enum):
+    """数据源导入状态枚举"""
+    UNCONFIGURED = ("未配置", "还未指定数据源路径")
+    PARTIAL = ("部分完成", "已导入部分数据源")
+    COMPLETE = ("数据已就绪", "所有必需数据源均已导入")
+    INVALID = ("路径失效", "已配置的路径不存在或不可读")
+
+    def __init__(self, label: str, description: str):
+        self.label = label
+        self.description = description
+
+
+@dataclass(frozen=True)
+class DataSourceValidationRecord:
+    """单个数据源的验证结果"""
+    source_key: str
+    source_label: str
+    path: str | None
+    exists: bool
+    is_readable: bool
+    file_count: int
+    detail: str
+    last_modified: str = ""
+
+    @property
+    def is_valid(self) -> bool:
+        """路径存在且可读"""
+        return bool(self.path) and self.exists and self.is_readable
 
 
 @dataclass(frozen=True)
@@ -517,6 +548,137 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def validate_data_source(settings: ProjectSettings, source_key: str) -> DataSourceValidationRecord:
+    """验证单个数据源的有效性"""
+    spec = PROJECT_SOURCE_SPECS.get(source_key)
+    if not spec:
+        return DataSourceValidationRecord(
+            source_key=source_key,
+            source_label="未知",
+            path=None,
+            exists=False,
+            is_readable=False,
+            file_count=0,
+            detail="未知的数据源类型",
+        )
+
+    field_value = getattr(settings, spec.field_name, None)
+    path_str = str(field_value).strip() if field_value else None
+
+    if not path_str:
+        return DataSourceValidationRecord(
+            source_key=source_key,
+            source_label=spec.label,
+            path=None,
+            exists=False,
+            is_readable=False,
+            file_count=0,
+            detail="未配置",
+        )
+
+    path = Path(path_str).expanduser()
+
+    # 检查路径存在性
+    if not path.exists():
+        return DataSourceValidationRecord(
+            source_key=source_key,
+            source_label=spec.label,
+            path=path_str,
+            exists=False,
+            is_readable=False,
+            file_count=0,
+            detail=f"路径不存在",
+        )
+
+    # 检查可读性和文件数量
+    try:
+        if path.is_file():
+            file_count = 1
+            is_readable = os.access(path, os.R_OK)
+        elif path.is_dir():
+            try:
+                files = list(path.glob("**/*"))
+                file_count = sum(1 for f in files if f.is_file())
+                is_readable = os.access(path, os.R_OK | os.X_OK)
+            except (PermissionError, OSError):
+                file_count = 0
+                is_readable = False
+        else:
+            return DataSourceValidationRecord(
+                source_key=source_key,
+                source_label=spec.label,
+                path=path_str,
+                exists=False,
+                is_readable=False,
+                file_count=0,
+                detail="既不是文件也不是目录",
+            )
+    except Exception as e:
+        return DataSourceValidationRecord(
+            source_key=source_key,
+            source_label=spec.label,
+            path=path_str,
+            exists=True,
+            is_readable=False,
+            file_count=0,
+            detail=f"读取失败: {str(e)[:50]}",
+        )
+
+    # 获取修改时间
+    try:
+        mtime = path.stat().st_mtime
+        last_modified = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+    except:
+        last_modified = ""
+
+    detail = f"{file_count} 个文件" if is_readable and file_count > 0 else "文件数为0"
+
+    return DataSourceValidationRecord(
+        source_key=source_key,
+        source_label=spec.label,
+        path=path_str,
+        exists=True,
+        is_readable=is_readable,
+        file_count=file_count,
+        detail=detail,
+        last_modified=last_modified,
+    )
+
+
+def validate_all_data_sources(settings: ProjectSettings) -> list[DataSourceValidationRecord]:
+    """验证所有数据源"""
+    records = []
+    for source_key in PROJECT_SOURCE_SPECS.keys():
+        records.append(validate_data_source(settings, source_key))
+    return records
+
+
+def get_data_source_validation_status(settings: ProjectSettings) -> DataSourceValidationStatus:
+    """获取总体数据导入状态"""
+    records = validate_all_data_sources(settings)
+
+    # 关键数据源（必需）
+    essential_sources = {"single_spectrum", "sum_spectrum", "temperature_scan", "pie_scan"}
+    essential_records = [r for r in records if r.source_key in essential_sources]
+
+    valid_count = sum(1 for r in essential_records if r.is_valid)
+    essential_count = len(essential_records)
+
+    # 检查是否有失效的已配置项（路径存在但不可读）
+    invalid_records = [r for r in records if r.path and not r.is_valid]
+
+    if invalid_records:
+        return DataSourceValidationStatus.INVALID
+
+    if valid_count == 0:
+        return DataSourceValidationStatus.UNCONFIGURED
+
+    if valid_count < essential_count:
+        return DataSourceValidationStatus.PARTIAL
+
+    return DataSourceValidationStatus.COMPLETE
+
+
 def get_project_ui_state(settings: ProjectSettings) -> ProjectUIState:
     """判断项目当前应展示的UI主操作按钮状态"""
     # 检查项目信息和目录初始化
@@ -526,14 +688,16 @@ def get_project_ui_state(settings: ProjectSettings) -> ProjectUIState:
     if not has_identity or not root_exists:
         return ProjectUIState.UNINITIALIZED
 
-    # 检查原始数据导入
-    raw_data_dir = project_directory(settings, "raw_data")
-    has_raw_data = _directory_has_files(raw_data_dir)
+    # 检查原始数据导入（使用严格验证）
+    data_status = get_data_source_validation_status(settings)
 
-    if not has_raw_data:
+    if data_status in (DataSourceValidationStatus.UNCONFIGURED, DataSourceValidationStatus.INVALID):
         return ProjectUIState.AWAITING_DATA_IMPORT
 
-    # 检查是否有任何分析产物（至少完成了标定或更后的阶段）
+    if data_status == DataSourceValidationStatus.PARTIAL:
+        return ProjectUIState.AWAITING_DATA_IMPORT
+
+    # 数据已完成导入（COMPLETE），检查是否有任何分析产物
     statuses = build_project_stage_statuses(settings)
     # 跳过前两个阶段（项目初始化、数据导入），检查后面的分析阶段
     analysis_started = any(s.completed for s in statuses[2:])

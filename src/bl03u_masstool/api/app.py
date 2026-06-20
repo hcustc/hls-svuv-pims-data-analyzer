@@ -662,30 +662,13 @@ def _run_pie_job(job_id: str, payload: PieStartPayload) -> None:
         target_mz_values = _parse_mz_values(payload.target_mz)
 
         _update_job(job_id, message="正在生成PIE曲线")
+        peak_kwargs = peak_config.to_peak_kwargs()
         analysis_df = analyze_pie_folder(
             folder,
             calibration=calibration,
             recursive=payload.recursive,
             energy_decimals=payload.energy_decimals,
-            algorithm=peak_config.algorithm,
-            threshold_end=peak_config.threshold_end,
-            min_intensity=peak_config.min_intensity,
-            detection_min_idx=peak_config.detection_min_idx,
-            nearby_peak_window=peak_config.nearby_peak_window,
-            duplicate_window=peak_config.duplicate_window,
-            weak_tail_early_window=peak_config.weak_tail_early_window,
-            weak_tail_late_window=peak_config.weak_tail_late_window,
-            weak_tail_ratio=peak_config.weak_tail_ratio,
-            gaussian_window_max=peak_config.gaussian_window_max,
-            gaussian_boundary_scale=peak_config.gaussian_boundary_scale,
-            boundary_padding=peak_config.boundary_padding,
-            prominence_ratio=peak_config.prominence_ratio,
-            smoothing_window=peak_config.smoothing_window,
-            smoothing_poly_order=peak_config.smoothing_poly_order,
-            baseline_window=peak_config.baseline_window,
-            baseline_percentile=peak_config.baseline_percentile,
-            min_peak_width=peak_config.min_peak_width,
-            max_peak_width=peak_config.max_peak_width,
+            **peak_kwargs,
             prefer_gaussian=payload.gaussian,
             manual_peak_path=manual_peak_path,
             photon_normalize=photon_mode != "off",
@@ -693,9 +676,6 @@ def _run_pie_job(job_id: str, payload: PieStartPayload) -> None:
             mass_discrimination=mass_discrimination,
             light_source=light_source,
             target_mz_values=target_mz_values,
-            vote_threshold=peak_config.vote_threshold,
-            min_intensity_for_single_vote=peak_config.min_intensity_for_single_vote,
-            mz_tolerance=peak_config.mz_tolerance,
         )
         curves = build_pie_curves(analysis_df)
         summary = _pie_summary(analysis_df, curves)

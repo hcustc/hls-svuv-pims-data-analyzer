@@ -53,6 +53,7 @@ from bl03u_masstool.core.mole_fraction import (
 )
 from bl03u_masstool.frontends.pyqt_app.theme import get_plot_theme
 from bl03u_masstool.frontends.pyqt_app.workers import WorkerThread
+from bl03u_masstool.frontends.pyqt_app.project_artifacts import record_project_artifact
 
 try:
     import pyqtgraph as pg
@@ -60,168 +61,188 @@ except Exception:  # pragma: no cover - only used when optional plotting is unav
     pg = None
 
 from bl03u_masstool.frontends.pyqt_app.common.widgets import DataFrameTableMixin
-from bl03u_masstool.frontends.pyqt_app.normalization.widget import CommonParametersDialog
 
 class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
     def __init__(self, calibration: Calibration, normalization_settings: NormalizationSettings | None = None, parent=None):
         super().__init__(parent)
         self.calibration = calibration
         self.normalization_settings = normalization_settings or NormalizationSettings()
+        self.project_settings: ProjectSettings | None = None
         self.peak_detection = load_peak_detection_config()
         self.result_df = pd.DataFrame()
         self.curves: dict[int, dict] = {}
         self.current_mz: int | None = None
         self.worker: WorkerThread | None = None
         self.setWindowTitle("温度扫描分析")
-        self.resize(1180, 760)
-        layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(10)
+        self.resize(1280, 800)
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        controls = QtWidgets.QWidget()
-        controls_layout = QtWidgets.QGridLayout(controls)
-        controls_layout.setContentsMargins(0, 0, 0, 0)
-        controls_layout.setHorizontalSpacing(8)
-        controls_layout.setVerticalSpacing(8)
-        self.folder_edit = QtWidgets.QLineEdit()
-        self.folder_edit.setPlaceholderText("选择包含温度扫描 txt 文件的文件夹")
-        self.browse_button = QtWidgets.QPushButton("浏览...")
-        self.browse_button.setToolTip("选择包含温度扫描txt文件的文件夹")
-        self.browse_button.clicked.connect(self.select_folder)
-        self.run_button = QtWidgets.QPushButton("开始分析")
-        self.run_button.setToolTip("开始分析温度扫描数据，生成温度-信号曲线")
-        self.run_button.clicked.connect(self.run_analysis)
-        self.export_button = QtWidgets.QPushButton("导出")
-        self.export_button.setToolTip("导出温度扫描分析结果为CSV文件")
-        self.export_button.clicked.connect(self.export_result)
-        self.common_params_button = QtWidgets.QPushButton("通用参数")
-        self.common_params_button.setToolTip("打开通用参数设置（光强归一化、Kr定标、寻峰参数等）")
-        self.common_params_button.clicked.connect(self.open_common_parameters)
-        self.peak_source_combo = QtWidgets.QComboBox()
-        self.peak_source_combo.setToolTip("自动寻峰：程序自动检测峰位；手动卡峰：使用预先标定的峰文件")
-        self.peak_source_combo.addItem("自动寻峰", "auto")
-        self.peak_source_combo.addItem("手动卡峰", "manual")
-        self.peak_file_edit = QtWidgets.QLineEdit()
-        self.peak_file_edit.setPlaceholderText("可选: yaml/csv/xlsx 手动卡峰文件")
-        self.select_peak_file_button = QtWidgets.QPushButton("选择卡峰")
-        self.select_peak_file_button.setToolTip("选择手动卡峰文件（支持yaml/csv/xlsx格式）")
-        self.select_peak_file_button.clicked.connect(self.select_peak_file)
+        # ── Toolbar ─────────────────────────────────────────────────────────
+        toolbar = QtWidgets.QWidget()
+        toolbar.setObjectName("TempToolbar")
+        toolbar_layout = QtWidgets.QHBoxLayout(toolbar)
+        toolbar_layout.setContentsMargins(8, 6, 8, 6)
+        toolbar_layout.setSpacing(6)
 
-        self.threshold_end_edit = QtWidgets.QDoubleSpinBox()
-        self.threshold_end_edit.setRange(0, 1_000_000)
-        self.threshold_end_edit.setDecimals(3)
-        self.threshold_end_edit.setValue(self.peak_detection.threshold_end)
-        self.min_intensity_edit = QtWidgets.QDoubleSpinBox()
-        self.min_intensity_edit.setRange(0, 1_000_000)
-        self.min_intensity_edit.setDecimals(3)
-        self.min_intensity_edit.setValue(self.peak_detection.min_intensity)
-        self.reference_mode_combo = QtWidgets.QComboBox()
-        self.reference_mode_combo.setToolTip("累加谱寻峰：所有温度累加后统一寻峰；最高温谱寻峰：用最高温度谱独立寻峰")
-        self.reference_mode_combo.addItem("累加谱寻峰", "sum")
-        self.reference_mode_combo.addItem("最高温谱寻峰", "max_temperature")
-        self.gaussian_check = QtWidgets.QCheckBox("高斯积分")
-        self.gaussian_check.setToolTip("使用高斯峰面积而非简单峰值强度作为信号量，更准确反映积分强度")
-        self.gaussian_check.setChecked(True)
-        self.status_label = QtWidgets.QLabel("就绪")
-
-        controls_layout.addWidget(QtWidgets.QLabel("温度扫描文件夹"), 0, 0)
-        controls_layout.addWidget(self.folder_edit, 0, 1, 1, 4)
-        controls_layout.addWidget(self.browse_button, 0, 5)
-        controls_layout.addWidget(self.run_button, 0, 6)
-        controls_layout.addWidget(self.export_button, 0, 7)
-        controls_layout.addWidget(self.common_params_button, 0, 8)
-        controls_layout.addWidget(QtWidgets.QLabel("参考峰来源"), 1, 0)
-        controls_layout.addWidget(self.reference_mode_combo, 1, 1)
-        controls_layout.addWidget(self.gaussian_check, 1, 2)
-        controls_layout.addWidget(QtWidgets.QLabel("自动寻峰与归一化参数在“通用参数”页管理"), 1, 3, 1, 4)
-        controls_layout.addWidget(QtWidgets.QLabel("卡峰来源"), 2, 0)
-        controls_layout.addWidget(self.peak_source_combo, 2, 1)
-        controls_layout.addWidget(self.peak_file_edit, 2, 2, 1, 4)
-        controls_layout.addWidget(self.select_peak_file_button, 2, 6)
-        controls_layout.addWidget(self.status_label, 3, 0, 1, 9)
-        controls_layout.setColumnStretch(1, 1)
-        controls_layout.setColumnStretch(4, 1)
-        layout.addWidget(controls)
-
-        # 摘要栏
-        self.summary_bar = QtWidgets.QWidget()
-        summary_layout = QtWidgets.QHBoxLayout(self.summary_bar)
-        summary_layout.setContentsMargins(0, 0, 0, 0)
-        summary_layout.setSpacing(6)
+        # Project info (read-only chip)
         self.summary_project_label = QtWidgets.QLabel("项目: ---")
         self.summary_system_label = QtWidgets.QLabel("体系: ---")
         self.summary_data_label = QtWidgets.QLabel("数据源: ---")
-        self.summary_project_label.setObjectName("ReadoutValue")
-        self.summary_system_label.setObjectName("ReadoutValue")
-        self.summary_data_label.setObjectName("ReadoutValue")
-        self.summary_project_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.summary_system_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.summary_data_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
-        summary_layout.addWidget(self.summary_project_label)
-        summary_layout.addWidget(self.summary_system_label)
-        summary_layout.addWidget(self.summary_data_label)
-        self.summary_open_project_btn = QtWidgets.QPushButton("打开项目设置")
-        self.summary_open_project_btn.setObjectName("WorkflowButton")
+        for lbl in (self.summary_project_label, self.summary_system_label, self.summary_data_label):
+            lbl.setObjectName("ReadoutValue")
+        toolbar_layout.addWidget(self.summary_project_label)
+        toolbar_layout.addWidget(self.summary_system_label)
+        toolbar_layout.addWidget(self.summary_data_label, stretch=1)
+
+        # Action buttons
+        self.run_button = QtWidgets.QPushButton("开始分析")
+        self.run_button.setObjectName("WorkflowButton")
+        self.run_button.setToolTip("开始分析温度扫描数据")
+        self.run_button.clicked.connect(self.run_analysis)
+
+        self.export_button = QtWidgets.QPushButton("导出结果")
+        self.export_button.setObjectName("ExportButton")
+        self.export_button.setToolTip("导出分析结果为CSV")
+        self.export_button.setEnabled(False)
+        self.export_button.clicked.connect(self.export_result)
+
+        self.summary_open_project_btn = QtWidgets.QPushButton("项目管理")
+        self.summary_open_project_btn.setObjectName("BrowseButton")
+        self.summary_open_project_btn.setToolTip("在项目管理中修改数据源、寻峰、归一化和温度扫描默认参数")
         self.summary_open_project_btn.clicked.connect(self._open_project_settings)
-        summary_layout.addWidget(self.summary_open_project_btn)
-        summary_layout.addStretch()
-        layout.addWidget(self.summary_bar)
 
-        # 内联状态提示
-        self.inline_status_bar = QtWidgets.QWidget()
-        inline_layout = QtWidgets.QHBoxLayout(self.inline_status_bar)
-        inline_layout.setContentsMargins(0, 0, 0, 0)
-        inline_layout.setSpacing(6)
+        # Sidebar toggle
+        self.sidebar_toggle_btn = QtWidgets.QPushButton("◀ 曲线")
+        self.sidebar_toggle_btn.setObjectName("BrowseButton")
+        self.sidebar_toggle_btn.setToolTip("展开/折叠曲线浏览")
+        self.sidebar_toggle_btn.setCheckable(True)
+        self.sidebar_toggle_btn.setChecked(True)
+        self.sidebar_toggle_btn.clicked.connect(self._toggle_sidebar)
+
+        for btn in (self.run_button, self.export_button,
+                    self.summary_open_project_btn, self.sidebar_toggle_btn):
+            toolbar_layout.addWidget(btn)
+
+        # Inline status
         self.inline_status_icon = QtWidgets.QLabel("")
+        self.inline_status_icon.setFixedWidth(20)
         self.inline_status_text = QtWidgets.QLabel("就绪")
+        self.inline_status_text.setObjectName("InlineStatusLabel")
         self.inline_retry_button = QtWidgets.QPushButton("重试")
-        self.inline_retry_button.setMaximumWidth(60)
+        self.inline_retry_button.setMaximumWidth(52)
         self.inline_retry_button.hide()
-        self.inline_action_hint = QtWidgets.QLabel('请选择温度扫描文件夹，点击"开始分析"')
-        self.inline_action_hint.setStyleSheet("color: #6b7280;")
-        inline_layout.addWidget(self.inline_status_icon)
-        inline_layout.addWidget(self.inline_status_text, stretch=1)
-        inline_layout.addWidget(self.inline_retry_button)
-        inline_layout.addStretch(2)
-        layout.addWidget(self.inline_status_bar)
+        self.inline_action_hint = QtWidgets.QLabel('在项目管理确认数据源和参数后，点击"开始分析"')
+        self.inline_action_hint.setObjectName("ProjectHint")
+        toolbar_layout.addWidget(self.inline_status_icon)
+        toolbar_layout.addWidget(self.inline_status_text)
+        toolbar_layout.addWidget(self.inline_action_hint)
+        toolbar_layout.addWidget(self.inline_retry_button)
+        root.addWidget(toolbar)
 
-        splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
-        left_panel = QtWidgets.QWidget()
-        left_layout = QtWidgets.QVBoxLayout(left_panel)
-        left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.setSpacing(8)
+        # thin separator
+        sep = QtWidgets.QFrame()
+        sep.setFrameShape(QtWidgets.QFrame.Shape.HLine)
+        sep.setObjectName("NavSeparator")
+        root.addWidget(sep)
+
+        # ── Body: sidebar + main area ────────────────────────────────────────
+        body_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+        body_splitter.setObjectName("MainSplitter")
+        root.addWidget(body_splitter, stretch=1)
+
+        # ── Left sidebar ─────────────────────────────────────────────────────
+        self._sidebar = QtWidgets.QWidget()
+        self._sidebar.setObjectName("SidePanel")
+        self._sidebar.setFixedWidth(240)
+        sidebar_layout = QtWidgets.QVBoxLayout(self._sidebar)
+        sidebar_layout.setContentsMargins(10, 10, 10, 10)
+        sidebar_layout.setSpacing(8)
+
+        # Curve filter
+        curve_browser_title = QtWidgets.QLabel("结果曲线")
+        curve_browser_title.setObjectName("ReadoutLabel")
+        sidebar_layout.addWidget(curve_browser_title)
+
         self.summary_label = QtWidgets.QLabel("未生成温度曲线")
-        left_layout.addWidget(self.summary_label)
+        self.summary_label.setObjectName("ProjectHint")
+        self.summary_label.setWordWrap(True)
+        sidebar_layout.addWidget(self.summary_label)
+
+        self.curve_filter_edit = QtWidgets.QLineEdit()
+        self.curve_filter_edit.setObjectName("CurveSearch")
+        self.curve_filter_edit.setPlaceholderText("搜索 m/z / 物种 / 分类")
+        self.curve_filter_edit.textChanged.connect(self.populate_mz_list)
+        sidebar_layout.addWidget(self.curve_filter_edit)
+
         filter_row = QtWidgets.QWidget()
-        filter_layout = QtWidgets.QHBoxLayout(filter_row)
+        filter_layout = QtWidgets.QVBoxLayout(filter_row)
         filter_layout.setContentsMargins(0, 0, 0, 0)
-        filter_layout.setSpacing(6)
-        filter_layout.addWidget(QtWidgets.QLabel("显示"))
+        filter_layout.setSpacing(4)
+        disp_row = QtWidgets.QHBoxLayout()
+        disp_row.addWidget(QtWidgets.QLabel("显示"))
         self.curve_display_combo = QtWidgets.QComboBox()
         self.curve_display_combo.addItem("按类别分组", "grouped")
         self.curve_display_combo.addItem("按m/z排序", "mz")
         self.curve_display_combo.currentIndexChanged.connect(self.populate_mz_list)
-        filter_layout.addWidget(self.curve_display_combo, stretch=1)
-        filter_layout.addWidget(QtWidgets.QLabel("筛选"))
+        disp_row.addWidget(self.curve_display_combo, stretch=1)
+        filter_layout.addLayout(disp_row)
+        filt_row = QtWidgets.QHBoxLayout()
+        filt_row.addWidget(QtWidgets.QLabel("筛选"))
         self.curve_group_combo = QtWidgets.QComboBox()
         self.curve_group_combo.addItem("全部", "all")
         for key in ("formation", "consumption", "intermediate", "unclassified"):
             self.curve_group_combo.addItem(TEMPERATURE_CURVE_CLASS_LABELS[key], key)
         self.curve_group_combo.currentIndexChanged.connect(self.populate_mz_list)
-        filter_layout.addWidget(self.curve_group_combo, stretch=1)
-        left_layout.addWidget(filter_row)
+        filt_row.addWidget(self.curve_group_combo, stretch=1)
+        filter_layout.addLayout(filt_row)
+        sidebar_layout.addWidget(filter_row)
+
         self.group_summary_label = QtWidgets.QLabel("")
+        self.group_summary_label.setObjectName("ProjectHint")
         self.group_summary_label.setWordWrap(True)
-        left_layout.addWidget(self.group_summary_label)
+        sidebar_layout.addWidget(self.group_summary_label)
+
         self.mz_list = QtWidgets.QTreeWidget()
         self.mz_list.setHeaderHidden(True)
         self.mz_list.setRootIsDecorated(True)
         self.mz_list.setUniformRowHeights(True)
         self.mz_list.currentItemChanged.connect(self.on_mz_selected)
-        left_layout.addWidget(self.mz_list, stretch=1)
-        splitter.addWidget(left_panel)
+        sidebar_layout.addWidget(self.mz_list, stretch=1)
 
-        right_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
+        body_splitter.addWidget(self._sidebar)
+
+        # ── Right main area ──────────────────────────────────────────────────
+        right_widget = QtWidgets.QWidget()
+        right_layout = QtWidgets.QVBoxLayout(right_widget)
+        right_layout.setContentsMargins(8, 8, 8, 8)
+        right_layout.setSpacing(6)
+        body_splitter.addWidget(right_widget)
+        body_splitter.setSizes([240, 1040])
+        body_splitter.setCollapsible(0, True)
+        body_splitter.setCollapsible(1, False)
+
+        # Plot area with empty-state overlay
+        self._plot_container = QtWidgets.QWidget()
+        self._plot_container.setObjectName("PlotPanel")
+        plot_stack = QtWidgets.QStackedLayout(self._plot_container)
+
+        # Empty state widget
+        self._empty_state = QtWidgets.QWidget()
+        empty_layout = QtWidgets.QVBoxLayout(self._empty_state)
+        empty_layout.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        empty_icon = QtWidgets.QLabel("📊")
+        empty_icon.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        empty_icon.setStyleSheet("font-size: 48px;")
+        empty_msg = QtWidgets.QLabel('尚未生成温度扫描曲线\n\n在项目管理确认数据源和参数后，点击"开始分析"')
+        empty_msg.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        empty_msg.setObjectName("ProjectHint")
+        empty_msg.setWordWrap(True)
+        empty_layout.addWidget(empty_icon)
+        empty_layout.addWidget(empty_msg)
+        plot_stack.addWidget(self._empty_state)
+
         if pg is not None:
             self.plot_widget = pg.PlotWidget()
             self.plot_widget.setBackground("#ffffff")
@@ -229,54 +250,94 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.plot_widget.setLabel("left", "Normalized Area")
             self.plot_widget.getAxis("bottom").enableAutoSIPrefix(False)
             self.plot_widget.showGrid(x=True, y=True)
-            right_splitter.addWidget(self.plot_widget)
+            plot_stack.addWidget(self.plot_widget)
         else:
             self.plot_widget = None
-            right_splitter.addWidget(QtWidgets.QLabel("未安装 pyqtgraph，无法显示温度扫描曲线图"))
+            no_pg = QtWidgets.QLabel("未安装 pyqtgraph，无法显示温度扫描曲线图")
+            no_pg.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            plot_stack.addWidget(no_pg)
 
+        plot_stack.setCurrentIndex(0)  # show empty state initially
+        right_layout.addWidget(self._plot_container, stretch=3)
+
+        curve_stats = QtWidgets.QFrame()
+        curve_stats.setObjectName("StatsBar")
+        curve_stats_layout = QtWidgets.QHBoxLayout(curve_stats)
+        curve_stats_layout.setContentsMargins(10, 2, 10, 2)
+        curve_stats_layout.setSpacing(12)
+        curve_stats_title = QtWidgets.QLabel("当前曲线")
+        curve_stats_title.setObjectName("StatsTitle")
+        self.current_curve_label = QtWidgets.QLabel("未选择")
+        self.current_curve_label.setObjectName("HintLabel")
+        self.current_curve_metric_label = QtWidgets.QLabel("生成曲线后可在左侧选择 m/z")
+        self.current_curve_metric_label.setObjectName("HintLabel")
+        curve_stats_layout.addWidget(curve_stats_title)
+        curve_stats_layout.addWidget(self.current_curve_label)
+        curve_stats_layout.addWidget(self.current_curve_metric_label, stretch=1)
+
+        # Toggle table visibility button
+        self.toggle_table_button = QtWidgets.QPushButton("📈 展开表格")
+        self.toggle_table_button.setCheckable(True)
+        self.toggle_table_button.setToolTip("点击显示/隐藏下方数据表格")
+        self.toggle_table_button.setFixedWidth(90)
+        self.toggle_table_button.setFixedHeight(26)
+        self.toggle_table_button.setObjectName("BrowseButton")
+        self.table_visible = False  # Initially hidden
+        self.toggle_table_button.clicked.connect(self._toggle_table_visibility)
+        curve_stats_layout.addWidget(self.toggle_table_button)
+        right_layout.addWidget(curve_stats)
+
+        # Bottom tabs (can be toggled) - initially hidden
+        self.detail_tabs = QtWidgets.QTabWidget()
+        self.detail_tabs.setObjectName("PeakResultTabs")
+        self.detail_tabs.setVisible(False)  # Start hidden
         self.curve_table = QtWidgets.QTableWidget()
         self.table = QtWidgets.QTableWidget()
         for table in (self.curve_table, self.table):
             table.setWordWrap(False)
             table.setAlternatingRowColors(True)
             table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
-        self.detail_tabs = QtWidgets.QTabWidget()
         self.detail_tabs.addTab(self.curve_table, "当前曲线")
         self.detail_tabs.addTab(self.table, "全部积分结果")
-        right_splitter.addWidget(self.detail_tabs)
-        right_splitter.setSizes([500, 220])
-        splitter.addWidget(right_splitter)
-        splitter.setSizes([260, 920])
-        layout.addWidget(splitter, stretch=1)
+        right_layout.addWidget(self.detail_tabs, stretch=2)
 
-    def select_folder(self):
-        folder = QtWidgets.QFileDialog.getExistingDirectory(self, "选择温度扫描文件夹")
-        if folder:
-            self.folder_edit.setText(folder)
+        # Status bar at bottom
+        self.status_label = QtWidgets.QLabel("就绪")
+        self.status_label.setObjectName("ProjectHint")
+        right_layout.addWidget(self.status_label)
 
-    def select_peak_file(self):
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self,
-            "选择手动卡峰文件",
-            "",
-            "Peak Files (*.yaml *.yml *.csv *.xlsx *.xls);;All Files (*)",
-        )
-        if path:
-            self.peak_file_edit.setText(path)
-            self.peak_source_combo.setCurrentIndex(1)
+    def _open_project_settings(self):
+        """跳转到项目管理页面。"""
+        win = self.window()
+        if hasattr(win, "switch_workspace_page"):
+            win.switch_workspace_page("project")
+
+    def _toggle_sidebar(self, checked: bool) -> None:
+        self._sidebar.setVisible(checked)
+        self.sidebar_toggle_btn.setText("◀ 曲线" if checked else "▶ 曲线")
+
+    def _toggle_table_visibility(self) -> None:
+        """Toggle the visibility of the data tables and adjust layout."""
+        self.table_visible = not self.table_visible
+        self.detail_tabs.setVisible(self.table_visible)
+        self.toggle_table_button.setText("📊 数据表格" if self.table_visible else "📈 展开表格")
+        # Force layout recalculation to adjust the plot area
+        parent = self.detail_tabs.parentWidget()
+        if parent and parent.layout():
+            parent.layout().invalidate()
+            parent.layout().activate()
+            parent.update()
+
+    def _show_plot(self) -> None:
+        """Switch plot container from empty state to the actual plot."""
+        stack = self._plot_container.layout()
+        if stack is not None and stack.count() > 1:
+            stack.setCurrentIndex(1)
 
     def set_project_settings(self, ps: ProjectSettings) -> None:
-        """Apply ProjectSettings defaults to TemperatureScanDialog inline controls."""
+        """Keep project context visible while project-owned parameters stay in 项目管理."""
         self.project_settings = ps
-        if ps.temperature_scan_folder:
-            self.folder_edit.setText(ps.temperature_scan_folder)
-        idx = self.reference_mode_combo.findData(ps.temp_reference_mode)
-        if idx >= 0:
-            self.reference_mode_combo.setCurrentIndex(idx)
-        self.gaussian_check.setChecked(ps.temp_prefer_gaussian)
-        if hasattr(self, "spin_kr_mz"):
-            self.spin_kr_mz.setValue(ps.temp_kr_mz)
-        # 更新摘要栏
+
         if hasattr(self, "summary_project_label"):
             project_name = ps.project_name or "---"
             system = ps.system or "---"
@@ -285,16 +346,15 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
             data_path = ps.temperature_scan_folder or "---"
             self.summary_data_label.setText(f"数据源: {data_path}")
 
-    def _open_project_settings(self):
-        """跳转到项目管理页面。"""
-        win = self.window()
-        if hasattr(win, "switch_workspace_page"):
-            win.switch_workspace_page("project")
+        if ps.temperature_scan_folder:
+            self._show_inline_empty('项目参数已同步，点击"开始分析"')
+        else:
+            self._show_inline_empty("请先在项目管理中配置温度扫描文件夹")
 
     def _show_inline_error(self, msg: str, retry_callback=None):
         self.inline_status_icon.setText("\u26a0\ufe0f")
         self.inline_status_text.setText(msg)
-        self.inline_status_text.setStyleSheet("color: #dc2626;")
+        self._set_inline_status("error")
         self.inline_action_hint.hide()
         if retry_callback:
             self.inline_retry_button.show()
@@ -309,7 +369,7 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
     def _show_inline_success(self, msg: str):
         self.inline_status_icon.setText("\u2705")
         self.inline_status_text.setText(msg)
-        self.inline_status_text.setStyleSheet("color: #16a34a;")
+        self._set_inline_status("success")
         self.inline_action_hint.hide()
         self.inline_retry_button.hide()
         QtCore.QTimer.singleShot(5000, self._clear_inline_status)
@@ -317,7 +377,7 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
     def _show_inline_empty(self, msg: str = ""):
         self.inline_status_icon.setText("")
         self.inline_status_text.setText("就绪")
-        self.inline_status_text.setStyleSheet("")
+        self._set_inline_status("")
         if msg:
             self.inline_action_hint.setText(msg)
             self.inline_action_hint.show()
@@ -328,33 +388,49 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
     def _clear_inline_status(self):
         self.inline_status_icon.setText("")
         self.inline_status_text.setText("就绪")
-        self.inline_status_text.setStyleSheet("")
+        self._set_inline_status("")
         self.inline_action_hint.hide()
         self.inline_retry_button.hide()
 
+    def _set_inline_status(self, status: str) -> None:
+        self.inline_status_text.setProperty("status", status)
+        self.inline_status_text.style().unpolish(self.inline_status_text)
+        self.inline_status_text.style().polish(self.inline_status_text)
+
     def open_common_parameters(self):
-        dialog = CommonParametersDialog(self.normalization_settings, self.calibration, self)
-        dialog.exec()
-        self.calibration = load_calibration_config()
+        self._open_project_settings()
 
     def run_analysis(self):
-        folder = self.folder_edit.text().strip()
+        # Get parameters from project settings (single source of truth)
+        ps = self.project_settings or ProjectSettings()
+        folder = ps.temperature_scan_folder
         if not folder:
-            self._show_inline_error("请先选择温度扫描文件夹", lambda: self.select_folder())
+            self._show_inline_error("请在项目管理中配置温度扫描文件夹")
             return
+
         peak_config = load_peak_detection_config()
         threshold_end = peak_config.threshold_end
         min_intensity = peak_config.min_intensity
-        reference_mode = self.reference_mode_combo.currentData()
-        prefer_gaussian = self.gaussian_check.isChecked()
-        manual_peak_path = self.peak_file_edit.text().strip() if self.peak_source_combo.currentData() == "manual" else None
-        if self.peak_source_combo.currentData() == "manual" and not manual_peak_path:
-            self._show_inline_error("请选择手动卡峰文件", lambda: self.select_peak_file())
-            return
+        reference_mode = ps.temp_reference_mode
+        prefer_gaussian = ps.temp_prefer_gaussian
+
+        # Auto-switch to manual peak detection if peak file is set
+        effective_peak_source = ps.temp_peak_source
+        if ps.manual_peak_file and ps.temp_peak_source == "auto":
+            effective_peak_source = "manual"
+
+        # Get manual peak file if using manual peak detection
+        manual_peak_path = None
+        if effective_peak_source == "manual":
+            manual_peak_path = ps.manual_peak_file
+            if not manual_peak_path:
+                self._show_inline_error("请在项目管理中配置手动卡峰文件")
+                return
+
         settings = self.normalization_settings
         photon_normalize = settings.temperature_photon_normalize
         kr_correct = settings.temperature_kr_correct
-        kr_mz = self.spin_kr_mz.value() if hasattr(self, "spin_kr_mz") else 84
+        kr_mz = ps.temp_kr_mz
         mass_discrimination = settings.mass_discrimination
         light_source = settings.light_source
         expansion_factors = settings.expansion_factors if kr_correct else None
@@ -394,6 +470,9 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 vote_threshold=peak_config.vote_threshold,
                 min_intensity_for_single_vote=peak_config.min_intensity_for_single_vote,
                 mz_tolerance=peak_config.mz_tolerance,
+                cwt_snr_threshold=peak_config.cwt_snr_threshold,
+                cwt_wavelet_max_width=peak_config.cwt_wavelet_max_width,
+                weak_tail_cutoff_idx=peak_config.weak_tail_cutoff_idx,
             ),
             self,
         )
@@ -403,22 +482,35 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.worker.start()
 
     def compute_kr_expansion(self):
-        folder = self.folder_edit.text().strip()
+        # Get parameters from project settings (single source of truth)
+        ps = self.project_settings or ProjectSettings()
+        folder = ps.temperature_scan_folder
         if not folder:
-            QtWidgets.QMessageBox.warning(self, "提示", "请先选择文件夹")
+            QtWidgets.QMessageBox.warning(self, "提示", "请在项目管理中配置温度扫描文件夹")
             return
+
         peak_config = load_peak_detection_config()
         threshold_end = peak_config.threshold_end
         min_intensity = peak_config.min_intensity
-        reference_mode = self.reference_mode_combo.currentData()
-        prefer_gaussian = self.gaussian_check.isChecked()
-        manual_peak_path = self.peak_file_edit.text().strip() if self.peak_source_combo.currentData() == "manual" else None
-        if self.peak_source_combo.currentData() == "manual" and not manual_peak_path:
-            QtWidgets.QMessageBox.warning(self, "提示", "请选择手动卡峰文件")
-            return
+        reference_mode = ps.temp_reference_mode
+        prefer_gaussian = ps.temp_prefer_gaussian
+
+        # Auto-switch to manual peak detection if peak file is set
+        effective_peak_source = ps.temp_peak_source
+        if ps.manual_peak_file and ps.temp_peak_source == "auto":
+            effective_peak_source = "manual"
+
+        # Get manual peak file if using manual peak detection
+        manual_peak_path = None
+        if effective_peak_source == "manual":
+            manual_peak_path = ps.manual_peak_file
+            if not manual_peak_path:
+                QtWidgets.QMessageBox.warning(self, "提示", "请在项目管理中配置手动卡峰文件")
+                return
+
         settings = self.normalization_settings
         light_source = settings.light_source
-        kr_mz = self.spin_kr_mz.value() if hasattr(self, "spin_kr_mz") else 84
+        kr_mz = ps.temp_kr_mz
         self.set_busy(True, "正在计算 Kr 膨胀系数...")
         self.worker = WorkerThread(
             lambda: compute_kr_expansion_factors(
@@ -469,14 +561,15 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
     def set_busy(self, busy: bool, message: str) -> None:
         self.status_label.setText(message)
         self.run_button.setDisabled(busy)
-        self.browse_button.setDisabled(busy)
-        self.export_button.setDisabled(busy)
-        self.common_params_button.setDisabled(busy)
-        self.reference_mode_combo.setDisabled(busy)
-        self.gaussian_check.setDisabled(busy)
-        self.peak_source_combo.setDisabled(busy)
-        self.peak_file_edit.setDisabled(busy)
-        self.select_peak_file_button.setDisabled(busy)
+        self.summary_open_project_btn.setDisabled(busy)
+        # export only available when there are results and not busy
+        self.export_button.setEnabled(not busy and not self.result_df.empty)
+        if busy:
+            self.inline_status_icon.setText("")
+            self.inline_status_text.setText(message)
+            self._set_inline_status("busy")
+            self.inline_action_hint.hide()
+            self.inline_retry_button.hide()
 
     def on_analysis_complete(self, result: object) -> None:
         self.result_df = result
@@ -486,6 +579,8 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         temperature_count = self.result_df["temperature"].nunique() if not self.result_df.empty else 0
         self.summary_label.setText(f"{len(self.curves)} 条m/z曲线 | {temperature_count} 个温度点")
         self.update_group_summary()
+        self._show_plot()  # reveal plot, hide empty state
+        self.export_button.setEnabled(True)
         self._show_inline_success(f"已完成分析，生成 {len(self.result_df)} 行温度扫描结果")
 
     def on_analysis_failed(self, message: str) -> None:
@@ -513,6 +608,7 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 (mz, self.curves[mz])
                 for mz in sorted(self.curves)
                 if self.curves[mz].get("curve_class", "unclassified") == group_key
+                and self.curve_matches_filter(mz, self.curves[mz])
             ]
             if not items:
                 continue
@@ -531,9 +627,26 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
             curve = self.curves[mz]
             if selected_group != "all" and curve.get("curve_class") != selected_group:
                 continue
+            if not self.curve_matches_filter(mz, curve):
+                continue
             item = QtWidgets.QTreeWidgetItem([self.curve_tree_label(mz, curve, include_group=True)])
             item.setData(0, QtCore.Qt.ItemDataRole.UserRole, mz)
             self.mz_list.addTopLevelItem(item)
+
+    def curve_matches_filter(self, mz: int, curve: dict) -> bool:
+        query = self.curve_filter_edit.text().strip().lower() if hasattr(self, "curve_filter_edit") else ""
+        if not query:
+            return True
+        haystack = " ".join(
+            str(value)
+            for value in (
+                mz,
+                curve.get("species", ""),
+                curve.get("curve_class", ""),
+                curve.get("curve_class_label", ""),
+            )
+        ).lower()
+        return query in haystack
 
     def curve_tree_label(self, mz: int, curve: dict, *, include_group: bool) -> str:
         label = curve.get("species") or ""
@@ -569,6 +682,8 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.curve_table.clear()
             self.curve_table.setRowCount(0)
             self.curve_table.setColumnCount(0)
+            self.current_curve_label.setText("未选择")
+            self.current_curve_metric_label.setText("调整筛选或重新生成曲线")
             if self.plot_widget is not None:
                 self.plot_widget.clear()
             return
@@ -591,6 +706,9 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
             }
         )
         self.set_dataframe(self.curve_table, curve_df)
+        class_label = curve.get("curve_class_label", "")
+        self.current_curve_label.setText(f"m/z {self.current_mz}")
+        self.current_curve_metric_label.setText(f"{class_label} | {len(curve['temperatures'])} 个温度点")
         self.update_plot(curve)
 
     def update_plot(self, curve: dict):
@@ -690,3 +808,10 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.result_df.to_excel(path, index=False)
         else:
             self.result_df.to_csv(path, index=False, encoding="utf-8-sig")
+        record_project_artifact(
+            self,
+            "temperature_scan_result_file",
+            path,
+            message="温度扫描结果已登记到项目管理",
+        )
+        QtWidgets.QMessageBox.information(self, "成功", "温度扫描结果已导出并登记到项目管理。")

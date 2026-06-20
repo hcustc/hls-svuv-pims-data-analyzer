@@ -62,6 +62,8 @@ except Exception:  # pragma: no cover - only used when optional plotting is unav
 from bl03u_masstool.frontends.pyqt_app.common.widgets import DataFrameTableMixin, combo_set_data
 
 class NormalizationSettingsWidget(QtWidgets.QWidget, DataFrameTableMixin):
+    settings_saved = QtCore.pyqtSignal()
+
     def __init__(self, settings: NormalizationSettings, calibration: Calibration, parent=None):
         super().__init__(parent)
         self.settings = settings
@@ -373,6 +375,7 @@ class NormalizationSettingsWidget(QtWidgets.QWidget, DataFrameTableMixin):
         calibration_path = save_calibration_config(self.calibration)
         peak_detection_path = save_peak_detection_config(self.peak_detection)
         self.status_label.setText(f"已保存: {normalization_path}；{calibration_path}；{peak_detection_path}")
+        self.settings_saved.emit()
 
     def compute_kr_factors(self):
         self.apply_to_settings()
