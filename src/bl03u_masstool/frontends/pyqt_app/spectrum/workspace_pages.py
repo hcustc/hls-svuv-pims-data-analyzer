@@ -550,20 +550,65 @@ class WorkspacePagesMixin:
     def _build_datasource_card(self, parent):
         self.datasource_card = QtWidgets.QFrame(parent)
         self.datasource_card.setObjectName("ProjectCard")
-        self.datasource_card.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Expanding,
-            QtWidgets.QSizePolicy.Policy.Fixed,
-        )
 
         card_layout = QVBoxLayout(self.datasource_card)
         card_layout.setContentsMargins(10, 8, 10, 10)
-        card_layout.setSpacing(10)
+        card_layout.setSpacing(12)
 
-        header = QtWidgets.QLabel("数据源路径", self.datasource_card)
-        header.setObjectName("ProjectTitle")
-        card_layout.addWidget(header)
+        # ── 导入状态卡片 ──
+        status_card = QtWidgets.QFrame(self.datasource_card)
+        status_card.setObjectName("ProjectCard")
+        status_layout = QVBoxLayout(status_card)
+        status_layout.setContentsMargins(10, 8, 10, 10)
+        status_layout.setSpacing(8)
+
+        status_header = QtWidgets.QLabel("导入状态", status_card)
+        status_header.setObjectName("ProjectTitle")
+        self.datasource_status_label = QtWidgets.QLabel("未初始化", status_card)
+        self.datasource_status_label.setObjectName("ProjectStatus")
+        self.datasource_status_label.setWordWrap(True)
+
+        status_layout.addWidget(status_header)
+        status_layout.addWidget(self.datasource_status_label)
+
+        # 数据源摘要表格
+        self.datasource_summary_table = QtWidgets.QTableWidget(0, 4, status_card)
+        self.datasource_summary_table.setHorizontalHeaderLabels(["数据源", "状态", "文件数", "修改时间"])
+        self.datasource_summary_table.verticalHeader().setVisible(False)
+        self.datasource_summary_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.datasource_summary_table.setMaximumHeight(150)
+        self.datasource_summary_table.setAlternatingRowColors(True)
+        self.datasource_summary_table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        self.datasource_summary_table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        self.datasource_summary_table.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        self.datasource_summary_table.horizontalHeader().setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        status_layout.addWidget(self.datasource_summary_table)
+
+        # 主操作按钮和导入提示
+        action_row = QHBoxLayout()
+        action_row.setContentsMargins(0, 0, 0, 0)
+        self.datasource_import_button = QPushButton("启动导入向导", status_card)
+        self.datasource_import_button.setFixedHeight(28)
+        self.datasource_import_button.setMinimumWidth(120)
+        self.datasource_import_button.clicked.connect(self.open_project_import_wizard)
+
+        self.datasource_hint_label = QtWidgets.QLabel("", status_card)
+        self.datasource_hint_label.setObjectName("ProjectHint")
+        self.datasource_hint_label.setWordWrap(True)
+
+        action_row.addWidget(self.datasource_import_button)
+        action_row.addWidget(self.datasource_hint_label, stretch=1)
+        status_layout.addLayout(action_row)
+
+        card_layout.addWidget(status_card)
+
+        # ── 详细配置卡片（现有的路径编辑功能）──
+        detail_header = QtWidgets.QLabel("数据源路径配置", self.datasource_card)
+        detail_header.setObjectName("ProjectTitle")
+        card_layout.addWidget(detail_header)
+
         hint = QtWidgets.QLabel(
-            '"读取当前路径"会从各工具页回填原始数据源；分析产物由上游工具导出后自动登记，也可在这里手动指定。',
+            '可在下方编辑数据源路径。"启动导入向导"会将原始数据复制到项目目录并自动回填路径；分析产物由上游工具导出后可手动指定。',
             self.datasource_card,
         )
         hint.setObjectName("ProjectHint")
@@ -971,10 +1016,97 @@ class WorkspacePagesMixin:
         validation_records = validate_all_data_sources(ps)
         validation_status = get_data_source_validation_status(ps)
 
-        # Update page state (will be fully implemented in step 3.2)
-        # For now, just ensure status is available for UI updates
+        # Store for reference
         self.current_data_source_status = validation_status
         self.current_validation_records = validation_records
+
+        # Check if project is initialized
+        root_exists = project_root(ps).exists()
+        if not root_exists:
+            # Project not initialized
+            if hasattr(self, "datasource_import_button"):
+                self.datasource_import_button.setEnabled(False)
+                self.datasource_import_button.setText("初始化项目后可导入")
+            if hasattr(self, "datasource_status_label"):
+                self.datasource_status_label.setText("❌ 未初始化 - 请先在'项目设置'页初始化项目")
+            if hasattr(self, "datasource_hint_label"):
+                self.datasource_hint_label.setText("")
+            if hasattr(self, "datasource_summary_table"):
+                self.datasource_summary_table.setRowCount(0)
+            return
+
+        # 更新状态标签
+        if hasattr(self, "datasource_status_label"):
+            if validation_status == DataSourceValidationStatus.UNCONFIGURED:
+                status_text = "⚠️ 未配置 - 还未指定任何数据源"
+            elif validation_status == DataSourceValidationStatus.PARTIAL:
+                status_text = "⏳ 部分完成 - 已导入部分数据源，还需完成其他项"
+            elif validation_status == DataSourceValidationStatus.INVALID:
+                status_text = "❌ 路径失效 - 某些已配置的路径不存在或不可读，请重新导入"
+            else:  # COMPLETE
+                status_text = "✅ 数据已就绪 - 所有必需数据源均已导入，可开始分析"
+            self.datasource_status_label.setText(status_text)
+
+        # 更新摘要表格
+        if hasattr(self, "datasource_summary_table"):
+            essential_sources = {"single_spectrum", "sum_spectrum", "temperature_scan", "pie_scan"}
+            self.datasource_summary_table.setRowCount(0)
+
+            for record in validation_records:
+                if record.source_key not in essential_sources:
+                    continue
+
+                row = self.datasource_summary_table.rowCount()
+                self.datasource_summary_table.insertRow(row)
+
+                # 数据源名称
+                name_item = QtWidgets.QTableWidgetItem(record.source_label)
+                self.datasource_summary_table.setItem(row, 0, name_item)
+
+                # 状态
+                if not record.path:
+                    status_text = "未配置"
+                    status_item = QtWidgets.QTableWidgetItem(status_text)
+                elif not record.is_valid:
+                    status_text = "⚠️ 失效"
+                    status_item = QtWidgets.QTableWidgetItem(status_text)
+                    status_item.setForeground(QtGui.QColor("red"))
+                else:
+                    status_text = "✓ 有效"
+                    status_item = QtWidgets.QTableWidgetItem(status_text)
+                    status_item.setForeground(QtGui.QColor("green"))
+                self.datasource_summary_table.setItem(row, 1, status_item)
+
+                # 文件数
+                file_count = str(record.file_count) if record.is_valid else "—"
+                self.datasource_summary_table.setItem(row, 2, QtWidgets.QTableWidgetItem(file_count))
+
+                # 修改时间
+                mtime_text = record.last_modified if record.last_modified else "—"
+                self.datasource_summary_table.setItem(row, 3, QtWidgets.QTableWidgetItem(mtime_text))
+
+        # 更新按钮状态和提示
+        if hasattr(self, "datasource_import_button"):
+            if validation_status == DataSourceValidationStatus.COMPLETE:
+                self.datasource_import_button.setText("更新导入数据")
+                self.datasource_import_button.setEnabled(True)
+            else:
+                self.datasource_import_button.setText("启动导入向导")
+                self.datasource_import_button.setEnabled(True)
+
+        if hasattr(self, "datasource_hint_label"):
+            # 计算统计信息
+            valid_records = [r for r in validation_records if r.is_valid]
+            invalid_records = [r for r in validation_records if r.path and not r.is_valid]
+            total_files = sum(r.file_count for r in valid_records)
+
+            if valid_records:
+                hint_text = f"已导入 {len(valid_records)} 个数据源，共 {total_files} 个文件"
+                if invalid_records:
+                    hint_text += f"；{len(invalid_records)} 个路径失效"
+                self.datasource_hint_label.setText(hint_text)
+            else:
+                self.datasource_hint_label.setText("")
 
     def _on_project_main_action_clicked(self) -> None:
         """Handle main action button click based on current project state"""
