@@ -11,6 +11,7 @@ from bl03u_masstool.core.normalization import load_normalization_settings
 from bl03u_masstool.core.project_lifecycle import (
     PROJECT_DIRECTORIES,
     PROJECT_SOURCE_SPECS,
+    ArtifactCategory,
     DataSourceValidationStatus,
     ProjectUIState,
     build_project_stage_statuses,
@@ -24,6 +25,7 @@ from bl03u_masstool.core.project_lifecycle import (
     next_project_stage,
     project_root,
     sanitize_project_slug,
+    scan_project_artifacts,
     validate_all_data_sources,
 )
 from bl03u_masstool.core.project_settings import ProjectSettings, ProjectSettingsManager
@@ -497,53 +499,90 @@ class WorkspacePagesMixin:
 
         card_layout = QVBoxLayout(self.artifact_manager_card)
         card_layout.setContentsMargins(10, 8, 10, 10)
-        card_layout.setSpacing(8)
+        card_layout.setSpacing(12)
 
-        header_row = QHBoxLayout()
-        header_row.setContentsMargins(0, 0, 0, 0)
-        title = QtWidgets.QLabel("项目文件树", self.artifact_manager_card)
-        title.setObjectName("ProjectTitle")
-        self.project_artifact_summary = QtWidgets.QLabel("", self.artifact_manager_card)
-        self.project_artifact_summary.setObjectName("ProjectHint")
-        self.project_artifact_summary.setWordWrap(True)
-        header_row.addWidget(title)
-        header_row.addWidget(self.project_artifact_summary, stretch=1)
-        card_layout.addLayout(header_row)
+        # ── 产物摘要卡片 ──
+        summary_card = QtWidgets.QFrame(self.artifact_manager_card)
+        summary_card.setObjectName("ProjectCard")
+        summary_layout = QVBoxLayout(summary_card)
+        summary_layout.setContentsMargins(10, 8, 10, 10)
+        summary_layout.setSpacing(8)
 
-        self.project_artifact_tree = QtWidgets.QTreeWidget(self.artifact_manager_card)
-        self.project_artifact_tree.setHeaderLabels(["文件/目录", "阶段", "大小", "修改时间"])
-        self.project_artifact_tree.setAlternatingRowColors(True)
-        self.project_artifact_tree.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
-        self.project_artifact_tree.header().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Stretch)
-        self.project_artifact_tree.header().setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
-        self.project_artifact_tree.header().setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
-        self.project_artifact_tree.header().setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
-        card_layout.addWidget(self.project_artifact_tree, stretch=1)
+        summary_header = QtWidgets.QLabel("产物摘要", summary_card)
+        summary_header.setObjectName("ProjectTitle")
+        self.artifact_summary_label = QtWidgets.QLabel("", summary_card)
+        self.artifact_summary_label.setObjectName("ProjectStatus")
+        self.artifact_summary_label.setWordWrap(True)
 
+        summary_layout.addWidget(summary_header)
+        summary_layout.addWidget(self.artifact_summary_label)
+        card_layout.addWidget(summary_card)
+
+        # ── 产物分类树 + 产物表格 ──
+        content_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+
+        # 左侧分类树
+        self.artifact_category_tree = QtWidgets.QTreeWidget(self.artifact_manager_card)
+        self.artifact_category_tree.setHeaderLabels(["分类"])
+        self.artifact_category_tree.setMaximumWidth(200)
+        self.artifact_category_tree.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        self.artifact_category_tree.itemSelectionChanged.connect(self.on_artifact_category_changed)
+        content_splitter.addWidget(self.artifact_category_tree)
+
+        # 右侧产物表格
+        self.artifact_product_table = QtWidgets.QTableWidget(self.artifact_manager_card)
+        self.artifact_product_table.setColumnCount(5)
+        self.artifact_product_table.setHorizontalHeaderLabels(["产物名称", "类型", "大小", "生成时间", "状态"])
+        self.artifact_product_table.setAlternatingRowColors(True)
+        self.artifact_product_table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        self.artifact_product_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.artifact_product_table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        self.artifact_product_table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        self.artifact_product_table.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        self.artifact_product_table.horizontalHeader().setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        self.artifact_product_table.horizontalHeader().setSectionResizeMode(4, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        content_splitter.addWidget(self.artifact_product_table)
+        content_splitter.setStretchFactor(0, 1)
+        content_splitter.setStretchFactor(1, 3)
+
+        card_layout.addWidget(content_splitter, stretch=1)
+
+        # ── 操作按钮栏 ──
         action_bar = QtWidgets.QWidget(self.artifact_manager_card)
         action_bar.setObjectName("ProjectActionBar")
         action_layout = QHBoxLayout(action_bar)
         action_layout.setContentsMargins(8, 6, 8, 6)
         action_layout.setSpacing(6)
-        self.project_refresh_artifacts_button = QPushButton("刷新", action_bar)
-        self.project_open_selected_button = QPushButton("打开所选", action_bar)
-        self.project_open_root_button = QPushButton("打开项目目录", action_bar)
-        self.project_refresh_artifacts_button.setObjectName("BrowseButton")
-        self.project_open_selected_button.setObjectName("BrowseButton")
-        self.project_open_root_button.setObjectName("BrowseButton")
+
+        self.artifact_preview_button = QPushButton("预览", action_bar)
+        self.artifact_open_dir_button = QPushButton("打开目录", action_bar)
+        self.artifact_metadata_button = QPushButton("查看元数据", action_bar)
+        self.artifact_snapshot_button = QPushButton("创建项目快照", action_bar)
+        self.artifact_export_button = QPushButton("导出项目", action_bar)
+        self.artifact_refresh_button = QPushButton("刷新", action_bar)
+
         for button in (
-            self.project_refresh_artifacts_button,
-            self.project_open_selected_button,
-            self.project_open_root_button,
+            self.artifact_preview_button,
+            self.artifact_open_dir_button,
+            self.artifact_metadata_button,
+            self.artifact_snapshot_button,
+            self.artifact_export_button,
+            self.artifact_refresh_button,
         ):
             button.setFixedHeight(28)
+            button.setObjectName("BrowseButton")
             action_layout.addWidget(button)
+
         action_layout.addStretch(1)
         card_layout.addWidget(action_bar)
 
-        self.project_refresh_artifacts_button.clicked.connect(self.refresh_project_lifecycle)
-        self.project_open_selected_button.clicked.connect(self.open_selected_project_artifact)
-        self.project_open_root_button.clicked.connect(self.open_project_root_folder)
+        # 连接按钮信号
+        self.artifact_preview_button.clicked.connect(self.preview_selected_artifact)
+        self.artifact_open_dir_button.clicked.connect(self.open_artifact_directory)
+        self.artifact_metadata_button.clicked.connect(self.show_artifact_metadata)
+        self.artifact_snapshot_button.clicked.connect(self.create_artifact_snapshot)
+        self.artifact_export_button.clicked.connect(self.export_project_artifacts)
+        self.artifact_refresh_button.clicked.connect(self.refresh_project_artifacts_page)
 
     # ── Tab 2: Data Sources ──────────────────────────────────────────────
 
@@ -629,12 +668,6 @@ class WorkspacePagesMixin:
         self.project_pics_database_edit.setPlaceholderText("选择 species_database.sqlite")
         self.project_manual_peak_edit = QLineEdit(self.datasource_card)
         self.project_manual_peak_edit.setPlaceholderText("选择 yaml/csv/xlsx 卡峰文件")
-        self.project_temperature_result_edit = QLineEdit(self.datasource_card)
-        self.project_temperature_result_edit.setPlaceholderText("温度扫描导出的 xlsx/csv 结果")
-        self.project_pie_result_edit = QLineEdit(self.datasource_card)
-        self.project_pie_result_edit.setPlaceholderText("PIE拟合导出的鉴定结果")
-        self.project_mole_fraction_result_edit = QLineEdit(self.datasource_card)
-        self.project_mole_fraction_result_edit.setPlaceholderText("摩尔分数导出的结果")
 
         def _browse_btn(text="选择"):
             b = QPushButton(text, self.datasource_card)
@@ -663,9 +696,6 @@ class WorkspacePagesMixin:
         self.project_sample_info_button = _browse_btn()
         self.project_database_button = _browse_btn()
         self.project_manual_peak_button = _browse_btn()
-        self.project_temperature_result_button = _browse_btn()
-        self.project_pie_result_button = _browse_btn()
-        self.project_mole_fraction_result_button = _browse_btn()
 
         workbench_group, workbench_layout = _path_group("质谱工作台")
         _add_path_row(workbench_layout, 0, "单谱文件", self.project_single_file_edit, self.project_single_file_button)
@@ -680,11 +710,6 @@ class WorkspacePagesMixin:
         _add_path_row(analysis_layout, 4, "手动卡峰文件", self.project_manual_peak_edit, self.project_manual_peak_button)
         card_layout.addWidget(analysis_group)
 
-        artifact_group, artifact_layout = _path_group("分析产物")
-        _add_path_row(artifact_layout, 0, "温度扫描结果", self.project_temperature_result_edit, self.project_temperature_result_button)
-        _add_path_row(artifact_layout, 1, "PIE鉴定结果", self.project_pie_result_edit, self.project_pie_result_button)
-        _add_path_row(artifact_layout, 2, "摩尔分数结果", self.project_mole_fraction_result_edit, self.project_mole_fraction_result_button)
-        card_layout.addWidget(artifact_group)
 
         self.project_single_file_button.clicked.connect(self.select_project_single_file)
         self.project_sum_folder_button.clicked.connect(
@@ -699,28 +724,6 @@ class WorkspacePagesMixin:
         self.project_sample_info_button.clicked.connect(self.select_project_sample_info)
         self.project_database_button.clicked.connect(self.select_project_database)
         self.project_manual_peak_button.clicked.connect(self.select_project_manual_peak)
-        self.project_temperature_result_button.clicked.connect(
-            lambda: self.select_project_result_file(
-                self.project_temperature_result_edit,
-                "选择温度扫描结果文件",
-                "Result Files (*.xlsx *.csv);;所有文件 (*)",
-            )
-        )
-        self.project_pie_result_button.clicked.connect(
-            lambda: self.select_project_result_file(
-                self.project_pie_result_edit,
-                "选择PIE鉴定结果文件",
-                "Result Files (*.xlsx *.csv);;所有文件 (*)",
-            )
-        )
-        self.project_mole_fraction_result_button.clicked.connect(
-            lambda: self.select_project_result_file(
-                self.project_mole_fraction_result_edit,
-                "选择摩尔分数结果文件",
-                "Result Files (*.xlsx *.csv);;所有文件 (*)",
-            )
-        )
-
         # Auto-save and push project paths when edited
         self.project_single_file_edit.editingFinished.connect(self._auto_save_datasource)
         self.project_sum_folder_edit.editingFinished.connect(self._auto_save_datasource)
@@ -729,9 +732,6 @@ class WorkspacePagesMixin:
         self.project_sample_info_edit.editingFinished.connect(self._auto_save_datasource)
         self.project_pics_database_edit.editingFinished.connect(self._auto_save_datasource)
         self.project_manual_peak_edit.editingFinished.connect(self._auto_save_datasource)
-        self.project_temperature_result_edit.editingFinished.connect(self._auto_save_datasource)
-        self.project_pie_result_edit.editingFinished.connect(self._auto_save_datasource)
-        self.project_mole_fraction_result_edit.editingFinished.connect(self._auto_save_datasource)
 
     # ── Tab 4: Function Params ───────────────────────────────────────────
 
@@ -923,9 +923,6 @@ class WorkspacePagesMixin:
         self.project_sample_info_edit.setText(ps.sample_info_file)
         self.project_pics_database_edit.setText(ps.pics_database_path)
         self.project_manual_peak_edit.setText(ps.manual_peak_file)
-        self.project_temperature_result_edit.setText(ps.temperature_scan_result_file)
-        self.project_pie_result_edit.setText(ps.pie_identification_result_file)
-        self.project_mole_fraction_result_edit.setText(ps.mole_fraction_result_file)
 
     def _collect_project_settings_from_ui(self) -> ProjectSettings:
         """Build a ProjectSettings from all UI fields (does not save)."""
@@ -941,9 +938,6 @@ class WorkspacePagesMixin:
         ps.sample_info_file = self.project_sample_info_edit.text().strip()
         ps.pics_database_path = self.project_pics_database_edit.text().strip()
         ps.manual_peak_file = self.project_manual_peak_edit.text().strip()
-        ps.temperature_scan_result_file = self.project_temperature_result_edit.text().strip()
-        ps.pie_identification_result_file = self.project_pie_result_edit.text().strip()
-        ps.mole_fraction_result_file = self.project_mole_fraction_result_edit.text().strip()
         return ps
 
     def load_project_settings(self) -> None:
@@ -1436,47 +1430,8 @@ class WorkspacePagesMixin:
                     if col == 1:
                         item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
                     self.project_stage_table.setItem(row, col, item)
-        if hasattr(self, "project_artifact_tree"):
-            self._refresh_project_artifacts_tree(ps)
-
-    def _refresh_project_artifacts_tree(self, ps: ProjectSettings) -> None:
-        self.project_artifact_tree.clear()
-        root_path = project_root(ps)
-        root_item = QtWidgets.QTreeWidgetItem([root_path.name, "项目根目录", "", str(root_path)])
-        root_item.setData(0, QtCore.Qt.ItemDataRole.UserRole, str(root_path))
-        self.project_artifact_tree.addTopLevelItem(root_item)
-
-        records = collect_project_files(ps)
-        records_by_section: dict[str, list] = {}
-        for record in records:
-            records_by_section.setdefault(record.section_key, []).append(record)
-        for spec in PROJECT_DIRECTORIES:
-            section_path = root_path / spec.relative_path
-            section_records = records_by_section.get(spec.key, [])
-            section_item = QtWidgets.QTreeWidgetItem(
-                [f"{spec.label} ({len(section_records)})", spec.relative_path, "", spec.purpose]
-            )
-            section_item.setData(0, QtCore.Qt.ItemDataRole.UserRole, str(section_path))
-            root_item.addChild(section_item)
-            for record in section_records:
-                name = record.relative_path
-                if record.relative_path.startswith(f"{spec.relative_path}/"):
-                    name = record.relative_path[len(spec.relative_path) + 1 :]
-                if record.missing:
-                    name = f"{name} (缺失)"
-                elif record.registered:
-                    name = f"{name} [已登记]"
-                item = QtWidgets.QTreeWidgetItem(
-                    [name, record.section_label, self._format_file_size(record.size_bytes), record.modified_at]
-                )
-                item.setToolTip(0, str(record.path))
-                item.setData(0, QtCore.Qt.ItemDataRole.UserRole, str(record.path))
-                section_item.addChild(item)
-        root_item.setExpanded(True)
-        for index in range(root_item.childCount()):
-            root_item.child(index).setExpanded(True)
-        total_size = sum(record.size_bytes for record in records if not record.missing)
-        self.project_artifact_summary.setText(f"{len(records)} 个登记/扫描到的项目条目，合计 {self._format_file_size(total_size)}")
+        if hasattr(self, "artifact_category_tree"):
+            self.refresh_project_artifacts_page(ps)
 
     def _format_file_size(self, size_bytes: int) -> str:
         size = float(size_bytes)
@@ -1486,24 +1441,224 @@ class WorkspacePagesMixin:
             size /= 1024
         return f"{size_bytes} B"
 
-    def open_selected_project_artifact(self) -> None:
-        item = self.project_artifact_tree.currentItem() if hasattr(self, "project_artifact_tree") else None
-        if item is None:
-            return
-        path_text = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
-        if not path_text:
-            return
-        path = Path(path_text)
-        if not path.exists():
-            QtWidgets.QMessageBox.warning(self, "文件不存在", str(path))
-            return
-        QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(path)))
-
     def open_project_root_folder(self) -> None:
         ps = self.project_settings_manager.get()
         root = project_root(ps)
         root.mkdir(parents=True, exist_ok=True)
         QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(root)))
+
+    def refresh_project_artifacts_page(self, ps: ProjectSettings | None = None) -> None:
+        """刷新产物管理页的所有内容"""
+        if ps is None:
+            ps = self.project_settings_manager.get()
+
+        if not hasattr(self, "artifact_category_tree"):
+            return
+
+        # 扫描所有产物
+        artifacts = scan_project_artifacts(ps)
+
+        # 统计产物信息
+        total_artifacts = len(artifacts)
+        valid_count = sum(1 for a in artifacts if a.status == "有效")
+        missing_count = sum(1 for a in artifacts if a.status == "缺失")
+        incomplete_count = sum(1 for a in artifacts if a.status == "不完整")
+        total_size = sum(a.size_bytes for a in artifacts if a.status == "有效")
+
+        # 更新摘要标签
+        summary_text = f"已登记 {total_artifacts} 个产物"
+        if total_artifacts > 0:
+            summary_text += f" | ✓ 有效 {valid_count}"
+            if missing_count > 0:
+                summary_text += f" | ⚠️ 缺失 {missing_count}"
+            if incomplete_count > 0:
+                summary_text += f" | ❌ 不完整 {incomplete_count}"
+            summary_text += f" | 总大小 {self._format_file_size(total_size)}"
+        self.artifact_summary_label.setText(summary_text)
+
+        # 重建分类树
+        self.artifact_category_tree.clear()
+        category_items: dict[str, QtWidgets.QTreeWidgetItem] = {}
+
+        for category in ArtifactCategory:
+            item = QtWidgets.QTreeWidgetItem([category.label])
+            item.setData(0, QtCore.Qt.ItemDataRole.UserRole, category.key)
+            self.artifact_category_tree.addTopLevelItem(item)
+            category_items[category.key] = item
+
+        # 按分类分组产物
+        artifacts_by_category: dict[str, list] = {}
+        for artifact in artifacts:
+            artifacts_by_category.setdefault(artifact.category, []).append(artifact)
+
+        # 存储产物到树的用户数据
+        self._artifacts_data = artifacts
+        self._artifacts_by_category = artifacts_by_category
+
+        # 在每个分类下显示产物计数
+        for category_key, category_items_list in artifacts_by_category.items():
+            if category_key in category_items:
+                count = len(category_items_list)
+                item = category_items[category_key]
+                text = item.text(0)
+                if " (" not in text:
+                    item.setText(0, f"{text} ({count})")
+
+    def on_artifact_category_changed(self) -> None:
+        """当选择分类时更新产物表格"""
+        selected_items = self.artifact_category_tree.selectedItems()
+        if not selected_items:
+            self.artifact_product_table.setRowCount(0)
+            return
+
+        selected_item = selected_items[0]
+        category_key = selected_item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+
+        if not hasattr(self, "_artifacts_by_category"):
+            return
+
+        artifacts = self._artifacts_by_category.get(category_key, [])
+
+        # 填充表格
+        self.artifact_product_table.setRowCount(len(artifacts))
+        for row, artifact in enumerate(artifacts):
+            artifact_name = Path(artifact.path).name
+
+            # 产物名称
+            name_item = QtWidgets.QTableWidgetItem(artifact_name)
+            name_item.setToolTip(artifact.path)
+            name_item.setData(QtCore.Qt.ItemDataRole.UserRole, artifact.path)
+            self.artifact_product_table.setItem(row, 0, name_item)
+
+            # 产物类型
+            type_item = QtWidgets.QTableWidgetItem(artifact.artifact_type)
+            self.artifact_product_table.setItem(row, 1, type_item)
+
+            # 文件大小
+            size_text = self._format_file_size(artifact.size_bytes) if artifact.size_bytes > 0 else "—"
+            size_item = QtWidgets.QTableWidgetItem(size_text)
+            size_item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
+            self.artifact_product_table.setItem(row, 2, size_item)
+
+            # 生成时间
+            time_item = QtWidgets.QTableWidgetItem(artifact.generation_time[:10] if artifact.generation_time else "—")
+            self.artifact_product_table.setItem(row, 3, time_item)
+
+            # 状态
+            status_item = QtWidgets.QTableWidgetItem(artifact.status)
+            if artifact.status == "有效":
+                status_item.setForeground(QtGui.QColor("green"))
+            elif artifact.status == "缺失":
+                status_item.setForeground(QtGui.QColor("red"))
+            elif artifact.status == "不完整":
+                status_item.setForeground(QtGui.QColor("orange"))
+            self.artifact_product_table.setItem(row, 4, status_item)
+
+    def preview_selected_artifact(self) -> None:
+        """预览选定的产物"""
+        selected = self.artifact_product_table.selectedIndexes()
+        if not selected:
+            return
+
+        row = selected[0].row()
+        artifact_path = self.artifact_product_table.item(row, 0).data(QtCore.Qt.ItemDataRole.UserRole)
+        if not artifact_path:
+            return
+
+        path = Path(artifact_path)
+        if path.is_file() and path.suffix.lower() in (".xlsx", ".csv"):
+            QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(path)))
+        else:
+            QtWidgets.QMessageBox.information(self, "提示", "只能预览 XLSX 和 CSV 文件")
+
+    def open_artifact_directory(self) -> None:
+        """打开产物所在目录"""
+        selected = self.artifact_product_table.selectedIndexes()
+        if not selected:
+            return
+
+        row = selected[0].row()
+        artifact_path = self.artifact_product_table.item(row, 0).data(QtCore.Qt.ItemDataRole.UserRole)
+        if not artifact_path:
+            return
+
+        path = Path(artifact_path).parent
+        QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(path)))
+
+    def show_artifact_metadata(self) -> None:
+        """显示产物的元数据"""
+        selected = self.artifact_product_table.selectedIndexes()
+        if not selected:
+            return
+
+        row = selected[0].row()
+        artifact_path = self.artifact_product_table.item(row, 0).data(QtCore.Qt.ItemDataRole.UserRole)
+        if not artifact_path or not hasattr(self, "_artifacts_data"):
+            return
+
+        # 找到对应的产物
+        artifact = None
+        for a in self._artifacts_data:
+            if a.path == artifact_path:
+                artifact = a
+                break
+
+        if not artifact:
+            return
+
+        metadata_text = (
+            f"产物类型: {artifact.artifact_type}\n"
+            f"分类: {artifact.category}\n"
+            f"路径: {artifact.path}\n"
+            f"大小: {self._format_file_size(artifact.size_bytes)}\n"
+            f"生成时间: {artifact.generation_time}\n"
+            f"来源模块: {artifact.source_module}\n"
+            f"状态: {artifact.status}\n"
+            f"详情: {artifact.detail}"
+        )
+
+        QtWidgets.QMessageBox.information(self, "产物元数据", metadata_text)
+
+    def create_artifact_snapshot(self) -> None:
+        """创建项目快照"""
+        ps = self.project_settings_manager.get()
+
+        # 弹出输入对话框获取快照备注
+        note, ok = QtWidgets.QInputDialog.getText(
+            self, "创建项目快照", "请输入快照备注（可选）："
+        )
+
+        if not ok:
+            return
+
+        try:
+            snapshot_path = create_project_snapshot(ps, note)
+            self.statusbar.showMessage(f"快照已创建: {snapshot_path.name}", 4000)
+            self.refresh_project_artifacts_page(ps)
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "创建快照失败", f"错误: {str(e)}")
+
+    def export_project_artifacts(self) -> None:
+        """导出项目"""
+        ps = self.project_settings_manager.get()
+
+        # 弹出文件保存对话框
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "导出项目",
+            f"{sanitize_project_slug(ps.project_name or ps.system or 'project')}_export.zip",
+            "ZIP 档案 (*.zip);;所有文件 (*)",
+        )
+
+        if not file_path:
+            return
+
+        try:
+            export_path = export_project_archive(ps, file_path)
+            QtWidgets.QMessageBox.information(self, "导出成功", f"项目已导出到:\n{export_path}")
+            self.refresh_project_artifacts_page(ps)
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "导出失败", f"错误: {str(e)}")
 
     def update_project_title(self) -> None:
         project_name = self.project_name_edit.text().strip()
