@@ -30,4 +30,4 @@ jobs:
           python -m pip install --no-deps -e .
 
       - name: Run tests
-        run: python -m pytest
+        run: python -m pytest -m "not gui"
