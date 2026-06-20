@@ -47,6 +47,9 @@ def test_pics_import_widget_initializes(qapp):
     try:
         assert widget is not None
         buttons = widget.findChildren(QtWidgets.QPushButton)
-        assert any("导入" in button.text() for button in buttons)
+        assert any("选择" in button.text() and "文件" in button.text() for button in buttons)
+        # Check that preview table exists
+        tables = widget.findChildren(QtWidgets.QTableWidget)
+        assert len(tables) > 0
     finally:
         widget.deleteLater()
