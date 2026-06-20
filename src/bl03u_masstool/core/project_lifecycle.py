@@ -116,6 +116,43 @@ class ProjectFileRecord:
     missing: bool = False
 
 
+class ArtifactStatus(Enum):
+    """产物有效性状态枚举"""
+    VALID = "有效"
+    MISSING = "缺失"
+    EXPIRED = "已过期"
+    INCOMPLETE = "不完整"
+
+
+class ArtifactCategory(Enum):
+    """产物分类枚举"""
+    INTERMEDIATE = ("intermediate", "中间结果", "spectrum_analysis")  # 寻峰、卡峰范围、高斯拟合
+    TEMPERATURE = ("temperature_scan", "温度扫描", "temperature_scan")
+    PIE = ("pie", "PIE拟合", "pie_analysis")
+    MOLE_FRACTION = ("mole_fraction", "摩尔分数", "mole_fraction")
+    PICS = ("pics", "PICS数据库", "final_report")
+    REPORTS = ("reports", "综合报告", "final_report")
+    SNAPSHOTS = ("snapshots", "版本快照", "versions")
+
+    def __init__(self, key: str, label: str, directory_key: str):
+        self.key = key
+        self.label = label
+        self.directory_key = directory_key
+
+
+@dataclass(frozen=True)
+class ArtifactRecord:
+    """单个产物的元数据记录"""
+    artifact_type: str  # 产物类型（如 temperature_scan_result, pie_identification_result）
+    category: str  # 分类 key (对应 ArtifactCategory)
+    path: str  # 产物绝对路径
+    generation_time: str  # ISO 8601 格式生成时间
+    size_bytes: int  # 文件大小（bytes）
+    source_module: str  # 生成模块（如 TemperatureModule, PIEModule）
+    status: str  # 有效性状态（valid/missing/expired/incomplete）
+    detail: str = ""  # 状态详情说明
+
+
 PROJECT_DIRECTORIES: tuple[ProjectDirectorySpec, ...] = (
     ProjectDirectorySpec("raw_data", "原始输入", "raw_data", "原始谱图、样品信息和导入记录"),
     ProjectDirectorySpec("calibration", "标定", "calibration", "定标点、定标参数和标定结果"),
@@ -711,3 +748,86 @@ def get_project_ui_state(settings: ProjectSettings) -> ProjectUIState:
         return ProjectUIState.ANALYSIS_COMPLETE
 
     return ProjectUIState.ANALYSIS_IN_PROGRESS
+
+
+def scan_project_artifacts(settings: ProjectSettings) -> list[ArtifactRecord]:
+    """扫描项目的所有产物并返回记录"""
+    records: list[ArtifactRecord] = []
+    root = project_root(settings)
+
+    # 定义每个产物类型与其相关字段的映射
+    artifact_mappings = [
+        ("temperature_scan_result", "temperature_scan", "温度扫描", "TemperatureModule", settings.temperature_scan_result_file),
+        ("pie_identification_result", "pie", "PIE鉴定", "PIEModule", settings.pie_identification_result_file),
+        ("mole_fraction_result", "mole_fraction", "摩尔分数", "MoleFractionModule", settings.mole_fraction_result_file),
+        ("manual_peak_file", "intermediate", "手动卡峰", "SpectrumModule", settings.manual_peak_file),
+    ]
+
+    for artifact_type, category_key, label, source_module, path_str in artifact_mappings:
+        if not path_str:
+            continue
+
+        path = Path(path_str).expanduser()
+        try:
+            if path.exists():
+                stat = path.stat()
+                mtime = datetime.fromtimestamp(stat.st_mtime)
+                generation_time = mtime.isoformat()
+                size = stat.st_size
+                status = ArtifactStatus.VALID.value
+                detail = ""
+            else:
+                generation_time = ""
+                size = 0
+                status = ArtifactStatus.MISSING.value
+                detail = "文件不存在或已删除"
+
+            records.append(
+                ArtifactRecord(
+                    artifact_type=artifact_type,
+                    category=category_key,
+                    path=str(path),
+                    generation_time=generation_time,
+                    size_bytes=size,
+                    source_module=source_module,
+                    status=status,
+                    detail=detail,
+                )
+            )
+        except Exception as e:
+            records.append(
+                ArtifactRecord(
+                    artifact_type=artifact_type,
+                    category=category_key,
+                    path=str(path),
+                    generation_time="",
+                    size_bytes=0,
+                    source_module=source_module,
+                    status=ArtifactStatus.INCOMPLETE.value,
+                    detail=f"读取失败: {str(e)[:50]}",
+                )
+            )
+
+    # 扫描版本快照目录
+    snapshots_dir = root / "versions"
+    if snapshots_dir.exists():
+        for snapshot_file in sorted(snapshots_dir.glob("*.zip"), key=lambda p: p.stat().st_mtime, reverse=True):
+            try:
+                stat = snapshot_file.stat()
+                mtime = datetime.fromtimestamp(stat.st_mtime)
+                records.append(
+                    ArtifactRecord(
+                        artifact_type="snapshot",
+                        category="snapshots",
+                        path=str(snapshot_file),
+                        generation_time=mtime.isoformat(),
+                        size_bytes=stat.st_size,
+                        source_module="ProjectManager",
+                        status=ArtifactStatus.VALID.value,
+                        detail="项目快照",
+                    )
+                )
+            except Exception as e:
+                pass
+
+    return records
