@@ -284,7 +284,21 @@ def ensure_project_structure(settings: ProjectSettings) -> dict[str, Path]:
         path.mkdir(parents=True, exist_ok=True)
         directories[spec.key] = path
     _write_project_readme(settings)
+    _write_project_marker(settings)
     return directories
+
+
+def _write_project_marker(settings: ProjectSettings) -> Path:
+    """Write project initialization marker file to project root."""
+    root = project_root(settings)
+    marker_path = root / ".bl03u_project"
+    if not marker_path.exists():
+        marker_content = {
+            "initialized_at": utc_now_iso(),
+            "version": "0.2.0",
+        }
+        marker_path.write_text(yaml.dump(marker_content, allow_unicode=True, default_flow_style=False))
+    return marker_path
 
 
 def _write_project_readme(settings: ProjectSettings) -> Path:
@@ -322,18 +336,63 @@ def _unique_destination(path: Path) -> Path:
 
 def import_project_source(settings: ProjectSettings, source_path: str | Path, source_key: str) -> ProjectImportResult:
     spec = PROJECT_SOURCE_SPECS[source_key]
-    source = Path(source_path).expanduser()
+    source = Path(source_path).expanduser().resolve()
     if not source.exists():
         raise FileNotFoundError(source)
 
     ensure_project_structure(settings)
+    root = project_root(settings).resolve()
+
+    # Safety check: prevent copying directory into itself or its subdirectories
+    try:
+        # Check if destination would be inside source
+        target_dir = project_directory(settings, spec.directory_key) / spec.subdirectory
+        target_dir = target_dir.resolve()
+
+        # If source is a directory, ensure target is not inside it
+        if source.is_dir():
+            try:
+                target_dir.relative_to(source)
+                # If we can compute relative_to without error, target IS inside source - FAIL
+                raise ValueError(
+                    f"Cannot import '{source.name}' to '{target_dir}': destination is inside source directory. "
+                    f"This would create a recursive copy. Please select a different source or destination."
+                )
+            except ValueError as e:
+                if "not in the same drive" not in str(e) and "does not start with" not in str(e):
+                    # Re-raise our custom error
+                    if "Cannot import" in str(e):
+                        raise
+                # If relative_to fails with a path error, it's safe (target NOT inside source)
+                pass
+
+        # Check if source is already inside the project directory
+        if source != root:
+            try:
+                source.relative_to(root)
+                # If source is inside project root, allow it (internal reorganization)
+            except ValueError:
+                # Source is outside project, which is fine
+                pass
+
+    except ValueError as e:
+        if "Cannot import" in str(e):
+            raise
+        # Other relative_to errors are acceptable
+        pass
+
     target_dir = project_directory(settings, spec.directory_key) / spec.subdirectory
     target_dir.mkdir(parents=True, exist_ok=True)
     destination = _unique_destination(target_dir / source.name)
-    if source.is_dir():
-        shutil.copytree(source, destination)
-    else:
-        shutil.copy2(source, destination)
+
+    try:
+        if source.is_dir():
+            shutil.copytree(source, destination)
+        else:
+            shutil.copy2(source, destination)
+    except Exception as e:
+        raise RuntimeError(f"Failed to import '{source.name}': {str(e)}")
+
     setattr(settings, spec.field_name, str(destination))
     return ProjectImportResult(source=source, destination=destination, field_name=spec.field_name, label=spec.label)
 
@@ -378,11 +437,14 @@ def next_project_stage(settings: ProjectSettings) -> ProjectStageStatus | None:
 def _stage_completion(settings: ProjectSettings, stage: ProjectStageSpec) -> tuple[bool, bool, str]:
     if stage.key == "project_setup":
         has_identity = bool(settings.project_name.strip() or settings.system.strip())
-        root_exists = project_root(settings).exists()
-        if has_identity and root_exists:
-            return True, False, f"项目目录：{project_root(settings)}"
+        root = project_root(settings)
+        marker_exists = (root / ".bl03u_project").exists()
+        standard_dirs_exist = all((root / spec.relative_path).exists() for spec in PROJECT_DIRECTORIES)
+
+        if has_identity and marker_exists and standard_dirs_exist:
+            return True, False, f"项目目录：{root}"
         if has_identity:
-            return False, False, "项目信息已填写，尚未初始化目录"
+            return False, False, "项目信息已填写，尚未初始化目录结构"
         return False, False, "缺少项目名或实验体系"
 
     registered_fields = [field for field in stage.required_fields if _field_has_value(settings, field)]
@@ -550,6 +612,9 @@ def export_project_archive(settings: ProjectSettings, destination: str | Path | 
         )
         for path in sorted(root.rglob("*")):
             if not path.is_file() or path.resolve() == destination_path.resolve():
+                continue
+            # Exclude existing snapshots to prevent recursive packaging
+            if path.parent.name == "versions" and path.suffix == ".zip":
                 continue
             archive.write(path, f"{root.name}/{path.relative_to(root)}")
         for field_name, value in _registered_artifact_fields(settings).items():
@@ -751,9 +816,12 @@ def get_project_ui_state(settings: ProjectSettings) -> ProjectUIState:
 
 
 def scan_project_artifacts(settings: ProjectSettings) -> list[ArtifactRecord]:
-    """扫描项目的所有产物并返回记录"""
+    """扫描项目的所有产物并返回记录，包括已登记和目录内未登记文件"""
     records: list[ArtifactRecord] = []
     root = project_root(settings)
+
+    # Track which files we've already recorded (by resolved path) to avoid duplicates
+    recorded_paths: set[Path] = set()
 
     # 定义每个产物类型与其相关字段的映射
     artifact_mappings = [
@@ -769,6 +837,9 @@ def scan_project_artifacts(settings: ProjectSettings) -> list[ArtifactRecord]:
 
         path = Path(path_str).expanduser()
         try:
+            resolved_path = path.resolve()
+            recorded_paths.add(resolved_path)
+
             if path.exists():
                 stat = path.stat()
                 mtime = datetime.fromtimestamp(stat.st_mtime)
@@ -807,6 +878,60 @@ def scan_project_artifacts(settings: ProjectSettings) -> list[ArtifactRecord]:
                     detail=f"读取失败: {str(e)[:50]}",
                 )
             )
+
+    # 扫描项目目录内的所有文件，补充未登记的产物
+    category_mapping = {
+        "spectrum_analysis": "intermediate",
+        "temperature_scan": "temperature_scan",
+        "pie_analysis": "pie",
+        "mole_fraction": "mole_fraction",
+        "final_report": "reports",
+    }
+
+    for spec in PROJECT_DIRECTORIES:
+        if spec.key == "versions":
+            # Already handled below
+            continue
+
+        category_key = category_mapping.get(spec.key, spec.key)
+        section_path = root / spec.relative_path
+
+        if not section_path.exists():
+            continue
+
+        try:
+            for file_path in sorted(section_path.rglob("*")):
+                if not file_path.is_file():
+                    continue
+
+                # Skip if already recorded as registered artifact
+                try:
+                    if file_path.resolve() in recorded_paths:
+                        continue
+                except Exception:
+                    pass
+
+                try:
+                    stat = file_path.stat()
+                    mtime = datetime.fromtimestamp(stat.st_mtime)
+                    generation_time = mtime.isoformat()
+
+                    records.append(
+                        ArtifactRecord(
+                            artifact_type=f"{spec.key}_unregistered",
+                            category=category_key,
+                            path=str(file_path),
+                            generation_time=generation_time,
+                            size_bytes=stat.st_size,
+                            source_module=spec.label,
+                            status=ArtifactStatus.VALID.value,
+                            detail="项目目录内文件（未登记）",
+                        )
+                    )
+                except Exception as e:
+                    pass
+        except Exception:
+            pass
 
     # 扫描版本快照目录
     snapshots_dir = root / "versions"
