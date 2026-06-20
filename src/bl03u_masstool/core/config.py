@@ -76,14 +76,13 @@ def app_path(section: str, key: str, fallback: str) -> Path:
     return project_path(value)
 
 
-def species_database_path(*, build_if_missing: bool = True) -> Path:
+def species_database_path() -> Path:
     app = load_app_config()
     value = app.get("database", {}).get("pics", "database/species_database.sqlite")
     path = ensure_user_copy(value)
-    if build_if_missing and not path.exists():
-        from .species_seed import build_species_database_from_seed
+    from .db_migration import ensure_database_up_to_date
 
-        build_species_database_from_seed(path)
+    ensure_database_up_to_date(path)
     return path
 
 

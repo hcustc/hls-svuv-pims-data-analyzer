@@ -1,3 +1,4 @@
+import csv
 import sqlite3
 
 import numpy as np
@@ -7,6 +8,7 @@ import pytest
 from bl03u_masstool.core.calibration import Calibration, fit_quadratic_calibration
 from bl03u_masstool.core.cwt_peak_detection import CwtPeakDetectionConfig, detect_peaks_cwt
 from bl03u_masstool.core.config import load_calibration_config, load_calibration_points, species_database_path
+from bl03u_masstool.core.db_migration import SCHEMA_VERSION, ensure_database_up_to_date, get_user_version
 from bl03u_masstool.core.integration import integrate_peak, load_peak_config
 from bl03u_masstool.core.isotope import (
     calculate_isotope_distribution,
@@ -34,6 +36,7 @@ from bl03u_masstool.core.pie_analysis import (
     load_species_database,
     save_species_database_sqlite,
 )
+from bl03u_masstool.core.species_seed import build_species_database_from_seed, default_species_seed_path
 from bl03u_masstool.core.temperature_scan import (
     analyze_temperature_folder,
     build_temperature_curves,
@@ -59,6 +62,57 @@ def test_species_sqlite_roundtrip(tmp_path):
     assert index == {18: [0]}
     assert loaded[0]["species"] == "Water"
     assert [round(value, 6) for value in loaded[0]["cross_sections"].tolist()] == [0.0, 1.2, 2.4]
+
+
+def test_default_species_seed_rebuilds_complete_sqlite_database(tmp_path):
+    seed_path = default_species_seed_path()
+    with seed_path.open("r", encoding="utf-8", newline="") as handle:
+        seed_rows = list(csv.DictReader(handle))
+    expected_species = len({int(row["species_id"]) for row in seed_rows})
+
+    sqlite_path = build_species_database_from_seed(tmp_path / "species_database.sqlite")
+
+    with sqlite3.connect(sqlite_path) as conn:
+        species_count = conn.execute("SELECT COUNT(*) FROM species").fetchone()[0]
+        point_count = conn.execute("SELECT COUNT(*) FROM pic_cross_sections").fetchone()[0]
+        null_ie_count = conn.execute("SELECT COUNT(*) FROM species WHERE ionization_energy IS NULL").fetchone()[0]
+        mz_range = conn.execute("SELECT MIN(mz), MAX(mz) FROM species").fetchone()
+        db_version = get_user_version(conn)
+
+    assert species_count == expected_species
+    assert point_count == len(seed_rows)
+    assert null_ie_count == 0
+    assert mz_range == (1, 720)
+    assert db_version == SCHEMA_VERSION
+
+
+def test_ensure_database_up_to_date_builds_missing_database(tmp_path):
+    db_path = tmp_path / "species_database.sqlite"
+    assert not db_path.exists()
+    ensure_database_up_to_date(db_path)
+    assert db_path.exists()
+    with sqlite3.connect(db_path) as conn:
+        assert get_user_version(conn) == SCHEMA_VERSION
+
+
+def test_ensure_database_up_to_date_is_noop_on_current_version(tmp_path):
+    db_path = tmp_path / "species_database.sqlite"
+    build_species_database_from_seed(db_path)
+    mtime_before = db_path.stat().st_mtime
+    ensure_database_up_to_date(db_path)
+    assert db_path.stat().st_mtime == mtime_before
+
+
+def test_ensure_database_up_to_date_migrates_old_version(tmp_path):
+    """A database stamped with version 0 (pre-migration) gets updated to SCHEMA_VERSION."""
+    db_path = tmp_path / "species_database.sqlite"
+    build_species_database_from_seed(db_path)
+    # Simulate a legacy database with no version stamp (user_version = 0).
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA user_version = 0")
+    ensure_database_up_to_date(db_path)
+    with sqlite3.connect(db_path) as conn:
+        assert get_user_version(conn) == SCHEMA_VERSION
 
 
 def test_pics_fit_returns_fitted_curve():

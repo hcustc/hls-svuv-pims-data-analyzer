@@ -43,6 +43,7 @@ output/*
 # Generated result files
 *.json
 *.xlsx
+!data/examples/pics_template.xlsx
 ensemble_*.json
 optimization_*.json
 validation_*.json

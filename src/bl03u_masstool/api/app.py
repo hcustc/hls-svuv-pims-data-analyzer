@@ -59,6 +59,13 @@ from bl03u_masstool.core.pie_analysis import (
     identify_species_for_mz_with_curve,
     load_species_database,
 )
+from bl03u_masstool.core.pics_import import (
+    _clean_column_name,
+    _find_column,
+    _parse_energy_column,
+    parse_pics_upload as _parse_pics_upload,
+    write_pics_records,
+)
 from bl03u_masstool.core.spectrum_io import read_bl03u_txt, sum_spectra
 from bl03u_masstool.logging_config import configure_logging
 
@@ -103,36 +110,6 @@ def _json_records(df) -> List[Dict[str, Any]]:
 
 def _float_or_none(value) -> Optional[float]:
     return None if value is None else float(value)
-
-
-def _clean_column_name(value: object) -> str:
-    return (
-        str(value)
-        .strip()
-        .lower()
-        .replace(" ", "_")
-        .replace("-", "_")
-        .replace("/", "_")
-        .replace("(", "")
-        .replace(")", "")
-    )
-
-
-def _find_column(columns, aliases: List[str]) -> Optional[str]:
-    cleaned = {_clean_column_name(column): column for column in columns}
-    for alias in aliases:
-        key = _clean_column_name(alias)
-        if key in cleaned:
-            return cleaned[key]
-    return None
-
-
-def _parse_energy_column(value: object) -> Optional[float]:
-    text = str(value).strip().lower().replace("ev", "")
-    try:
-        return float(text)
-    except ValueError:
-        return None
 
 
 def _parse_mz_column(value: object) -> Optional[float]:
@@ -259,18 +236,6 @@ def _load_species_database_cached(path: str, mtime: float) -> List[dict]:
     _ = mtime
     database, _index = load_species_database(path)
     return database
-
-
-def _read_pics_upload_table(content: bytes, filename: str) -> pd.DataFrame:
-    suffix = Path(filename).suffix.lower()
-    buffer = BytesIO(content)
-    if suffix in {".xlsx", ".xls"}:
-        return pd.read_excel(buffer)
-    if suffix == ".tsv":
-        return pd.read_csv(buffer, sep="\t")
-    if suffix in {".csv", ".txt", ""}:
-        return pd.read_csv(buffer)
-    raise ValueError("只支持 CSV、TSV、TXT、XLSX、XLS 文件")
 
 
 def _read_pie_curve_upload_table(content: bytes, filename: str) -> pd.DataFrame:
@@ -423,131 +388,6 @@ def _parse_uploaded_pie_curves(content: bytes, filename: str) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _records_from_long_table(df: pd.DataFrame) -> List[Dict[str, Any]]:
-    mz_col = _find_column(df.columns, ["mz", "m/z", "mass", "mass_number", "质量数"])
-    name_col = _find_column(df.columns, ["name", "species", "formula", "molecule", "物种", "名称", "分子式"])
-    ie_col = _find_column(df.columns, ["ionization_energy", "ie", "ionization energy", "电离能", "ie_ev"])
-    energy_col = _find_column(df.columns, ["energy_ev", "energy", "photon_energy", "photon energy", "e_ev", "光子能量"])
-    cross_col = _find_column(
-        df.columns,
-        ["cross_section", "cross section", "pics", "sigma", "cross", "截面", "光电离截面"],
-    )
-    if not all([mz_col, name_col, energy_col, cross_col]):
-        return []
-
-    working = df[[mz_col, name_col, energy_col, cross_col] + ([ie_col] if ie_col else [])].copy()
-    working = working.rename(
-        columns={
-            mz_col: "mz",
-            name_col: "species",
-            energy_col: "energy",
-            cross_col: "cross_section",
-        }
-    )
-    if ie_col:
-        working = working.rename(columns={ie_col: "ie"})
-    else:
-        working["ie"] = None
-    working["mz"] = pd.to_numeric(working["mz"], errors="coerce")
-    working["energy"] = pd.to_numeric(working["energy"], errors="coerce")
-    working["cross_section"] = pd.to_numeric(working["cross_section"], errors="coerce")
-    working["ie"] = pd.to_numeric(working["ie"], errors="coerce")
-    working["species"] = working["species"].astype(str).str.strip()
-    working = working.dropna(subset=["mz", "energy", "cross_section"])
-    working = working[working["species"] != ""]
-
-    records = []
-    for (mz, species, ie), group in working.groupby(["mz", "species", "ie"], dropna=False):
-        points = (
-            group.groupby("energy", as_index=False)["cross_section"]
-            .mean()
-            .sort_values("energy")
-        )
-        if len(points) < 2:
-            continue
-        records.append(
-            {
-                "mz": int(round(float(mz))),
-                "species": str(species),
-                "ie": None if pd.isna(ie) else float(ie),
-                "energies": points["energy"].astype(float).tolist(),
-                "cross_sections": points["cross_section"].astype(float).tolist(),
-            }
-        )
-    return records
-
-
-def _records_from_wide_table(df: pd.DataFrame) -> List[Dict[str, Any]]:
-    mz_col = _find_column(df.columns, ["mz", "m/z", "mass", "mass_number", "质量数"])
-    name_col = _find_column(df.columns, ["name", "species", "formula", "molecule", "物种", "名称", "分子式"])
-    ie_col = _find_column(df.columns, ["ionization_energy", "ie", "ionization energy", "电离能", "ie_ev"])
-    if not mz_col or not name_col:
-        return []
-    metadata_cols = {mz_col, name_col}
-    if ie_col:
-        metadata_cols.add(ie_col)
-
-    energy_columns = []
-    for column in df.columns:
-        if column in metadata_cols:
-            continue
-        energy = _parse_energy_column(column)
-        if energy is not None:
-            energy_columns.append((column, energy))
-    if not energy_columns:
-        return []
-
-    records = []
-    for _, row in df.iterrows():
-        try:
-            mz = int(round(float(row[mz_col])))
-        except Exception:
-            continue
-        species = str(row[name_col]).strip()
-        if not species:
-            continue
-        ie = None
-        if ie_col and not pd.isna(row[ie_col]):
-            ie = float(row[ie_col])
-        energies = []
-        cross_sections = []
-        for column, energy in energy_columns:
-            value = pd.to_numeric(row[column], errors="coerce")
-            if pd.isna(value):
-                continue
-            energies.append(float(energy))
-            cross_sections.append(float(value))
-        if len(energies) < 2:
-            continue
-        order = sorted(range(len(energies)), key=lambda idx: energies[idx])
-        records.append(
-            {
-                "mz": mz,
-                "species": species,
-                "ie": ie,
-                "energies": [energies[idx] for idx in order],
-                "cross_sections": [cross_sections[idx] for idx in order],
-            }
-        )
-    return records
-
-
-def _parse_pics_upload(content: bytes, filename: str) -> List[Dict[str, Any]]:
-    if not content:
-        raise ValueError("上传文件为空")
-    df = _read_pics_upload_table(content, filename)
-    if df.empty:
-        raise ValueError("上传文件没有数据行")
-    records = _records_from_long_table(df)
-    if not records:
-        records = _records_from_wide_table(df)
-    if not records:
-        raise ValueError(
-            "无法识别PICS表格。长表需要 mz/name/energy_ev/cross_section；宽表需要 mz/name 和多个能量列。"
-        )
-    return records
-
-
 def _backup_database(database_path: Path) -> Optional[Path]:
     if not database_path.exists():
         return None
@@ -558,26 +398,6 @@ def _backup_database(database_path: Path) -> Optional[Path]:
     return backup_path
 
 
-def _matching_species_ids(conn: sqlite3.Connection, record: Dict[str, Any]) -> List[int]:
-    if record["ie"] is None:
-        rows = conn.execute(
-            """
-            SELECT id FROM species
-            WHERE mz = ? AND LOWER(name) = LOWER(?) AND ionization_energy IS NULL
-            """,
-            (int(record["mz"]), str(record["species"])),
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            """
-            SELECT id FROM species
-            WHERE mz = ? AND LOWER(name) = LOWER(?) AND ABS(ionization_energy - ?) < 1e-6
-            """,
-            (int(record["mz"]), str(record["species"]), float(record["ie"])),
-        ).fetchall()
-    return [int(row[0]) for row in rows]
-
-
 def _write_pics_records_to_path(
     records: List[Dict[str, Any]],
     database_path: Path,
@@ -586,58 +406,15 @@ def _write_pics_records_to_path(
     *,
     backup: bool,
 ) -> Dict[str, Any]:
-    database_path.parent.mkdir(parents=True, exist_ok=True)
     backup_path = _backup_database(database_path) if backup else None
-    inserted_species = 0
-    replaced_species = 0
-    inserted_points = 0
-    mode = mode if mode in {"upsert", "append", "overwrite_all"} else "upsert"
-    if mode == "overwrite_all" and not confirm_overwrite:
-        raise ValueError("覆盖整个PICS库需要确认")
-
-    with sqlite3.connect(database_path) as conn:
-        conn.execute("PRAGMA foreign_keys = ON")
-        conn.executescript(SCHEMA_SQL)
-        if mode == "overwrite_all":
-            conn.execute("DELETE FROM pic_cross_sections")
-            conn.execute("DELETE FROM species")
-        for record in records:
-            if mode == "upsert":
-                ids = _matching_species_ids(conn, record)
-                if ids:
-                    replaced_species += len(ids)
-                    conn.executemany("DELETE FROM species WHERE id = ?", [(species_id,) for species_id in ids])
-
-            cursor = conn.execute(
-                "INSERT INTO species (mz, name, ionization_energy) VALUES (?, ?, ?)",
-                (int(record["mz"]), str(record["species"]), record["ie"]),
-            )
-            species_id = int(cursor.lastrowid)
-            rows = [
-                (species_id, float(energy), float(cross_section))
-                for energy, cross_section in zip(record["energies"], record["cross_sections"])
-                if np_is_finite(energy) and np_is_finite(cross_section)
-            ]
-            if len(rows) < 2:
-                conn.execute("DELETE FROM species WHERE id = ?", (species_id,))
-                continue
-            conn.executemany(
-                "INSERT INTO pic_cross_sections (species_id, energy_ev, cross_section) VALUES (?, ?, ?)",
-                rows,
-            )
-            inserted_species += 1
-            inserted_points += len(rows)
-        conn.commit()
+    result = write_pics_records(
+        records, database_path, mode=mode, confirm_overwrite=confirm_overwrite
+    )
     _load_species_database_cached.cache_clear()
-    return {
-        "mode": mode,
-        "database": str(database_path),
-        "backup": "" if backup_path is None else str(backup_path),
-        "parsed_species": len(records),
-        "inserted_species": inserted_species,
-        "replaced_species": replaced_species,
-        "inserted_points": inserted_points,
-    }
+    result["database"] = str(database_path)
+    result["backup"] = "" if backup_path is None else str(backup_path)
+    result["parsed_species"] = len(records)
+    return result
 
 
 def _write_pics_records(records: List[Dict[str, Any]], mode: str, confirm_overwrite: bool) -> Dict[str, Any]:
@@ -678,13 +455,6 @@ def _create_session_pics_library(records: List[Dict[str, Any]], filename: str) -
         }
     )
     return result
-
-
-def np_is_finite(value: object) -> bool:
-    try:
-        return bool(pd.notna(value) and math.isfinite(float(value)))
-    except Exception:
-        return False
 
 
 def _pie_summary(analysis_df: pd.DataFrame, curves: Dict[int, dict]) -> Dict[str, Any]:
