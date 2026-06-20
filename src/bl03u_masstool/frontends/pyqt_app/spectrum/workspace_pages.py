@@ -14,6 +14,8 @@ from bl03u_masstool.core.project_lifecycle import (
     ArtifactCategory,
     DataSourceValidationStatus,
     ProjectUIState,
+    WorkflowProfile,
+    analyze_workflow_capabilities,
     build_project_stage_statuses,
     collect_project_files,
     create_project_snapshot,
@@ -1010,9 +1012,13 @@ class WorkspacePagesMixin:
         validation_records = validate_all_data_sources(ps)
         validation_status = get_data_source_validation_status(ps)
 
+        # Get workflow capability analysis
+        workflow_result = analyze_workflow_capabilities(ps)
+
         # Store for reference
         self.current_data_source_status = validation_status
         self.current_validation_records = validation_records
+        self.current_workflow_result = workflow_result
 
         # Check if project is initialized
         root_exists = project_root(ps).exists()
@@ -1038,7 +1044,37 @@ class WorkspacePagesMixin:
             elif validation_status == DataSourceValidationStatus.INVALID:
                 status_text = "❌ 路径失效 - 某些已配置的路径不存在或不可读，请重新导入"
             else:  # COMPLETE
-                status_text = "✅ 数据已就绪 - 所有必需数据源均已导入，可开始分析"
+                status_text = "✅ 数据已就绪 - 所有必需数据源均已导入"
+
+            # 添加工作流能力信息
+            if workflow_result.available_workflows:
+                status_text += "\n\n可执行的分析工作流："
+                for profile in workflow_result.available_workflows:
+                    if profile == WorkflowProfile.SPECTRUM_ONLY:
+                        status_text += "\n  ✓ 质谱工作台"
+                    elif profile == WorkflowProfile.TEMPERATURE_SCAN:
+                        status_text += "\n  ✓ 温度扫描"
+                    elif profile == WorkflowProfile.PIE_ANALYSIS:
+                        status_text += "\n  ✓ PIE拟合"
+                    elif profile == WorkflowProfile.FULL_ANALYSIS:
+                        status_text += "\n  ✓ 完整分析流程"
+
+            if workflow_result.unavailable_workflows:
+                status_text += "\n\n尚不可执行的工作流："
+                for profile, reason in workflow_result.unavailable_workflows.items():
+                    reason_text = reason if reason else "缺少必需数据源"
+                    if profile == WorkflowProfile.SPECTRUM_ONLY:
+                        status_text += f"\n  ○ 质谱工作台：{reason_text}"
+                    elif profile == WorkflowProfile.TEMPERATURE_SCAN:
+                        status_text += f"\n  ○ 温度扫描：{reason_text}"
+                    elif profile == WorkflowProfile.PIE_ANALYSIS:
+                        status_text += f"\n  ○ PIE拟合：{reason_text}"
+                    elif profile == WorkflowProfile.FULL_ANALYSIS:
+                        status_text += f"\n  ○ 完整分析流程：{reason_text}"
+
+            if workflow_result.recommended_next_step:
+                status_text += f"\n\n建议：{workflow_result.recommended_next_step}"
+
             self.datasource_status_label.setText(status_text)
 
         # 更新摘要表格

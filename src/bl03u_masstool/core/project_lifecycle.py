@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 import os
@@ -15,11 +15,89 @@ from .config import writable_project_path
 from .project_settings import ProjectSettings
 
 
+class WorkflowProfile(Enum):
+    """定义可执行的分析工作流"""
+    SPECTRUM_ONLY = "spectrum_only"
+    TEMPERATURE_SCAN = "temperature_scan"
+    PIE_ANALYSIS = "pie_analysis"
+    FULL_ANALYSIS = "full_analysis"
+
+
+class DependencyOperator(Enum):
+    """依赖规则操作符"""
+    ALL_OF = "all_of"  # 所有源都必需
+    ANY_OF = "any_of"  # 至少一个源必需
+
+
+@dataclass(frozen=True)
+class DependencyRule:
+    """单个依赖规则"""
+    operator: DependencyOperator
+    sources: tuple[str, ...]  # 数据源键名
+
+
+@dataclass(frozen=True)
+class WorkflowRequirement:
+    """工作流依赖定义"""
+    profile: WorkflowProfile
+    required_sources: tuple[DependencyRule, ...]  # 多个规则用AND结合
+
+
+# 工作流依赖定义表
+WORKFLOW_REQUIREMENTS = {
+    WorkflowProfile.SPECTRUM_ONLY: WorkflowRequirement(
+        profile=WorkflowProfile.SPECTRUM_ONLY,
+        required_sources=(
+            DependencyRule(DependencyOperator.ANY_OF, ("single_spectrum", "sum_spectrum")),
+        ),
+    ),
+    WorkflowProfile.TEMPERATURE_SCAN: WorkflowRequirement(
+        profile=WorkflowProfile.TEMPERATURE_SCAN,
+        required_sources=(
+            DependencyRule(DependencyOperator.ANY_OF, ("single_spectrum", "sum_spectrum")),
+            DependencyRule(DependencyOperator.ALL_OF, ("temperature_scan",)),
+        ),
+    ),
+    WorkflowProfile.PIE_ANALYSIS: WorkflowRequirement(
+        profile=WorkflowProfile.PIE_ANALYSIS,
+        required_sources=(
+            DependencyRule(DependencyOperator.ANY_OF, ("single_spectrum", "sum_spectrum")),
+            DependencyRule(DependencyOperator.ALL_OF, ("pie_scan",)),
+        ),
+    ),
+    WorkflowProfile.FULL_ANALYSIS: WorkflowRequirement(
+        profile=WorkflowProfile.FULL_ANALYSIS,
+        required_sources=(
+            DependencyRule(DependencyOperator.ANY_OF, ("single_spectrum", "sum_spectrum")),
+            DependencyRule(DependencyOperator.ANY_OF, ("temperature_scan", "pie_scan")),
+        ),
+    ),
+}
+
+
+@dataclass(frozen=True)
+class WorkflowCapability:
+    """工作流可执行性评估结果"""
+    profile: WorkflowProfile
+    can_execute: bool
+    missing_sources: tuple[str, ...]  # 缺少的数据源
+    detail: str = ""
+
+
+@dataclass
+class WorkflowAnalysisResult:
+    """工作流分析的完整结果"""
+    available_workflows: list[WorkflowProfile] = field(default_factory=list)  # 可执行的工作流
+    unavailable_workflows: dict[WorkflowProfile, str] = field(default_factory=dict)  # 不可执行及原因
+    data_source_status: dict[str, bool] = field(default_factory=dict)  # 每个源的有效性
+    recommended_next_step: str = ""  # 推荐的下一步操作
+
+
 class ProjectUIState(Enum):
     """项目管理UI主操作按钮的状态枚举"""
     UNINITIALIZED = ("初始化项目", "项目信息未填或目录未初始化")
     AWAITING_DATA_IMPORT = ("前往数据导入", "已初始化，等待导入原始数据")
-    READY_TO_ANALYZE = ("前往质谱工作台", "数据已导入，可开始分析")
+    READY_TO_ANALYZE = ("前往质谱工作台", "数据已导入，至少一项分析可执行")
     ANALYSIS_IN_PROGRESS = ("查看分析进度", "分析进行中")
     ANALYSIS_COMPLETE = ("查看分析结果", "分析已完成")
 
@@ -785,21 +863,20 @@ def get_project_ui_state(settings: ProjectSettings) -> ProjectUIState:
     """判断项目当前应展示的UI主操作按钮状态"""
     # 检查项目信息和目录初始化
     has_identity = bool(settings.project_name.strip() or settings.system.strip())
-    root_exists = project_root(settings).exists()
+    root = project_root(settings)
+    marker_exists = (root / ".bl03u_project").exists()
+    standard_dirs_exist = all((root / spec.relative_path).exists() for spec in PROJECT_DIRECTORIES)
 
-    if not has_identity or not root_exists:
+    if not has_identity or not marker_exists or not standard_dirs_exist:
         return ProjectUIState.UNINITIALIZED
 
-    # 检查原始数据导入（使用严格验证）
-    data_status = get_data_source_validation_status(settings)
+    # 检查是否至少有一个分析工作流可执行
+    analysis_result = analyze_workflow_capabilities(settings)
 
-    if data_status in (DataSourceValidationStatus.UNCONFIGURED, DataSourceValidationStatus.INVALID):
+    if not analysis_result.available_workflows:
         return ProjectUIState.AWAITING_DATA_IMPORT
 
-    if data_status == DataSourceValidationStatus.PARTIAL:
-        return ProjectUIState.AWAITING_DATA_IMPORT
-
-    # 数据已完成导入（COMPLETE），检查是否有任何分析产物
+    # 数据已完成导入且至少一个工作流可执行，检查是否有分析进行中
     statuses = build_project_stage_statuses(settings)
     # 跳过前两个阶段（项目初始化、数据导入），检查后面的分析阶段
     analysis_started = any(s.completed for s in statuses[2:])
@@ -813,6 +890,84 @@ def get_project_ui_state(settings: ProjectSettings) -> ProjectUIState:
         return ProjectUIState.ANALYSIS_COMPLETE
 
     return ProjectUIState.ANALYSIS_IN_PROGRESS
+
+
+def analyze_workflow_capabilities(settings: ProjectSettings) -> WorkflowAnalysisResult:
+    """分析当前项目可执行的工作流和缺少的依赖"""
+    result = WorkflowAnalysisResult()
+
+    # 收集所有数据源的有效性
+    data_source_status = {}
+    for source_key in PROJECT_SOURCE_SPECS.keys():
+        validation = validate_data_source(settings, source_key)
+        data_source_status[source_key] = validation.is_valid
+
+    result.data_source_status = data_source_status
+
+    # 评估每个工作流
+    for workflow_profile, requirement in WORKFLOW_REQUIREMENTS.items():
+        can_execute = _check_workflow_requirements(requirement, data_source_status)
+
+        if can_execute:
+            result.available_workflows.append(workflow_profile)
+        else:
+            missing = _get_missing_sources_for_workflow(requirement, data_source_status)
+            result.unavailable_workflows[workflow_profile] = ", ".join(missing)
+
+    # 生成推荐的下一步操作
+    if result.available_workflows:
+        result.recommended_next_step = "可执行以下工作流"
+    else:
+        # 找出最关键缺少的数据源
+        missing_by_frequency = {}
+        for workflow, reasons in result.unavailable_workflows.items():
+            for source_key in PROJECT_SOURCE_SPECS.keys():
+                if not data_source_status.get(source_key):
+                    missing_by_frequency[source_key] = missing_by_frequency.get(source_key, 0) + 1
+
+        if missing_by_frequency:
+            most_critical = max(missing_by_frequency, key=missing_by_frequency.get)
+            source_label = PROJECT_SOURCE_SPECS[most_critical].label
+            result.recommended_next_step = f"请先导入：{source_label}"
+
+    return result
+
+
+def _check_workflow_requirements(
+    requirement: WorkflowRequirement,
+    data_source_status: dict[str, bool],
+) -> bool:
+    """检查工作流的所有依赖是否满足"""
+    for rule in requirement.required_sources:
+        if rule.operator == DependencyOperator.ANY_OF:
+            # 至少一个源有效
+            if not any(data_source_status.get(src, False) for src in rule.sources):
+                return False
+        elif rule.operator == DependencyOperator.ALL_OF:
+            # 所有源都有效
+            if not all(data_source_status.get(src, False) for src in rule.sources):
+                return False
+    return True
+
+
+def _get_missing_sources_for_workflow(
+    requirement: WorkflowRequirement,
+    data_source_status: dict[str, bool],
+) -> list[str]:
+    """获取工作流缺少的所有数据源"""
+    missing = set()
+    for rule in requirement.required_sources:
+        if rule.operator == DependencyOperator.ANY_OF:
+            if not any(data_source_status.get(src, False) for src in rule.sources):
+                for src in rule.sources:
+                    if src in PROJECT_SOURCE_SPECS and not data_source_status.get(src, False):
+                        missing.add(PROJECT_SOURCE_SPECS[src].label)
+        elif rule.operator == DependencyOperator.ALL_OF:
+            for src in rule.sources:
+                if src in PROJECT_SOURCE_SPECS and not data_source_status.get(src, False):
+                    missing.add(PROJECT_SOURCE_SPECS[src].label)
+    return sorted(list(missing))
+
 
 
 def scan_project_artifacts(settings: ProjectSettings) -> list[ArtifactRecord]:
