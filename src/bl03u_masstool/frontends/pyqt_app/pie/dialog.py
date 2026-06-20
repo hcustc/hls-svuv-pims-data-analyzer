@@ -51,16 +51,11 @@ from bl03u_masstool.core.mole_fraction import (
     load_mole_fraction_settings,
     save_mole_fraction_settings,
 )
-from bl03u_masstool.frontends.pyqt_app.theme import get_plot_theme
 from bl03u_masstool.frontends.pyqt_app.workers import WorkerThread
 from bl03u_masstool.frontends.pyqt_app.project_artifacts import record_project_artifact
 
-try:
-    import pyqtgraph as pg
-except Exception:  # pragma: no cover - only used when optional plotting is unavailable
-    pg = None
-
 from bl03u_masstool.frontends.pyqt_app.common.widgets import DataFrameTableMixin, FlowLayout
+from bl03u_masstool.frontends.pyqt_app.common.static_plot import StaticCurvePlot
 from bl03u_masstool.frontends.pyqt_app.normalization.widget import CommonParametersDialog
 
 def _run_exhaustive_fit(
@@ -157,6 +152,11 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.export_button.setToolTip("导出PIE曲线数据")
         self.export_button.setEnabled(False)
         self.export_button.clicked.connect(self.export_curve_data)
+        self.export_plot_button = QtWidgets.QPushButton("导出图表")
+        self.export_plot_button.setObjectName("ExportButton")
+        self.export_plot_button.setToolTip("导出当前PIE曲线图表为PNG/PDF")
+        self.export_plot_button.setEnabled(False)
+        self.export_plot_button.clicked.connect(self.export_plot)
         self.common_params_button = QtWidgets.QPushButton("参数")
         self.common_params_button.setObjectName("BrowseButton")
         self.common_params_button.setToolTip("打开通用参数设置")
@@ -214,6 +214,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         folder_row.addWidget(self.select_folder_button)
         folder_row.addWidget(self.analyze_button)
         folder_row.addWidget(self.export_button)
+        folder_row.addWidget(self.export_plot_button)
         folder_row.addWidget(self.common_params_button)
         folder_row.addWidget(self.summary_open_project_btn)
         folder_row.addWidget(self.status_label)
@@ -327,35 +328,8 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         plot_container_layout = QtWidgets.QVBoxLayout(plot_container)
         plot_container_layout.setContentsMargins(8, 8, 8, 8)
         plot_container_layout.setSpacing(6)
-        if pg is not None:
-            plot_theme = get_plot_theme()
-            self.plot_widget = pg.PlotWidget()
-            self.plot_widget.setBackground(plot_theme.background)
-            self.plot_widget.setLabel("bottom", "Photon Energy", units="eV")
-            self.plot_widget.setLabel("left", "Normalized Intensity")
-            self.plot_widget.showGrid(x=True, y=True)
-            # 悬停十字光标和坐标标签
-            self._hover_label = pg.TextItem("", anchor=(0, 1), color=plot_theme.foreground)
-            self._hover_label.setFont(QtWidgets.QApplication.font())
-            self.plot_widget.addItem(self._hover_label)
-            hover_pen = pg.mkPen(plot_theme.hover_line, width=1, style=QtCore.Qt.PenStyle.DashLine)
-            self._hover_vline = pg.InfiniteLine(angle=90, pen=hover_pen)
-            self._hover_hline = pg.InfiniteLine(angle=0, pen=hover_pen)
-            self.plot_widget.addItem(self._hover_vline)
-            self.plot_widget.addItem(self._hover_hline)
-            self._hover_vline.setVisible(False)
-            self._hover_hline.setVisible(False)
-            self.plot_widget.scene().sigMouseMoved.connect(self._on_pie_plot_mouse_move)
-            # 降低缩放灵敏度：锁定Y轴、减半滚轮速度
-            vb = self.plot_widget.getPlotItem().vb
-            vb.setMouseEnabled(x=True, y=False)
-            vb.state["wheelScaleFactor"] = -1.0 / 16.0
-            plot_container_layout.addWidget(self.plot_widget, stretch=1)
-        else:
-            self.plot_widget = None
-            plot_placeholder = QtWidgets.QLabel("未安装 pyqtgraph，无法显示PIE曲线图")
-            plot_placeholder.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-            plot_container_layout.addWidget(plot_placeholder, stretch=1)
+        self.plot_widget = StaticCurvePlot("Photon Energy (eV)", "Normalized Intensity", min_height=280)
+        plot_container_layout.addWidget(self.plot_widget, stretch=1)
 
         # 拟合统计条属于图表区域，不作为 splitter 的独立面板，避免挤占下方功能区。
         stats_bar = QtWidgets.QFrame()
@@ -1354,6 +1328,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         has_fit_records = bool(self.all_fit_results)
         has_successful_fits = any(result.get("success") for result in self.all_fit_results.values())
         self.export_button.setEnabled(has_curves and not busy)
+        self.export_plot_button.setEnabled(has_curves and not busy)
         self.fit_button.setEnabled(has_curves and not busy)
         self.fit_all_button.setEnabled(has_curves and not busy)
         self.refit_selected_button.setEnabled(has_curves and not busy)
@@ -1535,8 +1510,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.candidate_table.clearContents()
             self.candidate_table.setRowCount(0)
             if self.plot_widget is not None:
-                self.plot_widget.clear()
-                self.plot_widget.setTitle("未选择 PIE 曲线")
+                self.plot_widget.clear_plot(title="未选择 PIE 曲线")
             return
         self.current_mz = int(current.data(QtCore.Qt.ItemDataRole.UserRole))
 
@@ -1596,29 +1570,8 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.update_plot(curve, self.current_fit)
 
     def _on_pie_plot_mouse_move(self, pos):
-        """鼠标悬停时显示十字光标和坐标（无数据时静默忽略）。"""
-        if self.plot_widget is None:
-            return
-        plot_item = self.plot_widget.getPlotItem()
-        # 空 plot（尚未加载数据）时不做任何交互
-        if not plot_item.listDataItems():
-            return
-        vb = plot_item.vb
-        if vb.sceneBoundingRect().contains(pos):
-            mouse_point = vb.mapSceneToView(pos)
-            x, y = mouse_point.x(), mouse_point.y()
-            if not (np.isfinite(x) and np.isfinite(y)):
-                return
-            self._hover_vline.setPos(x)
-            self._hover_hline.setPos(y)
-            self._hover_vline.setVisible(True)
-            self._hover_hline.setVisible(True)
-            self._hover_label.setText(f"  {x:.3f} eV, {y:.4f}  ")
-            self._hover_label.setPos(x, y)
-        else:
-            self._hover_vline.setVisible(False)
-            self._hover_hline.setVisible(False)
-            self._hover_label.setText("")
+        """Retained for older signal wiring; Matplotlib trend plots are intentionally low-interaction."""
+        return
 
     def refresh_current_plot(self):
         if self.current_mz is not None and self.current_mz in self.curves:
@@ -1632,37 +1585,23 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         valid = np.isfinite(x_values) & np.isfinite(y_values)
         x_values = x_values[valid]
         y_values = y_values[valid]
-        self.plot_widget.clear()
-        if hasattr(self, "_hover_label"):
-            self.plot_widget.addItem(self._hover_label)
-            self.plot_widget.addItem(self._hover_vline)
-            self.plot_widget.addItem(self._hover_hline)
-            self._hover_vline.setVisible(False)
-            self._hover_hline.setVisible(False)
-            self._hover_label.setText("")
-        plot_item = self.plot_widget.getPlotItem()
-        if plot_item.legend is None:
-            plot_item.addLegend(offset=(-10, 10))
-        else:
-            plot_item.legend.clear()
-        self.plot_widget.setLabel("bottom", "Photon Energy", units="eV")
-        self.plot_widget.setLabel("left", "Normalized Intensity")
-        self.plot_widget.showGrid(x=True, y=True, alpha=0.25)
+        title = f"m/z {curve['mz']} PIE"
+        if fit_model is not None and fit_model.get("fitted") is not None:
+            title += f" | PICS R²={fit_model.get('r_squared', 0.0):.4f}"
+        self.plot_widget.clear_plot(title=title, xlabel="Photon Energy (eV)", ylabel="Normalized Intensity")
         if x_values.size == 0:
-            self.plot_widget.setTitle(f"m/z {curve['mz']} PIE - 无有效数据")
+            self.plot_widget.show_empty("无有效数据", title=f"m/z {curve['mz']} PIE")
             return
-        x_ranges = [x_values]
-        y_ranges = [y_values]
-        self.plot_widget.plot(
+        exp_x, exp_y = self.plot_widget.plot_series(
             x_values,
             y_values,
-            pen=pg.mkPen("#2563eb", width=2.5),
-            symbol="o",
-            symbolBrush="#2563eb",
-            symbolPen="#1e3a8a",
-            symbolSize=10,
-            name="实验PIE",
+            color="#2563eb",
+            linewidth=2.6,
+            markersize=6,
+            label="实验PIE",
         )
+        x_ranges = [exp_x]
+        y_ranges = [exp_y]
 
         if fit_model is not None:
             fit_x = np.asarray(fit_model.get("energies", []), dtype=float)
@@ -1673,11 +1612,13 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             if fit_x.size:
                 x_ranges.append(fit_x)
                 y_ranges.append(fit_y)
-                self.plot_widget.plot(
+                self.plot_widget.plot_series(
                     fit_x,
                     fit_y,
-                    pen=pg.mkPen("#f97316", width=2.5),
-                    name="PICS总拟合",
+                    color="#f97316",
+                    linewidth=2.4,
+                    marker=None,
+                    label="PICS总拟合",
                 )
                 species = fit_model.get("species", [])
                 colors = ["#16a34a", "#9333ea", "#dc2626", "#0891b2", "#ca8a04", "#be123c", "#7c3aed", "#0369a1"]
@@ -1695,47 +1636,19 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                         continue
                     x_ranges.append(component_x)
                     y_ranges.append(component_y)
-                    self.plot_widget.plot(
+                    self.plot_widget.plot_series(
                         component_x,
                         component_y,
-                        pen=pg.mkPen(colors[idx % len(colors)], width=1.5, style=QtCore.Qt.PenStyle.DashLine),
-                        name=str(component.get("species", ""))[:24],
+                        color=colors[idx % len(colors)],
+                        linewidth=1.6,
+                        marker=None,
+                        linestyle="--",
+                        alpha=0.9,
+                        label=str(component.get("species", ""))[:24],
                     )
 
-        title = f"m/z {curve['mz']} PIE"
-        if fit_model is not None and fit_model.get("fitted"):
-            title += f" | PICS R²={fit_model.get('r_squared', 0.0):.4f}"
-        self.plot_widget.setTitle(title)
-        all_x = np.concatenate(x_ranges)
-        all_y = np.concatenate(y_ranges)
-        x_min = float(np.min(all_x))
-        x_max = float(np.max(all_x))
-        y_min = float(np.min(all_y))
-        y_max = float(np.max(all_y))
-        x_pad = max(0.1, (x_max - x_min) * 0.08)
-        y_pad = max(1.0, (y_max - y_min) * 0.12)
-        if x_min == x_max:
-            x_min -= 0.5
-            x_max += 0.5
-        if y_min == y_max:
-            y_min -= 1.0
-            y_max += 1.0
-        # 设置缩放限制，防止过度缩放
-        vb = self.plot_widget.getPlotItem().vb
-        x_span = max(0.01, (x_max + x_pad) - (x_min - x_pad))
-        y_span = max(0.01, (y_max + y_pad) - max(0.0, y_min - y_pad))
-        vb.setLimits(
-            xMin=x_min - x_pad - x_span * 0.5,
-            xMax=x_max + x_pad + x_span * 0.5,
-            yMin=max(0.0, y_min - y_pad - y_span * 0.5),
-            yMax=y_max + y_pad + y_span * 0.5,
-            minXRange=x_span * 0.10,
-            maxXRange=x_span * 50,
-            minYRange=y_span * 0.10,
-            maxYRange=y_span * 50,
-        )
-        self.plot_widget.setXRange(x_min - x_pad, x_max + x_pad, padding=0)
-        self.plot_widget.setYRange(max(0.0, y_min - y_pad), y_max + y_pad, padding=0)
+        self.plot_widget.apply_data_limits(x_ranges, y_ranges, x_pad_min=0.1, y_pad_min=1.0)
+        self.plot_widget.finish(legend=True)
 
     def fit_current_curve(self):
         if not self.database:
@@ -1935,3 +1848,20 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.analysis_df.to_excel(path, index=False)
         else:
             self.analysis_df.to_csv(path, index=False, encoding="utf-8-sig")
+
+    def export_plot(self):
+        if self.plot_widget is None or self.plot_widget.figure is None:
+            QtWidgets.QMessageBox.warning(self, "提示", "没有可导出的图表")
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "导出PIE曲线图",
+            str(ensure_output_dir("exports", "pie") / "pie_curve_plot.png"),
+            "PNG Images (*.png);;PDF Files (*.pdf)",
+        )
+        if not path:
+            return
+        if self.plot_widget.save_plot(path):
+            QtWidgets.QMessageBox.information(self, "成功", f"曲线图已导出：{path}")
+        else:
+            QtWidgets.QMessageBox.warning(self, "错误", "导出图表失败")
