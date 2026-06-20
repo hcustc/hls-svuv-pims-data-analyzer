@@ -1,17 +1,16 @@
 project:
-  name: ''
-  system: ''
-  description: ''
-  output_dir: output
+  name: test
+  system: test
+  description: test
+  output_dir: /Users/huangchen/Downloads/
 data_sources:
   single_spectrum_file: ''
-  sum_spectrum_folder: tests/fixtures/bl03u_sample/C6F11O2H/Temp_Scan/12.5eV
-  temperature_scan_folder: /Users/huangchen/VscodeProject/BL03U_MSTool_clean_repo/BL03U_MassSpectrumTool/tests/fixtures/bl03u_sample/顺-13-二甲基环己烷
-    30 torr/温度扫描/11eV/
-  pie_scan_folder: tests/fixtures/bl03u_sample/C6F11O2H/PIE_Scan/1050
-  pics_database_path: /Users/huangchen/VscodeProject/BL03U_MSTool_clean_repo/BL03U_MassSpectrumTool/database/species_database.sqlite
-  manual_peak_file: /Users/huangchen/VscodeProject/BL03U_MSTool_clean_repo/BL03U_MassSpectrumTool/tests/fixtures/bl03u_sample/顺-13-二甲基环己烷
-    30 torr/peak_ranges-DHMC.csv
+  sum_spectrum_folder: ''
+  temperature_scan_folder: ''
+  pie_scan_folder: ''
+  sample_info_file: ''
+  pics_database_path: ''
+  manual_peak_file: ''
 analysis_artifacts:
   temperature_scan_result_file: ''
   pie_identification_result_file: ''
