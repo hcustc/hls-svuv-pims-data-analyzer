@@ -155,8 +155,8 @@ class StaticCurvePlot(QtWidgets.QWidget):
         x_arrays: Iterable[Iterable[float]],
         y_arrays: Iterable[Iterable[float]],
         *,
-        x_pad_min: float,
-        y_pad_min: float,
+        x_pad_min: float = 0.2,
+        y_pad_min: float = 0.05,
         y_floor: float | None = 0.0,
     ) -> None:
         if self.axes is None:
@@ -175,30 +175,34 @@ class StaticCurvePlot(QtWidgets.QWidget):
         if y_min == y_max:
             y_min -= y_pad_min
             y_max += y_pad_min
-        x_pad = max(x_pad_min, (x_max - x_min) * 0.08)
-        y_pad = max(y_pad_min, (y_max - y_min) * 0.12)
+        # Apply 5% margins
+        x_pad = max(x_pad_min, (x_max - x_min) * 0.05)
+        y_pad = max(y_pad_min, (y_max - y_min) * 0.05)
         lower_y = y_min - y_pad
         if y_floor is not None:
             lower_y = max(y_floor, lower_y)
         self.axes.set_xlim(x_min - x_pad, x_max + x_pad)
         self.axes.set_ylim(lower_y, y_max + y_pad)
 
-    def finish(self, *, legend: bool = False) -> None:
+    def finish(self, *, legend: bool = False, legend_loc: str = "best", legend_bbox_to_anchor: tuple[float, float] | None = None) -> None:
         if self.axes is None or self.canvas is None:
             return
         if legend:
             handles, labels = self.axes.get_legend_handles_labels()
             if labels:
                 column_count = 2 if len(labels) > 8 else 1
-                legend_obj = self.axes.legend(
-                    loc="best",
-                    fontsize=8,
-                    frameon=True,
-                    ncol=column_count,
-                    labelspacing=0.35,
-                    handlelength=1.8,
-                    borderpad=0.5,
-                )
+                legend_kwargs = {
+                    "loc": legend_loc,
+                    "fontsize": 8,
+                    "frameon": True,
+                    "ncol": column_count,
+                    "labelspacing": 0.35,
+                    "handlelength": 1.8,
+                    "borderpad": 0.5,
+                }
+                if legend_bbox_to_anchor is not None:
+                    legend_kwargs["bbox_to_anchor"] = legend_bbox_to_anchor
+                legend_obj = self.axes.legend(**legend_kwargs)
                 legend_obj.get_frame().set_facecolor("#ffffff")
                 legend_obj.get_frame().set_edgecolor("#d8dee8")
                 legend_obj.get_frame().set_alpha(0.92)
@@ -225,7 +229,9 @@ class StaticCurvePlot(QtWidgets.QWidget):
         self.axes.set_facecolor(self._plot_theme.background)
         self.axes.set_xlabel(self._xlabel, color="#334155", labelpad=8)
         self.axes.set_ylabel(self._ylabel, color="#334155", labelpad=8)
-        self.axes.grid(True, color=self._plot_theme.grid, linewidth=0.8, alpha=0.6)
+        # Lighten grid: only major grid, reduce opacity
+        self.axes.grid(True, which="major", color=self._plot_theme.grid, linewidth=0.6, alpha=0.35)
+        self.axes.grid(False, which="minor")
         self.axes.tick_params(colors="#475569", labelsize=9)
         self.axes.spines["top"].set_visible(False)
         self.axes.spines["right"].set_visible(False)

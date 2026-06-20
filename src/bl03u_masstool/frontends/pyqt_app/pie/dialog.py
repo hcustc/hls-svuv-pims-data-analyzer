@@ -1585,20 +1585,26 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         valid = np.isfinite(x_values) & np.isfinite(y_values)
         x_values = x_values[valid]
         y_values = y_values[valid]
-        title = f"m/z {curve['mz']} PIE"
-        if fit_model is not None and fit_model.get("fitted") is not None:
-            title += f" | PICS R²={fit_model.get('r_squared', 0.0):.4f}"
-        self.plot_widget.clear_plot(title=title, xlabel="Photon Energy (eV)", ylabel="Normalized Intensity")
+
+        # Simplified title, R² moved to indicator box
+        r_squared_text = ""
+        if fit_model is not None and fit_model.get("r_squared") is not None:
+            r_squared_text = f"R² = {fit_model.get('r_squared', 0.0):.4f}"
+        title = f"m/z {curve['mz']} PIE–PICS 拟合"
+        self.plot_widget.clear_plot(title=title, xlabel="光子能量 (eV)", ylabel="相对强度")
         if x_values.size == 0:
             self.plot_widget.show_empty("无有效数据", title=f"m/z {curve['mz']} PIE")
             return
+
+        # Experimental data: blue scatter with thin connecting line
         exp_x, exp_y = self.plot_widget.plot_series(
             x_values,
             y_values,
             color="#2563eb",
-            linewidth=2.6,
-            markersize=6,
-            label="实验PIE",
+            linewidth=1.2,
+            marker="o",
+            markersize=6.5,
+            label="实验数据",
         )
         x_ranges = [exp_x]
         y_ranges = [exp_y]
@@ -1612,13 +1618,15 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             if fit_x.size:
                 x_ranges.append(fit_x)
                 y_ranges.append(fit_y)
+                # Total fit: thick solid line to highlight
                 self.plot_widget.plot_series(
                     fit_x,
                     fit_y,
                     color="#f97316",
-                    linewidth=2.4,
+                    linewidth=2.8,
                     marker=None,
-                    label="PICS总拟合",
+                    linestyle="-",
+                    label="总拟合",
                 )
                 species = fit_model.get("species", [])
                 colors = ["#16a34a", "#9333ea", "#dc2626", "#0891b2", "#ca8a04", "#be123c", "#7c3aed", "#0369a1"]
@@ -1636,19 +1644,33 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                         continue
                     x_ranges.append(component_x)
                     y_ranges.append(component_y)
+                    # Component curves: thin dashed lines with low opacity
                     self.plot_widget.plot_series(
                         component_x,
                         component_y,
                         color=colors[idx % len(colors)],
-                        linewidth=1.6,
+                        linewidth=1.1,
                         marker=None,
                         linestyle="--",
-                        alpha=0.9,
+                        alpha=0.58,
                         label=str(component.get("species", ""))[:24],
                     )
 
-        self.plot_widget.apply_data_limits(x_ranges, y_ranges, x_pad_min=0.1, y_pad_min=1.0)
-        self.plot_widget.finish(legend=True)
+        # Apply data limits with 5% margin
+        self.plot_widget.apply_data_limits(x_ranges, y_ranges, x_pad_min=0.2, y_pad_min=0.05)
+
+        # Add R² indicator box in top-right corner if available
+        if self.plot_widget.axes is not None and r_squared_text:
+            self.plot_widget.axes.text(
+                0.98, 0.97, r_squared_text,
+                transform=self.plot_widget.axes.transAxes,
+                ha="right", va="top",
+                fontsize=9,
+                bbox=dict(boxstyle="round,pad=0.5", facecolor="#ffffff", edgecolor="#cbd5e1", alpha=0.85),
+            )
+
+        # Legend outside plot area, ordered: experimental data → total fit → components
+        self.plot_widget.finish(legend=True, legend_loc="center left", legend_bbox_to_anchor=(1.02, 0.5))
 
     def fit_current_curve(self):
         if not self.database:
