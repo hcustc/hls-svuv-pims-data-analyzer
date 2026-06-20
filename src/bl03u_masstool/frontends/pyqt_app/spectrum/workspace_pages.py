@@ -32,6 +32,12 @@ from bl03u_masstool.core.project_lifecycle import (
 )
 from bl03u_masstool.core.project_settings import ProjectSettings, ProjectSettingsManager
 from bl03u_masstool.frontends.pyqt_app.isotope.dialog import IsotopeAbundanceDialog
+from bl03u_masstool.frontends.pyqt_app.progress_dialog import ProgressDialog
+from bl03u_masstool.frontends.pyqt_app.worker import (
+    ExportWorker,
+    SnapshotWorker,
+)
+from bl03u_masstool.frontends.pyqt_app.worker_manager import WorkerManager
 from bl03u_masstool.frontends.pyqt_app.mole_fraction.dialog import MoleFractionDialog
 from bl03u_masstool.frontends.pyqt_app.nist.widget import IonizationEnergyLookupWidget
 from bl03u_masstool.frontends.pyqt_app.normalization.widget import NormalizationSettingsWidget
@@ -1425,13 +1431,71 @@ class WorkspacePagesMixin:
 
     def create_project_version_snapshot(self) -> None:
         ps = self._collect_and_save_project_settings()
-        try:
-            snapshot_path = create_project_snapshot(ps, ps.project_name or ps.system or "snapshot")
-        except Exception as exc:
-            QtWidgets.QMessageBox.critical(self, "创建快照失败", str(exc))
-            return
-        self.refresh_project_lifecycle(ps)
-        self.statusbar.showMessage(f"项目快照已创建：{snapshot_path}", 5000)
+
+        # Initialize worker manager if needed
+        if not hasattr(self, "_worker_manager"):
+            self._worker_manager = WorkerManager(self)
+
+        # Create worker
+        note = ps.project_name or ps.system or "snapshot"
+        worker = SnapshotWorker(ps, note)
+
+        # Connect signals
+        worker.progress.connect(self._on_snapshot_progress)
+        worker.finished.connect(self._on_snapshot_finished)
+        worker.error.connect(self._on_snapshot_error)
+        worker.cancelled.connect(self._on_snapshot_cancelled)
+
+        # Show progress dialog
+        self._snapshot_progress_dialog = ProgressDialog(self, "创建快照")
+        self._snapshot_progress_dialog.rejected.connect(lambda: self._worker_manager.cancel())
+        self._snapshot_progress_dialog.show()
+
+        # Disable button
+        if hasattr(self, "snapshot_button"):
+            self.snapshot_button.setEnabled(False)
+
+        # Start worker
+        self._worker_manager.run_worker(worker)
+
+    def _on_snapshot_progress(self, percent: int, message: str) -> None:
+        """Update snapshot progress dialog."""
+        if hasattr(self, "_snapshot_progress_dialog"):
+            self._snapshot_progress_dialog.update(percent, message)
+
+    def _on_snapshot_finished(self, result: dict) -> None:
+        """Handle snapshot completion."""
+        if hasattr(self, "_snapshot_progress_dialog"):
+            self._snapshot_progress_dialog.close()
+
+        if hasattr(self, "snapshot_button"):
+            self.snapshot_button.setEnabled(True)
+
+        if result.get("success"):
+            self.refresh_project_lifecycle()
+            self.statusbar.showMessage(f"项目快照已创建：{result['path']}", 5000)
+        else:
+            QtWidgets.QMessageBox.critical(self, "创建快照失败", result.get("error", "Unknown error"))
+
+    def _on_snapshot_error(self, message: str) -> None:
+        """Handle snapshot error."""
+        if hasattr(self, "_snapshot_progress_dialog"):
+            self._snapshot_progress_dialog.close()
+
+        if hasattr(self, "snapshot_button"):
+            self.snapshot_button.setEnabled(True)
+
+        QtWidgets.QMessageBox.critical(self, "创建快照失败", message)
+
+    def _on_snapshot_cancelled(self) -> None:
+        """Handle snapshot cancellation."""
+        if hasattr(self, "_snapshot_progress_dialog"):
+            self._snapshot_progress_dialog.close()
+
+        if hasattr(self, "snapshot_button"):
+            self.snapshot_button.setEnabled(True)
+
+        self.statusbar.showMessage("快照创建已取消", 3000)
 
     def export_current_project(self) -> None:
         ps = self._collect_and_save_project_settings()
@@ -1444,13 +1508,70 @@ class WorkspacePagesMixin:
         )
         if not path:
             return
-        try:
-            archive_path = export_project_archive(ps, path)
-        except Exception as exc:
-            QtWidgets.QMessageBox.critical(self, "导出失败", str(exc))
-            return
-        self.refresh_project_lifecycle(ps)
-        self.statusbar.showMessage(f"项目已导出：{archive_path}", 5000)
+
+        # Initialize worker manager if needed
+        if not hasattr(self, "_worker_manager"):
+            self._worker_manager = WorkerManager(self)
+
+        # Create worker
+        worker = ExportWorker(ps, path)
+
+        # Connect signals
+        worker.progress.connect(self._on_export_progress)
+        worker.finished.connect(self._on_export_finished)
+        worker.error.connect(self._on_export_error)
+        worker.cancelled.connect(self._on_export_cancelled)
+
+        # Show progress dialog
+        self._export_progress_dialog = ProgressDialog(self, "导出项目")
+        self._export_progress_dialog.rejected.connect(lambda: self._worker_manager.cancel())
+        self._export_progress_dialog.show()
+
+        # Disable button
+        if hasattr(self, "export_button"):
+            self.export_button.setEnabled(False)
+
+        # Start worker
+        self._worker_manager.run_worker(worker)
+
+    def _on_export_progress(self, percent: int, message: str) -> None:
+        """Update export progress dialog."""
+        if hasattr(self, "_export_progress_dialog"):
+            self._export_progress_dialog.update(percent, message)
+
+    def _on_export_finished(self, result: dict) -> None:
+        """Handle export completion."""
+        if hasattr(self, "_export_progress_dialog"):
+            self._export_progress_dialog.close()
+
+        if hasattr(self, "export_button"):
+            self.export_button.setEnabled(True)
+
+        if result.get("success"):
+            self.refresh_project_lifecycle()
+            self.statusbar.showMessage(f"项目已导出：{result['path']}", 5000)
+        else:
+            QtWidgets.QMessageBox.critical(self, "导出失败", result.get("error", "Unknown error"))
+
+    def _on_export_error(self, message: str) -> None:
+        """Handle export error."""
+        if hasattr(self, "_export_progress_dialog"):
+            self._export_progress_dialog.close()
+
+        if hasattr(self, "export_button"):
+            self.export_button.setEnabled(True)
+
+        QtWidgets.QMessageBox.critical(self, "导出失败", message)
+
+    def _on_export_cancelled(self) -> None:
+        """Handle export cancellation."""
+        if hasattr(self, "_export_progress_dialog"):
+            self._export_progress_dialog.close()
+
+        if hasattr(self, "export_button"):
+            self.export_button.setEnabled(True)
+
+        self.statusbar.showMessage("项目导出已取消", 3000)
 
     def refresh_project_lifecycle(self, ps: ProjectSettings | None = None) -> None:
         if ps is None:
