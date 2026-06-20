@@ -960,12 +960,8 @@ class WorkspacePagesMixin:
 
     def load_project_settings(self) -> None:
         ps = self.project_settings_manager.get()
-        default_pie_folder = "tests/fixtures/bl03u_sample/C6F11O2H/PIE_Scan/1050"
-        default_database = str(species_database_path())
-        if not ps.pie_scan_folder:
-            ps.pie_scan_folder = default_pie_folder
-        if not ps.pics_database_path:
-            ps.pics_database_path = default_database
+        # Do NOT auto-fill paths here - only display what's actually saved in config
+        # Users must use the import wizard to set up data sources
         self._read_project_settings_to_ui(ps)
         self._load_function_params_to_ui(ps)
         self.update_project_title()
