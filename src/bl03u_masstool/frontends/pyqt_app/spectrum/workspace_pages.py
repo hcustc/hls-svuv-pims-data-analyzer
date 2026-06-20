@@ -394,17 +394,22 @@ class WorkspacePagesMixin:
         action_layout = QHBoxLayout(action_bar)
         action_layout.setContentsMargins(8, 6, 8, 6)
         action_layout.setSpacing(6)
-        self.project_save_button = QPushButton("保存项目", action_bar)
-        self.project_apply_button = QPushButton("应用到工具", action_bar)
-        self.project_capture_button = QPushButton("读取当前路径", action_bar)
-        self.project_save_button.setToolTip("保存当前项目页中的项目信息、数据源路径和功能默认参数。")
-        self.project_apply_button.setToolTip("将项目路径和默认参数同步到主工作台、温度扫描、PIE 等工具页面，并保存项目配置。")
-        self.project_capture_button.setToolTip("从当前各工具页面读取已选择的文件/目录，回填到项目数据源；不会自动保存。")
-        for button in (self.project_save_button, self.project_apply_button, self.project_capture_button):
+
+        self.project_read_paths_button = QPushButton("读取工具路径", action_bar)
+        self.project_save_and_apply_button = QPushButton("保存并应用", action_bar)
+
+        self.project_read_paths_button.setToolTip(
+            "从质谱工作台读取已选择的单谱和累计谱路径，回填到项目设置页。"
+        )
+        self.project_save_and_apply_button.setToolTip(
+            "保存项目设置 → 创建项目文件夹 → 同步参数到各工具页面。一键完成项目初始化和配置。"
+        )
+
+        for button in (self.project_read_paths_button, self.project_save_and_apply_button):
             button.setFixedHeight(28)
             action_layout.addWidget(button)
-        self.project_apply_button.setObjectName("BrowseButton")
-        self.project_capture_button.setObjectName("BrowseButton")
+
+        self.project_save_and_apply_button.setObjectName("BrowseButton")
         hero_layout.addWidget(action_bar)
         card_layout.addWidget(hero)
 
@@ -438,9 +443,8 @@ class WorkspacePagesMixin:
         form_layout.addRow("项目目录", output_row)
         card_layout.addLayout(form_layout)
 
-        self.project_save_button.clicked.connect(self.save_project_settings)
-        self.project_apply_button.clicked.connect(self.apply_project_settings_to_tools)
-        self.project_capture_button.clicked.connect(self.capture_current_project_paths)
+        self.project_read_paths_button.clicked.connect(self.read_paths_from_tools)
+        self.project_save_and_apply_button.clicked.connect(self.save_and_apply_project_settings)
         self.project_output_dir_button.clicked.connect(
             lambda: self.select_project_folder(self.project_output_dir_edit, "选择输出目录")
         )
@@ -1180,29 +1184,80 @@ class WorkspacePagesMixin:
         ps.mf_parent_initial_mf = self.fp_mf_parent_initial_mf.value()
         ps.mf_photon_energy = self.fp_mf_photon_energy.value()
 
-    def save_project_settings(self) -> None:
+    def save_and_apply_project_settings(self) -> None:
+        """Save project settings, create project structure, and sync to tools.
+
+        This combines three operations:
+        1. Save project configuration
+        2. Create project directory structure
+        3. Sync settings to all tool pages
+        """
         ps = self._collect_project_settings_from_ui()
+
+        # Auto-generate project folder if needed
+        if (not ps.output_dir.strip() or ps.output_dir.strip() == "output") and (ps.project_name or ps.system):
+            ps.output_dir = self._default_project_folder(ps)
+            self.project_output_dir_edit.setText(ps.output_dir)
+
+        # Collect function parameters
         self._collect_function_params_from_ui(ps)
+
+        # Step 1: Create project directory structure
+        try:
+            ensure_project_structure(ps)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "初始化项目失败", str(exc))
+            return
+
+        # Step 2: Save configuration
         self.project_settings_manager.set(ps)
         self.project_settings_manager.save()
+
+        # Step 3: Sync to tools
+        self._apply_settings_to_tools(ps)
+
         self.update_project_title()
         self.refresh_project_lifecycle(ps)
         self.refresh_project_parameter_summary()
         self.update_project_ui_state(ps)
-        self.statusbar.showMessage("项目设置已保存", 3000)
+        self.statusbar.showMessage("✅ 项目已保存、初始化并应用到工具", 3000)
 
-    def save_function_params(self) -> None:
+    def read_paths_from_tools(self) -> None:
+        """Read file paths from spectrum workbench and fill into project settings.
+
+        This only reads and updates UI, does not save to disk.
+        User must click 'save_and_apply_project_settings' to persist changes.
+        """
+        self.project_single_file_edit.setText(self.lineEdit.text().strip())
+        self.project_sum_folder_edit.setText(self.folder_path.text().strip())
+        self.refresh_project_lifecycle()
+        self.statusbar.showMessage('✓ 已从工具页面读取路径。点击"保存并应用"写入配置。', 4000)
+
+    def apply_project_settings_to_tools(self) -> None:
+        """Sync project settings to tool pages (light version, no save/init)."""
         ps = self._collect_project_settings_from_ui()
         self._collect_function_params_from_ui(ps)
-        self.project_settings_manager.set(ps)
-        self.project_settings_manager.save()
+        self._apply_settings_to_tools(ps)
+        self.statusbar.showMessage("项目设置已应用到工具", 3000)
+
+    def _apply_settings_to_tools(self, ps: ProjectSettings) -> None:
+        """Internal method: sync project settings to all tool pages."""
+        if ps.single_spectrum_file:
+            self.lineEdit.setText(ps.single_spectrum_file)
+        if ps.sum_spectrum_folder:
+            self.folder_path.setText(ps.sum_spectrum_folder)
+        # Temperature page and PIE page are now read-only parameter displays
+        # No need to manually set folder_edit - parameters come from ProjectSettings
+        if hasattr(self, "temperature_page"):
+            self.temperature_page.set_project_settings(ps)
+        if hasattr(self, "pie_page"):
+            self.pie_page.set_project_settings(ps)
+            if ps.pics_database_path and os.path.exists(ps.pics_database_path):
+                self.pie_page.load_database(show_message=False)
         self._sync_project_settings_to_tool_pages(ps)
-        self.update_project_title()
-        self.refresh_project_lifecycle(ps)
-        self.refresh_project_parameter_summary()
-        self.statusbar.showMessage("功能参数已保存，项目摘要已更新", 3000)
 
     def _sync_project_settings_to_tool_pages(self, ps: ProjectSettings) -> None:
+        """Sync project settings to all tool pages (temperature, PIE, etc.)."""
         calibration = self.current_calibration()
         if hasattr(self, "temperature_page"):
             self.temperature_page.normalization_settings = self.normalization_settings
@@ -1221,36 +1276,17 @@ class WorkspacePagesMixin:
             self.pics_page.calibration = calibration
             self.pics_page.set_project_settings(ps)
 
-    def apply_project_settings_to_tools(self) -> None:
+    def save_function_params(self) -> None:
+        """Save function parameters from the current project page."""
         ps = self._collect_project_settings_from_ui()
         self._collect_function_params_from_ui(ps)
-        if ps.single_spectrum_file:
-            self.lineEdit.setText(ps.single_spectrum_file)
-        if ps.sum_spectrum_folder:
-            self.folder_path.setText(ps.sum_spectrum_folder)
-        # Temperature page and PIE page are now read-only parameter displays
-        # No need to manually set folder_edit - parameters come from ProjectSettings
-        if hasattr(self, "temperature_page"):
-            self.temperature_page.set_project_settings(ps)
-        if hasattr(self, "pie_page"):
-            self.pie_page.set_project_settings(ps)
-            if ps.pics_database_path and os.path.exists(ps.pics_database_path):
-                self.pie_page.load_database(show_message=False)
         self.project_settings_manager.set(ps)
         self.project_settings_manager.save()
-        self.update_project_title()
         self._sync_project_settings_to_tool_pages(ps)
+        self.update_project_title()
         self.refresh_project_lifecycle(ps)
         self.refresh_project_parameter_summary()
-        self.statusbar.showMessage("项目路径和默认参数已应用到当前工具并保存", 3000)
-
-    def capture_current_project_paths(self) -> None:
-        """Capture paths from editable tool pages (Spectrum).
-        Temperature and PIE pages are read-only, so no capture needed."""
-        self.project_single_file_edit.setText(self.lineEdit.text().strip())
-        self.project_sum_folder_edit.setText(self.folder_path.text().strip())
-        self.refresh_project_lifecycle()
-        self.statusbar.showMessage('已从工具页面回填路径；请点击"保存项目"写入配置', 4000)
+        self.statusbar.showMessage("功能参数已保存，项目摘要已更新", 3000)
 
     def _auto_save_datasource(self) -> None:
         """Auto-save data source settings and sync to tool pages."""
