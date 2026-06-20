@@ -165,7 +165,6 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.summary_open_project_btn.clicked.connect(self._open_project_settings)
         self.status_label = QtWidgets.QLabel("就绪")
         self.status_label.setObjectName("ProjectStatus")
-        self.load_button.setObjectName("BrowseButton")
         self.select_folder_button.setObjectName("BrowseButton")
 
         # ---- 紧凑数据源控制带 ----
@@ -468,8 +467,6 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         splitter.addWidget(self.right_splitter)
         splitter.setSizes([260, 1020])
         layout.addWidget(splitter, stretch=1)
-        if self.database_edit.text():
-            self.load_database(show_message=False)
         self._update_action_state()
 
     def _open_project_settings(self):
@@ -1223,8 +1220,6 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.merge_method_combo.setCurrentIndex(idx)
         if ps.pie_scan_folder:
             self.folder_edit.setText(ps.pie_scan_folder)
-        if ps.pics_database_path:
-            self.database_edit.setText(ps.pics_database_path)
         self._update_action_state()
 
     def open_common_parameters(self):
