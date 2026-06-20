@@ -111,10 +111,8 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(8)
 
-        default_db = species_database_path()
-        self.database_edit = QtWidgets.QLineEdit(str(default_db) if default_db.exists() else "")
-        self.load_button = QtWidgets.QPushButton("加载")
-        self.load_button.clicked.connect(self.load_database)
+        # Auto-load PICS database (built-in, not user-selectable)
+        self._auto_load_database()
 
         self.use_multi_folders = QtWidgets.QToolButton()
         self.use_multi_folders.setText("多文件夹")
@@ -177,14 +175,6 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         data_layout.setContentsMargins(8, 8, 8, 8)
         data_layout.setSpacing(6)
 
-        db_row = QtWidgets.QHBoxLayout()
-        db_row.setSpacing(6)
-        db_label = QtWidgets.QLabel("PICS库")
-        db_label.setObjectName("ReadoutLabel")
-        db_row.addWidget(db_label)
-        db_row.addWidget(self.database_edit, stretch=1)
-        db_row.addWidget(self.load_button)
-
         self.summary_bar = QtWidgets.QWidget()
         summary_layout = QtWidgets.QHBoxLayout(self.summary_bar)
         summary_layout.setContentsMargins(0, 0, 0, 0)
@@ -201,8 +191,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         summary_layout.addWidget(self.summary_project_label)
         summary_layout.addWidget(self.summary_system_label)
         summary_layout.addWidget(self.summary_data_label)
-        db_row.addWidget(self.summary_bar)
-        data_layout.addLayout(db_row)
+        data_layout.addWidget(self.summary_bar)
 
         folder_row = QtWidgets.QHBoxLayout()
         folder_row.setSpacing(6)
@@ -524,7 +513,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.right_splitter.setSizes([10000, 34])
 
     def load_database(self, show_message: bool = True):
-        path = self.database_edit.text().strip()
+        path = self.database_edit.text().strip() if hasattr(self, "database_edit") else ""
         if not path:
             path, _ = QtWidgets.QFileDialog.getOpenFileName(
                 self,
@@ -534,7 +523,8 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             )
             if not path:
                 return
-            self.database_edit.setText(path)
+            if hasattr(self, "database_edit"):
+                self.database_edit.setText(path)
         try:
             self.database, _ = load_species_database(path)
             self.status_label.setText(f"已加载PICS库: {len(self.database)} 个物种")
@@ -542,6 +532,15 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 QtWidgets.QMessageBox.information(self, "完成", f"已加载 {len(self.database)} 个物种")
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, "错误", str(exc))
+
+    def _auto_load_database(self):
+        """自动加载内置PICS数据库"""
+        try:
+            db_path = species_database_path()
+            if db_path.exists():
+                self.database, _ = load_species_database(str(db_path))
+        except Exception:
+            pass
 
     # ---- 候选物种面板方法 ----
 
@@ -1314,8 +1313,6 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.status_label.setText(message)
         self.analyze_button.setEnabled(not busy)
         self.common_params_button.setEnabled(not busy)
-        self.load_button.setEnabled(not busy)
-        self.database_edit.setEnabled(not busy)
         self.use_multi_folders.setEnabled(not busy)
         self.summary_open_project_btn.setEnabled(not busy)
         self.force_input.setEnabled(not busy)
