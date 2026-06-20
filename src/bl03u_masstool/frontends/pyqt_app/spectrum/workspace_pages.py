@@ -657,8 +657,6 @@ class WorkspacePagesMixin:
         self.project_pie_folder_edit.setPlaceholderText("选择 PIE 扫描目录")
         self.project_sample_info_edit = QLineEdit(self.datasource_card)
         self.project_sample_info_edit.setPlaceholderText("选择样品信息 xlsx/csv/txt 文件")
-        self.project_pics_database_edit = QLineEdit(self.datasource_card)
-        self.project_pics_database_edit.setPlaceholderText("选择 species_database.sqlite")
         self.project_manual_peak_edit = QLineEdit(self.datasource_card)
         self.project_manual_peak_edit.setPlaceholderText("选择 yaml/csv/xlsx 卡峰文件")
 
@@ -700,7 +698,6 @@ class WorkspacePagesMixin:
         self.project_temperature_folder_button = _browse_btn()
         self.project_pie_folder_button = _browse_btn()
         self.project_sample_info_button = _browse_btn()
-        self.project_database_button = _browse_btn()
         self.project_manual_peak_button = _browse_btn()
 
         workbench_group, workbench_layout = _path_group("质谱工作台")
@@ -712,9 +709,25 @@ class WorkspacePagesMixin:
         _add_path_row(analysis_layout, 0, "temperature_scan", "温度扫描目录", self.project_temperature_folder_edit, self.project_temperature_folder_button)
         _add_path_row(analysis_layout, 1, "pie_scan", "PIE扫描目录", self.project_pie_folder_edit, self.project_pie_folder_button)
         _add_path_row(analysis_layout, 2, "sample_info", "样品信息", self.project_sample_info_edit, self.project_sample_info_button)
-        _add_path_row(analysis_layout, 3, "pics_database", "PICS数据库", self.project_pics_database_edit, self.project_database_button)
-        _add_path_row(analysis_layout, 4, "manual_peak", "手动卡峰文件", self.project_manual_peak_edit, self.project_manual_peak_button)
+        _add_path_row(analysis_layout, 3, "manual_peak", "手动卡峰文件", self.project_manual_peak_edit, self.project_manual_peak_button)
         card_layout.addWidget(analysis_group)
+
+        # ── 参考数据库（只读）──
+        ref_group = QtWidgets.QGroupBox("参考数据库", self.datasource_card)
+        ref_layout = QtWidgets.QGridLayout(ref_group)
+        ref_layout.setContentsMargins(8, 8, 8, 8)
+        ref_layout.setHorizontalSpacing(6)
+        ref_layout.setVerticalSpacing(5)
+        ref_layout.setColumnStretch(1, 1)
+
+        ref_label = QtWidgets.QLabel("PICS数据库", self.datasource_card)
+        ref_label.setFixedWidth(88)
+        self.project_pics_database_display = QLineEdit(self.datasource_card)
+        self.project_pics_database_display.setReadOnly(True)
+        self.project_pics_database_display.setPlaceholderText("系统参考数据库（自动配置）")
+        ref_layout.addWidget(ref_label, 0, 0)
+        ref_layout.addWidget(self.project_pics_database_display, 0, 1)
+        card_layout.addWidget(ref_group)
 
         self.project_single_file_button.clicked.connect(self.select_project_single_file)
         self.project_sum_folder_button.clicked.connect(
@@ -727,7 +740,6 @@ class WorkspacePagesMixin:
             lambda: self.select_project_folder(self.project_pie_folder_edit, "选择PIE扫描目录")
         )
         self.project_sample_info_button.clicked.connect(self.select_project_sample_info)
-        self.project_database_button.clicked.connect(self.select_project_database)
         self.project_manual_peak_button.clicked.connect(self.select_project_manual_peak)
         # Auto-save and push project paths when edited
         self.project_single_file_edit.editingFinished.connect(self._auto_save_datasource)
@@ -735,7 +747,6 @@ class WorkspacePagesMixin:
         self.project_temperature_folder_edit.editingFinished.connect(self._auto_save_datasource)
         self.project_pie_folder_edit.editingFinished.connect(self._auto_save_datasource)
         self.project_sample_info_edit.editingFinished.connect(self._auto_save_datasource)
-        self.project_pics_database_edit.editingFinished.connect(self._auto_save_datasource)
         self.project_manual_peak_edit.editingFinished.connect(self._auto_save_datasource)
 
     # ── Tab 4: Function Params ───────────────────────────────────────────
@@ -926,8 +937,10 @@ class WorkspacePagesMixin:
         self.project_temperature_folder_edit.setText(ps.temperature_scan_folder)
         self.project_pie_folder_edit.setText(ps.pie_scan_folder)
         self.project_sample_info_edit.setText(ps.sample_info_file)
-        self.project_pics_database_edit.setText(ps.pics_database_path)
         self.project_manual_peak_edit.setText(ps.manual_peak_file)
+        # PICS database is read-only reference database
+        if hasattr(self, "project_pics_database_display"):
+            self.project_pics_database_display.setText(ps.pics_database_path)
 
     def _collect_project_settings_from_ui(self) -> ProjectSettings:
         """Build a ProjectSettings from all UI fields (does not save)."""
@@ -941,8 +954,8 @@ class WorkspacePagesMixin:
         ps.temperature_scan_folder = self.project_temperature_folder_edit.text().strip()
         ps.pie_scan_folder = self.project_pie_folder_edit.text().strip()
         ps.sample_info_file = self.project_sample_info_edit.text().strip()
-        ps.pics_database_path = self.project_pics_database_edit.text().strip()
         ps.manual_peak_file = self.project_manual_peak_edit.text().strip()
+        # PICS database path is never modified from UI (read-only)
         return ps
 
     def load_project_settings(self) -> None:
@@ -1059,7 +1072,6 @@ class WorkspacePagesMixin:
             "temperature_scan": "temperature_scan",
             "pie_scan": "pie_scan",
             "sample_info": "sample_info",
-            "pics_database": "pics_database",
             "manual_peak": "manual_peak",
         }
         if hasattr(self, "datasource_row_status_labels"):
@@ -1354,17 +1366,6 @@ class WorkspacePagesMixin:
         )
         if folder:
             target.setText(folder)
-            self._auto_save_datasource()
-
-    def select_project_database(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "选择PICS数据库",
-            self._dialog_start_dir(self.project_pics_database_edit.text()),
-            "SQLite Files (*.sqlite *.sqlite3 *.db);;所有文件 (*)",
-        )
-        if path:
-            self.project_pics_database_edit.setText(path)
             self._auto_save_datasource()
 
     def select_project_manual_peak(self) -> None:
