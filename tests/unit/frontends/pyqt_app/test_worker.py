@@ -2,13 +2,24 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import MagicMock, patch
 
+# Set offscreen platform BEFORE importing PyQt6
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
 import pytest
-from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QApplication
+
+pytest.importorskip("PyQt6")
+try:
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtWidgets import QApplication
+except ImportError as e:
+    pytest.skip(f"PyQt6 display libraries not available: {e}", allow_module_level=True)
+
+pytestmark = pytest.mark.gui
 
 from bl03u_masstool.core.project_lifecycle import ProjectSettings, ensure_project_structure
 from bl03u_masstool.frontends.pyqt_app.progress_dialog import ProgressDialog
