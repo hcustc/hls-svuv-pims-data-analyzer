@@ -9,6 +9,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PyQt6")
 from PyQt6 import QtWidgets
 
+pytestmark = pytest.mark.gui
+
 from bl03u_masstool.core.calibration import Calibration
 from bl03u_masstool.frontends.pyqt_app.pics.dialog import PICSCalculatorDialog
 
