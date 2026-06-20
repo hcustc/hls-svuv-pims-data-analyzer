@@ -79,6 +79,9 @@ class WorkspacePagesMixin:
             ("ionization", "IE查询", self.ionization_page),
             ("isotope", "分子/同位素", self.isotope_page),
         ]
+        # Pages that get a separator inserted AFTER them in the nav bar
+        _nav_separators_after = {"spectrum", "pics"}
+
         self.page_buttons: dict[str, QtWidgets.QToolButton] = {}
         self.page_button_group = QtWidgets.QButtonGroup(self.page_nav)
         self.page_button_group.setExclusive(True)
@@ -99,6 +102,17 @@ class WorkspacePagesMixin:
             self.page_button_group.addButton(button, index)
             self.page_buttons[page_name] = button
             nav_layout.addWidget(button)
+            if page_name in _nav_separators_after:
+                sep = QtWidgets.QFrame(self.page_nav)
+                sep.setFrameShape(QtWidgets.QFrame.Shape.VLine)
+                sep.setObjectName("NavSeparator")
+                sep.setFixedWidth(1)
+                sep.setSizePolicy(
+                    QtWidgets.QSizePolicy.Policy.Fixed,
+                    QtWidgets.QSizePolicy.Policy.Expanding,
+                )
+                nav_layout.addWidget(sep)
+                nav_layout.addSpacing(2)
         nav_layout.addStretch(1)
 
         self.page_buttons["spectrum"].setChecked(True)
@@ -106,6 +120,12 @@ class WorkspacePagesMixin:
         self.verticalLayout_9.insertWidget(1, self.workspace_stack, stretch=1)
         self.workspace_stack.setCurrentWidget(self.spectrum_page)
         self._route_common_parameter_buttons()
+
+        # Auto-pull tool page paths back to project management when edited
+        self.lineEdit.editingFinished.connect(lambda: self._pull_path_from_tool("single"))
+        self.folder_path.editingFinished.connect(lambda: self._pull_path_from_tool("sum"))
+        # Note: temperature_page and pie_page are now read-only parameter display,
+        # so no signal connections needed - parameters come from ProjectSettings
 
     def _build_project_page(self):
         page_layout = QVBoxLayout(self.project_page)
@@ -133,7 +153,7 @@ class WorkspacePagesMixin:
         datasource_layout.addWidget(self.datasource_card)
         datasource_layout.addStretch(1)
 
-        # --- Tab 3: 通用参数 (existing NormalizationSettingsWidget) ---
+        # --- Tab 3: 参数配置 (通用参数 + 功能参数 merged) ---
         self.project_common_page = QtWidgets.QWidget(self.project_tabs)
         common_layout = QVBoxLayout(self.project_common_page)
         common_layout.setContentsMargins(0, 0, 0, 0)
@@ -143,37 +163,55 @@ class WorkspacePagesMixin:
         common_scroll_widget = QtWidgets.QWidget()
         common_scroll_layout = QVBoxLayout(common_scroll_widget)
         common_scroll_layout.setContentsMargins(8, 8, 8, 8)
-        common_scroll_layout.setSpacing(10)
+        common_scroll_layout.setSpacing(12)
+
+        # Section header: 通用参数
+        common_section_title = QtWidgets.QLabel("通用参数（定标·归一化·寻峰）", common_scroll_widget)
+        common_section_title.setObjectName("ProjectTitle")
+        common_hint = QtWidgets.QLabel(
+            "以下参数影响主工作台、温度扫描、PIE、摩尔分数和 PICS；保存后自动同步到各工具。",
+            common_scroll_widget,
+        )
+        common_hint.setObjectName("ProjectHint")
+        common_hint.setWordWrap(True)
         self.project_common_settings_widget = NormalizationSettingsWidget(
             self.normalization_settings,
             self.current_calibration(),
             common_scroll_widget,
         )
         self.project_common_settings_widget.save_button.clicked.connect(self.on_project_common_parameters_saved)
-        common_hint = QtWidgets.QLabel(
-            "通用参数会影响主工作台、温度扫描、PIE、摩尔分数和 PICS；保存后会同步到各工具。",
+        self.project_common_settings_widget.settings_saved.connect(self.on_project_common_parameters_saved)
+
+        # Divider
+        divider = QtWidgets.QFrame(common_scroll_widget)
+        divider.setFrameShape(QtWidgets.QFrame.Shape.HLine)
+        divider.setObjectName("NavSeparator")
+
+        # Section header: 功能参数
+        func_section_title = QtWidgets.QLabel("功能默认参数（PIE·温度扫描·PICS·摩尔分数）", common_scroll_widget)
+        func_section_title.setObjectName("ProjectTitle")
+        func_hint = QtWidgets.QLabel(
+            '以下默认值在"应用到工具"或切换工具页时自动同步；保存后写入项目配置。',
             common_scroll_widget,
         )
-        common_hint.setObjectName("ProjectHint")
-        common_hint.setWordWrap(True)
+        func_hint.setObjectName("ProjectHint")
+        func_hint.setWordWrap(True)
+        self._build_function_params_card(common_scroll_widget)
+
+        common_scroll_layout.addWidget(common_section_title)
         common_scroll_layout.addWidget(common_hint)
         common_scroll_layout.addWidget(self.project_common_settings_widget)
+        common_scroll_layout.addWidget(divider)
+        common_scroll_layout.addWidget(func_section_title)
+        common_scroll_layout.addWidget(func_hint)
+        common_scroll_layout.addWidget(self.function_params_card)
         common_scroll_layout.addStretch(1)
         common_scroll.setWidget(common_scroll_widget)
         common_layout.addWidget(common_scroll)
 
-        # --- Tab 4: 功能参数 ---
-        self.project_function_params_page = QtWidgets.QWidget(self.project_tabs)
-        func_layout = QVBoxLayout(self.project_function_params_page)
-        func_layout.setContentsMargins(8, 8, 8, 8)
-        func_layout.setSpacing(10)
-        self._build_function_params_card(self.project_function_params_page)
-        func_layout.addWidget(self.function_params_card)
-
         self.project_tabs.addTab(self.project_identity_page, "项目设置")
         self.project_tabs.addTab(self.project_datasource_page, "数据源")
-        self.project_tabs.addTab(self.project_common_page, "通用参数")
-        self.project_tabs.addTab(self.project_function_params_page, "功能参数")
+        self.project_tabs.addTab(self.project_common_page, "参数配置")
         page_layout.addWidget(self.project_tabs, stretch=1)
 
         self.load_project_settings()
@@ -229,6 +267,8 @@ class WorkspacePagesMixin:
         for button in (self.project_save_button, self.project_apply_button, self.project_capture_button):
             button.setFixedHeight(28)
             action_layout.addWidget(button)
+        self.project_apply_button.setObjectName("BrowseButton")
+        self.project_capture_button.setObjectName("BrowseButton")
         hero_layout.addWidget(action_bar)
         card_layout.addWidget(hero)
 
@@ -296,7 +336,7 @@ class WorkspacePagesMixin:
         header.setObjectName("ProjectTitle")
         card_layout.addWidget(header)
         hint = QtWidgets.QLabel(
-            "“读取当前路径”会从各工具页回填到这里；“应用到工具”会把这里的路径同步到对应工具页。",
+            '"读取当前路径"会从各工具页回填原始数据源；分析产物由上游工具导出后自动登记，也可在这里手动指定。',
             self.datasource_card,
         )
         hint.setObjectName("ProjectHint")
@@ -315,6 +355,12 @@ class WorkspacePagesMixin:
         self.project_pics_database_edit.setPlaceholderText("选择 species_database.sqlite")
         self.project_manual_peak_edit = QLineEdit(self.datasource_card)
         self.project_manual_peak_edit.setPlaceholderText("选择 yaml/csv/xlsx 卡峰文件")
+        self.project_temperature_result_edit = QLineEdit(self.datasource_card)
+        self.project_temperature_result_edit.setPlaceholderText("温度扫描导出的 xlsx/csv 结果")
+        self.project_pie_result_edit = QLineEdit(self.datasource_card)
+        self.project_pie_result_edit.setPlaceholderText("PIE拟合导出的鉴定结果")
+        self.project_mole_fraction_result_edit = QLineEdit(self.datasource_card)
+        self.project_mole_fraction_result_edit.setPlaceholderText("摩尔分数导出的结果")
 
         def _browse_btn(text="选择"):
             b = QPushButton(text, self.datasource_card)
@@ -342,6 +388,9 @@ class WorkspacePagesMixin:
         self.project_pie_folder_button = _browse_btn()
         self.project_database_button = _browse_btn()
         self.project_manual_peak_button = _browse_btn()
+        self.project_temperature_result_button = _browse_btn()
+        self.project_pie_result_button = _browse_btn()
+        self.project_mole_fraction_result_button = _browse_btn()
 
         workbench_group, workbench_layout = _path_group("质谱工作台")
         _add_path_row(workbench_layout, 0, "单谱文件", self.project_single_file_edit, self.project_single_file_button)
@@ -355,6 +404,12 @@ class WorkspacePagesMixin:
         _add_path_row(analysis_layout, 3, "手动卡峰文件", self.project_manual_peak_edit, self.project_manual_peak_button)
         card_layout.addWidget(analysis_group)
 
+        artifact_group, artifact_layout = _path_group("分析产物")
+        _add_path_row(artifact_layout, 0, "温度扫描结果", self.project_temperature_result_edit, self.project_temperature_result_button)
+        _add_path_row(artifact_layout, 1, "PIE鉴定结果", self.project_pie_result_edit, self.project_pie_result_button)
+        _add_path_row(artifact_layout, 2, "摩尔分数结果", self.project_mole_fraction_result_edit, self.project_mole_fraction_result_button)
+        card_layout.addWidget(artifact_group)
+
         self.project_single_file_button.clicked.connect(self.select_project_single_file)
         self.project_sum_folder_button.clicked.connect(
             lambda: self.select_project_folder(self.project_sum_folder_edit, "选择累计谱文件夹")
@@ -367,6 +422,38 @@ class WorkspacePagesMixin:
         )
         self.project_database_button.clicked.connect(self.select_project_database)
         self.project_manual_peak_button.clicked.connect(self.select_project_manual_peak)
+        self.project_temperature_result_button.clicked.connect(
+            lambda: self.select_project_result_file(
+                self.project_temperature_result_edit,
+                "选择温度扫描结果文件",
+                "Result Files (*.xlsx *.csv);;所有文件 (*)",
+            )
+        )
+        self.project_pie_result_button.clicked.connect(
+            lambda: self.select_project_result_file(
+                self.project_pie_result_edit,
+                "选择PIE鉴定结果文件",
+                "Result Files (*.xlsx *.csv);;所有文件 (*)",
+            )
+        )
+        self.project_mole_fraction_result_button.clicked.connect(
+            lambda: self.select_project_result_file(
+                self.project_mole_fraction_result_edit,
+                "选择摩尔分数结果文件",
+                "Result Files (*.xlsx *.csv);;所有文件 (*)",
+            )
+        )
+
+        # Auto-save and push project paths when edited
+        self.project_single_file_edit.editingFinished.connect(self._auto_save_datasource)
+        self.project_sum_folder_edit.editingFinished.connect(self._auto_save_datasource)
+        self.project_temperature_folder_edit.editingFinished.connect(self._auto_save_datasource)
+        self.project_pie_folder_edit.editingFinished.connect(self._auto_save_datasource)
+        self.project_pics_database_edit.editingFinished.connect(self._auto_save_datasource)
+        self.project_manual_peak_edit.editingFinished.connect(self._auto_save_datasource)
+        self.project_temperature_result_edit.editingFinished.connect(self._auto_save_datasource)
+        self.project_pie_result_edit.editingFinished.connect(self._auto_save_datasource)
+        self.project_mole_fraction_result_edit.editingFinished.connect(self._auto_save_datasource)
 
     # ── Tab 4: Function Params ───────────────────────────────────────────
 
@@ -557,6 +644,9 @@ class WorkspacePagesMixin:
         self.project_pie_folder_edit.setText(ps.pie_scan_folder)
         self.project_pics_database_edit.setText(ps.pics_database_path)
         self.project_manual_peak_edit.setText(ps.manual_peak_file)
+        self.project_temperature_result_edit.setText(ps.temperature_scan_result_file)
+        self.project_pie_result_edit.setText(ps.pie_identification_result_file)
+        self.project_mole_fraction_result_edit.setText(ps.mole_fraction_result_file)
 
     def _collect_project_settings_from_ui(self) -> ProjectSettings:
         """Build a ProjectSettings from all UI fields (does not save)."""
@@ -571,6 +661,9 @@ class WorkspacePagesMixin:
         ps.pie_scan_folder = self.project_pie_folder_edit.text().strip()
         ps.pics_database_path = self.project_pics_database_edit.text().strip()
         ps.manual_peak_file = self.project_manual_peak_edit.text().strip()
+        ps.temperature_scan_result_file = self.project_temperature_result_edit.text().strip()
+        ps.pie_identification_result_file = self.project_pie_result_edit.text().strip()
+        ps.mole_fraction_result_file = self.project_mole_fraction_result_edit.text().strip()
         return ps
 
     def load_project_settings(self) -> None:
@@ -581,8 +674,6 @@ class WorkspacePagesMixin:
             ps.pie_scan_folder = default_pie_folder
         if not ps.pics_database_path:
             ps.pics_database_path = default_database
-        if not ps.system:
-            ps.system = "C6F11O2H"
         self._read_project_settings_to_ui(ps)
         self._load_function_params_to_ui(ps)
         self.update_project_title()
@@ -643,6 +734,7 @@ class WorkspacePagesMixin:
         self._collect_function_params_from_ui(ps)
         self.project_settings_manager.set(ps)
         self.project_settings_manager.save()
+        self._sync_project_settings_to_tool_pages(ps)
         self.update_project_title()
         self.refresh_project_parameter_summary()
         self.statusbar.showMessage("功能参数已保存，项目摘要已更新", 3000)
@@ -673,13 +765,13 @@ class WorkspacePagesMixin:
             self.lineEdit.setText(ps.single_spectrum_file)
         if ps.sum_spectrum_folder:
             self.folder_path.setText(ps.sum_spectrum_folder)
-        if ps.temperature_scan_folder and hasattr(self, "temperature_page"):
-            self.temperature_page.folder_edit.setText(ps.temperature_scan_folder)
-        if ps.pie_scan_folder and hasattr(self, "pie_page"):
-            self.pie_page.folder_edit.setText(ps.pie_scan_folder)
-        if ps.pics_database_path and hasattr(self, "pie_page"):
-            self.pie_page.database_edit.setText(ps.pics_database_path)
-            if os.path.exists(ps.pics_database_path):
+        # Temperature page and PIE page are now read-only parameter displays
+        # No need to manually set folder_edit - parameters come from ProjectSettings
+        if hasattr(self, "temperature_page"):
+            self.temperature_page.set_project_settings(ps)
+        if hasattr(self, "pie_page"):
+            self.pie_page.set_project_settings(ps)
+            if ps.pics_database_path and os.path.exists(ps.pics_database_path):
                 self.pie_page.load_database(show_message=False)
         self.project_settings_manager.set(ps)
         self.project_settings_manager.save()
@@ -689,14 +781,46 @@ class WorkspacePagesMixin:
         self.statusbar.showMessage("项目路径和默认参数已应用到当前工具并保存", 3000)
 
     def capture_current_project_paths(self) -> None:
+        """Capture paths from editable tool pages (Spectrum).
+        Temperature and PIE pages are read-only, so no capture needed."""
         self.project_single_file_edit.setText(self.lineEdit.text().strip())
         self.project_sum_folder_edit.setText(self.folder_path.text().strip())
-        if hasattr(self, "temperature_page"):
-            self.project_temperature_folder_edit.setText(self.temperature_page.folder_edit.text().strip())
-        if hasattr(self, "pie_page"):
-            self.project_pie_folder_edit.setText(self.pie_page.folder_edit.text().strip())
-            self.project_pics_database_edit.setText(self.pie_page.database_edit.text().strip())
-        self.statusbar.showMessage("已从工具页面回填路径；请点击“保存项目”写入配置", 4000)
+        self.statusbar.showMessage('已从工具页面回填路径；请点击"保存项目"写入配置', 4000)
+
+    def _auto_save_datasource(self) -> None:
+        """Auto-save data source settings and sync to tool pages."""
+        ps = self._collect_project_settings_from_ui()
+        self.project_settings_manager.set(ps)
+        self.project_settings_manager.save()
+        # Push editable paths to Spectrum tool page
+        val = self.project_single_file_edit.text().strip()
+        if val:
+            self.lineEdit.setText(val)
+        val = self.project_sum_folder_edit.text().strip()
+        if val:
+            self.folder_path.setText(val)
+        # Sync project settings to all tool pages (Temperature, PIE, etc.)
+        self._sync_project_settings_to_tool_pages(ps)
+
+    def _push_path_to_tool(self, kind: str) -> None:
+        """Push a single path field from project management to the corresponding editable tool page.
+        Note: Temperature and PIE pages are read-only, so only Spectrum tool is updated."""
+        if kind == "single":
+            val = self.project_single_file_edit.text().strip()
+            if val:
+                self.lineEdit.setText(val)
+        elif kind == "sum":
+            val = self.project_sum_folder_edit.text().strip()
+            if val:
+                self.folder_path.setText(val)
+
+    def _pull_path_from_tool(self, kind: str) -> None:
+        """Pull a single path from an editable tool page back to project management.
+        Note: Temperature and PIE pages are read-only, so only Spectrum tool is pulled."""
+        if kind == "single":
+            self.project_single_file_edit.setText(self.lineEdit.text().strip())
+        elif kind == "sum":
+            self.project_sum_folder_edit.setText(self.folder_path.text().strip())
 
     def select_project_single_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -737,6 +861,16 @@ class WorkspacePagesMixin:
         if path:
             self.project_manual_peak_edit.setText(path)
 
+    def select_project_result_file(self, target: QLineEdit, title: str, file_filter: str) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            title,
+            self._dialog_start_dir(target.text()),
+            file_filter,
+        )
+        if path:
+            target.setText(path)
+
     def update_project_title(self) -> None:
         project_name = self.project_name_edit.text().strip()
         project_system = self.project_system_edit.text().strip()
@@ -775,7 +909,11 @@ class WorkspacePagesMixin:
                 f"温度参考={temp_map.get(ps.temp_reference_mode, ps.temp_reference_mode)}, "
                 f"Kr m/z={ps.temp_kr_mz}; "
                 f"PICS NO m/z={ps.pics_no_mz}; "
-                f"母体 m/z={ps.mf_parent_mz}, 光子能量={ps.mf_photon_energy:.4g} eV"
+                f"母体 m/z={ps.mf_parent_mz}, 光子能量={ps.mf_photon_energy:.4g} eV\n"
+                "分析产物:\n"
+                f"温度扫描结果={'已登记' if ps.temperature_scan_result_file else '未登记'}; "
+                f"PIE鉴定结果={'已登记' if ps.pie_identification_result_file else '未登记'}; "
+                f"摩尔分数结果={'已登记' if ps.mole_fraction_result_file else '未登记'}"
             )
         except Exception as exc:
             summary = f"统一参数摘要读取失败: {exc}"

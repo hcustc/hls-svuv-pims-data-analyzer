@@ -5,11 +5,17 @@ project:
   output_dir: output
 data_sources:
   single_spectrum_file: ''
-  sum_spectrum_folder: ''
-  temperature_scan_folder: ''
-  pie_scan_folder: ''
-  pics_database_path: ''
-  manual_peak_file: ''
+  sum_spectrum_folder: tests/fixtures/bl03u_sample/C6F11O2H/Temp_Scan/12.5eV
+  temperature_scan_folder: /Users/huangchen/VscodeProject/BL03U_MSTool_clean_repo/BL03U_MassSpectrumTool/tests/fixtures/bl03u_sample/顺-13-二甲基环己烷
+    30 torr/温度扫描/11eV/
+  pie_scan_folder: tests/fixtures/bl03u_sample/C6F11O2H/PIE_Scan/1050
+  pics_database_path: /Users/huangchen/VscodeProject/BL03U_MSTool_clean_repo/BL03U_MassSpectrumTool/database/species_database.sqlite
+  manual_peak_file: /Users/huangchen/VscodeProject/BL03U_MSTool_clean_repo/BL03U_MassSpectrumTool/tests/fixtures/bl03u_sample/顺-13-二甲基环己烷
+    30 torr/peak_ranges-DHMC.csv
+analysis_artifacts:
+  temperature_scan_result_file: ''
+  pie_identification_result_file: ''
+  mole_fraction_result_file: ''
 calibration:
   a: 3.66334e-07
   b: 0.000637719
@@ -21,7 +27,7 @@ normalization:
   temperature_kr_correct: true
   pie_photon_mode: first
   mass_discrimination: 1.0
-  kr_calibration_folder: 
+  kr_calibration_folder: null
   kr_calibration_peak_file: config/peak_integration.yaml
   expansion_factors:
     550.0: 1.0
@@ -68,6 +74,12 @@ peak_detection:
   baseline_percentile: 5.0
   min_peak_width: 1
   max_peak_width: 80
+  cwt_snr_threshold: 0.02
+  cwt_wavelet_max_width: 30
+  weak_tail_cutoff_idx: 15000
+  vote_threshold: 0.667
+  min_intensity_for_single_vote: 5.0
+  mz_tolerance: 0.2
 function_params:
   pie:
     energy_decimals: 1
@@ -76,6 +88,7 @@ function_params:
     multi_folder_mode: false
     merge_method: low_energy_dominant
   temperature_scan:
+    peak_source: auto
     reference_mode: sum
     prefer_gaussian: true
     kr_mz: 84
