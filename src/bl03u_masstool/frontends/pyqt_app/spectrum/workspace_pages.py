@@ -11,17 +11,20 @@ from bl03u_masstool.core.normalization import load_normalization_settings
 from bl03u_masstool.core.project_lifecycle import (
     PROJECT_DIRECTORIES,
     PROJECT_SOURCE_SPECS,
+    DataSourceValidationStatus,
     ProjectUIState,
     build_project_stage_statuses,
     collect_project_files,
     create_project_snapshot,
     ensure_project_structure,
     export_project_archive,
+    get_data_source_validation_status,
     get_project_ui_state,
     import_initial_project_data,
     next_project_stage,
     project_root,
     sanitize_project_slug,
+    validate_all_data_sources,
 )
 from bl03u_masstool.core.project_settings import ProjectSettings, ProjectSettingsManager
 from bl03u_masstool.frontends.pyqt_app.isotope.dialog import IsotopeAbundanceDialog
@@ -976,8 +979,8 @@ class WorkspacePagesMixin:
                 self.switch_workspace_page(next_status.nav_page)
         elif state == ProjectUIState.ANALYSIS_COMPLETE:
             self.project_tabs.setCurrentWidget(self.project_artifacts_page)
-        """Write function params tab values into ProjectSettings."""
-        ps.pie_energy_decimals = self.fp_pie_energy_decimals.value()
+
+    def _collect_function_params_from_ui(self, ps: ProjectSettings) -> None:
         ps.pie_recursive = self.fp_pie_recursive.isChecked()
         ps.pie_prefer_gaussian = self.fp_pie_prefer_gaussian.isChecked()
         ps.pie_multi_folder_mode = self.fp_pie_multi_folder.isChecked()

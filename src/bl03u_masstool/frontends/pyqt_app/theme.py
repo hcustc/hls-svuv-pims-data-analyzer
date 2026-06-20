@@ -89,6 +89,11 @@ QWidget#SidePanel {{
     border-radius: 6px;
 }}
 
+QWidget#TempToolbar {{
+    background: {t.panel_bg};
+    border-bottom: 1px solid {t.border};
+}}
+
 QFrame#ProjectCard {{
     background: {t.panel_bg};
     border: 1px solid {t.border};
@@ -130,6 +135,11 @@ QLabel#InlineStatusLabel[status="error"] {{
 
 QLabel#InlineStatusLabel[status="success"] {{
     color: {t.success};
+}}
+
+QLabel#InlineStatusLabel[status="busy"] {{
+    color: {t.primary_hover};
+    font-weight: 600;
 }}
 
 QLabel#ProjectTitle {{
@@ -290,6 +300,16 @@ QPushButton#BrowseButton:hover {{
     border-color: {t.primary};
 }}
 
+QPushButton#WorkflowButton:disabled,
+QPushButton#BrowseButton:disabled,
+QPushButton#PrimaryToolbarButton:disabled,
+QPushButton#ExportButton:disabled,
+QPushButton#WarningButton:disabled {{
+    background: {t.disabled_bg};
+    border-color: {t.disabled_bg};
+    color: {t.disabled_text};
+}}
+
 QPushButton#PrimaryToolbarButton {{
     background: {t.primary};
     color: {t.text_inverse};
@@ -424,12 +444,56 @@ QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {{
     border-color: {t.border_focus};
 }}
 
-QTableWidget, QListWidget {{
+QLineEdit#CurveSearch {{
+    background: {t.panel_subtle};
+}}
+
+QTableWidget, QListWidget, QTreeWidget {{
     background: {t.panel_bg};
     alternate-background-color: {t.panel_subtle};
     border: 1px solid {t.border};
     border-radius: 5px;
     gridline-color: {t.gridline};
+}}
+
+QTreeWidget::item, QListWidget::item {{
+    padding: 4px 6px;
+}}
+
+QTreeWidget::item:selected, QListWidget::item:selected {{
+    background: {t.selection};
+    color: {t.text_primary};
+}}
+
+QWidget#TagCloud {{
+    background: transparent;
+}}
+
+QFrame#ForceTag {{
+    background: #eef2ff;
+    border: 1px solid #c7d2fe;
+    border-radius: 4px;
+    padding: 0;
+}}
+
+QLabel#ForceTagText {{
+    background: transparent;
+    color: #3730a3;
+    font-size: 9pt;
+}}
+
+QPushButton#TagCloseButton {{
+    background: transparent;
+    border: 0;
+    color: #6366f1;
+    font-size: 8pt;
+    padding: 0;
+    min-height: 14px;
+}}
+
+QPushButton#TagCloseButton:hover {{
+    color: {t.danger};
+    font-weight: 700;
 }}
 
 QHeaderView::section {{
@@ -488,10 +552,26 @@ QTabWidget#ProjectTabs QTabBar::tab:selected,
 QTabWidget#PeakResultTabs QTabBar::tab:selected {{
     background: {t.panel_bg};
     color: {t.text_primary};
+    font-weight: 600;
 }}
 
-QSplitter::handle {{
-    background: {t.gridline};
+QTabBar::tab:hover:!selected {{
+    background: {t.primary_soft};
+    color: {t.primary_hover};
+}}
+
+QFrame#NavSeparator {{
+    background: {t.border};
+    margin: 6px 2px;
+}}
+
+QSplitter#MainSplitter::handle {{
+    background: {t.border};
+    width: 3px;
+}}
+
+QSplitter#MainSplitter::handle:hover {{
+    background: {t.primary_border};
 }}
 """
 

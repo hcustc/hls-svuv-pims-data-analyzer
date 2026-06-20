@@ -16,8 +16,12 @@ def test_project_settings_round_trip_preserves_nested_yaml_fields(tmp_path):
         sum_spectrum_folder="data/sum",
         temperature_scan_folder="data/temp",
         pie_scan_folder="data/pie",
+        sample_info_file="data/sample.xlsx",
         pics_database_path="database/species_database.sqlite",
         manual_peak_file="config/manual.yaml",
+        temperature_scan_result_file="output/temperature.xlsx",
+        pie_identification_result_file="output/pie_identification.xlsx",
+        mole_fraction_result_file="output/mole_fraction.xlsx",
         cal_a=1.2e-7,
         cal_b=2.3e-4,
         cal_c=0.45,
@@ -65,8 +69,12 @@ def test_project_settings_round_trip_preserves_nested_yaml_fields(tmp_path):
     assert loaded.sum_spectrum_folder == settings.sum_spectrum_folder
     assert loaded.temperature_scan_folder == settings.temperature_scan_folder
     assert loaded.pie_scan_folder == settings.pie_scan_folder
+    assert loaded.sample_info_file == settings.sample_info_file
     assert loaded.pics_database_path == settings.pics_database_path
     assert loaded.manual_peak_file == settings.manual_peak_file
+    assert loaded.temperature_scan_result_file == settings.temperature_scan_result_file
+    assert loaded.pie_identification_result_file == settings.pie_identification_result_file
+    assert loaded.mole_fraction_result_file == settings.mole_fraction_result_file
     assert loaded.cal_a == settings.cal_a
     assert loaded.cal_b == settings.cal_b
     assert loaded.cal_c == settings.cal_c
@@ -109,6 +117,11 @@ def test_load_project_settings_accepts_saved_yaml_key_names(tmp_path):
         yaml.safe_dump(
             {
                 "project": {"name": "Saved Name", "system": "Saved System"},
+                "analysis_artifacts": {
+                    "temperature_scan_result_file": "out/temp.xlsx",
+                    "pie_identification_result_file": "out/pie.xlsx",
+                    "mole_fraction_result_file": "out/mf.xlsx",
+                },
                 "calibration": {"a": 1.0, "b": 2.0, "c": 3.0, "points": [{"tof": 1, "mz": 2}]},
                 "peak_detection": {"algorithm": "cwt", "detection_min_idx": 321},
                 "function_params": {"pie": {"energy_decimals": 3}},
@@ -121,6 +134,9 @@ def test_load_project_settings_accepts_saved_yaml_key_names(tmp_path):
 
     assert loaded.project_name == "Saved Name"
     assert loaded.system == "Saved System"
+    assert loaded.temperature_scan_result_file == "out/temp.xlsx"
+    assert loaded.pie_identification_result_file == "out/pie.xlsx"
+    assert loaded.mole_fraction_result_file == "out/mf.xlsx"
     assert loaded.cal_a == 1.0
     assert loaded.cal_b == 2.0
     assert loaded.cal_c == 3.0
