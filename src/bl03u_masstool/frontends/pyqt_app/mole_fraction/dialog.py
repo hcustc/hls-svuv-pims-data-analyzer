@@ -130,9 +130,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             db_path = species_database_path()
             if db_path.exists():
                 self.database, self.mz_index = load_species_database(str(db_path))
-                self.lbl_db_status.setText(f"已加载 {len(self.database)} 个物种")
-                self.lbl_db_status.setStyleSheet("color: #6495ed;")
-                if hasattr(self, "combo_parent_species"):
+                if hasattr(self, "_update_parent_species_list"):
                     self._update_parent_species_list()
                 if hasattr(self, "energy_parent_table"):
                     self._refresh_energy_parent_table()
@@ -196,14 +194,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         source_layout = QtWidgets.QHBoxLayout(source_bar)
         source_layout.setContentsMargins(0, 0, 0, 0)
         source_layout.setSpacing(8)
-        source_layout.addWidget(QtWidgets.QLabel("物种数据库:"))
-        self.lbl_db_status = QtWidgets.QLabel("未加载数据库")
-        self.lbl_db_status.setStyleSheet("color: rgba(232, 232, 232, 0.6);")
-        btn_load_db = QtWidgets.QPushButton("加载物种数据库")
-        btn_load_db.setToolTip("加载PICS物种数据库，用于获取物种的电离能、分子式等信息")
-        btn_load_db.clicked.connect(self._load_database)
-        source_layout.addWidget(btn_load_db)
-        source_layout.addWidget(self.lbl_db_status)
+        # PICS database is auto-loaded (built-in, not user-selectable)
         source_layout.addStretch()
         source_bar.setMaximumHeight(42)
         source_bar.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
@@ -1079,8 +1070,6 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             return
         try:
             self.database, self.mz_index = load_species_database(file_path)
-            self.lbl_db_status.setText(f"已加载 {len(self.database)} 个物种")
-            self.lbl_db_status.setStyleSheet("color: #6495ed;")
             self._update_parent_species_list()
             self._refresh_energy_parent_table()
         except Exception as e:
@@ -2995,7 +2984,5 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             path = species_database_path()
         try:
             self.database, self.mz_index = load_species_database(path)
-            self.lbl_db_status.setText(f"已加载 {len(self.database)} 个物种")
-            self.lbl_db_status.setStyleSheet("color: #6495ed;")
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "错误", f"加载数据库失败: {e}")
