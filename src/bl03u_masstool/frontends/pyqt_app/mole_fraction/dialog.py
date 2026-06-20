@@ -1962,29 +1962,30 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
                     species = species_list[0]
                     ie = species.get("ie", 0) or 0
                     usable_energies = [e for e in all_energies if e >= ie]
-                    calc_energies = usable_energies[:2]
 
-                    if not calc_energies:
+                    if not usable_energies:
                         warnings.append(f"质量数 {mz} 物种 {species['species']}: 没有高于电离能({ie:.2f} eV)的能量数据")
                         continue
 
-                    for calc_energy in calc_energies:
-                        ref = self._reference_parent_for_energy(calc_energy)
-                        if ref is None:
-                            warnings.append(f"质量数 {mz} 物种 {species['species']}: 缺少 {calc_energy:.2f} eV 的参考母体")
-                            continue
-                        ref_mz, ref_mw, ref_energy, ref_signal, ref_mf_at_tm, ref_species_name = ref
-                        signal_data = self._get_signal_from_scan_data(mz, calc_energy)
-                        if not signal_data:
-                            continue
-                        mf = self._calc_product_mf_auto(
-                            mz, species, ref_mz, ref_mw,
-                            ref_energy, ref_signal, ref_mf_at_tm,
-                            signal_data, calc_energy=calc_energy,
-                            ref_species_name=ref_species_name,
-                        )
-                        if mf:
-                            self.all_species_mf[(mz, species["species"], calc_energy)] = mf
+                    calc_energy = select_calc_energy(ie, usable_energies)
+                    ref = self._reference_parent_for_energy(calc_energy)
+                    if ref is None:
+                        warnings.append(f"质量数 {mz} 物种 {species['species']}: 缺少 {calc_energy:.2f} eV 的参考母体")
+                        continue
+
+                    ref_mz, ref_mw, ref_energy, ref_signal, ref_mf_at_tm, ref_species_name = ref
+                    signal_data = self._get_signal_from_scan_data(mz, calc_energy)
+                    if not signal_data:
+                        continue
+
+                    mf = self._calc_product_mf_auto(
+                        mz, species, ref_mz, ref_mw,
+                        ref_energy, ref_signal, ref_mf_at_tm,
+                        signal_data, calc_energy=calc_energy,
+                        ref_species_name=ref_species_name,
+                    )
+                    if mf:
+                        self.all_species_mf[(mz, species["species"], calc_energy)] = mf
                 else:
                     species_list_sorted = sorted(
                         species_list,

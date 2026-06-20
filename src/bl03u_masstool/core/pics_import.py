@@ -306,6 +306,16 @@ def write_pics_records(
             conn.execute("DELETE FROM species")
 
         for record in records:
+            # Build cross-section rows first to validate before deleting old records
+            rows = [
+                (float(e), float(cs))
+                for e, cs in zip(record["energies"], record["cross_sections"])
+                if _is_finite(e) and _is_finite(cs)
+            ]
+            if len(rows) < 2:
+                # Skip records with insufficient valid data points
+                continue
+
             if mode == "upsert":
                 ids = _matching_species_ids(conn, record)
                 if ids:
@@ -320,19 +330,11 @@ def write_pics_records(
                 (int(record["mz"]), str(record["species"]), record["ie"]),
             )
             species_id = int(cursor.lastrowid)
-            rows = [
-                (species_id, float(e), float(cs))
-                for e, cs in zip(record["energies"], record["cross_sections"])
-                if _is_finite(e) and _is_finite(cs)
-            ]
-            if len(rows) < 2:
-                conn.execute("DELETE FROM species WHERE id = ?", (species_id,))
-                continue
 
             conn.executemany(
                 "INSERT INTO pic_cross_sections (species_id, energy_ev, cross_section) "
                 "VALUES (?, ?, ?)",
-                rows,
+                [(species_id, e, cs) for e, cs in rows],
             )
             inserted_species += 1
             inserted_points  += len(rows)
