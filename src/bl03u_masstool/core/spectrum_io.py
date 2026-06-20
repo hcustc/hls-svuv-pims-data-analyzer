@@ -109,7 +109,7 @@ def read_bl03u_txt(path: str | Path, *, trim_start: int = 4000) -> Spectrum:
 
 def list_spectrum_files(folder: str | Path, suffixes: tuple[str, ...] = (".txt", ".asc", ".888")) -> list[Path]:
     folder = Path(folder)
-    return sorted(path for path in folder.rglob("*") if path.is_file() and path.suffix.lower() in suffixes)
+    return sorted(path for path in folder.iterdir() if path.is_file() and path.suffix.lower() in suffixes)
 
 
 def read_folder_spectra(

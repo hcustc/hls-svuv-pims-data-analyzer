@@ -408,6 +408,17 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self._show_inline_error("请在项目管理中配置温度扫描文件夹")
             return
 
+        # If folder has no direct .txt files but has subdirectories, ask user to pick a subfolder
+        folder_path = Path(folder)
+        has_direct_txt = any(p.is_file() and p.suffix.lower() == ".txt" for p in folder_path.iterdir())
+        if not has_direct_txt and any(p.is_dir() for p in folder_path.iterdir()):
+            selected = QtWidgets.QFileDialog.getExistingDirectory(
+                self, "选择包含 .txt 文件的子文件夹", folder
+            )
+            if not selected:
+                return
+            folder = selected
+
         peak_config = load_peak_detection_config()
         threshold_end = peak_config.threshold_end
         min_intensity = peak_config.min_intensity
