@@ -137,18 +137,29 @@ def query_species_by_mz(path: str | Path, mz: int) -> list[dict]:
 
 
 def extract_photon_energy(metadata_lines: list[str], path: str | Path | None = None, fallback: float | None = None) -> float:
-    """Extract nominal photon energy for PIE grouping."""
+    """Extract nominal photon energy for PIE grouping.
+
+    Priority:
+    1. File metadata (most accurate) - Energy field in spectrum header
+    2. Directory path (fallback) - e.g., "8.0eV" in directory name
+    3. Fallback value
+    """
+    # First try: extract from file metadata (most accurate)
+    for line in metadata_lines:
+        if "energy" in line.lower():
+            value = extract_first_number(line)
+            if value is not None:
+                return value
+
+    # Second try: extract from path (useful for legacy folder structures)
     if path is not None:
         path_obj = Path(path)
         for part in reversed(path_obj.parts):
             match = EV_RE.search(part)
             if match:
                 return float(match.group(1))
-    for line in metadata_lines:
-        if "energy" in line.lower():
-            value = extract_first_number(line)
-            if value is not None:
-                return value
+
+    # Last resort: fallback
     if fallback is not None:
         return float(fallback)
     raise ValueError("cannot extract photon energy")
