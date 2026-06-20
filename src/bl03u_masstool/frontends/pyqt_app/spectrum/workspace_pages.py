@@ -1154,7 +1154,7 @@ class WorkspacePagesMixin:
         state = get_project_ui_state(ps)
 
         if state == ProjectUIState.UNINITIALIZED:
-            self.initialize_project_structure()
+            self.save_and_apply_project_settings()
         elif state == ProjectUIState.AWAITING_DATA_IMPORT:
             self.project_tabs.setCurrentWidget(self.project_datasource_page)
         elif state == ProjectUIState.READY_TO_ANALYZE:
@@ -1187,10 +1187,12 @@ class WorkspacePagesMixin:
     def save_and_apply_project_settings(self) -> None:
         """Save project settings, create project structure, and sync to tools.
 
-        This combines three operations:
-        1. Save project configuration
-        2. Create project directory structure
-        3. Sync settings to all tool pages
+        This is the unified method that:
+        1. Auto-generates project directory name (if needed)
+        2. Creates project directory structure
+        3. Saves all configuration to disk
+        4. Syncs settings to all tool pages
+        5. Refreshes UI displays
         """
         ps = self._collect_project_settings_from_ui()
 
@@ -1198,6 +1200,8 @@ class WorkspacePagesMixin:
         if (not ps.output_dir.strip() or ps.output_dir.strip() == "output") and (ps.project_name or ps.system):
             ps.output_dir = self._default_project_folder(ps)
             self.project_output_dir_edit.setText(ps.output_dir)
+            # Re-collect after updating output_dir field
+            ps = self._collect_project_settings_from_ui()
 
         # Collect function parameters
         self._collect_function_params_from_ui(ps)
@@ -1213,9 +1217,13 @@ class WorkspacePagesMixin:
         self.project_settings_manager.set(ps)
         self.project_settings_manager.save()
 
-        # Step 3: Sync to tools
+        # Step 3: Read settings back to UI (ensures consistency)
+        self._read_project_settings_to_ui(ps)
+
+        # Step 4: Sync to tools
         self._apply_settings_to_tools(ps)
 
+        # Step 5: Refresh UI displays
         self.update_project_title()
         self.refresh_project_lifecycle(ps)
         self.refresh_project_parameter_summary()
@@ -1396,22 +1404,6 @@ class WorkspacePagesMixin:
         self.project_settings_manager.set(ps)
         self.project_settings_manager.save()
         return ps
-
-    def initialize_project_structure(self) -> None:
-        ps = self._collect_project_settings_from_ui()
-        if (not ps.output_dir.strip() or ps.output_dir.strip() == "output") and (ps.project_name or ps.system):
-            self.project_output_dir_edit.setText(self._default_project_folder(ps))
-            ps = self._collect_project_settings_from_ui()
-        self._collect_function_params_from_ui(ps)
-        ensure_project_structure(ps)
-        self.project_settings_manager.set(ps)
-        self.project_settings_manager.save()
-        self._read_project_settings_to_ui(ps)
-        self._sync_project_settings_to_tool_pages(ps)
-        self.refresh_project_lifecycle(ps)
-        self.refresh_project_parameter_summary()
-        self.update_project_ui_state(ps)
-        self.statusbar.showMessage(f"项目目录已初始化：{project_root(ps)}", 5000)
 
     def open_project_import_wizard(self) -> None:
         ps = self._collect_project_settings_from_ui()
