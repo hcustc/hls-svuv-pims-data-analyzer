@@ -396,19 +396,24 @@ class WorkspacePagesMixin:
         action_layout.setSpacing(6)
 
         self.project_read_paths_button = QPushButton("读取工具路径", action_bar)
+        self.project_initialize_button = QPushButton("初始化项目", action_bar)
         self.project_save_and_apply_button = QPushButton("保存并应用", action_bar)
 
         self.project_read_paths_button.setToolTip(
             "从质谱工作台读取已选择的单谱和累计谱路径，回填到项目设置页。"
         )
+        self.project_initialize_button.setToolTip(
+            "创建项目文件夹结构并保存配置。仅初始化项目，不同步参数到工具。"
+        )
         self.project_save_and_apply_button.setToolTip(
-            "保存项目设置 → 创建项目文件夹 → 同步参数到各工具页面。一键完成项目初始化和配置。"
+            "保存项目设置 → 创建项目文件夹 → 同步参数到各工具页面。完整初始化和配置。"
         )
 
-        for button in (self.project_read_paths_button, self.project_save_and_apply_button):
+        for button in (self.project_read_paths_button, self.project_initialize_button, self.project_save_and_apply_button):
             button.setFixedHeight(28)
             action_layout.addWidget(button)
 
+        self.project_initialize_button.setObjectName("BrowseButton")
         self.project_save_and_apply_button.setObjectName("BrowseButton")
         hero_layout.addWidget(action_bar)
         card_layout.addWidget(hero)
@@ -444,6 +449,7 @@ class WorkspacePagesMixin:
         card_layout.addLayout(form_layout)
 
         self.project_read_paths_button.clicked.connect(self.read_paths_from_tools)
+        self.project_initialize_button.clicked.connect(self.initialize_project_structure)
         self.project_save_and_apply_button.clicked.connect(self.save_and_apply_project_settings)
         self.project_output_dir_button.clicked.connect(
             lambda: self.select_project_folder(self.project_output_dir_edit, "选择输出目录")
@@ -1187,12 +1193,7 @@ class WorkspacePagesMixin:
     def save_and_apply_project_settings(self) -> None:
         """Save project settings, create project structure, and sync to tools.
 
-        This is the unified method that:
-        1. Auto-generates project directory name (if needed)
-        2. Creates project directory structure
-        3. Saves all configuration to disk
-        4. Syncs settings to all tool pages
-        5. Refreshes UI displays
+        This is the complete operation: initialize + apply to all tool pages.
         """
         ps = self._collect_project_settings_from_ui()
 
@@ -1200,10 +1201,8 @@ class WorkspacePagesMixin:
         if (not ps.output_dir.strip() or ps.output_dir.strip() == "output") and (ps.project_name or ps.system):
             ps.output_dir = self._default_project_folder(ps)
             self.project_output_dir_edit.setText(ps.output_dir)
-            # Re-collect after updating output_dir field
             ps = self._collect_project_settings_from_ui()
 
-        # Collect function parameters
         self._collect_function_params_from_ui(ps)
 
         # Step 1: Create project directory structure
@@ -1217,18 +1216,55 @@ class WorkspacePagesMixin:
         self.project_settings_manager.set(ps)
         self.project_settings_manager.save()
 
-        # Step 3: Read settings back to UI (ensures consistency)
+        # Step 3: Read settings back to UI
         self._read_project_settings_to_ui(ps)
 
         # Step 4: Sync to tools
         self._apply_settings_to_tools(ps)
 
-        # Step 5: Refresh UI displays
+        # Step 5: Refresh UI
         self.update_project_title()
         self.refresh_project_lifecycle(ps)
         self.refresh_project_parameter_summary()
         self.update_project_ui_state(ps)
         self.statusbar.showMessage("✅ 项目已保存、初始化并应用到工具", 3000)
+
+    def initialize_project_structure(self) -> None:
+        """Initialize project structure only (create folders, save config).
+
+        Does NOT sync to tool pages. Use this for lightweight initialization.
+        Use save_and_apply_project_settings() for complete setup including tools.
+        """
+        ps = self._collect_project_settings_from_ui()
+
+        # Auto-generate project folder if needed
+        if (not ps.output_dir.strip() or ps.output_dir.strip() == "output") and (ps.project_name or ps.system):
+            ps.output_dir = self._default_project_folder(ps)
+            self.project_output_dir_edit.setText(ps.output_dir)
+            ps = self._collect_project_settings_from_ui()
+
+        self._collect_function_params_from_ui(ps)
+
+        # Create project directory structure
+        try:
+            ensure_project_structure(ps)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "初始化项目失败", str(exc))
+            return
+
+        # Save configuration
+        self.project_settings_manager.set(ps)
+        self.project_settings_manager.save()
+
+        # Read settings back to UI
+        self._read_project_settings_to_ui(ps)
+
+        # Refresh UI (but don't sync to tools)
+        self.update_project_title()
+        self.refresh_project_lifecycle(ps)
+        self.refresh_project_parameter_summary()
+        self.update_project_ui_state(ps)
+        self.statusbar.showMessage(f"✓ 项目已初始化：{project_root(ps)}", 3000)
 
     def read_paths_from_tools(self) -> None:
         """Read file paths from spectrum workbench and fill into project settings.
