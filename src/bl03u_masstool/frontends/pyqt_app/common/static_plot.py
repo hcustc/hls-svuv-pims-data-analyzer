@@ -87,7 +87,7 @@ class StaticCurvePlot(QtWidgets.QWidget):
         self._xlabel = xlabel or self._xlabel
         self._ylabel = ylabel or self._ylabel
         self._style_axes()
-        self.axes.set_title(title, loc="left", fontsize=12, fontweight="bold", color="#111827", pad=12)
+        self.axes.set_title(title, loc="center", fontsize=12, fontweight="bold", color="#111827", pad=12)
         self.canvas.draw_idle()
 
     def show_empty(self, message: str, *, title: str = "") -> None:
