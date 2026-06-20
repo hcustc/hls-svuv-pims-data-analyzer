@@ -84,6 +84,9 @@ def analyze_temperature_folder(
     vote_threshold: float = 0.667,
     min_intensity_for_single_vote: float = 5.0,
     mz_tolerance: float = 0.2,
+    cwt_snr_threshold: float = 0.02,
+    cwt_wavelet_max_width: int = 30,
+    weak_tail_cutoff_idx: int = 15000,
 ) -> pd.DataFrame:
     files = list_spectrum_files(folder, (".txt",))
     spectra = []
@@ -152,6 +155,9 @@ def analyze_temperature_folder(
             vote_threshold=vote_threshold,
             min_intensity_for_single_vote=min_intensity_for_single_vote,
             mz_tolerance=mz_tolerance,
+            cwt_snr_threshold=cwt_snr_threshold,
+            cwt_wavelet_max_width=cwt_wavelet_max_width,
+            weak_tail_cutoff_idx=weak_tail_cutoff_idx,
         )
 
     rows = []

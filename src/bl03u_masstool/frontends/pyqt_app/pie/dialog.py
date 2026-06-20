@@ -51,15 +51,11 @@ from bl03u_masstool.core.mole_fraction import (
     load_mole_fraction_settings,
     save_mole_fraction_settings,
 )
-from bl03u_masstool.frontends.pyqt_app.theme import get_plot_theme
 from bl03u_masstool.frontends.pyqt_app.workers import WorkerThread
-
-try:
-    import pyqtgraph as pg
-except Exception:  # pragma: no cover - only used when optional plotting is unavailable
-    pg = None
+from bl03u_masstool.frontends.pyqt_app.project_artifacts import record_project_artifact
 
 from bl03u_masstool.frontends.pyqt_app.common.widgets import DataFrameTableMixin, FlowLayout
+from bl03u_masstool.frontends.pyqt_app.common.static_plot import StaticCurvePlot
 from bl03u_masstool.frontends.pyqt_app.normalization.widget import CommonParametersDialog
 
 def _run_exhaustive_fit(
@@ -108,16 +104,15 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.all_fit_results: dict[int, dict] = {}  # 保存所有拟合结果
         self.worker: WorkerThread | None = None
         self.pie_folders: list[str] = []
+        self._busy = False
         self.setWindowTitle("PIE物种拟合")
         self.resize(1380, 850)
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(8)
 
-        default_db = species_database_path()
-        self.database_edit = QtWidgets.QLineEdit(str(default_db) if default_db.exists() else "")
-        self.load_button = QtWidgets.QPushButton("加载")
-        self.load_button.clicked.connect(self.load_database)
+        # Auto-load PICS database (built-in, not user-selectable)
+        self._auto_load_database()
 
         self.use_multi_folders = QtWidgets.QToolButton()
         self.use_multi_folders.setText("多文件夹")
@@ -147,20 +142,30 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.merge_method_combo.addItem("简单拼接 (不缩放)", "mean")
 
         self.analyze_button = QtWidgets.QPushButton("生成曲线")
+        self.analyze_button.setObjectName("WorkflowButton")
         self.analyze_button.setToolTip("生成PIE曲线")
         self.analyze_button.clicked.connect(self.run_analysis)
         self.export_button = QtWidgets.QPushButton("导出曲线")
+        self.export_button.setObjectName("ExportButton")
         self.export_button.setToolTip("导出PIE曲线数据")
+        self.export_button.setEnabled(False)
         self.export_button.clicked.connect(self.export_curve_data)
+        self.export_plot_button = QtWidgets.QPushButton("导出图表")
+        self.export_plot_button.setObjectName("ExportButton")
+        self.export_plot_button.setToolTip("导出当前PIE曲线图表为PNG/PDF")
+        self.export_plot_button.setEnabled(False)
+        self.export_plot_button.clicked.connect(self.export_plot)
         self.common_params_button = QtWidgets.QPushButton("参数")
+        self.common_params_button.setObjectName("BrowseButton")
         self.common_params_button.setToolTip("打开通用参数设置")
         self.common_params_button.clicked.connect(self.open_common_parameters)
+        self.summary_open_project_btn = QtWidgets.QPushButton("项目设置")
+        self.summary_open_project_btn.setObjectName("BrowseButton")
+        self.summary_open_project_btn.setToolTip("修改项目名、体系、数据源等")
+        self.summary_open_project_btn.clicked.connect(self._open_project_settings)
         self.status_label = QtWidgets.QLabel("就绪")
         self.status_label.setObjectName("ProjectStatus")
-        self.load_button.setObjectName("BrowseButton")
         self.select_folder_button.setObjectName("BrowseButton")
-        self.export_button.setObjectName("BrowseButton")
-        self.common_params_button.setObjectName("BrowseButton")
 
         # ---- 紧凑数据源控制带 ----
         source_panel = QtWidgets.QWidget()
@@ -168,14 +173,6 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         data_layout = QtWidgets.QVBoxLayout(source_panel)
         data_layout.setContentsMargins(8, 8, 8, 8)
         data_layout.setSpacing(6)
-
-        db_row = QtWidgets.QHBoxLayout()
-        db_row.setSpacing(6)
-        db_label = QtWidgets.QLabel("PICS库")
-        db_label.setObjectName("ReadoutLabel")
-        db_row.addWidget(db_label)
-        db_row.addWidget(self.database_edit, stretch=1)
-        db_row.addWidget(self.load_button)
 
         self.summary_bar = QtWidgets.QWidget()
         summary_layout = QtWidgets.QHBoxLayout(self.summary_bar)
@@ -193,8 +190,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         summary_layout.addWidget(self.summary_project_label)
         summary_layout.addWidget(self.summary_system_label)
         summary_layout.addWidget(self.summary_data_label)
-        db_row.addWidget(self.summary_bar)
-        data_layout.addLayout(db_row)
+        data_layout.addWidget(self.summary_bar)
 
         folder_row = QtWidgets.QHBoxLayout()
         folder_row.setSpacing(6)
@@ -206,7 +202,9 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         folder_row.addWidget(self.select_folder_button)
         folder_row.addWidget(self.analyze_button)
         folder_row.addWidget(self.export_button)
+        folder_row.addWidget(self.export_plot_button)
         folder_row.addWidget(self.common_params_button)
+        folder_row.addWidget(self.summary_open_project_btn)
         folder_row.addWidget(self.status_label)
         data_layout.addLayout(folder_row)
 
@@ -233,11 +231,25 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.fit_all_button.setToolTip("一键拟合所有PIE曲线")
         self.fit_all_button.clicked.connect(self.fit_all_curves)
         self.fit_all_button.setFixedHeight(28)
+        self.fit_all_button.setEnabled(False)
+
+        self.refit_selected_button = QtWidgets.QPushButton("重拟合选中")
+        self.refit_selected_button.setObjectName("BrowseButton")
+        self.refit_selected_button.setToolTip("重新拟合左侧选中的 m/z 曲线")
+        self.refit_selected_button.clicked.connect(self.refit_selected_curves)
+        self.refit_selected_button.setEnabled(False)
+
+        self.clear_fits_button = QtWidgets.QPushButton("清除拟合")
+        self.clear_fits_button.setObjectName("WarningButton")
+        self.clear_fits_button.setToolTip("清除当前页面所有拟合结果")
+        self.clear_fits_button.clicked.connect(self.clear_all_fits)
+        self.clear_fits_button.setEnabled(False)
 
         self.export_pie_button = QtWidgets.QPushButton("导出鉴定结果")
         self.export_pie_button.setObjectName("ExportButton")
         self.export_pie_button.setToolTip("导出PIE物种鉴定结果")
         self.export_pie_button.clicked.connect(self.export_pie_results)
+        self.export_pie_button.setEnabled(False)
 
         self._force_species: list[str] = []
 
@@ -263,6 +275,11 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         list_header.addWidget(list_title)
         list_header.addWidget(self.summary_label, stretch=1)
         left_layout.addLayout(list_header)
+        self.mz_filter_edit = QtWidgets.QLineEdit()
+        self.mz_filter_edit.setObjectName("CurveSearch")
+        self.mz_filter_edit.setPlaceholderText("搜索 m/z / 物种")
+        self.mz_filter_edit.textChanged.connect(self.populate_mz_list)
+        left_layout.addWidget(self.mz_filter_edit)
         self.mz_list = QtWidgets.QListWidget()
         self.mz_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
         self.mz_list.currentItemChanged.connect(self.on_mz_selected)
@@ -273,53 +290,56 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         mz_hint.setObjectName("HintLabel")
         left_layout.addWidget(mz_hint)
         self.fit_button = QtWidgets.QPushButton("拟合当前")
+        self.fit_button.setObjectName("PrimaryToolbarButton")
         self.fit_button.setToolTip("拟合当前选中的m/z曲线")
         self.fit_button.clicked.connect(self.fit_current_curve)
+        self.fit_button.setEnabled(False)
         left_layout.addWidget(self.fit_button)
         left_layout.addWidget(self.fit_all_button)
+        refit_row = QtWidgets.QHBoxLayout()
+        refit_row.setSpacing(6)
+        refit_row.addWidget(self.refit_selected_button)
+        refit_row.addWidget(self.clear_fits_button)
+        left_layout.addLayout(refit_row)
         self.exhaustive_button = QtWidgets.QPushButton("穷举优选")
         self.exhaustive_button.setObjectName("WarningButton")
         self.exhaustive_button.setToolTip("穷举候选物种所有组合，按R²排序选出最优")
         self.exhaustive_button.clicked.connect(self._exhaustive_best_fit)
+        self.exhaustive_button.setEnabled(False)
         left_layout.addWidget(self.exhaustive_button)
         splitter.addWidget(left_panel)
 
-        right_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
+        self.right_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
         plot_container = QtWidgets.QWidget()
         plot_container.setObjectName("PlotPanel")
         plot_container.setMinimumHeight(280)
         plot_container_layout = QtWidgets.QVBoxLayout(plot_container)
         plot_container_layout.setContentsMargins(8, 8, 8, 8)
         plot_container_layout.setSpacing(6)
-        if pg is not None:
-            plot_theme = get_plot_theme()
-            self.plot_widget = pg.PlotWidget()
-            self.plot_widget.setBackground(plot_theme.background)
-            self.plot_widget.setLabel("bottom", "Photon Energy", units="eV")
-            self.plot_widget.setLabel("left", "Normalized Intensity")
-            self.plot_widget.showGrid(x=True, y=True)
-            # 悬停十字光标和坐标标签
-            self._hover_label = pg.TextItem("", anchor=(0, 1), color=plot_theme.foreground)
-            self._hover_label.setFont(QtWidgets.QApplication.font())
-            self.plot_widget.addItem(self._hover_label)
-            hover_pen = pg.mkPen(plot_theme.hover_line, width=1, style=QtCore.Qt.PenStyle.DashLine)
-            self._hover_vline = pg.InfiniteLine(angle=90, pen=hover_pen)
-            self._hover_hline = pg.InfiniteLine(angle=0, pen=hover_pen)
-            self.plot_widget.addItem(self._hover_vline)
-            self.plot_widget.addItem(self._hover_hline)
-            self._hover_vline.setVisible(False)
-            self._hover_hline.setVisible(False)
-            self.plot_widget.scene().sigMouseMoved.connect(self._on_pie_plot_mouse_move)
-            # 降低缩放灵敏度：锁定Y轴、减半滚轮速度
-            vb = self.plot_widget.getPlotItem().vb
-            vb.setMouseEnabled(x=True, y=False)
-            vb.state["wheelScaleFactor"] = -1.0 / 16.0
-            plot_container_layout.addWidget(self.plot_widget, stretch=1)
-        else:
-            self.plot_widget = None
-            plot_placeholder = QtWidgets.QLabel("未安装 pyqtgraph，无法显示PIE曲线图")
-            plot_placeholder.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-            plot_container_layout.addWidget(plot_placeholder, stretch=1)
+
+        # Plot stack: empty state + actual plot
+        self._plot_stack = QtWidgets.QStackedLayout()
+
+        # Empty state
+        self._empty_state = QtWidgets.QWidget()
+        empty_layout = QtWidgets.QVBoxLayout(self._empty_state)
+        empty_layout.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        empty_icon = QtWidgets.QLabel("📈")
+        empty_icon.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        empty_icon.setStyleSheet("font-size: 48px;")
+        empty_msg = QtWidgets.QLabel('尚未生成PIE曲线\n\n选择包含PIE数据的文件夹后，点击"生成曲线"')
+        empty_msg.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        empty_msg.setObjectName("ProjectHint")
+        empty_msg.setWordWrap(True)
+        empty_layout.addWidget(empty_icon)
+        empty_layout.addWidget(empty_msg)
+        self._plot_stack.addWidget(self._empty_state)
+
+        self.plot_widget = StaticCurvePlot("Photon Energy (eV)", "Normalized Intensity", min_height=280)
+        self._plot_stack.addWidget(self.plot_widget)
+        self._plot_stack.setCurrentIndex(0)  # Show empty state initially
+
+        plot_container_layout.addLayout(self._plot_stack, stretch=1)
 
         # 拟合统计条属于图表区域，不作为 splitter 的独立面板，避免挤占下方功能区。
         stats_bar = QtWidgets.QFrame()
@@ -336,7 +356,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         stats_bar_layout.addWidget(stats_title)
         stats_bar_layout.addWidget(self.fit_stats_label, stretch=1)
         plot_container_layout.addWidget(stats_bar)
-        right_splitter.addWidget(plot_container)
+        self.right_splitter.addWidget(plot_container)
 
         self.curve_table = QtWidgets.QTableWidget()
         self.fit_table = QtWidgets.QTableWidget()
@@ -430,9 +450,9 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self._candidate_data: list[dict] = []
         self._candidate_updating = False
 
-        detail_container = QtWidgets.QWidget()
-        detail_container.setMinimumHeight(200)
-        detail_container_layout = QtWidgets.QVBoxLayout(detail_container)
+        self.detail_container = QtWidgets.QWidget()
+        self.detail_container.setObjectName("ResultPanel")
+        detail_container_layout = QtWidgets.QVBoxLayout(self.detail_container)
         detail_container_layout.setContentsMargins(0, 0, 0, 0)
         detail_container_layout.setSpacing(4)
         detail_header = QtWidgets.QHBoxLayout()
@@ -443,25 +463,76 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.export_pie_button.setFixedHeight(26)
         detail_header.addWidget(detail_title)
         detail_header.addStretch()
+
+        self.pie_toggle_table_button = QtWidgets.QPushButton("展开表格")
+        self.pie_toggle_table_button.setCheckable(True)
+        self.pie_toggle_table_button.setToolTip("点击显示/隐藏结果与拟合控制表格")
+        self.pie_toggle_table_button.setFixedWidth(86)
+        self.pie_toggle_table_button.setFixedHeight(26)
+        self.pie_toggle_table_button.setObjectName("BrowseButton")
+        self.pie_toggle_table_button.clicked.connect(self._toggle_pie_table_visibility)
+        detail_header.addWidget(self.pie_toggle_table_button)
+
         detail_header.addWidget(self.export_pie_button)
         detail_container_layout.addLayout(detail_header)
         detail_container_layout.addWidget(self.detail_tabs, stretch=1)
 
-        right_splitter.addWidget(detail_container)
-        right_splitter.setStretchFactor(0, 3)
-        right_splitter.setStretchFactor(1, 1)
-        right_splitter.setCollapsible(0, False)
-        right_splitter.setCollapsible(1, False)
-        right_splitter.setSizes([480, 300])
+        self.right_splitter.addWidget(self.detail_container)
+        self.right_splitter.setStretchFactor(0, 3)
+        self.right_splitter.setStretchFactor(1, 1)
+        self.right_splitter.setCollapsible(0, False)
+        self.right_splitter.setCollapsible(1, False)
+        self.pie_table_visible = False
+        self._apply_detail_panel_state(expanded=False)
+        QtCore.QTimer.singleShot(0, lambda: self._resize_detail_panel(expanded=False))
 
-        splitter.addWidget(right_splitter)
+        splitter.addWidget(self.right_splitter)
         splitter.setSizes([260, 1020])
         layout.addWidget(splitter, stretch=1)
-        if self.database_edit.text():
-            self.load_database(show_message=False)
+        self._update_action_state()
+
+    def _open_project_settings(self):
+        """跳转到项目管理页面。"""
+        win = self.window()
+        if hasattr(win, "switch_workspace_page"):
+            win.switch_workspace_page("project")
+
+    def _toggle_pie_table_visibility(self, checked: bool | None = None) -> None:
+        """Toggle the visibility of the detail tabs and adjust splitter."""
+        expanded = (not self.pie_table_visible) if checked is None else bool(checked)
+        self._apply_detail_panel_state(expanded=expanded)
+
+    def _apply_detail_panel_state(self, *, expanded: bool) -> None:
+        self.pie_table_visible = expanded
+        self.pie_toggle_table_button.setChecked(expanded)
+        self.detail_tabs.setVisible(self.pie_table_visible)
+        self.pie_toggle_table_button.setText("收起表格" if expanded else "展开表格")
+        if expanded:
+            self.detail_container.setMinimumHeight(220)
+            self.detail_container.setMaximumHeight(16777215)
+            self.detail_container.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Expanding,
+                QtWidgets.QSizePolicy.Policy.Expanding,
+            )
+        else:
+            self.detail_container.setMinimumHeight(34)
+            self.detail_container.setMaximumHeight(34)
+            self.detail_container.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Expanding,
+                QtWidgets.QSizePolicy.Policy.Fixed,
+            )
+        self._resize_detail_panel(expanded=expanded)
+
+    def _resize_detail_panel(self, *, expanded: bool) -> None:
+        if expanded:
+            total_height = max(1, self.right_splitter.height())
+            detail_height = min(max(240, int(total_height * 0.34)), 360)
+            self.right_splitter.setSizes([max(360, total_height - detail_height), detail_height])
+        else:
+            self.right_splitter.setSizes([10000, 34])
 
     def load_database(self, show_message: bool = True):
-        path = self.database_edit.text().strip()
+        path = self.database_edit.text().strip() if hasattr(self, "database_edit") else ""
         if not path:
             path, _ = QtWidgets.QFileDialog.getOpenFileName(
                 self,
@@ -471,7 +542,8 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             )
             if not path:
                 return
-            self.database_edit.setText(path)
+            if hasattr(self, "database_edit"):
+                self.database_edit.setText(path)
         try:
             self.database, _ = load_species_database(path)
             self.status_label.setText(f"已加载PICS库: {len(self.database)} 个物种")
@@ -479,6 +551,15 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 QtWidgets.QMessageBox.information(self, "完成", f"已加载 {len(self.database)} 个物种")
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, "错误", str(exc))
+
+    def _auto_load_database(self):
+        """自动加载内置PICS数据库"""
+        try:
+            db_path = species_database_path()
+            if db_path.exists():
+                self.database, _ = load_species_database(str(db_path))
+        except Exception:
+            pass
 
     # ---- 候选物种面板方法 ----
 
@@ -857,6 +938,9 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.refresh_current_plot()
             self.mz_list.setCurrentRow(0)
 
+        self.populate_mz_list()
+        self._update_action_state()
+
         QtWidgets.QMessageBox.information(
             self, "完成",
             f"拟合完成！\n已拟合: {fitted_count} / {total_count} 条曲线"
@@ -945,6 +1029,8 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                     break
 
         self.refresh_current_plot()
+        self.populate_mz_list()
+        self._update_action_state()
 
         QtWidgets.QMessageBox.information(
             self, "完成",
@@ -958,6 +1044,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.fit_table.setRowCount(0)
         self._update_fit_stats(0, 0, None)
         self.refresh_current_plot()
+        self._update_action_state()
 
     def export_pie_results(self):
         """导出PIE物种鉴定结果到Excel"""
@@ -992,10 +1079,16 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             result = export_pie_results_to_excel(self, file_path)
 
             if result['success']:
+                record_project_artifact(
+                    self,
+                    "pie_identification_result_file",
+                    result.get("file_path", file_path),
+                    message="PIE鉴定结果已登记到项目管理",
+                )
                 QtWidgets.QMessageBox.information(
                     self,
                     "导出成功",
-                    result['message']
+                    f"{result['message']}\n\n已登记到项目管理。"
                 )
             else:
                 QtWidgets.QMessageBox.warning(
@@ -1057,38 +1150,19 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
         for name in self.get_force_species():
             tag = QtWidgets.QFrame()
-            tag.setStyleSheet("""
-                QFrame {
-                    background: #eef2ff;
-                    border: 1px solid #c7d2fe;
-                    border-radius: 4px;
-                    padding: 0;
-                }
-            """)
+            tag.setObjectName("ForceTag")
             tag.setFixedHeight(24)
             tag_layout = QtWidgets.QHBoxLayout(tag)
             tag_layout.setContentsMargins(6, 1, 2, 1)
             tag_layout.setSpacing(2)
 
             label = QtWidgets.QLabel(name)
-            label.setStyleSheet("background: transparent; color: #3730a3; font-size: 9pt;")
+            label.setObjectName("ForceTagText")
             tag_layout.addWidget(label)
 
             close_btn = QtWidgets.QPushButton("\u2715")
+            close_btn.setObjectName("TagCloseButton")
             close_btn.setFixedSize(16, 16)
-            close_btn.setStyleSheet("""
-                QPushButton {
-                    background: transparent;
-                    border: none;
-                    color: #6366f1;
-                    font-size: 8pt;
-                    padding: 0;
-                }
-                QPushButton:hover {
-                    color: #dc2626;
-                    font-weight: bold;
-                }
-            """)
             close_btn.clicked.connect(lambda checked=False, n=name: self._remove_force_species_name(n))
             tag_layout.addWidget(close_btn)
 
@@ -1125,8 +1199,13 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
     def toggle_multi_folder_mode(self, checked: bool):
         """切换多文件夹模式"""
-        self.folder_edit.setEnabled(not checked)
-        self.select_folder_button.setEnabled(not checked)
+        busy = getattr(self, "_busy", False)
+        self.folder_edit.setEnabled(not checked and not busy)
+        self.select_folder_button.setEnabled(not checked and not busy)
+        self.add_folder_button.setEnabled(checked and not busy)
+        self.remove_folder_button.setEnabled(checked and not busy)
+        self.clear_folders_button.setEnabled(checked and not busy)
+        self.merge_method_combo.setEnabled(checked and not busy)
         self.multi_folder_section.setVisible(checked)
 
     def add_folder(self):
@@ -1163,8 +1242,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.merge_method_combo.setCurrentIndex(idx)
         if ps.pie_scan_folder:
             self.folder_edit.setText(ps.pie_scan_folder)
-        if ps.pics_database_path:
-            self.database_edit.setText(ps.pics_database_path)
+        self._update_action_state()
 
     def open_common_parameters(self):
         dialog = CommonParametersDialog(self.normalization_settings, self.calibration, self)
@@ -1248,22 +1326,31 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.worker.start()
 
     def set_busy(self, busy: bool, message: str) -> None:
+        self._busy = busy
         self.status_label.setText(message)
-        self.analyze_button.setDisabled(busy)
-        self.select_folder_button.setDisabled(busy)
-        self.export_button.setDisabled(busy)
-        self.common_params_button.setDisabled(busy)
-        self.fit_button.setDisabled(busy)
-        self.load_button.setDisabled(busy)
-        self.use_multi_folders.setDisabled(busy)
-        self.add_folder_button.setDisabled(busy)
-        self.remove_folder_button.setDisabled(busy)
-        self.clear_folders_button.setDisabled(busy)
-        self.merge_method_combo.setDisabled(busy)
-        self.fit_all_button.setDisabled(busy)
-        self.export_pie_button.setDisabled(busy)
-        self.force_input.setDisabled(busy)
-        self.exhaustive_button.setDisabled(busy)
+        self.analyze_button.setEnabled(not busy)
+        self.common_params_button.setEnabled(not busy)
+        self.use_multi_folders.setEnabled(not busy)
+        self.summary_open_project_btn.setEnabled(not busy)
+        self.force_input.setEnabled(not busy)
+        self.toggle_multi_folder_mode(self.use_multi_folders.isChecked())
+        self._update_action_state()
+
+    def _update_action_state(self) -> None:
+        busy = getattr(self, "_busy", False)
+        has_curves = bool(self.curves)
+        has_fit_records = bool(self.all_fit_results)
+        has_successful_fits = any(result.get("success") for result in self.all_fit_results.values())
+        self.export_button.setEnabled(has_curves and not busy)
+        self.export_plot_button.setEnabled(has_curves and not busy)
+        self.fit_button.setEnabled(has_curves and not busy)
+        self.fit_all_button.setEnabled(has_curves and not busy)
+        self.refit_selected_button.setEnabled(has_curves and not busy)
+        self.exhaustive_button.setEnabled(has_curves and not busy)
+        self.clear_fits_button.setEnabled(has_fit_records and not busy)
+        self.export_pie_button.setEnabled(has_successful_fits and not busy)
+        if hasattr(self, "candidate_apply_btn"):
+            self.candidate_apply_btn.setEnabled(has_curves and not busy)
 
     def run_pie_analysis_sync(
         self,
@@ -1380,29 +1467,67 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.current_fit = None
         self.all_fit_results = {}  # 重置拟合结果
         self.populate_mz_list()
+        # Switch from empty state to plot display
+        if hasattr(self, "_plot_stack"):
+            self._plot_stack.setCurrentIndex(1)
         energy_count = self.analysis_df["energy"].nunique() if not self.analysis_df.empty else 0
         self.summary_label.setText(f"{len(self.curves)} 条m/z曲线 | {energy_count} 个能量点")
         self._update_fit_stats(0, 0, None)
+        self._update_action_state()
         if self.curves:
             self.mz_list.setCurrentRow(0)
         QtWidgets.QMessageBox.information(self, "完成", f"生成 {len(self.curves)} 条PIE曲线")
 
     def on_analysis_failed(self, message: str) -> None:
+        self.status_label.setText(f"失败: {message}")
+        self._update_action_state()
         QtWidgets.QMessageBox.critical(self, "错误", message)
 
     def populate_mz_list(self):
+        current_mz = self.current_mz
         self.mz_list.clear()
         for mz in sorted(self.curves):
             curve = self.curves[mz]
+            if not self._pie_curve_matches_filter(mz, curve):
+                continue
             label = curve.get("species") or ""
             suffix = f" {label}" if label and label != "Unknown" else ""
-            item = QtWidgets.QListWidgetItem(f"{mz}{suffix}  ({len(curve['energies'])}点)")
+            fit_state = "已拟合" if mz in self.all_fit_results and self.all_fit_results[mz].get("success") else "待拟合"
+            item = QtWidgets.QListWidgetItem(f"{mz}{suffix}  ({len(curve['energies'])}点)  {fit_state}")
             item.setData(QtCore.Qt.ItemDataRole.UserRole, mz)
+            item.setToolTip(f"m/z {mz} | {fit_state}")
             self.mz_list.addItem(item)
+            if current_mz == mz:
+                self.mz_list.setCurrentItem(item)
+        if self.mz_list.count() == 0:
+            self.on_mz_selected(None)
+
+    def _pie_curve_matches_filter(self, mz: int, curve: dict) -> bool:
+        query = self.mz_filter_edit.text().strip().lower() if hasattr(self, "mz_filter_edit") else ""
+        if not query:
+            return True
+        haystack = " ".join(
+            str(value)
+            for value in (
+                mz,
+                curve.get("species", ""),
+                "已拟合" if mz in self.all_fit_results else "待拟合",
+            )
+        ).lower()
+        return query in haystack
 
     def on_mz_selected(self, current, previous=None):
         if current is None:
             self.current_mz = None
+            self.current_fit = None
+            for table in (self.curve_table, self.fit_table):
+                table.clear()
+                table.setRowCount(0)
+                table.setColumnCount(0)
+            self.candidate_table.clearContents()
+            self.candidate_table.setRowCount(0)
+            if self.plot_widget is not None:
+                self.plot_widget.clear_plot(title="未选择 PIE 曲线")
             return
         self.current_mz = int(current.data(QtCore.Qt.ItemDataRole.UserRole))
 
@@ -1462,29 +1587,8 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.update_plot(curve, self.current_fit)
 
     def _on_pie_plot_mouse_move(self, pos):
-        """鼠标悬停时显示十字光标和坐标（无数据时静默忽略）。"""
-        if self.plot_widget is None:
-            return
-        plot_item = self.plot_widget.getPlotItem()
-        # 空 plot（尚未加载数据）时不做任何交互
-        if not plot_item.listDataItems():
-            return
-        vb = plot_item.vb
-        if vb.sceneBoundingRect().contains(pos):
-            mouse_point = vb.mapSceneToView(pos)
-            x, y = mouse_point.x(), mouse_point.y()
-            if not (np.isfinite(x) and np.isfinite(y)):
-                return
-            self._hover_vline.setPos(x)
-            self._hover_hline.setPos(y)
-            self._hover_vline.setVisible(True)
-            self._hover_hline.setVisible(True)
-            self._hover_label.setText(f"  {x:.3f} eV, {y:.4f}  ")
-            self._hover_label.setPos(x, y)
-        else:
-            self._hover_vline.setVisible(False)
-            self._hover_hline.setVisible(False)
-            self._hover_label.setText("")
+        """Retained for older signal wiring; Matplotlib trend plots are intentionally low-interaction."""
+        return
 
     def refresh_current_plot(self):
         if self.current_mz is not None and self.current_mz in self.curves:
@@ -1498,30 +1602,29 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         valid = np.isfinite(x_values) & np.isfinite(y_values)
         x_values = x_values[valid]
         y_values = y_values[valid]
-        self.plot_widget.clear()
-        plot_item = self.plot_widget.getPlotItem()
-        if plot_item.legend is None:
-            plot_item.addLegend(offset=(-10, 10))
-        else:
-            plot_item.legend.clear()
-        self.plot_widget.setLabel("bottom", "Photon Energy", units="eV")
-        self.plot_widget.setLabel("left", "Normalized Intensity")
-        self.plot_widget.showGrid(x=True, y=True, alpha=0.25)
+
+        # Simplified title, R² moved to indicator box
+        r_squared_text = ""
+        if fit_model is not None and fit_model.get("r_squared") is not None:
+            r_squared_text = f"R² = {fit_model.get('r_squared', 0.0):.4f}"
+        title = f"m/z {curve['mz']} PIE–PICS 拟合"
+        self.plot_widget.clear_plot(title=title, xlabel="光子能量 (eV)", ylabel="相对强度")
         if x_values.size == 0:
-            self.plot_widget.setTitle(f"m/z {curve['mz']} PIE - 无有效数据")
+            self.plot_widget.show_empty("无有效数据", title=f"m/z {curve['mz']} PIE")
             return
-        x_ranges = [x_values]
-        y_ranges = [y_values]
-        self.plot_widget.plot(
+
+        # Experimental data: blue scatter with thin connecting line
+        exp_x, exp_y = self.plot_widget.plot_series(
             x_values,
             y_values,
-            pen=pg.mkPen("#2563eb", width=2.5),
-            symbol="o",
-            symbolBrush="#2563eb",
-            symbolPen="#1e3a8a",
-            symbolSize=10,
-            name="实验PIE",
+            color="#2563eb",
+            linewidth=1.2,
+            marker="o",
+            markersize=6.5,
+            label="实验数据",
         )
+        x_ranges = [exp_x]
+        y_ranges = [exp_y]
 
         if fit_model is not None:
             fit_x = np.asarray(fit_model.get("energies", []), dtype=float)
@@ -1532,11 +1635,15 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             if fit_x.size:
                 x_ranges.append(fit_x)
                 y_ranges.append(fit_y)
-                self.plot_widget.plot(
+                # Total fit: thick solid line to highlight
+                self.plot_widget.plot_series(
                     fit_x,
                     fit_y,
-                    pen=pg.mkPen("#f97316", width=2.5),
-                    name="PICS总拟合",
+                    color="#f97316",
+                    linewidth=2.8,
+                    marker=None,
+                    linestyle="-",
+                    label="总拟合",
                 )
                 species = fit_model.get("species", [])
                 colors = ["#16a34a", "#9333ea", "#dc2626", "#0891b2", "#ca8a04", "#be123c", "#7c3aed", "#0369a1"]
@@ -1554,47 +1661,33 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                         continue
                     x_ranges.append(component_x)
                     y_ranges.append(component_y)
-                    self.plot_widget.plot(
+                    # Component curves: thin dashed lines with low opacity
+                    self.plot_widget.plot_series(
                         component_x,
                         component_y,
-                        pen=pg.mkPen(colors[idx % len(colors)], width=1.5, style=QtCore.Qt.PenStyle.DashLine),
-                        name=str(component.get("species", ""))[:24],
+                        color=colors[idx % len(colors)],
+                        linewidth=1.1,
+                        marker=None,
+                        linestyle="--",
+                        alpha=0.58,
+                        label=str(component.get("species", ""))[:24],
                     )
 
-        title = f"m/z {curve['mz']} PIE"
-        if fit_model is not None and fit_model.get("fitted"):
-            title += f" | PICS R²={fit_model.get('r_squared', 0.0):.4f}"
-        self.plot_widget.setTitle(title)
-        all_x = np.concatenate(x_ranges)
-        all_y = np.concatenate(y_ranges)
-        x_min = float(np.min(all_x))
-        x_max = float(np.max(all_x))
-        y_min = float(np.min(all_y))
-        y_max = float(np.max(all_y))
-        x_pad = max(0.1, (x_max - x_min) * 0.08)
-        y_pad = max(1.0, (y_max - y_min) * 0.12)
-        if x_min == x_max:
-            x_min -= 0.5
-            x_max += 0.5
-        if y_min == y_max:
-            y_min -= 1.0
-            y_max += 1.0
-        # 设置缩放限制，防止过度缩放
-        vb = self.plot_widget.getPlotItem().vb
-        x_span = max(0.01, (x_max + x_pad) - (x_min - x_pad))
-        y_span = max(0.01, (y_max + y_pad) - max(0.0, y_min - y_pad))
-        vb.setLimits(
-            xMin=x_min - x_pad - x_span * 0.5,
-            xMax=x_max + x_pad + x_span * 0.5,
-            yMin=max(0.0, y_min - y_pad - y_span * 0.5),
-            yMax=y_max + y_pad + y_span * 0.5,
-            minXRange=x_span * 0.10,
-            maxXRange=x_span * 50,
-            minYRange=y_span * 0.10,
-            maxYRange=y_span * 50,
-        )
-        self.plot_widget.setXRange(x_min - x_pad, x_max + x_pad, padding=0)
-        self.plot_widget.setYRange(max(0.0, y_min - y_pad), y_max + y_pad, padding=0)
+        # Apply data limits with 5% margin
+        self.plot_widget.apply_data_limits(x_ranges, y_ranges, x_pad_min=0.2, y_pad_min=0.05)
+
+        # Add R² indicator box in top-right corner if available
+        if self.plot_widget.axes is not None and r_squared_text:
+            self.plot_widget.axes.text(
+                0.98, 0.97, r_squared_text,
+                transform=self.plot_widget.axes.transAxes,
+                ha="right", va="top",
+                fontsize=9,
+                bbox=dict(boxstyle="round,pad=0.5", facecolor="#ffffff", edgecolor="#cbd5e1", alpha=0.85),
+            )
+
+        # Legend outside plot area, ordered: experimental data → total fit → components
+        self.plot_widget.finish(legend=True, legend_loc="center left", legend_bbox_to_anchor=(1.02, 0.5))
 
     def fit_current_curve(self):
         if not self.database:
@@ -1646,8 +1739,14 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                     selected, curve["energies"], curve["intensities"]
                 )
 
-            self.current_fit = fit_model
             results = fit_model.get("species", [])
+            self.current_fit = fit_model
+            self.all_fit_results[self.current_mz] = {
+                "success": bool(results),
+                "model": fit_model,
+                "species": results[:3],
+                "r_squared": fit_model.get("r_squared", 0.0),
+            }
             fit_df = pd.DataFrame(
                 [
                     {
@@ -1668,6 +1767,13 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 f"m/z {self.current_mz}: PICS候选 {fit_model.get('candidate_count', 0)} 个，"
                 f"命中 {len(results)} 个，R²={fit_model.get('r_squared', 0.0):.4f}"
             )
+            fitted_count = sum(1 for r in self.all_fit_results.values() if r.get("success"))
+            total_count = len(self.curves)
+            all_r_squared = [r.get("r_squared", 0.0) for r in self.all_fit_results.values() if r.get("success")]
+            avg_r_squared = sum(all_r_squared) / len(all_r_squared) if all_r_squared else 0.0
+            self._update_fit_stats(fitted_count, total_count, avg_r_squared if all_r_squared else None)
+            self.populate_mz_list()
+            self._update_action_state()
             if not results:
                 QtWidgets.QMessageBox.information(self, "结果", "当前m/z没有匹配到可拟合的物种")
         except Exception as exc:
@@ -1721,6 +1827,12 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             return
         best = ranked[0]
         self.current_fit = best["model"]
+        self.all_fit_results[self.current_mz] = {
+            "success": True,
+            "model": best["model"],
+            "species": best["model"].get("species", [])[:3],
+            "r_squared": best["r_squared"],
+        }
         curve = self.curves[self.current_mz]
         self.update_plot(curve, best["model"])
         # 更新PICS拟合表: 排名 / 物种组合 / 物种数 / R² / RMSE
@@ -1743,6 +1855,12 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             f"m/z {self.current_mz}: 最优组合 [{names}] R²={best['r_squared']:.4f} "
             f"(共 {len(ranked)} 种组合)"
         )
+        fitted_count = sum(1 for r in self.all_fit_results.values() if r.get("success"))
+        all_r_squared = [r.get("r_squared", 0.0) for r in self.all_fit_results.values() if r.get("success")]
+        avg_r_squared = sum(all_r_squared) / len(all_r_squared) if all_r_squared else None
+        self._update_fit_stats(fitted_count, len(self.curves), avg_r_squared)
+        self.populate_mz_list()
+        self._update_action_state()
 
     def _on_combination_selected(self):
         row = self.fit_table.currentRow()
@@ -1769,3 +1887,20 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.analysis_df.to_excel(path, index=False)
         else:
             self.analysis_df.to_csv(path, index=False, encoding="utf-8-sig")
+
+    def export_plot(self):
+        if self.plot_widget is None or self.plot_widget.figure is None:
+            QtWidgets.QMessageBox.warning(self, "提示", "没有可导出的图表")
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "导出PIE曲线图",
+            str(ensure_output_dir("exports", "pie") / "pie_curve_plot.png"),
+            "PNG Images (*.png);;PDF Files (*.pdf)",
+        )
+        if not path:
+            return
+        if self.plot_widget.save_plot(path):
+            QtWidgets.QMessageBox.information(self, "成功", f"曲线图已导出：{path}")
+        else:
+            QtWidgets.QMessageBox.warning(self, "错误", "导出图表失败")

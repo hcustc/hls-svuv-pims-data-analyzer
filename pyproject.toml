@@ -11,6 +11,7 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "beautifulsoup4",
     "fastapi",
+    "matplotlib",
     "numpy",
     "openpyxl",
     "pandas",
