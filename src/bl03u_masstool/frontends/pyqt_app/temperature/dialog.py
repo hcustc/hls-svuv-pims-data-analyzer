@@ -291,11 +291,6 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.detail_tabs.addTab(self.table, "全部积分结果")
         right_layout.addWidget(self.detail_tabs, stretch=2)
 
-        # Status bar at bottom
-        self.status_label = QtWidgets.QLabel("就绪")
-        self.status_label.setObjectName("ProjectHint")
-        right_layout.addWidget(self.status_label)
-
     def _open_project_settings(self):
         """跳转到项目管理页面。"""
         win = self.window()
@@ -560,7 +555,6 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
 
     def set_busy(self, busy: bool, message: str) -> None:
-        self.status_label.setText(message)
         self.run_button.setDisabled(busy)
         self.summary_open_project_btn.setDisabled(busy)
         # export only available when there are results and not busy
