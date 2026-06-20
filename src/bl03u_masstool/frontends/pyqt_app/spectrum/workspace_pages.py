@@ -1313,6 +1313,7 @@ class WorkspacePagesMixin:
         # Sync project settings to all tool pages (Temperature, PIE, etc.)
         self._sync_project_settings_to_tool_pages(ps)
         self.refresh_project_lifecycle(ps)
+        self.refresh_project_datasource_page(ps)
 
     def _push_path_to_tool(self, kind: str) -> None:
         """Push a single path field from project management to the corresponding editable tool page.
@@ -1343,6 +1344,7 @@ class WorkspacePagesMixin:
         )
         if path:
             self.project_single_file_edit.setText(path)
+            self._auto_save_datasource()
 
     def select_project_folder(self, target: QLineEdit, title: str) -> None:
         folder = QFileDialog.getExistingDirectory(
@@ -1352,6 +1354,7 @@ class WorkspacePagesMixin:
         )
         if folder:
             target.setText(folder)
+            self._auto_save_datasource()
 
     def select_project_database(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -1362,6 +1365,7 @@ class WorkspacePagesMixin:
         )
         if path:
             self.project_pics_database_edit.setText(path)
+            self._auto_save_datasource()
 
     def select_project_manual_peak(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -1372,6 +1376,7 @@ class WorkspacePagesMixin:
         )
         if path:
             self.project_manual_peak_edit.setText(path)
+            self._auto_save_datasource()
 
     def select_project_sample_info(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -1382,6 +1387,7 @@ class WorkspacePagesMixin:
         )
         if path:
             self.project_sample_info_edit.setText(path)
+            self._auto_save_datasource()
 
     def select_project_result_file(self, target: QLineEdit, title: str, file_filter: str) -> None:
         path, _ = QFileDialog.getOpenFileName(
