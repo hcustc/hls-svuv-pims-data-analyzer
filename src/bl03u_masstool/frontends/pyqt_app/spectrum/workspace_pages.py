@@ -913,6 +913,7 @@ class WorkspacePagesMixin:
         self._load_function_params_to_ui(ps)
         self.update_project_title()
         self.refresh_project_lifecycle()
+        self.refresh_project_datasource_page()
         self.update_project_ui_state(ps)
 
     def _load_function_params_to_ui(self, ps: ProjectSettings) -> None:
@@ -960,6 +961,20 @@ class WorkspacePagesMixin:
 
         if hasattr(self, "project_progress_bar"):
             self.project_progress_bar.setValue(completed_count)
+
+    def refresh_project_datasource_page(self, ps: ProjectSettings | None = None) -> None:
+        """Refresh data source validation status on the data import page"""
+        if ps is None:
+            ps = self.project_settings_manager.get()
+
+        # Get validation results for all data sources
+        validation_records = validate_all_data_sources(ps)
+        validation_status = get_data_source_validation_status(ps)
+
+        # Update page state (will be fully implemented in step 3.2)
+        # For now, just ensure status is available for UI updates
+        self.current_data_source_status = validation_status
+        self.current_validation_records = validation_records
 
     def _on_project_main_action_clicked(self) -> None:
         """Handle main action button click based on current project state"""
@@ -1219,6 +1234,7 @@ class WorkspacePagesMixin:
         self._sync_project_settings_to_tool_pages(ps)
         self.refresh_project_lifecycle(ps)
         self.refresh_project_parameter_summary()
+        self.refresh_project_datasource_page(ps)
         self.update_project_ui_state(ps)
         imported = "、".join(result.label for result in results)
         self.statusbar.showMessage(f"已导入：{imported}", 5000)
