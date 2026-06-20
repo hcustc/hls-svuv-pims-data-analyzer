@@ -54,16 +54,11 @@ from bl03u_masstool.core.mole_fraction import (
     select_calc_energy,
     separate_coexisting_species_signals,
 )
-from bl03u_masstool.frontends.pyqt_app.theme import get_plot_theme
 from bl03u_masstool.frontends.pyqt_app.workers import WorkerThread
 from bl03u_masstool.frontends.pyqt_app.project_artifacts import record_project_artifact
 
-try:
-    import pyqtgraph as pg
-except Exception:  # pragma: no cover - only used when optional plotting is unavailable
-    pg = None
-
 from bl03u_masstool.frontends.pyqt_app.common.widgets import DataFrameTableMixin
+from bl03u_masstool.frontends.pyqt_app.common.static_plot import StaticCurvePlot
 
 class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
     def __init__(self, calibration: Calibration, normalization_settings, parent=None):
@@ -833,20 +828,8 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         plot_panel = QtWidgets.QWidget()
         plot_layout = QtWidgets.QVBoxLayout(plot_panel)
         plot_layout.setContentsMargins(8, 8, 8, 8)
-        if pg is not None:
-            self.auto_mf_plot_widget = pg.PlotWidget()
-            self.auto_mf_plot_widget.setBackground("#ffffff")
-            self.auto_mf_plot_widget.setMinimumHeight(250)
-            self.auto_mf_plot_widget.setLabel("bottom", "温度", units="°C")
-            self.auto_mf_plot_widget.setLabel("left", "摩尔分数")
-            self.auto_mf_plot_widget.showGrid(x=True, y=True, alpha=0.3)
-            self.auto_mf_plot_widget.addLegend()
-            plot_layout.addWidget(self.auto_mf_plot_widget)
-        else:
-            self.auto_mf_plot_widget = None
-            placeholder = QtWidgets.QLabel("pyqtgraph 未安装，无法显示绘图")
-            placeholder.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-            plot_layout.addWidget(placeholder)
+        self.auto_mf_plot_widget = StaticCurvePlot("温度 (°C)", "摩尔分数", min_height=250)
+        plot_layout.addWidget(self.auto_mf_plot_widget)
         detail_tabs.addTab(plot_panel, "摩尔分数-温度曲线")
 
         warning_panel = QtWidgets.QWidget()
@@ -874,6 +857,9 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         btn_export = QtWidgets.QPushButton("导出结果 (Excel/CSV)")
         btn_export.clicked.connect(self._export_results)
         btn_layout.addWidget(btn_export)
+        btn_export_plot = QtWidgets.QPushButton("导出图表 (PNG/PDF)")
+        btn_export_plot.clicked.connect(self._export_plot)
+        btn_layout.addWidget(btn_export_plot)
         btn_refresh_results = QtWidgets.QPushButton("刷新结果")
         btn_refresh_results.clicked.connect(self._refresh_results_view)
         btn_layout.addWidget(btn_refresh_results)
@@ -906,19 +892,8 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         plot_body_layout = QtWidgets.QHBoxLayout(plot_body)
         plot_body_layout.setContentsMargins(0, 0, 0, 0)
         plot_body_layout.setSpacing(8)
-        if pg is not None:
-            self.mf_plot_widget = pg.PlotWidget()
-            self.mf_plot_widget.setBackground("#ffffff")
-            self.mf_plot_widget.setMinimumHeight(300)
-            self.mf_plot_widget.setLabel("bottom", "温度", units="°C")
-            self.mf_plot_widget.setLabel("left", "摩尔分数")
-            self.mf_plot_widget.showGrid(x=True, y=True, alpha=0.3)
-            plot_body_layout.addWidget(self.mf_plot_widget, 1)
-        else:
-            self.mf_plot_widget = None
-            placeholder = QtWidgets.QLabel("pyqtgraph 未安装，无法显示绘图")
-            placeholder.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-            plot_body_layout.addWidget(placeholder, 1)
+        self.mf_plot_widget = StaticCurvePlot("温度 (°C)", "摩尔分数", min_height=300)
+        plot_body_layout.addWidget(self.mf_plot_widget, 1)
         series_group = QtWidgets.QGroupBox("曲线列表")
         series_layout = QtWidgets.QVBoxLayout(series_group)
         series_layout.setContentsMargins(8, 8, 8, 8)
@@ -2701,18 +2676,16 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self._plot_single_auto_mf(key)
 
     def _plot_all_auto_mf(self):
-        if pg is None or self.auto_mf_plot_widget is None:
+        if self.auto_mf_plot_widget is None:
             return
         if not self.all_species_mf:
             return
 
-        self.auto_mf_plot_widget.clear()
-        self.auto_mf_plot_widget.addLegend()
-        self.auto_mf_plot_widget.setTitle("")
+        self.auto_mf_plot_widget.clear_plot(xlabel="温度 (°C)", ylabel="摩尔分数")
 
         plot_keys = self._auto_plot_keys_for_scope()
         if not plot_keys:
-            self.auto_mf_plot_widget.setTitle("没有可显示的曲线")
+            self.auto_mf_plot_widget.show_empty("没有可显示的曲线")
             return
 
         colors = [
@@ -2731,6 +2704,8 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
         all_temps: list[float] = []
         all_values: list[float] = []
+        x_ranges = []
+        y_ranges = []
         for species, entries in species_energies.items():
             entries.sort(key=lambda x: x[1])
             for mz, energy in entries:
@@ -2749,22 +2724,22 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 all_values.extend(float(v) for v in mfs_arr)
 
                 label = f"{species} ({energy:.1f}eV)"
-                self.auto_mf_plot_widget.plot(
-                    temps_arr, mfs_arr,
-                    pen=pg.mkPen(color, width=2),
-                    symbol="o", symbolSize=5, symbolBrush=color,
-                    name=label,
+                plot_x, plot_y = self.auto_mf_plot_widget.plot_series(
+                    temps_arr,
+                    mfs_arr,
+                    color=color,
+                    linewidth=2,
+                    markersize=4.5,
+                    label=label,
                 )
-        if all_temps:
-            self.auto_mf_plot_widget.setXRange(min(all_temps) - 50, max(all_temps) + 50)
-        if all_values:
-            min_mf = min(all_values)
-            max_mf = max(all_values)
-            padding = (max_mf - min_mf) * 0.1 if max_mf > min_mf else max(max_mf * 0.1, 1e-9)
-            self.auto_mf_plot_widget.setYRange(max(0, min_mf - padding), max_mf + padding)
+                x_ranges.append(plot_x)
+                y_ranges.append(plot_y)
+        if all_temps and all_values:
+            self.auto_mf_plot_widget.apply_data_limits(x_ranges, y_ranges, x_pad_min=50.0, y_pad_min=1e-9)
+        self.auto_mf_plot_widget.finish(legend=True)
 
     def _plot_single_auto_mf(self, key):
-        if pg is None or self.auto_mf_plot_widget is None:
+        if self.auto_mf_plot_widget is None:
             return
         if key not in self.all_species_mf:
             return
@@ -2774,8 +2749,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
         mz, species, energy = key
 
-        self.auto_mf_plot_widget.clear()
-        self.auto_mf_plot_widget.addLegend()
+        self.auto_mf_plot_widget.clear_plot(xlabel="温度 (°C)", ylabel="摩尔分数")
 
         sorted_temps = sorted(mf.keys())
         temps_arr = np.array(sorted_temps)
@@ -2783,12 +2757,16 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
         color = (100, 200, 255)
         label = f"m/z={mz} {species} @ {energy:.2f} eV"
-        self.auto_mf_plot_widget.plot(
-            temps_arr, mfs_arr,
-            pen=pg.mkPen(color, width=3),
-            symbol="o", symbolSize=6, symbolBrush=color,
-            name=label,
+        plot_x, plot_y = self.auto_mf_plot_widget.plot_series(
+            temps_arr,
+            mfs_arr,
+            color=color,
+            linewidth=2.8,
+            markersize=5.5,
+            label=label,
         )
+        self.auto_mf_plot_widget.apply_data_limits([plot_x], [plot_y], x_pad_min=50.0, y_pad_min=1e-9)
+        self.auto_mf_plot_widget.finish(legend=True)
 
     def _collect_all_results(self) -> dict[str, dict[float, float]]:
         return {series["label"]: series["values"] for series in self._collect_result_series()}
@@ -2910,17 +2888,17 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.lbl_results_status.setText(f"已显示 {len(result_series)} 条结果，{len(all_temps)} 个温度点")
 
     def _plot_results_mf(self):
-        if pg is None or self.mf_plot_widget is None:
+        if self.mf_plot_widget is None:
             return
 
         result_series = self._collect_result_series()
         if hasattr(self, "mf_series_list"):
             self.mf_series_list.clear()
         if not result_series:
-            self.mf_plot_widget.clear()
+            self.mf_plot_widget.clear_plot(title="暂无摩尔分数结果", xlabel="温度 (°C)", ylabel="摩尔分数")
             return
 
-        self.mf_plot_widget.clear()
+        self.mf_plot_widget.clear_plot(title="摩尔分数-温度曲线", xlabel="温度 (°C)", ylabel="摩尔分数")
 
         colors = [
             (255, 100, 100), (100, 180, 255), (255, 200, 50),
@@ -2931,6 +2909,8 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
         all_temps = []
         all_mfs = []
+        x_ranges = []
+        y_ranges = []
         for idx, series in enumerate(result_series):
             color = colors[idx % len(colors)]
             name = str(series["label"])
@@ -2940,11 +2920,15 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             temps_arr = np.array(sorted_temps)
             mfs_arr = np.array([res[t] for t in sorted_temps])
             all_mfs.extend(mfs_arr.tolist())
-            self.mf_plot_widget.plot(
-                temps_arr, mfs_arr,
-                pen=pg.mkPen(color, width=2),
-                symbol="o", symbolSize=4, symbolBrush=color,
+            plot_x, plot_y = self.mf_plot_widget.plot_series(
+                temps_arr,
+                mfs_arr,
+                color=color,
+                linewidth=2,
+                markersize=4.2,
             )
+            x_ranges.append(plot_x)
+            y_ranges.append(plot_y)
             if hasattr(self, "mf_series_list"):
                 pixmap = QtGui.QPixmap(12, 12)
                 pixmap.fill(QtGui.QColor(*color))
@@ -2952,13 +2936,9 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 item.setToolTip(name)
                 self.mf_series_list.addItem(item)
 
-        if all_temps:
-            self.mf_plot_widget.setXRange(min(all_temps) - 50, max(all_temps) + 50)
-        if all_mfs:
-            min_mf = min(all_mfs)
-            max_mf = max(all_mfs)
-            padding = (max_mf - min_mf) * 0.1 if max_mf > min_mf else 0.1
-            self.mf_plot_widget.setYRange(max(0, min_mf - padding), max_mf + padding)
+        if all_temps and all_mfs:
+            self.mf_plot_widget.apply_data_limits(x_ranges, y_ranges, x_pad_min=50.0, y_pad_min=0.1)
+        self.mf_plot_widget.finish()
 
     def _export_results(self):
         all_results = self._collect_all_results()
@@ -2989,6 +2969,23 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             QtWidgets.QMessageBox.information(self, "成功", "摩尔分数结果导出成功，并已登记到项目管理。")
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "错误", f"导出失败: {e}")
+
+    def _export_plot(self):
+        if self.auto_mf_plot_widget is None or self.auto_mf_plot_widget.figure is None:
+            QtWidgets.QMessageBox.warning(self, "提示", "没有可导出的图表")
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "导出摩尔分数-温度曲线图",
+            str(ensure_output_dir("exports", "mole_fraction") / "mole_fraction_plot.png"),
+            "PNG Images (*.png);;PDF Files (*.pdf)",
+        )
+        if not path:
+            return
+        if self.auto_mf_plot_widget.save_plot(path):
+            QtWidgets.QMessageBox.information(self, "成功", f"曲线图已导出：{path}")
+        else:
+            QtWidgets.QMessageBox.warning(self, "错误", "导出图表失败")
 
     def set_temperature_scan_df(self, df: pd.DataFrame):
         self._temperature_scan_df = df

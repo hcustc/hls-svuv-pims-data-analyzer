@@ -51,16 +51,11 @@ from bl03u_masstool.core.mole_fraction import (
     load_mole_fraction_settings,
     save_mole_fraction_settings,
 )
-from bl03u_masstool.frontends.pyqt_app.theme import get_plot_theme
 from bl03u_masstool.frontends.pyqt_app.workers import WorkerThread
 from bl03u_masstool.frontends.pyqt_app.project_artifacts import record_project_artifact
 
-try:
-    import pyqtgraph as pg
-except Exception:  # pragma: no cover - only used when optional plotting is unavailable
-    pg = None
-
 from bl03u_masstool.frontends.pyqt_app.common.widgets import DataFrameTableMixin
+from bl03u_masstool.frontends.pyqt_app.common.static_plot import StaticCurvePlot
 
 class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
     def __init__(self, calibration: Calibration, normalization_settings: NormalizationSettings | None = None, parent=None):
@@ -108,6 +103,12 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.export_button.setEnabled(False)
         self.export_button.clicked.connect(self.export_result)
 
+        self.export_plot_button = QtWidgets.QPushButton("导出图表")
+        self.export_plot_button.setObjectName("ExportButton")
+        self.export_plot_button.setToolTip("导出当前曲线图表为PNG/PDF")
+        self.export_plot_button.setEnabled(False)
+        self.export_plot_button.clicked.connect(self.export_plot)
+
         self.summary_open_project_btn = QtWidgets.QPushButton("项目管理")
         self.summary_open_project_btn.setObjectName("BrowseButton")
         self.summary_open_project_btn.setToolTip("在项目管理中修改数据源、寻峰、归一化和温度扫描默认参数")
@@ -121,7 +122,7 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.sidebar_toggle_btn.setChecked(True)
         self.sidebar_toggle_btn.clicked.connect(self._toggle_sidebar)
 
-        for btn in (self.run_button, self.export_button,
+        for btn in (self.run_button, self.export_button, self.export_plot_button,
                     self.summary_open_project_btn, self.sidebar_toggle_btn):
             toolbar_layout.addWidget(btn)
 
@@ -243,19 +244,8 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         empty_layout.addWidget(empty_msg)
         plot_stack.addWidget(self._empty_state)
 
-        if pg is not None:
-            self.plot_widget = pg.PlotWidget()
-            self.plot_widget.setBackground("#ffffff")
-            self.plot_widget.setLabel("bottom", "Temperature (C)")
-            self.plot_widget.setLabel("left", "Normalized Area")
-            self.plot_widget.getAxis("bottom").enableAutoSIPrefix(False)
-            self.plot_widget.showGrid(x=True, y=True)
-            plot_stack.addWidget(self.plot_widget)
-        else:
-            self.plot_widget = None
-            no_pg = QtWidgets.QLabel("未安装 pyqtgraph，无法显示温度扫描曲线图")
-            no_pg.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-            plot_stack.addWidget(no_pg)
+        self.plot_widget = StaticCurvePlot("Temperature (C)", "Normalized Area")
+        plot_stack.addWidget(self.plot_widget)
 
         plot_stack.setCurrentIndex(0)  # show empty state initially
         right_layout.addWidget(self._plot_container, stretch=3)
@@ -592,6 +582,7 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.update_group_summary()
         self._show_plot()  # reveal plot, hide empty state
         self.export_button.setEnabled(True)
+        self.export_plot_button.setEnabled(True)
         self._show_inline_success(f"已完成分析，生成 {len(self.result_df)} 行温度扫描结果")
 
     def on_analysis_failed(self, message: str) -> None:
@@ -696,7 +687,7 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.current_curve_label.setText("未选择")
             self.current_curve_metric_label.setText("调整筛选或重新生成曲线")
             if self.plot_widget is not None:
-                self.plot_widget.clear()
+                self.plot_widget.clear_plot(title="未选择温度曲线")
             return
         mz_value = current.data(0, QtCore.Qt.ItemDataRole.UserRole)
         if mz_value is None:
@@ -730,38 +721,20 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         valid = np.isfinite(x_values) & np.isfinite(y_values)
         x_values = x_values[valid]
         y_values = y_values[valid]
-        self.plot_widget.clear()
-        self.plot_widget.setLabel("bottom", "Temperature (C)")
-        self.plot_widget.setLabel("left", "Normalized Area")
-        self.plot_widget.getAxis("bottom").enableAutoSIPrefix(False)
-        self.plot_widget.showGrid(x=True, y=True, alpha=0.25)
+        title = f"m/z {curve['mz']} 温度扫描 - {curve.get('curve_class_label', '')}"
+        self.plot_widget.clear_plot(title=title, xlabel="Temperature (C)", ylabel="Normalized Area")
         if x_values.size == 0:
-            self.plot_widget.setTitle(f"m/z {curve['mz']} 温度曲线 - 无有效数据")
+            self.plot_widget.show_empty("无有效数据", title=f"m/z {curve['mz']} 温度曲线")
             return
-        self.plot_widget.plot(
+        plot_x, plot_y = self.plot_widget.plot_series(
             x_values,
             y_values,
-            pen=pg.mkPen("#2563eb", width=2),
-            symbol="o",
-            symbolBrush="#2563eb",
-            symbolPen="#1e3a8a",
-            symbolSize=8,
+            color="#2563eb",
+            linewidth=2.4,
+            markersize=6,
         )
-        self.plot_widget.setTitle(f"m/z {curve['mz']} 温度扫描 - {curve.get('curve_class_label', '')}")
-        x_min = float(np.min(x_values))
-        x_max = float(np.max(x_values))
-        y_min = float(np.min(y_values))
-        y_max = float(np.max(y_values))
-        x_pad = max(5.0, (x_max - x_min) * 0.08)
-        y_pad = max(1.0, (y_max - y_min) * 0.12)
-        if x_min == x_max:
-            x_min -= 5.0
-            x_max += 5.0
-        if y_min == y_max:
-            y_min -= 1.0
-            y_max += 1.0
-        self.plot_widget.setXRange(x_min - x_pad, x_max + x_pad, padding=0)
-        self.plot_widget.setYRange(max(0.0, y_min - y_pad), y_max + y_pad, padding=0)
+        self.plot_widget.apply_data_limits([plot_x], [plot_y], x_pad_min=5.0, y_pad_min=1.0)
+        self.plot_widget.finish()
 
     def run_analysis_sync(
         self,
@@ -826,3 +799,26 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
             message="温度扫描结果已登记到项目管理",
         )
         QtWidgets.QMessageBox.information(self, "成功", "温度扫描结果已导出并登记到项目管理。")
+
+    def export_plot(self):
+        if self.plot_widget is None or self.plot_widget.figure is None:
+            QtWidgets.QMessageBox.warning(self, "提示", "没有可导出的图表")
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "导出温度扫描曲线图",
+            str(ensure_output_dir("exports", "temperature") / "temperature_scan_plot.png"),
+            "PNG Images (*.png);;PDF Files (*.pdf)",
+        )
+        if not path:
+            return
+        if self.plot_widget.save_plot(path):
+            record_project_artifact(
+                self,
+                "temperature_scan_plot_file",
+                path,
+                message="温度扫描曲线图已登记到项目管理",
+            )
+            QtWidgets.QMessageBox.information(self, "成功", f"曲线图已导出：{path}")
+        else:
+            QtWidgets.QMessageBox.warning(self, "错误", "导出图表失败")
