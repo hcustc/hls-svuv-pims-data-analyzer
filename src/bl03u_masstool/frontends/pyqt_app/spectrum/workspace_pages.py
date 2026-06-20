@@ -1945,6 +1945,7 @@ class WorkspacePagesMixin:
             "pie": self.pie_page,
             "mole_fraction": self.mole_fraction_page,
             "pics": self.pics_page,
+            "pics_import": self.pics_import_page,
             "ionization": self.ionization_page,
             "isotope": self.isotope_page,
         }

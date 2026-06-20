@@ -64,6 +64,7 @@ from bl03u_masstool.frontends.pyqt_app.mole_fraction.dialog import MoleFractionD
 from bl03u_masstool.frontends.pyqt_app.nist.widget import IonizationEnergyLookupWidget
 from bl03u_masstool.frontends.pyqt_app.normalization.widget import NormalizationSettingsWidget
 from bl03u_masstool.frontends.pyqt_app.pics.dialog import PICSCalculatorDialog
+from bl03u_masstool.frontends.pyqt_app.pics.import_widget import PICSImportWidget
 from bl03u_masstool.frontends.pyqt_app.pie.dialog import PIESpeciesFitDialog
 from bl03u_masstool.frontends.pyqt_app.temperature.dialog import TemperatureScanDialog
 
@@ -81,6 +82,7 @@ class CoreToolsDialog(QtWidgets.QDialog):
             "pie": self.tabs.addTab(PIESpeciesFitDialog(calibration, self.normalization_settings, self), "PIE物种拟合"),
             "mole_fraction": self.tabs.addTab(MoleFractionDialog(calibration, self.normalization_settings, self), "摩尔分数"),
             "pics": self.tabs.addTab(PICSCalculatorDialog(calibration, self.normalization_settings, self), "PICS计算"),
+            "pics_import": self.tabs.addTab(PICSImportWidget(self), "PICS导入"),
             "ionization": self.tabs.addTab(IonizationEnergyLookupWidget(self), "电离能查询"),
             "isotope": self.tabs.addTab(IsotopeAbundanceDialog(self), "分子/同位素"),
         }

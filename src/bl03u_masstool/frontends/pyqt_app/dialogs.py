@@ -7,6 +7,7 @@ from bl03u_masstool.frontends.pyqt_app.mole_fraction.dialog import MoleFractionD
 from bl03u_masstool.frontends.pyqt_app.nist.widget import IonizationEnergyLookupWidget
 from bl03u_masstool.frontends.pyqt_app.normalization.widget import CommonParametersDialog, NormalizationSettingsWidget
 from bl03u_masstool.frontends.pyqt_app.pics.dialog import PICSCalculatorDialog
+from bl03u_masstool.frontends.pyqt_app.pics.import_widget import PICSImportWidget
 from bl03u_masstool.frontends.pyqt_app.pie.dialog import PIESpeciesFitDialog, _run_exhaustive_fit
 from bl03u_masstool.frontends.pyqt_app.temperature.dialog import TemperatureScanDialog
 
@@ -20,6 +21,7 @@ __all__ = [
     "MoleFractionDialog",
     "NormalizationSettingsWidget",
     "PICSCalculatorDialog",
+    "PICSImportWidget",
     "PIESpeciesFitDialog",
     "TemperatureScanDialog",
     "_run_exhaustive_fit",
