@@ -15,13 +15,37 @@ src/bl03u_masstool/resources/pics/schema.sql
 src/bl03u_masstool/resources/pics/species_seed.csv
 ```
 
-如果工作库不存在，程序会从 seed 自动生成 SQLite。也可以显式重建：
+## Schema 版本管理
 
-```bash
-bl03u-build-species-db --output database/species_database.sqlite
-# 或
-python -m bl03u_masstool.scripts.build_species_database --output database/species_database.sqlite
+数据库通过 SQLite 的 `PRAGMA user_version` 进行版本跟踪。当前版本号定义在：
+
+```python
+# src/bl03u_masstool/core/db_migration.py
+SCHEMA_VERSION: int = 1
 ```
+
+每次应用启动时，`species_database_path()` 会自动调用 `ensure_database_up_to_date()`：
+
+- 数据库不存在 → 从 seed 重建，并写入版本号
+- `user_version == SCHEMA_VERSION` → 无操作
+- `user_version < SCHEMA_VERSION` → 按序执行所有待迁移的 SQL
+- `user_version > SCHEMA_VERSION` → 抛出 `RuntimeError`（app 版本过旧）
+
+### 添加新 migration
+
+1. 在 `db_migration.py` 中递增 `SCHEMA_VERSION`
+2. 在 `_MIGRATIONS` 字典中添加对应的 SQL：
+
+```python
+SCHEMA_VERSION: int = 2
+
+_MIGRATIONS: dict[int, str] = {
+    1: "",  # 初始 schema
+    2: "ALTER TABLE species ADD COLUMN source TEXT;",
+}
+```
+
+3. 同步更新 `resources/pics/schema.sql`（作为新建数据库时的完整 schema）
 
 ## 表结构
 
@@ -50,8 +74,36 @@ CREATE INDEX idx_species_mz ON species(mz);
 CREATE INDEX idx_pics_species_energy ON pic_cross_sections(species_id, energy_ev);
 ```
 
-`species` 保存候选物种元数据，`pic_cross_sections` 保存每个物种的 PICS 曲线点。表结构的
-权威版本是 `resources/pics/schema.sql`；默认数据的权威版本是 `resources/pics/species_seed.csv`。
+表结构的权威版本是 `resources/pics/schema.sql`；默认数据的权威版本是 `resources/pics/species_seed.csv`。
+
+## 上传物种模板
+
+用户可通过 Excel 模板批量上传物种数据到数据库：
+
+```text
+data/examples/pics_template.xlsx
+```
+
+模板列格式与 seed CSV 保持一致，通过 Web 界面上传后后端执行写入。支持三种写入模式：
+
+- `upsert`：替换匹配的物种记录（按 mz + name 匹配）
+- `append`：把上传记录追加为新物种条目
+- `overwrite_all`：覆盖整个 PICS 库，需要显式确认
+
+## 重建数据库
+
+如果工作库不存在，程序会从 seed 自动生成。也可以显式重建：
+
+```bash
+bl03u-build-species-db --output database/species_database.sqlite
+# 或
+python -m bl03u_masstool.scripts.build_species_database --output database/species_database.sqlite
+```
+
+## 更新默认数据
+
+默认数据库变更应优先修改 `species_seed.csv` 或生成该 CSV 的上游清洗流程，再重建 SQLite。这样
+Git diff 可读，也方便代码审查。SQLite 文件应视为运行工作库或发布产物，而不是唯一数据源。
 
 ## 查询
 
@@ -66,41 +118,20 @@ python -m bl03u_masstool.scripts.query_species_database
 ```bash
 sqlite3 database/species_database.sqlite "SELECT COUNT(*) FROM species;"
 sqlite3 database/species_database.sqlite "SELECT COUNT(*) FROM pic_cross_sections;"
+sqlite3 database/species_database.sqlite "PRAGMA user_version;"
 sqlite3 database/species_database.sqlite "PRAGMA integrity_check;"
 sqlite3 database/species_database.sqlite "PRAGMA foreign_key_check;"
 ```
 
-## 更新
+## 备份与恢复
 
-默认数据库变更应优先修改 `species_seed.csv` 或生成该 CSV 的上游清洗流程，再重建 SQLite。这样
-Git diff 可读，也方便代码审查。SQLite 文件应视为运行工作库或发布产物，而不是唯一数据源。
+生成的备份文件不要提交到 Git（已由 `.gitignore` 忽略）。
 
-通过 Web 上传维护 PICS 数据时，优先使用内置上传流程：
-
-- 临时工作库：为当前浏览器会话创建隔离库，不修改服务器维护库。
-- 服务器维护库：写入共享维护数据库，需要 `BL03U_ADMIN_TOKEN`。
-
-写入服务器维护库前，后端会在 `database/backups/` 下创建时间戳备份。支持的写入模式：
-
-- `upsert`：替换匹配的物种记录。
-- `append`：把上传记录追加为新物种条目。
-- `overwrite_all`：覆盖整个 PICS 库，需要显式确认。
-
-如果通过脚本或命令行手动维护，先备份：
+手动维护前先备份：
 
 ```bash
 cp database/species_database.sqlite database/species_database.backup_$(date +%Y%m%d_%H%M%S).sqlite
 ```
-
-只有在明确需要规范化维护库数据时，才运行清洗脚本：
-
-```bash
-python -m bl03u_masstool.scripts.clean_species_database
-```
-
-## 备份与恢复
-
-生成的备份文件不要提交到 Git；这些路径已由 `.gitignore` 忽略。
 
 恢复备份：
 
@@ -116,11 +147,5 @@ cp database/species_database.backup_YYYYMMDD_HHMMSS.sqlite database/species_data
 
 ```bash
 sqlite3 database/species_database.sqlite "VACUUM;"
-```
-
-压缩后再做完整性检查：
-
-```bash
 sqlite3 database/species_database.sqlite "PRAGMA integrity_check;"
-sqlite3 database/species_database.sqlite "PRAGMA foreign_key_check;"
 ```

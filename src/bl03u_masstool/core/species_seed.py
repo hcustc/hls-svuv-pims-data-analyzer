@@ -7,6 +7,7 @@ import sqlite3
 from pathlib import Path
 
 from .runtime_paths import resource_path
+from .db_migration import SCHEMA_VERSION, set_user_version
 
 
 DEFAULT_SCHEMA_PATH = Path("resources/pics/schema.sql")
@@ -76,6 +77,7 @@ def build_species_database_from_seed(
                 """,
                 (species_id, float(row["energy_ev"]), float(row["cross_section"])),
             )
+        set_user_version(conn, SCHEMA_VERSION)
         conn.commit()
     return output
 

@@ -5,7 +5,8 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from bl03u_masstool.core.config import species_database_path
+from bl03u_masstool.core.config import load_app_config
+from bl03u_masstool.core.runtime_paths import ensure_user_copy
 from bl03u_masstool.core.species_seed import (
     build_species_database_from_seed,
     default_species_schema_path,
@@ -27,7 +28,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-overwrite", action="store_true", help="Keep an existing output database.")
     args = parser.parse_args(argv)
 
-    output = args.output or species_database_path(build_if_missing=False)
+    if args.output:
+        output = args.output
+    else:
+        app = load_app_config()
+        value = app.get("database", {}).get("pics", "database/species_database.sqlite")
+        output = ensure_user_copy(value)
     path = build_species_database_from_seed(
         output,
         seed_path=args.seed,

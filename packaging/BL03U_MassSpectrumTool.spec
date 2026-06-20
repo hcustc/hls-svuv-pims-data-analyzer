@@ -6,6 +6,8 @@ import sys
 
 ROOT = Path.cwd().resolve()
 APP_NAME = "BL03U-MassSpectrumTool"
+ICON_ICO = ROOT / "icons" / "icon.ico"
+ICON_ICNS = ROOT / "icons" / "icon.icns"
 
 datas = [
     (str(ROOT / "icons"), "icons"),
@@ -60,6 +62,7 @@ if sys.platform == "darwin":
         coll,
         name=f"{APP_NAME}.app",
         bundle_identifier="cn.ihep.bl03u.mass-spectrum-tool",
+        icon=str(ICON_ICNS),
     )
 else:
     exe = EXE(
@@ -81,4 +84,5 @@ else:
         target_arch=None,
         codesign_identity=None,
         entitlements_file=None,
+        icon=str(ICON_ICO) if sys.platform == "win32" else None,
     )

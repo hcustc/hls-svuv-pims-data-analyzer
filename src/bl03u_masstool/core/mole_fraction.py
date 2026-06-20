@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import pickle
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -14,6 +15,8 @@ from .isotope import formula_nominal_mass
 from .pie_analysis import load_species_database
 from .temperature_scan import build_temperature_curves
 
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_MOLE_FRACTION_CONFIG = Path("config/mole_fraction.yaml")
 
@@ -124,6 +127,21 @@ def get_expansion_coefficient(
     return float(np.interp(temperature, temps, coeffs))
 
 
+def select_calc_energy(
+    ie: float, usable_energies: list[float], threshold: float = 0.05
+) -> float:
+    if not usable_energies:
+        raise ValueError("no usable energies")
+    sorted_energies = sorted(usable_energies)
+    closest_energy = min(sorted_energies, key=lambda e: abs(e - ie))
+    energy_diff = abs(closest_energy - ie)
+    if energy_diff < threshold:
+        idx = sorted_energies.index(closest_energy)
+        if idx + 1 < len(sorted_energies):
+            return sorted_energies[idx + 1]
+    return closest_energy
+
+
 def _get_cross_section_from_db(
     database: list[dict],
     mz_index: dict[int, list[int]],
@@ -138,18 +156,194 @@ def _get_cross_section_from_db(
             energies = spec.get("energies")
             cross_sections = spec.get("cross_sections")
             if energies is not None and cross_sections is not None:
-                return float(
-                    np.interp(energy, energies, cross_sections, left=0, right=0)
-                )
+                return _interpolate_cross_section(energies, cross_sections, energy)
     if indices:
         spec = database[indices[0]]
         energies = spec.get("energies")
         cross_sections = spec.get("cross_sections")
         if energies is not None and cross_sections is not None:
-            return float(
-                np.interp(energy, energies, cross_sections, left=0, right=0)
-            )
+            return _interpolate_cross_section(energies, cross_sections, energy)
     return 0.0
+
+
+def _interpolate_cross_section(
+    energies: np.ndarray,
+    cross_sections: np.ndarray,
+    energy: float,
+) -> float:
+    energy_values = np.asarray(energies, dtype=float)
+    cross_section_values = np.asarray(cross_sections, dtype=float)
+    valid = np.isfinite(energy_values) & np.isfinite(cross_section_values)
+    energy_values = energy_values[valid]
+    cross_section_values = cross_section_values[valid]
+    if energy_values.size == 0:
+        return 0.0
+
+    order = np.argsort(energy_values)
+    energy_values = energy_values[order]
+    cross_section_values = cross_section_values[order]
+
+    min_energy = float(energy_values[0])
+    max_energy = float(energy_values[-1])
+    if min_energy <= energy <= max_energy:
+        return float(np.interp(energy, energy_values, cross_section_values))
+    if energy > max_energy:
+        return float(
+            np.interp(
+                energy,
+                energy_values,
+                cross_section_values,
+                left=0.0,
+                right=float(cross_section_values[-1]),
+            )
+        )
+    if energy_values.size >= 2:
+        e1, e2 = energy_values[:2]
+        c1, c2 = cross_section_values[:2]
+        if e2 > e1:
+            slope = (c2 - c1) / (e2 - e1)
+            extrapolated = c1 + slope * (energy - e1)
+            return float(max(0.0, min(extrapolated, c1)))
+    return 0.0
+
+
+def _get_species_from_database(
+    database: list[dict],
+    mz_index: dict[int, list[int]],
+    species_name: str,
+    mz: int,
+) -> dict | None:
+    for idx in mz_index.get(mz, []):
+        spec = database[idx]
+        if spec.get("species") == species_name or spec.get("name") == species_name:
+            return spec
+    return None
+
+
+def separate_coexisting_species_signals(
+    mz: int,
+    species_at_mz: list[dict],
+    energy_scan_data: dict[float, dict[float, float]],
+    database: list[dict],
+    mz_index: dict[int, list[int]],
+    target_energy: float | None = None,
+) -> tuple[dict[str, dict[float, float]], dict[str, float]]:
+    if not species_at_mz or not energy_scan_data:
+        return {}, {}
+
+    species_with_ie = [s for s in species_at_mz if s.get("ie") is not None]
+    species_with_ie.sort(key=lambda s: s.get("ie", float("inf")))
+    if not species_with_ie:
+        return {}, {}
+
+    available_energies = sorted(float(e) for e in energy_scan_data)
+    pure_signals: dict[str, dict[float, float]] = {}
+    pure_energies: dict[str, float] = {}
+
+    for idx, species in enumerate(species_with_ie):
+        species_name = str(species["species"])
+        species_ie = float(species.get("ie") or 0.0)
+        next_ie = (
+            float(species_with_ie[idx + 1].get("ie", float("inf")))
+            if idx + 1 < len(species_with_ie)
+            else float("inf")
+        )
+
+        candidates = [e for e in available_energies if species_ie <= e < next_ie]
+        if not candidates:
+            candidates = [e for e in available_energies if e >= species_ie]
+        if not candidates:
+            logger.info(
+                "物种分离: %s (IE=%.3f eV, m/z=%s) 没有可用能量",
+                species_name,
+                species_ie,
+                mz,
+            )
+            continue
+
+        pure_energy = select_calc_energy(species_ie, candidates)
+        pure_energies[species_name] = pure_energy
+        net_signal = {
+            float(temp): float(signal)
+            for temp, signal in energy_scan_data[pure_energy].items()
+        }
+
+        for prev_name, prev_pure_signal in pure_signals.items():
+            prev_pure_energy = pure_energies[prev_name]
+            prev_db = _get_species_from_database(database, mz_index, prev_name, mz)
+            if prev_db is None:
+                logger.warning("物种分离: 数据库中未找到 %s", prev_name)
+                continue
+            prev_energies = prev_db.get("energies")
+            prev_cross = prev_db.get("cross_sections")
+            if prev_energies is None or prev_cross is None:
+                logger.warning("物种分离: %s 没有光电离截面数据", prev_name)
+                continue
+
+            sigma_prev_at_prev = _interpolate_cross_section(
+                prev_energies, prev_cross, prev_pure_energy
+            )
+            sigma_prev_at_current = _interpolate_cross_section(
+                prev_energies, prev_cross, pure_energy
+            )
+            if sigma_prev_at_prev <= 0 or sigma_prev_at_current <= 0:
+                continue
+
+            ratio = sigma_prev_at_current / sigma_prev_at_prev
+            fallback_prev = (
+                sum(prev_pure_signal.values()) / len(prev_pure_signal)
+                if prev_pure_signal
+                else 0.0
+            )
+            for temp in list(net_signal):
+                prev_signal = prev_pure_signal.get(temp, fallback_prev)
+                net_signal[temp] = max(0.0, net_signal[temp] - prev_signal * ratio)
+
+        pure_signals[species_name] = net_signal
+
+    if target_energy is None:
+        return pure_signals, pure_energies
+
+    if target_energy not in energy_scan_data:
+        return pure_signals, pure_energies
+
+    target_result: dict[str, dict[float, float]] = {}
+    target_temps = sorted(float(t) for t in energy_scan_data[target_energy])
+    for species in species_with_ie:
+        species_name = str(species["species"])
+        species_ie = float(species.get("ie") or 0.0)
+        if species_name not in pure_signals:
+            continue
+        if target_energy < species_ie:
+            target_result[species_name] = {temp: 0.0 for temp in target_temps}
+            continue
+
+        species_db = _get_species_from_database(database, mz_index, species_name, mz)
+        if species_db is None:
+            logger.warning("物种分离: 数据库中未找到 %s", species_name)
+            continue
+        species_energies = species_db.get("energies")
+        species_cross = species_db.get("cross_sections")
+        if species_energies is None or species_cross is None:
+            logger.warning("物种分离: %s 没有光电离截面数据", species_name)
+            continue
+
+        pure_energy = pure_energies[species_name]
+        sigma_at_pure = _interpolate_cross_section(
+            species_energies, species_cross, pure_energy
+        )
+        sigma_at_target = _interpolate_cross_section(
+            species_energies, species_cross, target_energy
+        )
+        if sigma_at_pure <= 0:
+            continue
+        ratio = sigma_at_target / sigma_at_pure
+        target_result[species_name] = {
+            temp: pure_signals[species_name].get(temp, 0.0) * ratio
+            for temp in target_temps
+        }
+
+    return target_result, pure_energies
 
 
 def calc_parent_mole_fraction(
@@ -278,9 +472,20 @@ def extract_signal_from_temperature_curves(
     *,
     energy: float | None = None,
 ) -> dict[float, float]:
+    if energy is not None:
+        energy_curve = temperature_curves.get(energy)
+        if isinstance(energy_curve, dict) and "temperatures" not in energy_curve:
+            return extract_signal_from_temperature_curves(energy_curve, mz)
+
     curve = temperature_curves.get(mz)
     if curve is None:
         return {}
+    if energy is not None and isinstance(curve, dict):
+        by_energy = curve.get("by_energy") or curve.get("energy_curves")
+        if isinstance(by_energy, dict):
+            nested_curve = by_energy.get(energy)
+            if nested_curve is not None:
+                return extract_signal_from_temperature_curves({mz: nested_curve}, mz)
     temps = curve.get("temperatures", [])
     areas = curve.get("areas", [])
     if len(temps) != len(areas):
@@ -326,9 +531,19 @@ def compute_all_mole_fractions(
     )
 
     for prod in product_species:
-        prod_mz = prod.get("mz", 0)
-        prod_name = prod.get("name", f"m/z={prod_mz}")
-        prod_mw = prod.get("mw", float(prod_mz))
+        prod_mz = int(prod.get("mz", 0))
+        prod_name = str(prod.get("species") or prod.get("name") or f"m/z={prod_mz}")
+        prod_mw = prod.get("mw")
+        if prod_mw is None:
+            formula = prod.get("formula")
+            if formula:
+                try:
+                    prod_mw = float(formula_nominal_mass(str(formula)))
+                except ValueError:
+                    prod_mw = float(prod_mz)
+            else:
+                prod_mw = float(prod_mz)
+        prod_mw = float(prod_mw)
 
         prod_signal = extract_signal_from_temperature_curves(curves, prod_mz)
 
@@ -339,7 +554,7 @@ def compute_all_mole_fractions(
             species_name=prod_name,
             ref_mw=float(settings.reference_species_mz or settings.parent_mz),
             ref_mz=settings.reference_species_mz or settings.parent_mz,
-            ref_species_name=prod.get("ref_name", ""),
+            ref_species_name=str(prod.get("ref_species") or prod.get("ref_name") or ""),
             ref_mf_at_tm=settings.reference_species_mf_at_tm,
             ref_signal_data=ref_signal,
             energy=settings.photon_energy,
@@ -501,10 +716,8 @@ class MoleFractionCalculator:
         return [spec for spec in self.database if spec["mz"] == mz]
 
     def get_cross_section_at_energy(self, species: dict, energy: float) -> float:
-        return float(
-            np.interp(
-                energy, species["energies"], species["cross_sections"], left=0, right=0
-            )
+        return _interpolate_cross_section(
+            species["energies"], species["cross_sections"], energy
         )
 
     @staticmethod
@@ -569,6 +782,67 @@ class MoleFractionCalculator:
             results[T] = max(0.0, float(X_T))
 
         self.parent_mf_results = results
+        return results
+
+    def calc_parent_mf_by_reference(
+        self,
+        signal_data: dict[float, float],
+        species_mw: float,
+        species_name: str,
+        ref_mw: float,
+        ref_species_name: str,
+        ref_signal_data: dict[float, float],
+        ref_mf_at_tm: float,
+        calc_energy: float,
+        ref_energy: float,
+    ) -> dict[float, float] | None:
+        if not signal_data or not ref_signal_data or ref_mf_at_tm == 0:
+            return None
+
+        species_obj = _get_species_from_database(
+            self.database, self.mz_index, species_name, int(round(species_mw))
+        )
+        ref_obj = _get_species_from_database(
+            self.database, self.mz_index, ref_species_name, int(round(ref_mw))
+        )
+        if species_obj is None:
+            species_list = self.get_species_by_mz(int(round(species_mw)))
+            species_obj = species_list[0] if species_list else None
+        if ref_obj is None:
+            ref_species_list = self.get_species_by_mz(int(round(ref_mw)))
+            ref_obj = ref_species_list[0] if ref_species_list else None
+        if species_obj is None or ref_obj is None:
+            return None
+
+        sigma_i = self.get_cross_section_at_energy(species_obj, calc_energy)
+        sigma_ref = self.get_cross_section_at_energy(ref_obj, ref_energy)
+        D_i = self.calc_mass_discrimination(species_mw, self.mass_disc_exponent)
+        D_ref = self.calc_mass_discrimination(ref_mw, self.mass_disc_exponent)
+
+        T_M = self.reference_temperature
+        if T_M is None:
+            T_M = max(ref_signal_data.keys()) if ref_signal_data else None
+        if T_M is None:
+            return None
+
+        lambda_TM = self.get_expansion_coefficient(T_M)
+        results: dict[float, float] = {}
+        for T, S_i in signal_data.items():
+            S_ref_T = ref_signal_data.get(T)
+            if not S_ref_T:
+                continue
+            lambda_T = self.get_expansion_coefficient(T)
+            cross_section_ratio = sigma_ref / sigma_i if sigma_i > 0 and sigma_ref > 0 else 1.0
+            mass_disc_ratio = D_ref / D_i if D_i > 0 and D_ref > 0 else 1.0
+            X_i = (
+                ref_mf_at_tm
+                * (S_i / S_ref_T)
+                * cross_section_ratio
+                * mass_disc_ratio
+                * (lambda_TM / lambda_T)
+            )
+            results[T] = max(0.0, float(X_i))
+
         return results
 
     def calc_product_mf_with_ref_signal(
@@ -677,17 +951,16 @@ class MoleFractionCalculator:
         signal_data: dict[float, float],
         calc_energy: float | None = None,
         available_energies: list[float] | None = None,
+        ref_species_name: str | None = None,
     ) -> dict[float, float] | None:
         ie = species.get("ie", 0) or 0
         species_name = species["species"]
 
         if calc_energy is None:
-            best_energy = None
-            if available_energies:
-                for energy in sorted(available_energies, reverse=True):
-                    if energy >= ie:
-                        best_energy = energy
-                        break
+            usable_energies = [
+                energy for energy in (available_energies or []) if energy >= ie
+            ]
+            best_energy = select_calc_energy(ie, usable_energies) if usable_energies else None
         else:
             best_energy = calc_energy
 
@@ -697,20 +970,27 @@ class MoleFractionCalculator:
         if not signal_data:
             return None
 
-        species_obj = None
-        for s in self.get_species_by_mz(mz):
-            if s["species"] == species_name:
-                species_obj = s
-                break
-        if species_obj is None and self.get_species_by_mz(mz):
-            species_obj = self.get_species_by_mz(mz)[0]
+        species_obj = _get_species_from_database(
+            self.database, self.mz_index, species_name, mz
+        )
+        species_list = self.get_species_by_mz(mz)
+        if species_obj is None and species_list:
+            species_obj = species_list[0]
 
+        ref_species_name = (
+            ref_species_name
+            or species.get("ref_species")
+            or species.get("ref_name")
+            or ""
+        )
         ref_obj = None
-        for s in self.get_species_by_mz(ref_mz):
-            ref_obj = s
-            break
-        if ref_obj is None and self.get_species_by_mz(ref_mz):
-            ref_obj = self.get_species_by_mz(ref_mz)[0]
+        if ref_species_name:
+            ref_obj = _get_species_from_database(
+                self.database, self.mz_index, str(ref_species_name), ref_mz
+            )
+        ref_species_list = self.get_species_by_mz(ref_mz)
+        if ref_obj is None and ref_species_list:
+            ref_obj = ref_species_list[0]
 
         if species_obj is None or ref_obj is None:
             return None
@@ -817,64 +1097,25 @@ class MoleFractionCalculator:
             key=lambda x: x.get("ie") if x.get("ie") is not None else float("inf")
         )
 
-        mf_results: dict[tuple, dict[float, float]] = {}
-
-        for species in resolvable_species:
-            ie = species.get("ie") if species.get("ie") is not None else float("inf")
-            if ie == float("inf"):
-                continue
-
-            usable_energies = [e for e in sorted_energies if e >= ie]
-            calc_energies = usable_energies[:2]
-
-            if not calc_energies:
-                continue
-
-            for calc_e in calc_energies:
+        if len(resolvable_species) <= 1:
+            for species in resolvable_species:
+                ie = species.get("ie") if species.get("ie") is not None else float("inf")
+                if ie == float("inf"):
+                    continue
+                usable_energies = [e for e in sorted_energies if e >= ie]
+                if not usable_energies:
+                    continue
+                calc_e = select_calc_energy(float(ie), usable_energies)
                 signal_data = extract_signal_from_temperature_curves(
-                    temperature_curves, mz
+                    temperature_curves, mz, energy=calc_e
                 )
                 if not signal_data:
                     continue
-
-                net_signal = dict(signal_data)
-
-                for prev_key, prev_mf in mf_results.items():
-                    prev_name = prev_key[1]
-                    prev_energy = prev_key[2]
-                    prev_obj = None
-                    for s in self.get_species_by_mz(mz):
-                        if s["species"] == prev_name:
-                            prev_obj = s
-                            break
-                    if prev_obj is None:
-                        continue
-
-                    prev_ie = prev_obj.get("ie", 0) or 0
-                    if prev_ie > calc_e:
-                        continue
-
-                    sigma_prev_at_calc = self.get_cross_section_at_energy(
-                        prev_obj, calc_e
-                    )
-                    sigma_prev_at_prev = self.get_cross_section_at_energy(
-                        prev_obj, prev_energy
-                    )
-
-                    if sigma_prev_at_prev > 0 and sigma_prev_at_calc > 0:
-                        ratio = sigma_prev_at_calc / sigma_prev_at_prev
-                        for T in net_signal:
-                            if T in prev_mf:
-                                contribution = prev_mf[T] * ratio
-                                net_signal[T] = max(
-                                    0, net_signal.get(T, 0) - contribution
-                                )
-
                 mf = self.calc_product_mf_from_signal(
                     mz,
                     species,
                     calc_e,
-                    net_signal,
+                    signal_data,
                     ref_mz,
                     ref_mw,
                     ref_energy,
@@ -882,14 +1123,94 @@ class MoleFractionCalculator:
                     ref_mf_at_tm,
                 )
                 if mf:
-                    mf_results[(mz, species["species"], calc_e)] = mf
+                    result[(mz, species["species"], calc_e)] = mf
+            if warnings:
+                result["warning"] = f"质量数 {mz}: {'; '.join(warnings)}"
+            return result
+
+        try:
+            energy_scan_data: dict[float, dict[float, float]] = {}
+            for energy in sorted_energies:
+                signal_data = extract_signal_from_temperature_curves(
+                    temperature_curves, mz, energy=energy
+                )
+                if signal_data:
+                    energy_scan_data[energy] = signal_data
+            if not energy_scan_data:
+                warnings.append(f"质量数 {mz}: 没有可用的温度扫描信号")
+                result["warning"] = f"质量数 {mz}: {'; '.join(warnings)}"
+                return result
+
+            species_at_mz = [
+                {"species": species["species"], "ie": species.get("ie")}
+                for species in resolvable_species
+            ]
+            separated, pure_energies = separate_coexisting_species_signals(
+                mz=mz,
+                species_at_mz=species_at_mz,
+                energy_scan_data=energy_scan_data,
+                database=self.database,
+                mz_index=self.mz_index,
+            )
+
+            for species in resolvable_species:
+                species_name = species["species"]
+                if species_name not in separated:
+                    continue
+                calc_e = pure_energies.get(species_name)
+                if calc_e is None:
+                    ie = species.get("ie") if species.get("ie") is not None else float("inf")
+                    usable_energies = [e for e in sorted_energies if e >= ie]
+                    if not usable_energies:
+                        continue
+                    calc_e = select_calc_energy(float(ie), usable_energies)
+                mf = self.calc_product_mf_from_signal(
+                    mz,
+                    species,
+                    calc_e,
+                    separated[species_name],
+                    ref_mz,
+                    ref_mw,
+                    ref_energy,
+                    ref_signal_data,
+                    ref_mf_at_tm,
+                )
+                if mf:
+                    result[(mz, species_name, calc_e)] = mf
+        except Exception as exc:
+            logger.warning("质量数 %s 多物种信号分离失败: %s", mz, exc)
+            for species in resolvable_species:
+                ie = species.get("ie") if species.get("ie") is not None else float("inf")
+                if ie == float("inf"):
+                    continue
+                usable_energies = [e for e in sorted_energies if e >= ie]
+                if not usable_energies:
+                    continue
+                calc_e = select_calc_energy(float(ie), usable_energies)
+                signal_data = extract_signal_from_temperature_curves(
+                    temperature_curves, mz, energy=calc_e
+                )
+                if not signal_data:
+                    continue
+                mf = self.calc_product_mf_from_signal(
+                    mz,
+                    species,
+                    calc_e,
+                    signal_data,
+                    ref_mz,
+                    ref_mw,
+                    ref_energy,
+                    ref_signal_data,
+                    ref_mf_at_tm,
+                )
+                if mf:
+                    result[(mz, species["species"], calc_e)] = mf
 
         if len(species_list) > len(
-            set(k[1] for k in mf_results.keys())
+            set(k[1] for k in result if k != "warning")
         ) + sum(len(g) - 1 for g in species_groups.values() if len(g) > 1):
             warnings.append(f"质量数 {mz}: 部分可分辨物种未能计算摩尔分数")
 
-        result.update(mf_results)
         if warnings:
             result["warning"] = f"质量数 {mz}: {'; '.join(warnings)}"
 
@@ -906,23 +1227,31 @@ class MoleFractionCalculator:
         ref_energy: float,
         ref_signal_data: dict[float, float],
         ref_mf_at_tm: float,
+        ref_species_name: str | None = None,
     ) -> dict[float, float] | None:
         species_name = species["species"]
 
-        species_obj = None
-        for s in self.get_species_by_mz(mz):
-            if s["species"] == species_name:
-                species_obj = s
-                break
-        if species_obj is None and self.get_species_by_mz(mz):
-            species_obj = self.get_species_by_mz(mz)[0]
+        species_obj = _get_species_from_database(
+            self.database, self.mz_index, species_name, mz
+        )
+        species_list = self.get_species_by_mz(mz)
+        if species_obj is None and species_list:
+            species_obj = species_list[0]
 
         ref_obj = None
-        for s in self.get_species_by_mz(ref_mz):
-            ref_obj = s
-            break
-        if ref_obj is None and self.get_species_by_mz(ref_mz):
-            ref_obj = self.get_species_by_mz(ref_mz)[0]
+        ref_species_name = (
+            ref_species_name
+            or species.get("ref_species")
+            or species.get("ref_name")
+            or ""
+        )
+        if ref_species_name:
+            ref_obj = _get_species_from_database(
+                self.database, self.mz_index, str(ref_species_name), ref_mz
+            )
+        ref_species_list = self.get_species_by_mz(ref_mz)
+        if ref_obj is None and ref_species_list:
+            ref_obj = ref_species_list[0]
 
         if species_obj is None or ref_obj is None:
             return None
@@ -1005,7 +1334,16 @@ class MoleFractionCalculator:
         parent_signal = extract_signal_from_temperature_curves(
             temperature_curves, parent_mz
         )
-        parent_mf_at_tm = parent_mf_results.get(self.reference_temperature, 0)
+        reference_temperature = self.reference_temperature
+        if reference_temperature not in parent_mf_results:
+            common_temperatures = sorted(set(parent_signal) & set(parent_mf_results))
+            if common_temperatures:
+                reference_temperature = common_temperatures[-1]
+            elif parent_mf_results:
+                reference_temperature = sorted(parent_mf_results)[-1]
+        if self.reference_temperature != reference_temperature:
+            self.reference_temperature = reference_temperature
+        parent_mf_at_tm = parent_mf_results.get(reference_temperature, 0)
 
         for mz, sp_list in species_by_mz.items():
             if mz == parent_mz:

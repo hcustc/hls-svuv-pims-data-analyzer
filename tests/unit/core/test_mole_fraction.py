@@ -1,18 +1,24 @@
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from bl03u_masstool.core.mole_fraction import (
     MASS_DISCRIMINATION_PRESETS,
+    MoleFractionCalculator,
     MoleFractionSettings,
+    _interpolate_cross_section,
+    calc_auto_mole_fractions,
     calc_expansion_coefficients,
     calc_isomeric_separation,
     calc_mass_discrimination,
     calc_parent_mole_fraction,
     calc_product_mole_fraction,
+    compute_all_mole_fractions,
     get_expansion_coefficient,
     load_mole_fraction_settings,
+    separate_coexisting_species_signals,
 )
 
 
@@ -142,3 +148,130 @@ class TestMoleFractionSettings:
         assert loaded.mass_disc_exponent == pytest.approx(0.5)
         assert loaded.parent_mz == 100
         assert loaded.kr_data[100.0] == pytest.approx(50.0)
+
+
+def test_compute_all_mole_fractions_accepts_pie_species_field_and_formula_mass():
+    temperature_scan_df = pd.DataFrame(
+        [
+            {"temperature": 100.0, "file": "t100.txt", "reference_temperature": 100.0, "mz": 30.0, "area": 1000.0},
+            {"temperature": 200.0, "file": "t200.txt", "reference_temperature": 100.0, "mz": 30.0, "area": 800.0},
+            {"temperature": 100.0, "file": "t100.txt", "reference_temperature": 100.0, "mz": 18.0, "area": 50.0},
+            {"temperature": 200.0, "file": "t200.txt", "reference_temperature": 100.0, "mz": 18.0, "area": 80.0},
+        ]
+    )
+    database = [
+        {"mz": 18, "species": "Water", "energies": np.array([12.0]), "cross_sections": np.array([2.0])},
+        {"mz": 30, "species": "NO", "energies": np.array([12.0]), "cross_sections": np.array([4.0])},
+    ]
+    settings = MoleFractionSettings(
+        mass_disc_exponent=0.0,
+        parent_mz=30,
+        parent_initial_mf=0.01,
+        reference_temperature=100.0,
+        reference_species_mz=30,
+        reference_species_mf_at_tm=0.01,
+        photon_energy=12.0,
+        kr_data={100.0: 1.0, 200.0: 1.0},
+    )
+
+    result = compute_all_mole_fractions(
+        temperature_scan_df,
+        settings=settings,
+        database=database,
+        mz_index={18: [0], 30: [1]},
+        product_species=[{"mz": 18, "species": "Water", "formula": "H2O"}],
+    )
+
+    assert result["Water"].tolist() == pytest.approx([0.001, 0.0016])
+
+
+def test_auto_mole_fractions_uses_parent_result_temperature_when_reference_is_unset():
+    calculator = MoleFractionCalculator()
+    calculator.database = [
+        {"mz": 18, "species": "Water", "energies": np.array([12.0]), "cross_sections": np.array([2.0])},
+        {"mz": 30, "species": "NO", "energies": np.array([12.0]), "cross_sections": np.array([4.0])},
+    ]
+    calculator.mz_index = {18: [0], 30: [1]}
+    calculator.expansion_coefficients = {100.0: 1.0, 200.0: 1.0}
+    calculator.mass_disc_exponent = 0.0
+    calculator.parent_mz = 30
+
+    results, warnings = calc_auto_mole_fractions(
+        calculator,
+        pie_species_data=[{"mz": 18, "species": "Water", "ie": 11.0}],
+        temperature_curves={
+            30: {"temperatures": [100.0, 200.0], "areas": [1000.0, 800.0]},
+            18: {"temperatures": [100.0, 200.0], "areas": [50.0, 80.0]},
+        },
+        parent_mf_results={100.0: 0.01, 200.0: 0.008},
+        available_energies=[12.0],
+        parent_energy=12.0,
+    )
+
+    assert warnings == []
+    assert results[(18, "Water", 12.0)][100.0] == pytest.approx(0.001)
+    assert results[(18, "Water", 12.0)][200.0] == pytest.approx(0.0016)
+
+
+def test_cross_section_interpolation_extrapolates_low_energy_edge():
+    energies = np.array([9.0, 10.0])
+    cross_sections = np.array([1.0, 3.0])
+
+    assert _interpolate_cross_section(energies, cross_sections, 9.5) == pytest.approx(2.0)
+    assert _interpolate_cross_section(energies, cross_sections, 8.8) == pytest.approx(0.6)
+    assert _interpolate_cross_section(energies, cross_sections, 8.0) == pytest.approx(0.0)
+    assert _interpolate_cross_section(energies, cross_sections, 11.0) == pytest.approx(3.0)
+
+
+def test_separate_coexisting_species_signals_uses_energy_resolved_subtraction():
+    temperatures = [550.0, 600.0, 650.0]
+    naphthalene_85 = np.array([0.10, 0.15, 0.22])
+    chlorophenol_90 = np.array([2.00, 1.90, 1.80])
+    database = [
+        {
+            "species": "Naphthalene",
+            "mz": 128,
+            "ie": 8.14,
+            "energies": np.array([8.5, 9.0, 10.0]),
+            "cross_sections": np.array([2.0, 3.5, 4.8]),
+        },
+        {
+            "species": "o-Chlorophenol",
+            "mz": 128,
+            "ie": 8.90,
+            "energies": np.array([9.0, 10.0]),
+            "cross_sections": np.array([1.5, 4.5]),
+        },
+    ]
+    mz_index = {128: [0, 1]}
+    energy_scan_data = {
+        8.5: dict(zip(temperatures, naphthalene_85)),
+        9.0: dict(zip(temperatures, naphthalene_85 * (3.5 / 2.0) + chlorophenol_90)),
+        10.0: dict(
+            zip(
+                temperatures,
+                naphthalene_85 * (4.8 / 2.0)
+                + chlorophenol_90 * (4.5 / 1.5),
+            )
+        ),
+    }
+
+    separated, pure_energies = separate_coexisting_species_signals(
+        mz=128,
+        species_at_mz=[
+            {"species": "Naphthalene", "ie": 8.14},
+            {"species": "o-Chlorophenol", "ie": 8.90},
+        ],
+        energy_scan_data=energy_scan_data,
+        database=database,
+        mz_index=mz_index,
+        target_energy=10.0,
+    )
+
+    assert pure_energies == {"Naphthalene": 8.5, "o-Chlorophenol": 9.0}
+    assert list(separated["Naphthalene"].values()) == pytest.approx(
+        (naphthalene_85 * (4.8 / 2.0)).tolist()
+    )
+    assert list(separated["o-Chlorophenol"].values()) == pytest.approx(
+        (chlorophenol_90 * (4.5 / 1.5)).tolist()
+    )
