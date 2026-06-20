@@ -165,6 +165,18 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
         widget = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(widget)
 
+        self.species_tabs = QtWidgets.QTabWidget()
+        self.species_tabs.addTab(self._create_species_basics_tab(), "基础参数")
+        self.species_tabs.addTab(self._create_reference_pics_tab(), "NO截面库")
+        self.species_tabs.addTab(self._create_pics_import_tab(), "外部导入")
+        layout.addWidget(self.species_tabs)
+
+        return widget
+
+    def _create_species_basics_tab(self):
+        widget = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(widget)
+
         new_group = QtWidgets.QGroupBox("新物种信息")
         new_layout = QtWidgets.QFormLayout(new_group)
 
@@ -183,6 +195,14 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.spin_new_mz.setRange(1, 500)
         new_layout.addRow("质量数 m/z:", self.spin_new_mz)
 
+        self.double_new_ie = QtWidgets.QDoubleSpinBox()
+        self.double_new_ie.setToolTip("新物种的电离能（eV），留 0 表示未知")
+        self.double_new_ie.setRange(0.0, 100.0)
+        self.double_new_ie.setDecimals(3)
+        self.double_new_ie.setValue(0.0)
+        self.double_new_ie.setSpecialValueText("未知")
+        new_layout.addRow("电离能 (eV):", self.double_new_ie)
+
         layout.addWidget(new_group)
 
         no_group = QtWidgets.QGroupBox("参考物种 NO")
@@ -200,26 +220,6 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
         no_layout.addRow("质量数 m/z:", self.spin_no_mz)
 
         layout.addWidget(no_group)
-
-        no_cs_group = QtWidgets.QGroupBox("NO光电离截面 (从数据库获取)")
-        no_cs_layout = QtWidgets.QVBoxLayout(no_cs_group)
-
-        self.no_cs_table = QtWidgets.QTableWidget()
-        self.no_cs_table.setColumnCount(2)
-        self.no_cs_table.setHorizontalHeaderLabels(["光子能量(eV)", "光电离截面(Mb)"])
-        self.no_cs_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
-        no_cs_layout.addWidget(self.no_cs_table)
-
-        self.lbl_no_cs_status = QtWidgets.QLabel("")
-        self.lbl_no_cs_status.setStyleSheet("color: #6495ed;")
-        no_cs_layout.addWidget(self.lbl_no_cs_status)
-
-        btn_load_no_cs = QtWidgets.QPushButton("从数据库加载NO光电离截面")
-        btn_load_no_cs.setToolTip("从物种数据库加载NO在不同光子能量下的光电离截面数据")
-        btn_load_no_cs.clicked.connect(self._load_no_cross_sections)
-        no_cs_layout.addWidget(btn_load_no_cs)
-
-        layout.addWidget(no_cs_group)
 
         mf_group = QtWidgets.QGroupBox("摩尔分数 (输入量比例)")
         mf_layout = QtWidgets.QFormLayout(mf_group)
@@ -244,6 +244,56 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
         btn_update.setToolTip("将当前设置的参数应用到计算中")
         btn_update.clicked.connect(self._update_parameters)
         layout.addWidget(btn_update)
+        layout.addStretch()
+
+        return widget
+
+    def _create_reference_pics_tab(self):
+        widget = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(widget)
+
+        no_cs_group = QtWidgets.QGroupBox("NO光电离截面 (从数据库获取)")
+        no_cs_layout = QtWidgets.QVBoxLayout(no_cs_group)
+
+        self.no_cs_table = QtWidgets.QTableWidget()
+        self.no_cs_table.setColumnCount(2)
+        self.no_cs_table.setHorizontalHeaderLabels(["光子能量(eV)", "光电离截面(Mb)"])
+        self.no_cs_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
+        no_cs_layout.addWidget(self.no_cs_table)
+
+        self.lbl_no_cs_status = QtWidgets.QLabel("")
+        self.lbl_no_cs_status.setStyleSheet("color: #6495ed;")
+        no_cs_layout.addWidget(self.lbl_no_cs_status)
+
+        btn_load_no_cs = QtWidgets.QPushButton("从数据库加载NO光电离截面")
+        btn_load_no_cs.setToolTip("从物种数据库加载NO在不同光子能量下的光电离截面数据")
+        btn_load_no_cs.clicked.connect(self._load_no_cross_sections)
+        no_cs_layout.addWidget(btn_load_no_cs)
+
+        layout.addWidget(no_cs_group)
+
+        return widget
+
+    def _create_pics_import_tab(self):
+        widget = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(widget)
+
+        import_group = QtWidgets.QGroupBox("导入外部 PICS 数据")
+        import_layout = QtWidgets.QVBoxLayout(import_group)
+        import_note = QtWidgets.QLabel(
+            "从 CSV / XLSX 文件导入物种的光电离截面数据到本地数据库。\n"
+            "支持宽表（每行一物种，能量值作列名）和长表（每行一能量点）格式。"
+        )
+        import_note.setWordWrap(True)
+        import_note.setStyleSheet("color: #6495ed;")
+        import_layout.addWidget(import_note)
+        btn_import = QtWidgets.QPushButton("从文件导入 PICS 到数据库…")
+        btn_import.setObjectName("WorkflowButton")
+        btn_import.setToolTip("选择 XLSX/CSV 文件，解析后写入本地 PICS 数据库（upsert 模式）")
+        btn_import.clicked.connect(self._import_pics_from_file)
+        import_layout.addWidget(btn_import)
+        layout.addWidget(import_group)
+        layout.addStretch()
 
         return widget
 
@@ -693,6 +743,57 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
             df.to_csv(file_path, index=False, encoding="utf-8-sig")
             QtWidgets.QMessageBox.information(self, "提示", "导出成功")
 
+    def _import_pics_from_file(self):
+        file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "选择 PICS 数据文件",
+            "",
+            "数据文件 (*.xlsx *.xls *.csv *.tsv *.txt);;所有文件 (*)",
+        )
+        if not file_path:
+            return
+
+        try:
+            from bl03u_masstool.core.pics_import import parse_pics_upload, write_pics_records
+
+            content = Path(file_path).read_bytes()
+            records = parse_pics_upload(content, Path(file_path).name)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "解析失败", f"无法解析文件：\n{e}")
+            return
+
+        # 预览对话框
+        lines = [f"解析到 {len(records)} 个物种：\n"]
+        for r in records[:20]:
+            ie_str = f"IE={r['ie']} eV" if r['ie'] else "IE 未知"
+            lines.append(f"  m/z={r['mz']}  {r['species']}  {ie_str}  ({len(r['energies'])} 点)")
+        if len(records) > 20:
+            lines.append(f"  … 还有 {len(records) - 20} 个物种")
+        lines.append("\n是否以 upsert 模式写入本地数据库？\n（同名同 m/z 物种将被替换）")
+
+        reply = QtWidgets.QMessageBox.question(
+            self,
+            "确认导入",
+            "\n".join(lines),
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+        )
+        if reply != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            db_path = species_database_path()
+            result = write_pics_records(records, db_path, mode="upsert")
+            self._load_database()
+            QtWidgets.QMessageBox.information(
+                self,
+                "导入完成",
+                f"写入物种: {result['inserted_species']}\n"
+                f"替换旧记录: {result['replaced_species']}\n"
+                f"数据点: {result['inserted_points']}",
+            )
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "写入失败", f"写入数据库失败：\n{e}")
+
     def _export_to_database(self):
         if not self.pics_results:
             QtWidgets.QMessageBox.warning(self, "警告", "没有可导出的数据")
@@ -703,43 +804,33 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
             QtWidgets.QMessageBox.warning(self, "警告", "数据库文件不存在")
             return
 
+        ie_value = self.double_new_ie.value()
+        ie: float | None = None if ie_value == 0.0 else ie_value
+
         try:
-            import sqlite3
+            from bl03u_masstool.core.pics_import import write_pics_records
 
             points_by_energy: dict[float, list[float]] = {}
             for (energy, _temp), sigma in self.pics_results.items():
                 points_by_energy.setdefault(float(energy), []).append(float(sigma))
-            cross_section_points = [
-                (energy, float(np.mean(values)))
-                for energy, values in sorted(points_by_energy.items())
-            ]
+            energies = sorted(points_by_energy.keys())
+            cross_sections = [float(np.mean(points_by_energy[e])) for e in energies]
 
-            with sqlite3.connect(str(db_path)) as conn:
-                conn.execute("PRAGMA foreign_keys = ON")
-                cursor = conn.cursor()
-                cursor.execute(
-                    """
-                    INSERT INTO species (mz, name, formula, ionization_energy, smiles)
-                    VALUES (?, ?, ?, ?, ?)
-                    """,
-                    (
-                        self.new_species_mz,
-                        self.new_species_name,
-                        self.new_species_formula,
-                        0.0,
-                        "",
-                    ),
-                )
-                species_id = cursor.lastrowid
-                cursor.executemany(
-                    """
-                    INSERT INTO pic_cross_sections (species_id, energy_ev, cross_section)
-                    VALUES (?, ?, ?)
-                    """,
-                    [(species_id, energy, sigma) for energy, sigma in cross_section_points],
-                )
-                conn.commit()
-
-            QtWidgets.QMessageBox.information(self, "提示", "成功添加到数据库")
+            record = {
+                "mz": self.new_species_mz,
+                "species": self.new_species_name,
+                "ie": ie,
+                "energies": energies,
+                "cross_sections": cross_sections,
+            }
+            result = write_pics_records([record], db_path, mode="upsert")
+            self._load_database()
+            msg = (
+                f"成功写入数据库\n"
+                f"写入物种: {result['inserted_species']}，"
+                f"替换旧记录: {result['replaced_species']}，"
+                f"数据点: {result['inserted_points']}"
+            )
+            QtWidgets.QMessageBox.information(self, "提示", msg)
         except Exception as e:
-            QtWidgets.QMessageBox.warning(self, "错误", f"添加到数据库失败: {str(e)}")
+            QtWidgets.QMessageBox.warning(self, "错误", f"写入数据库失败: {e}")
