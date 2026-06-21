@@ -106,11 +106,11 @@ class FittingControlWidget(QtWidgets.QWidget):
         input_row = QtWidgets.QHBoxLayout()
         input_row.setSpacing(6)
         self.species_input = QtWidgets.QLineEdit()
-        self.species_input.setPlaceholderText("输入物种名称后回车或点击\"添加\"来锁定物种...")
+        self.species_input.setPlaceholderText("输入物种名称后按回车或点击\"添加候选\"来添加候选物种...")
         self.species_input.returnPressed.connect(self._add_species_from_input)
         input_row.addWidget(self.species_input, stretch=1)
 
-        add_species_btn = QtWidgets.QPushButton("添加")
+        add_species_btn = QtWidgets.QPushButton("添加候选")
         add_species_btn.setObjectName("BrowseButton")
         add_species_btn.setFixedHeight(28)
         add_species_btn.clicked.connect(self._add_species_from_input)
@@ -176,38 +176,32 @@ class FittingControlWidget(QtWidgets.QWidget):
     # ---- 物种数据管理方法 ----
 
     def _add_species_from_input(self):
-        """从输入框添加物种为锁定候选"""
+        """从输入框添加物种为普通候选，用户可后续点击按钮锁定"""
         name = self.species_input.text().strip()
         if not name:
             return
 
-        # 添加到锁定候选列表（如果还没有）
-        if name not in self._locked_species:
-            self._locked_species.append(name)
-            # 标记现有物种为锁定
-            found = False
-            for species in self._unified_species_data:
-                if species.get('species') == name and species.get('mz') == self._current_mz:
-                    species['is_locked'] = True
-                    found = True
-                    break
+        # 检查该物种是否已存在于当前m/z的候选中
+        already_exists = any(
+            species.get('species') == name and species.get('mz') == self._current_mz
+            for species in self._unified_species_data
+        )
 
-            if not found:
-                # 如果不存在于表格中，添加新条目
-                new_species = {
-                    'id': self._generate_new_id(),
-                    'species': name,
-                    'mz': self._current_mz,
-                    'ionization_energy': 0.0,
-                    'source': 'manual',
-                    'is_locked': True,
-                    'is_enabled': True,
-                    'coefficient': 0.0,
-                }
-                self._unified_species_data.append(new_species)
+        if not already_exists:
+            # 添加新的普通候选物种（默认不锁定）
+            new_species = {
+                'id': self._generate_new_id(),
+                'species': name,
+                'mz': self._current_mz,
+                'ionization_energy': 0.0,
+                'source': 'manual',
+                'is_locked': False,  # 新添加的候选默认为普通状态
+                'is_enabled': True,
+                'coefficient': 0.0,
+            }
+            self._unified_species_data.append(new_species)
 
             self._refresh_table_from_data()
-            self.force_species_added.emit(name)
             self.species_config_changed.emit()
 
         self.species_input.clear()
