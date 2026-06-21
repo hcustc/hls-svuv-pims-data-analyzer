@@ -44,15 +44,17 @@ class FittingControlWidget(QtWidgets.QWidget):
     force_species_cleared = QtCore.pyqtSignal()              # 清除所有锁定候选（保留）
 
     # 统一的配置变更信号
-    coefficient_mode_changed = QtCore.pyqtSignal(str)        # 系数模式: auto/locked_fit/manual
     species_config_changed = QtCore.pyqtSignal()             # 物种配置整体改变
     candidate_selection_changed = QtCore.pyqtSignal(list)    # 选中的候选物种ID列表
 
     # ---- 控制变更信号 ----
-    candidates_import_requested = QtCore.pyqtSignal()        # 导入系数按钮点击
     candidates_zeroed = QtCore.pyqtSignal()                  # 清零按钮点击
     pics_import_requested = QtCore.pyqtSignal()              # PICS 导入按钮点击（空状态）
     species_forced_toggled = QtCore.pyqtSignal(str)          # 向后兼容：物种状态切换（改用candidate_lock_toggled）
+
+    # ---- 结果操作信号 ----
+    confirmation_requested = QtCore.pyqtSignal()             # 确认鉴定按钮点击
+    export_requested = QtCore.pyqtSignal()                   # 导出鉴定结果按钮点击
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -115,7 +117,7 @@ class FittingControlWidget(QtWidgets.QWidget):
         empty_layout.setContentsMargins(16, 16, 16, 16)
         empty_layout.setSpacing(12)
 
-        empty_icon = QtWidgets.QLabel("ℹ️")
+        empty_icon = QtWidgets.QLabel("[i]")
         empty_icon.setStyleSheet("font-size: 32px; text-align: center;")
         empty_icon.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         empty_layout.addWidget(empty_icon)
@@ -145,20 +147,6 @@ class FittingControlWidget(QtWidgets.QWidget):
 
         main_layout.addWidget(self.empty_state_widget, stretch=1)
 
-        # ---- 中间：控制栏（系数模式 + 按钮）----
-        control_row1 = QtWidgets.QHBoxLayout()
-        control_row1.setSpacing(6)
-        control_row1.addWidget(QtWidgets.QLabel("系数模式:"))
-
-        self.coefficient_mode_combo = QtWidgets.QComboBox()
-        self.coefficient_mode_combo.addItem("自动拟合", "auto")
-        self.coefficient_mode_combo.addItem("锁定已选", "locked_fit")
-        self.coefficient_mode_combo.addItem("手动系数", "manual")
-        self.coefficient_mode_combo.currentIndexChanged.connect(self._on_coefficient_mode_changed)
-        control_row1.addWidget(self.coefficient_mode_combo)
-        control_row1.addStretch()
-        main_layout.addLayout(control_row1)
-
         # 按钮行
         control_row2 = QtWidgets.QHBoxLayout()
         control_row2.setSpacing(6)
@@ -173,12 +161,6 @@ class FittingControlWidget(QtWidgets.QWidget):
         self.clear_selection_btn.clicked.connect(lambda: self._set_all_rows_checked(False))
         self.clear_selection_btn.setObjectName("BrowseButton")
         control_row2.addWidget(self.clear_selection_btn)
-
-        self.import_coeff_btn = QtWidgets.QPushButton("导入系数")
-        self.import_coeff_btn.setToolTip("从当前拟合结果导入系数")
-        self.import_coeff_btn.clicked.connect(lambda: self.candidates_import_requested.emit())
-        self.import_coeff_btn.setObjectName("BrowseButton")
-        control_row2.addWidget(self.import_coeff_btn)
 
         self.zero_coeff_btn = QtWidgets.QPushButton("系数清零")
         self.zero_coeff_btn.setToolTip("将所有系数值清零")
@@ -200,6 +182,76 @@ class FittingControlWidget(QtWidgets.QWidget):
         self.species_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.species_table.horizontalHeader().setStretchLastSection(False)
         main_layout.addWidget(self.species_table, stretch=1)
+
+        # ---- 结果摘要区（拟合后显示）----
+        # 分隔线
+        separator = QtWidgets.QFrame()
+        separator.setFrameShape(QtWidgets.QFrame.Shape.HLine)
+        separator.setStyleSheet("color: #e2e8f0;")
+        main_layout.addWidget(separator)
+
+        self.result_section = QtWidgets.QWidget()
+        self.result_section.setVisible(False)
+        result_layout = QtWidgets.QVBoxLayout(self.result_section)
+        result_layout.setContentsMargins(0, 4, 0, 4)
+        result_layout.setSpacing(4)
+
+        # 结果标题行：标签 + R² + 状态标签
+        result_header = QtWidgets.QHBoxLayout()
+        result_header.setSpacing(6)
+        result_title = QtWidgets.QLabel("拟合结果")
+        result_title.setObjectName("ReadoutLabel")
+        result_header.addWidget(result_title)
+
+        self.result_r2_label = QtWidgets.QLabel("")
+        self.result_r2_label.setObjectName("ReadoutValue")
+        result_header.addWidget(self.result_r2_label)
+
+        result_header.addStretch()
+
+        self.result_status_label = QtWidgets.QLabel("")
+        self.result_status_label.setFixedWidth(70)
+        self.result_status_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
+        result_header.addWidget(self.result_status_label)
+        result_layout.addLayout(result_header)
+
+        # 物种贡献摘要表格（3列：物种名、贡献%、系数）
+        self.fit_result_table = QtWidgets.QTableWidget()
+        self.fit_result_table.setColumnCount(3)
+        self.fit_result_table.setHorizontalHeaderLabels(["物种", "贡献%", "系数"])
+        self.fit_result_table.setWordWrap(False)
+        self.fit_result_table.setAlternatingRowColors(True)
+        self.fit_result_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.fit_result_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.fit_result_table.setMaximumHeight(160)
+        self.fit_result_table.setMinimumHeight(60)
+        self.fit_result_table.horizontalHeader().setSectionResizeMode(
+            0, QtWidgets.QHeaderView.ResizeMode.Stretch
+        )
+        self.fit_result_table.setColumnWidth(1, 60)
+        self.fit_result_table.setColumnWidth(2, 80)
+        result_layout.addWidget(self.fit_result_table)
+
+        # 操作按钮行
+        action_row = QtWidgets.QHBoxLayout()
+        action_row.setSpacing(6)
+
+        self.confirm_btn = QtWidgets.QPushButton("✓ 确认鉴定")
+        self.confirm_btn.setObjectName("WorkflowButton")
+        self.confirm_btn.setToolTip("将当前拟合结果确认为该 m/z 的鉴定结论")
+        self.confirm_btn.setFixedHeight(28)
+        self.confirm_btn.clicked.connect(self.confirmation_requested.emit)
+        action_row.addWidget(self.confirm_btn)
+
+        self.export_result_btn = QtWidgets.QPushButton("导出鉴定结果")
+        self.export_result_btn.setObjectName("ExportButton")
+        self.export_result_btn.setToolTip("导出所有已拟合的 m/z 鉴定结果到 Excel")
+        self.export_result_btn.setFixedHeight(28)
+        self.export_result_btn.clicked.connect(self.export_requested.emit)
+        action_row.addWidget(self.export_result_btn)
+
+        result_layout.addLayout(action_row)
+        main_layout.addWidget(self.result_section)
 
         # 初始化空状态显示
         self._update_ui_state()
@@ -241,11 +293,11 @@ class FittingControlWidget(QtWidgets.QWidget):
 
         状态1: 前置数据未准备（初始或清空）
           - _candidates_loaded = False
-          - 显示空状态："请先生成 PIE 曲线"（ℹ️）
+          - 显示空状态："请先生成 PIE 曲线"（[i]）
 
         状态2: 查询已执行但无结果
           - _candidates_loaded = True，_unified_species_data 为空
-          - 显示空状态："当前 m/z 未找到候选物种"（⚠️ + PICS 导入按钮）
+          - 显示空状态："当前 m/z 未找到候选物种"（[!] + PICS 导入按钮）
 
         状态3: 有候选物种
           - _unified_species_data 不为空
@@ -260,7 +312,7 @@ class FittingControlWidget(QtWidgets.QWidget):
             self._refresh_table_from_data()
         elif self._candidates_loaded:
             # 查询已执行但无结果 → 显示"未找到候选物种"空状态
-            self.empty_icon.setText("⚠️")
+            self.empty_icon.setText("[!]")
             self.empty_title.setText("当前 m/z 未找到候选物种")
             self.empty_text.setText(
                 "PICS 数据库中尚未收录该质荷比的物种或缺少截面数据。\n"
@@ -271,7 +323,7 @@ class FittingControlWidget(QtWidgets.QWidget):
             self.species_table.hide()
         else:
             # 前置数据未准备 → 显示"请先生成 PIE 曲线"空状态
-            self.empty_icon.setText("ℹ️")
+            self.empty_icon.setText("[i]")
             self.empty_title.setText("等待 PIE 曲线")
             self.empty_text.setText(
                 "请先在左侧选择质荷比 (m/z) 并生成 PIE 曲线。\n"
@@ -459,8 +511,6 @@ class FittingControlWidget(QtWidgets.QWidget):
         coeff_spin.setRange(0, 1e6)
         coeff_spin.setDecimals(6)
         coeff_spin.setValue(species.get('coefficient', 0.0))
-        mode = self.coefficient_mode_combo.currentData()
-        coeff_spin.setEnabled(mode != "auto")
         coeff_spin.setFixedHeight(24)
         coeff_spin.setContentsMargins(0, 0, 0, 0)
         coeff_spin.valueChanged.connect(lambda val, r=row: self._on_row_changed(r))
@@ -566,18 +616,6 @@ class FittingControlWidget(QtWidgets.QWidget):
 
         self.species_config_changed.emit()
 
-    def _on_coefficient_mode_changed(self, index: int):
-        """系数模式改变时更新表格控件状态"""
-        mode = self.coefficient_mode_combo.currentData()
-
-        for row in range(self.species_table.rowCount()):
-            # 更新系数输入框启用状态 (Col 2)
-            coeff_widget = self.species_table.cellWidget(row, 2)
-            if isinstance(coeff_widget, QtWidgets.QDoubleSpinBox):
-                coeff_widget.setEnabled(mode != "auto")
-
-        self.coefficient_mode_changed.emit(mode)
-
     def _set_all_rows_checked(self, checked: bool):
         """全选或清空所有物种的启用状态"""
         self._updating = True
@@ -678,10 +716,6 @@ class FittingControlWidget(QtWidgets.QWidget):
         """设置候选物种列表（向后兼容）"""
         self._unified_species_data = list(candidates)
 
-    def get_coefficient_mode(self) -> str:
-        """获取当前系数模式"""
-        return self.coefficient_mode_combo.currentData()
-
     def _get_selected_candidate_ids(self) -> list[int]:
         """获取选中的候选物种ID列表"""
         selected_ids = []
@@ -700,7 +734,93 @@ class FittingControlWidget(QtWidgets.QWidget):
         self._unified_species_data = []
         self._candidates_loaded = False  # 重置查询标志
         self.species_table.setRowCount(0)
+        self.clear_fit_result()
         self._update_ui_state()
+
+    # ---- 结果摘要区方法 ----
+
+    def show_fit_result(self, fit_model: dict, status: str = "COMPLETED"):
+        """
+        填充并显示右侧结果摘要区
+
+        Args:
+            fit_model: 拟合结果字典（含 species, r_squared 等）
+            status: "COMPLETED" | "OBSOLETE" | "CONFIRMED"
+        """
+        species_list = fit_model.get("species", [])
+        r2 = fit_model.get("r_squared", 0.0)
+
+        # 更新 R² 标签（带颜色）
+        if r2 >= 0.8:
+            color = "#166534"
+        elif r2 >= 0.5:
+            color = "#92400e"
+        else:
+            color = "#dc2626"
+        self.result_r2_label.setText(
+            f"<span style='color:{color}; font-weight:bold;'>R²={r2:.4f}</span>"
+        )
+        self.result_r2_label.setTextFormat(QtCore.Qt.TextFormat.RichText)
+
+        # 填充物种贡献表格
+        self.fit_result_table.setRowCount(len(species_list))
+        total_contrib = sum(s.get("contribution_percent", 0.0) for s in species_list)
+        if total_contrib <= 0:
+            total_contrib = 1.0
+        for row, sp in enumerate(species_list):
+            name = str(sp.get("species", ""))
+            contrib = float(sp.get("contribution_percent", 0.0))
+            coeff = float(sp.get("coefficient", 0.0))
+
+            name_item = QtWidgets.QTableWidgetItem(name)
+            contrib_item = QtWidgets.QTableWidgetItem(f"{contrib:.1f}%")
+            coeff_item = QtWidgets.QTableWidgetItem(f"{coeff:.4f}")
+
+            contrib_item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            coeff_item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+
+            self.fit_result_table.setItem(row, 0, name_item)
+            self.fit_result_table.setItem(row, 1, contrib_item)
+            self.fit_result_table.setItem(row, 2, coeff_item)
+
+        self.fit_result_table.resizeRowsToContents()
+
+        # 更新状态标签
+        self._set_result_status_label(status)
+
+        # 显示结果区
+        self.result_section.setVisible(True)
+
+    def clear_fit_result(self):
+        """隐藏结果摘要区并清空内容"""
+        self.fit_result_table.setRowCount(0)
+        self.result_r2_label.setText("")
+        self.result_status_label.setText("")
+        self.confirm_btn.setText("✓ 确认鉴定")
+        self.result_section.setVisible(False)
+
+    def set_fit_confirmed(self, confirmed: bool):
+        """更新确认状态显示"""
+        if confirmed:
+            self._set_result_status_label("CONFIRMED")
+            self.confirm_btn.setText("↺ 重新确认")
+        else:
+            self._set_result_status_label("COMPLETED")
+            self.confirm_btn.setText("✓ 确认鉴定")
+
+    def _set_result_status_label(self, status: str):
+        """设置结果状态标签文字和颜色"""
+        config = {
+            "COMPLETED": ("[已拟合]", "#1d4ed8"),
+            "OBSOLETE":  ("[结果过期]", "#92400e"),
+            "CONFIRMED": ("[✓ 已确认]", "#166534"),
+            "FAILED":    ("[失败]", "#dc2626"),
+        }
+        text, color = config.get(status, ("", "#374151"))
+        self.result_status_label.setText(
+            f"<span style='color:{color}; font-weight:bold;'>{text}</span>"
+        )
+        self.result_status_label.setTextFormat(QtCore.Qt.TextFormat.RichText)
 
     # ---- 向后兼容属性 ----
 

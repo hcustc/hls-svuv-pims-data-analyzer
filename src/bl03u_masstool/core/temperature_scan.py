@@ -87,6 +87,8 @@ def analyze_temperature_folder(
     cwt_snr_threshold: float = 0.02,
     cwt_wavelet_max_width: int = 30,
     weak_tail_cutoff_idx: int = 15000,
+    temp_curve_class_change_threshold: float = 0.25,
+    temp_curve_class_peak_fraction: float = 0.65,
 ) -> pd.DataFrame:
     files = list_spectrum_files(folder, (".txt",))
     spectra = []
@@ -194,7 +196,11 @@ def analyze_temperature_folder(
         mass_discrimination=mass_discrimination,
         expansion_factors=expansion_factors,
     )
-    return annotate_temperature_curve_groups(normalized)
+    return annotate_temperature_curve_groups(
+        normalized,
+        relative_change_threshold=temp_curve_class_change_threshold,
+        endpoint_peak_fraction=temp_curve_class_peak_fraction,
+    )
 
 
 def _build_reference_spectrum(spectra: list[tuple[float, Path, Spectrum, float, float]], reference_mode: str) -> tuple[float, Spectrum, str]:
@@ -342,7 +348,12 @@ def _curve_class_result(curve_class: str, reason: str) -> dict:
     }
 
 
-def annotate_temperature_curve_groups(result_df: pd.DataFrame) -> pd.DataFrame:
+def annotate_temperature_curve_groups(
+    result_df: pd.DataFrame,
+    *,
+    relative_change_threshold: float = 0.25,
+    endpoint_peak_fraction: float = 0.65,
+) -> pd.DataFrame:
     """Add curve classification columns to temperature scan rows."""
     result = result_df.copy()
     if result.empty:
@@ -351,7 +362,11 @@ def annotate_temperature_curve_groups(result_df: pd.DataFrame) -> pd.DataFrame:
                 result[column] = []
         return result
 
-    curves = build_temperature_curves(result)
+    curves = build_temperature_curves(
+        result,
+        relative_change_threshold=relative_change_threshold,
+        endpoint_peak_fraction=endpoint_peak_fraction,
+    )
     class_by_mz = {
         mz: (
             curve["curve_class"],
@@ -436,7 +451,12 @@ def compute_kr_expansion_factors(
     )
 
 
-def build_temperature_curves(result_df: pd.DataFrame) -> dict[int, dict]:
+def build_temperature_curves(
+    result_df: pd.DataFrame,
+    *,
+    relative_change_threshold: float = 0.25,
+    endpoint_peak_fraction: float = 0.65,
+) -> dict[int, dict]:
     """Convert temperature scan rows into m/z keyed curve objects."""
     curves: dict[int, dict] = {}
     if result_df.empty:
@@ -470,7 +490,12 @@ def build_temperature_curves(result_df: pd.DataFrame) -> dict[int, dict]:
             )
             .sort_values("temperature")
         )
-        classification = classify_temperature_curve(ordered["temperature"], ordered["area"])
+        classification = classify_temperature_curve(
+            ordered["temperature"],
+            ordered["area"],
+            relative_change_threshold=relative_change_threshold,
+            endpoint_peak_fraction=endpoint_peak_fraction,
+        )
         curves[int(mz)] = {
             "mz": int(mz),
             "mz_exact_mean": float(ordered["mz"].mean()),

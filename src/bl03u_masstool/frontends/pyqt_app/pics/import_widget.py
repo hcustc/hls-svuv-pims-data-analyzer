@@ -33,7 +33,7 @@ class PICSImportWidget(QtWidgets.QWidget):
         header_layout.setContentsMargins(0, 0, 0, 0)
         header_layout.setSpacing(6)
 
-        title = QtWidgets.QLabel("🗂️ PICS 数据库导入工具")
+        title = QtWidgets.QLabel("PICS 数据库导入工具")
         title.setObjectName("ProjectTitle")
         title.setStyleSheet("font-size: 14px; font-weight: bold;")
         header_layout.addWidget(title)
@@ -54,7 +54,7 @@ class PICSImportWidget(QtWidgets.QWidget):
         main_layout.addWidget(divider1)
 
         # ========== File Selection Section ==========
-        file_group = QtWidgets.QGroupBox("1️⃣ 选择数据文件")
+        file_group = QtWidgets.QGroupBox("[1] 选择数据文件")
         file_group.setObjectName("ImportSection")
         file_layout = QtWidgets.QVBoxLayout(file_group)
 
@@ -77,7 +77,7 @@ class PICSImportWidget(QtWidgets.QWidget):
         main_layout.addWidget(file_group)
 
         # ========== Preview Section ==========
-        preview_group = QtWidgets.QGroupBox("2️⃣ 导入预览与确认")
+        preview_group = QtWidgets.QGroupBox("[2] 导入预览与确认")
         preview_group.setObjectName("ImportSection")
         preview_layout = QtWidgets.QVBoxLayout(preview_group)
 
@@ -105,7 +105,7 @@ class PICSImportWidget(QtWidgets.QWidget):
         main_layout.addWidget(preview_group)
 
         # ========== Import Result Section ==========
-        result_group = QtWidgets.QGroupBox("3️⃣ 导入结果")
+        result_group = QtWidgets.QGroupBox("[3] 导入结果")
         result_group.setObjectName("ImportSection")
         result_layout = QtWidgets.QVBoxLayout(result_group)
 
@@ -160,7 +160,7 @@ class PICSImportWidget(QtWidgets.QWidget):
             self.preview_status.setStyleSheet("color: #4ecdc4;")
 
         except Exception as e:
-            self.preview_status.setText(f"❌ 文件解析失败：{str(e)}")
+            self.preview_status.setText(f"[错误] 文件解析失败：{str(e)}")
             self.preview_status.setStyleSheet("color: #ff6b6b;")
             self.preview_table.setVisible(False)
             QtWidgets.QMessageBox.warning(self, "解析失败", f"无法解析文件：\n{e}")
@@ -173,7 +173,7 @@ class PICSImportWidget(QtWidgets.QWidget):
             lines.append(f"  m/z={r['mz']}  {r['species']}  {ie_str}  ({len(r['energies'])} 点)")
         if len(records) > 15:
             lines.append(f"  … 还有 {len(records) - 15} 个物种")
-        lines.append("\n⚠️ 相同物种和 m/z 的现有记录将被替换")
+        lines.append("\n[提示] 相同物种和 m/z 的现有记录将被替换")
         lines.append("是否继续导入？")
 
         reply = QtWidgets.QMessageBox.question(
@@ -193,7 +193,7 @@ class PICSImportWidget(QtWidgets.QWidget):
             result = write_pics_records(records, db_path, mode="upsert")
 
             result_text = (
-                f"✅ 导入成功\n\n"
+                f"[成功] 导入成功\n\n"
                 f"新增物种: {result['inserted_species']}\n"
                 f"更新物种: {result['replaced_species']}\n"
                 f"总数据点: {result['inserted_points']}"
@@ -203,11 +203,11 @@ class PICSImportWidget(QtWidgets.QWidget):
 
             QtWidgets.QMessageBox.information(
                 self,
-                "✅ 导入完成",
+                "[成功] 导入完成",
                 result_text,
             )
         except Exception as e:
-            result_text = f"❌ 导入失败：{str(e)}"
+            result_text = f"[错误] 导入失败：{str(e)}"
             self.result_label.setText(result_text)
             self.result_label.setStyleSheet("color: #ff6b6b; background-color: #fff0f5; padding: 12px; border-radius: 4px;")
             QtWidgets.QMessageBox.warning(self, "导入失败", f"写入数据库失败：\n{e}")

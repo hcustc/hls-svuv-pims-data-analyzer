@@ -1052,7 +1052,7 @@ class WorkspacePagesMixin:
             if validation_status == DataSourceValidationStatus.UNCONFIGURED:
                 status_text = "尚未导入任何数据源，点击「启动导入向导」开始"
             elif validation_status == DataSourceValidationStatus.INVALID:
-                status_text = f"⚠ {len(invalid_records)} 个路径失效，请重新导入"
+                status_text = f"[警告] {len(invalid_records)} 个路径失效，请重新导入"
             elif validation_status == DataSourceValidationStatus.PARTIAL:
                 status_text = f"{len(valid_records)} 个数据源就绪，共 {total_files} 个文件"
             else:
@@ -1087,7 +1087,7 @@ class WorkspacePagesMixin:
                     lbl.setText("—")
                     lbl.setStyleSheet("")
                 elif not record.is_valid:
-                    lbl.setText("⚠ 路径失效")
+                    lbl.setText("[警告] 路径失效")
                     lbl.setStyleSheet("color: #c0392b;")
                 else:
                     count_text = f"{record.file_count}个文件" if record.file_count > 1 else "已配置"
@@ -1208,7 +1208,7 @@ class WorkspacePagesMixin:
         self.refresh_project_lifecycle(ps)
         self.refresh_project_parameter_summary()
         self.update_project_ui_state(ps)
-        self.statusbar.showMessage("✅ 项目已保存、初始化并应用到工具", 3000)
+        self.statusbar.showMessage("[成功] 项目已保存、初始化并应用到工具", 3000)
 
     def initialize_project_structure(self) -> None:
         """Initialize project structure only (create folders, save config).
@@ -1682,9 +1682,9 @@ class WorkspacePagesMixin:
         if total_artifacts > 0:
             summary_text += f" | ✓ 有效 {valid_count}"
             if missing_count > 0:
-                summary_text += f" | ⚠️ 缺失 {missing_count}"
+                summary_text += f" | [!] 缺失 {missing_count}"
             if incomplete_count > 0:
-                summary_text += f" | ❌ 不完整 {incomplete_count}"
+                summary_text += f" | [x] 不完整 {incomplete_count}"
             summary_text += f" | 总大小 {self._format_file_size(total_size)}"
         self.artifact_summary_label.setText(summary_text)
 
