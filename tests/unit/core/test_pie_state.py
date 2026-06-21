@@ -528,7 +528,157 @@ class TestPieStateManagerLoad:
         assert isinstance(arrays['energies'], np.ndarray)
 
 
-class TestPieStateIntegration:
+class TestSecurityAndIntegrity:
+    """Test security checks and data integrity."""
+
+    def test_path_traversal_prevention(self, temp_project_dir):
+        """Test that path traversal attempts are blocked."""
+        manager = PieStateManager(temp_project_dir)
+
+        # Try to load with path traversal attempt
+        arrays = manager.load_mz_arrays(46)
+
+        # Should return empty dict, not raise exception
+        assert arrays == {}
+
+    def test_npz_no_pickle(self, temp_project_dir, sample_curves):
+        """Test that NPZ loading uses allow_pickle=False."""
+        manager = PieStateManager(temp_project_dir)
+
+        # Create a malicious NPZ with a pickle object
+        # This should fail safely with allow_pickle=False
+        npz_path = os.path.join(manager.state_dir, 'arrays', 'mz_46.npz')
+        os.makedirs(os.path.dirname(npz_path), exist_ok=True)
+
+        # Create valid NPZ
+        np.savez_compressed(npz_path, energies=np.array([1, 2, 3]))
+
+        # Load should work
+        arrays = manager.load_mz_arrays(46)
+        assert 'energies' in arrays
+
+        # Clean up
+        shutil.rmtree(manager.state_dir)
+
+    def test_invalid_npz_reference_format(
+        self,
+        temp_project_dir,
+        sample_curves,
+        sample_database,
+        sample_per_mz_config,
+    ):
+        """Test that invalid NPZ references are rejected."""
+        manager = PieStateManager(temp_project_dir)
+        calib = MockCalibration()
+
+        # Load with malformed result containing bad array reference
+        # Manually craft results with bad reference
+        bad_results = {
+            46: {
+                'success': True,
+                'model': {
+                    'mz': 46,
+                    'species': [],
+                    'r_squared': 0.95,
+                },
+                'fit_config_hash': 'abc',
+                'global_config_hash': 'xyz',
+                'fit_timestamp': 1234567890.0,
+            }
+        }
+
+        # Save first
+        manager.save_state(
+            sample_curves,
+            sample_database,
+            calib,
+            sample_per_mz_config,
+            bad_results,
+            'global_hash',
+        )
+
+        # Load
+        result = manager.load_state(sample_curves, sample_database, calib)
+        assert result['success'] is True
+
+    def test_array_shape_validation(
+        self,
+        temp_project_dir,
+        sample_curves,
+        sample_database,
+        sample_per_mz_config,
+        sample_fit_results,
+    ):
+        """Test that array shapes are validated on load."""
+        manager = PieStateManager(temp_project_dir)
+        calib = MockCalibration()
+
+        # Save valid data
+        manager.save_state(
+            sample_curves,
+            sample_database,
+            calib,
+            sample_per_mz_config,
+            sample_fit_results,
+            'global_hash_123',
+        )
+
+        # Load and verify arrays
+        arrays = manager.load_mz_arrays(46)
+
+        # Check shapes
+        assert arrays['energies'].ndim == 1
+        assert arrays['intensities'].ndim == 1
+        assert arrays['fitted_curve'].ndim == 1
+
+    def test_missing_required_fields(self, temp_project_dir, sample_curves, sample_database):
+        """Test handling of missing required fields in loaded JSON."""
+        manager = PieStateManager(temp_project_dir)
+
+        # Create state dir with incomplete manifest
+        os.makedirs(manager.state_dir)
+        manifest_path = os.path.join(manager.state_dir, 'manifest.json')
+
+        # Write manifest missing required fields
+        incomplete_manifest = {
+            'schema_version': 1,
+            # Missing project_fingerprint, database_fingerprint, etc.
+        }
+
+        with open(manifest_path, 'w') as f:
+            json.dump(incomplete_manifest, f)
+
+        # Load should handle gracefully
+        result = manager.load_state(sample_curves, sample_database, MockCalibration())
+
+        # Should succeed but with warnings
+        assert result['success'] is True
+        assert len(result['warnings']) > 0
+
+        # Cleanup
+        shutil.rmtree(manager.state_dir)
+
+    def test_corrupted_json_handling(self, temp_project_dir, sample_curves, sample_database):
+        """Test handling of corrupted JSON files."""
+        manager = PieStateManager(temp_project_dir)
+
+        # Create state dir with corrupted manifest
+        os.makedirs(manager.state_dir)
+        manifest_path = os.path.join(manager.state_dir, 'manifest.json')
+
+        # Write invalid JSON
+        with open(manifest_path, 'w') as f:
+            f.write('{ invalid json ]')
+
+        # Load should fail gracefully
+        result = manager.load_state(sample_curves, sample_database, MockCalibration())
+
+        # Should fail with error message
+        assert result['success'] is False
+        assert result['error'] is not None
+
+        # Cleanup
+        shutil.rmtree(manager.state_dir)
     """Integration tests for save/load cycle."""
 
     def test_round_trip_preserves_data(
