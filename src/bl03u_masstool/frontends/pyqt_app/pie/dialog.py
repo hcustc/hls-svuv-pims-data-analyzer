@@ -1336,75 +1336,16 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 f"导出时发生错误：{str(e)}"
             )
 
-    # ── Force species tag cloud ──────────────────────────────────────────
-
-    def _add_force_from_input(self):
-        """Add species from the input field to the force-fit tag cloud."""
-        name = self.force_input.text().strip()
-        if name and name not in self.get_force_species():
-            self._force_species = list(self.get_force_species()) + [name]
-            self._rebuild_force_tags()
-        self.force_input.clear()
+    # ── Force species management (delegated to FittingControlWidget) ───────
 
     def add_force_species(self, species_name: str):
-        """Add a force-fit species (called externally, e.g. from m/z list)."""
-        current = list(self.get_force_species())
-        if species_name not in current:
-            current.append(species_name)
-        self._force_species = current
-        self._rebuild_force_tags()
-
-    def _remove_force_species_name(self, name: str):
-        """Remove a specific species from the force-fit list by name."""
-        current = list(self.get_force_species())
-        if name in current:
-            current.remove(name)
-        self._force_species = current
-        self._rebuild_force_tags()
-
-    def remove_force_species(self):
-        """Remove selected force species (kept for backward compat)."""
-        current = list(self.get_force_species())
-        if current:
-            self._force_species = current[:-1]
-            self._rebuild_force_tags()
+        """Add a force-fit species (delegated to FittingControlWidget)."""
+        self.fitting_control_widget.add_force_species(species_name)
+        self._on_force_species_changed()
 
     def get_force_species(self) -> list:
-        """Return current force-fit species list."""
-        return list(getattr(self, '_force_species', []))
-
-    def _rebuild_force_tags(self):
-        """Rebuild the tag chips in the flow layout from _force_species."""
-        # Clear existing tag widgets
-        while self.force_tag_layout.count():
-            item = self.force_tag_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-
-        for name in self.get_force_species():
-            tag = QtWidgets.QFrame()
-            tag.setObjectName("ForceTag")
-            tag.setFixedHeight(24)
-            tag_layout = QtWidgets.QHBoxLayout(tag)
-            tag_layout.setContentsMargins(6, 1, 2, 1)
-            tag_layout.setSpacing(2)
-
-            label = QtWidgets.QLabel(name)
-            label.setObjectName("ForceTagText")
-            tag_layout.addWidget(label)
-
-            close_btn = QtWidgets.QPushButton("\u2715")
-            close_btn.setObjectName("TagCloseButton")
-            close_btn.setFixedSize(16, 16)
-            close_btn.clicked.connect(lambda checked=False, n=name: self._remove_force_species_name(n))
-            tag_layout.addWidget(close_btn)
-
-            self.force_tag_layout.addWidget(tag)
-
-        # Force re-layout of the tag container
-        container = self.force_tag_layout.parent()
-        if container is not None:
-            container.updateGeometry()
+        """Return current force-fit species list (delegated to FittingControlWidget)."""
+        return self.fitting_control_widget.get_force_species()
 
     # ── Fit stats helper ─────────────────────────────────────────────────
 
@@ -1759,7 +1700,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.common_params_button.setEnabled(not busy)
         self.use_multi_folders.setEnabled(not busy)
         self.summary_open_project_btn.setEnabled(not busy)
-        self.force_input.setEnabled(not busy)
+        self.species_input.setEnabled(not busy)
         self.toggle_multi_folder_mode(self.use_multi_folders.isChecked())
         self._update_action_state()
 
