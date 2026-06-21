@@ -71,7 +71,6 @@ class FittingControlWidget(QtWidgets.QWidget):
 
         # ---- 内部状态 ----
         self._locked_species: list[str] = []                   # 主要使用：锁定候选物种名称列表
-        self._force_species: list[str] = []                    # 向后兼容：_locked_species的别名
         self._unified_species_data: list[dict] = []            # 统一的物种数据
         self._current_mz: int | None = None                    # 当前m/z
         self._updating = False                                 # 防止递归更新
@@ -182,9 +181,9 @@ class FittingControlWidget(QtWidgets.QWidget):
         if not name:
             return
 
-        # 添加到强制物种列表（如果还没有）
-        if name not in self._force_species:
-            self._force_species.append(name)
+        # 添加到锁定候选列表（如果还没有）
+        if name not in self._locked_species:
+            self._locked_species.append(name)
             # 标记现有物种为强制
             found = False
             for species in self._unified_species_data:
@@ -442,13 +441,13 @@ class FittingControlWidget(QtWidgets.QWidget):
             species['is_forced'] = not species.get('is_forced', False)
             species_name = species.get('species')
 
-            # 更新_force_species列表
-            if species['is_forced'] and species_name not in self._force_species:
-                self._force_species.append(species_name)
-                self.force_species_added.emit(species_name)
-            elif not species['is_forced'] and species_name in self._force_species:
-                self._force_species.remove(species_name)
-                self.force_species_removed.emit(species_name)
+            # 更新_locked_species列表
+            if species['is_forced'] and species_name not in self._locked_species:
+                self._locked_species.append(species_name)
+                self.locked_candidate_added.emit(species_name)
+            elif not species['is_forced'] and species_name in self._locked_species:
+                self._locked_species.remove(species_name)
+                self.locked_candidate_removed.emit(species_name)
 
             # 刷新按钮样式 (Col 1 的切换按钮)
             species_widget = self.species_table.cellWidget(row, 1)
@@ -490,10 +489,10 @@ class FittingControlWidget(QtWidgets.QWidget):
             species = self._unified_species_data.pop(row)
             species_name = species.get('species')
 
-            # 从强制列表中移除
-            if species_name in self._force_species:
-                self._force_species.remove(species_name)
-                self.force_species_removed.emit(species_name)
+            # 从锁定列表中移除
+            if species_name in self._locked_species:
+                self._locked_species.remove(species_name)
+                self.locked_candidate_removed.emit(species_name)
 
             self._refresh_table_from_data()
             self.species_config_changed.emit()
@@ -588,7 +587,6 @@ class FittingControlWidget(QtWidgets.QWidget):
     def set_locked_species(self, species: list[str]):
         """设置锁定候选物种列表（主要方法）"""
         self._locked_species = list(species)
-        self._force_species = list(species)  # 同步维护向后兼容字段
 
     def lock_candidate(self, species_name: str):
         """锁定单个候选物种（主要方法）
@@ -597,7 +595,6 @@ class FittingControlWidget(QtWidgets.QWidget):
         """
         if species_name not in self._locked_species:
             self._locked_species.append(species_name)
-            self._force_species.append(species_name)  # 同步维护
             self.locked_candidate_added.emit(species_name)
             # 触发表格更新
             self._refresh_table_from_data()
@@ -607,7 +604,6 @@ class FittingControlWidget(QtWidgets.QWidget):
         """解锁单个候选物种（主要方法）"""
         if species_name in self._locked_species:
             self._locked_species.remove(species_name)
-            self._force_species.remove(species_name)  # 同步维护
             self.locked_candidate_removed.emit(species_name)
             self._refresh_table_from_data()
             self.species_config_changed.emit()
@@ -652,12 +648,18 @@ class FittingControlWidget(QtWidgets.QWidget):
 
     def clear_ui(self):
         """清空UI内容"""
-        self._force_species = []
+        self._locked_species = []
         self._unified_species_data = []
         self.species_input.clear()
         self.species_table.setRowCount(0)
 
     # ---- 向后兼容属性 ----
+
+    @property
+    def _force_species(self) -> list[str]:
+        """向后兼容：返回_locked_species（只读属性别名）"""
+        return self._locked_species
+
     @property
     def _candidate_data(self):
         """向后兼容：返回_unified_species_data"""
