@@ -63,6 +63,8 @@ from bl03u_masstool.frontends.pyqt_app.project_artifacts import record_project_a
 from bl03u_masstool.frontends.pyqt_app.common.widgets import DataFrameTableMixin, FlowLayout
 from bl03u_masstool.frontends.pyqt_app.common.static_plot import StaticCurvePlot
 from bl03u_masstool.frontends.pyqt_app.normalization.widget import CommonParametersDialog
+from bl03u_masstool.frontends.pyqt_app.pie.fitting_control_widget import FittingControlWidget
+from bl03u_masstool.frontends.pyqt_app.pie.result_display_widget import ResultDisplayWidget
 
 def _run_exhaustive_fit(
     candidates: list[dict],
@@ -342,14 +344,10 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self._empty_state = QtWidgets.QWidget()
         empty_layout = QtWidgets.QVBoxLayout(self._empty_state)
         empty_layout.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        empty_icon = QtWidgets.QLabel("📈")
-        empty_icon.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        empty_icon.setStyleSheet("font-size: 48px;")
         empty_msg = QtWidgets.QLabel('尚未生成PIE曲线\n\n选择包含PIE数据的文件夹后，点击"生成曲线"')
         empty_msg.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         empty_msg.setObjectName("ProjectHint")
         empty_msg.setWordWrap(True)
-        empty_layout.addWidget(empty_icon)
         empty_layout.addWidget(empty_msg)
         self._plot_stack.addWidget(self._empty_state)
 
@@ -373,136 +371,91 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.fit_stats_label.setTextFormat(QtCore.Qt.TextFormat.RichText)
         stats_bar_layout.addWidget(stats_title)
         stats_bar_layout.addWidget(self.fit_stats_label, stretch=1)
+
+        # 添加"查看结果详情"按钮到统计条右侧
+        self.show_result_detail_btn = QtWidgets.QPushButton("查看结果详情")
+        self.show_result_detail_btn.setObjectName("BrowseButton")
+        self.show_result_detail_btn.setToolTip("展开/收起结果详情面板")
+        self.show_result_detail_btn.setFixedWidth(100)
+        self.show_result_detail_btn.setFixedHeight(24)
+        stats_bar_layout.addWidget(self.show_result_detail_btn)
+
         plot_container_layout.addWidget(stats_bar)
         self.right_splitter.addWidget(plot_container)
 
-        self.curve_table = QtWidgets.QTableWidget()
-        self.fit_table = QtWidgets.QTableWidget()
-        for table in (self.curve_table, self.fit_table):
-            table.setWordWrap(False)
-            table.setAlternatingRowColors(True)
-            table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
-        self.detail_tabs = QtWidgets.QTabWidget()
-        self.detail_tabs.setMinimumHeight(170)
-        self.detail_tabs.addTab(self.curve_table, "曲线数据")
-        self.detail_tabs.addTab(self.fit_table, "物种贡献明细")
+        # ---- 创建新的widget实例（Phase 4: UI分离） ----
+        self.fitting_control_widget = FittingControlWidget(self)
+        self.result_display_widget = ResultDisplayWidget(self)
 
-        # ---- 强制物种面板 ----
-        force_panel = QtWidgets.QWidget()
-        force_panel_layout = QtWidgets.QVBoxLayout(force_panel)
-        force_panel_layout.setContentsMargins(0, 4, 0, 0)
-        force_panel_layout.setSpacing(6)
+        # ---- 配置中间splitter的2层布局 ----
+        # right_splitter 现在用作中间区域：plot_container + result_display
+        self.right_splitter.addWidget(self.result_display_widget)
 
-        force_input_row = QtWidgets.QHBoxLayout()
-        force_input_row.setSpacing(6)
-        self.force_input = QtWidgets.QLineEdit()
-        self.force_input.setPlaceholderText("输入物种名称后回车添加...")
-        self.force_input.returnPressed.connect(self._add_force_from_input)
-        force_input_row.addWidget(self.force_input, stretch=1)
-        add_force_btn = QtWidgets.QPushButton("添加")
-        add_force_btn.setObjectName("BrowseButton")
-        add_force_btn.setFixedHeight(28)
-        add_force_btn.clicked.connect(self._add_force_from_input)
-        force_input_row.addWidget(add_force_btn)
-        force_panel_layout.addLayout(force_input_row)
+        # ---- 中间区域尺寸分配 ----
+        self.right_splitter.setStretchFactor(0, 1)   # 图表：可伸缩
+        self.right_splitter.setStretchFactor(1, 0)   # 结果详情：可收起
 
-        tag_container = QtWidgets.QWidget()
-        tag_container.setObjectName("TagCloud")
-        self.force_tag_layout = FlowLayout(tag_container, margin=0, spacing=4)
-        tag_container.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Minimum)
-        force_panel_layout.addWidget(tag_container, stretch=1)
-        self.detail_tabs.addTab(force_panel, "强制物种")
+        # ---- 中间区域可收起性 ----
+        self.right_splitter.setCollapsible(0, False)  # 图表：不可收起
+        self.right_splitter.setCollapsible(1, True)   # 结果详情：可收起
 
-        # ---- 候选物种面板 ----
-        candidate_panel = QtWidgets.QWidget()
-        candidate_layout = QtWidgets.QVBoxLayout(candidate_panel)
-        candidate_layout.setContentsMargins(0, 4, 0, 0)
-        candidate_layout.setSpacing(4)
+        # ---- 配置拟合控制widget的约束 ----
+        self.fitting_control_widget.setMinimumWidth(360)
+        self.fitting_control_widget.setMaximumWidth(420)
 
-        self.candidate_table = QtWidgets.QTableWidget()
-        self.candidate_table.setColumnCount(6)
-        self.candidate_table.setHorizontalHeaderLabels(["选择", "物种", "m/z", "IE(eV)", "系数", "锁定"])
-        self.candidate_table.setWordWrap(False)
-        self.candidate_table.setAlternatingRowColors(True)
-        self.candidate_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
-        self.candidate_table.horizontalHeader().setStretchLastSection(True)
+        # ---- 连接FittingControlWidget信号 ----
+        self.fitting_control_widget.force_species_added.connect(self._on_force_species_changed)
+        self.fitting_control_widget.force_species_removed.connect(self._on_force_species_changed)
+        self.fitting_control_widget.force_species_cleared.connect(self._on_force_species_changed)
+        self.fitting_control_widget.coefficient_mode_changed.connect(self._on_fitting_config_changed)
+        self.fitting_control_widget.candidate_selection_changed.connect(self._on_fitting_config_changed)
+        self.fitting_control_widget.candidate_coefficient_changed.connect(self._on_fitting_config_changed)
+        self.fitting_control_widget.candidates_import_requested.connect(self._on_import_coefficients_requested)
+        self.fitting_control_widget.candidates_zeroed.connect(self._on_fitting_config_changed)
 
-        # 候选控制栏
-        candidate_controls = QtWidgets.QHBoxLayout()
-        candidate_controls.setSpacing(6)
-        candidate_controls.addWidget(QtWidgets.QLabel("系数模式:"))
-        self.coefficient_mode_combo = QtWidgets.QComboBox()
-        self.coefficient_mode_combo.addItem("自动拟合", "auto")
-        self.coefficient_mode_combo.addItem("锁定已选", "locked_fit")
-        self.coefficient_mode_combo.addItem("手动系数", "manual")
-        self.coefficient_mode_combo.currentIndexChanged.connect(self._on_coefficient_mode_changed)
-        candidate_controls.addWidget(self.coefficient_mode_combo)
-        self.candidate_select_all_btn = QtWidgets.QPushButton("全选")
-        self.candidate_select_all_btn.clicked.connect(lambda: self._set_all_candidates_checked(True))
-        self.candidate_clear_btn = QtWidgets.QPushButton("清空")
-        self.candidate_clear_btn.clicked.connect(lambda: self._set_all_candidates_checked(False))
-        self.candidate_import_coeff_btn = QtWidgets.QPushButton("导入系数")
-        self.candidate_import_coeff_btn.setToolTip("从当前拟合结果导入候选物种系数")
-        self.candidate_import_coeff_btn.clicked.connect(self._import_coefficients_from_fit)
-        self.candidate_zero_coeff_btn = QtWidgets.QPushButton("清零")
-        self.candidate_zero_coeff_btn.setToolTip("将所有候选物种系数清零")
-        self.candidate_zero_coeff_btn.clicked.connect(self._zero_all_coefficients)
-        for btn in (self.candidate_select_all_btn, self.candidate_clear_btn,
-                     self.candidate_import_coeff_btn, self.candidate_zero_coeff_btn):
-            btn.setObjectName("BrowseButton")
-        candidate_controls.addWidget(self.candidate_select_all_btn)
-        candidate_controls.addWidget(self.candidate_clear_btn)
-        candidate_controls.addWidget(self.candidate_import_coeff_btn)
-        candidate_controls.addWidget(self.candidate_zero_coeff_btn)
-        candidate_controls.addStretch()
-        candidate_layout.addLayout(candidate_controls)
-        candidate_layout.addWidget(self.candidate_table, stretch=1)
+        # ---- 连接ResultDisplayWidget信号 ----
+        self.result_display_widget.export_requested.connect(self.export_pie_results)
 
-        self.detail_tabs.addTab(candidate_panel, "候选物种")
+        # ---- 连接"查看结果详情"按钮 ----
+        self.show_result_detail_btn.clicked.connect(self._toggle_result_display)
 
-        self._candidate_data: list[dict] = []
-        self._candidate_updating = False
+        # ---- 重构主splitter为3层水平布局 ----
+        # 原始：splitter 有2个child (left_panel, right_splitter)
+        # 改为：splitter 有3个child (left_panel, middle_splitter, fitting_control_widget)
+        # 将right_splitter改名为middle_splitter以体现新用途
+        middle_splitter = self.right_splitter
+        splitter.addWidget(middle_splitter)
+        splitter.addWidget(self.fitting_control_widget)
 
-        self.detail_container = QtWidgets.QWidget()
-        self.detail_container.setObjectName("ResultPanel")
-        detail_container_layout = QtWidgets.QVBoxLayout(self.detail_container)
-        detail_container_layout.setContentsMargins(0, 0, 0, 0)
-        detail_container_layout.setSpacing(4)
-        detail_header = QtWidgets.QHBoxLayout()
-        detail_header.setContentsMargins(0, 0, 0, 0)
-        detail_header.setSpacing(6)
-        detail_title = QtWidgets.QLabel("结果与拟合控制")
-        detail_title.setObjectName("ReadoutLabel")
-        self.export_pie_button.setFixedHeight(26)
-        detail_header.addWidget(detail_title)
-        detail_header.addStretch()
+        # ---- 主splitter尺寸分配 ----
+        splitter.setStretchFactor(0, 0)   # 左侧：固定宽度
+        splitter.setStretchFactor(1, 1)   # 中间：可伸缩
+        splitter.setStretchFactor(2, 0)   # 右侧：固定宽度
 
-        self.pie_toggle_table_button = QtWidgets.QPushButton("展开表格")
-        self.pie_toggle_table_button.setCheckable(True)
-        self.pie_toggle_table_button.setToolTip("点击显示/隐藏结果与拟合控制表格")
-        self.pie_toggle_table_button.setFixedWidth(86)
-        self.pie_toggle_table_button.setFixedHeight(26)
-        self.pie_toggle_table_button.setObjectName("BrowseButton")
-        self.pie_toggle_table_button.clicked.connect(self._toggle_pie_table_visibility)
-        detail_header.addWidget(self.pie_toggle_table_button)
+        # ---- 主splitter可收起性 ----
+        splitter.setCollapsible(0, False)  # 左侧：不可收起
+        splitter.setCollapsible(1, False)  # 中间：不可收起
+        splitter.setCollapsible(2, False)  # 右侧：不可收起
 
-        detail_header.addWidget(self.export_pie_button)
-        detail_container_layout.addLayout(detail_header)
-        detail_container_layout.addWidget(self.detail_tabs, stretch=1)
-
-        self.right_splitter.addWidget(self.detail_container)
-        self.right_splitter.setStretchFactor(0, 3)
-        self.right_splitter.setStretchFactor(1, 1)
-        self.right_splitter.setCollapsible(0, False)
-        self.right_splitter.setCollapsible(1, False)
-        self.pie_table_visible = False
-        self._apply_detail_panel_state(expanded=False)
-        QtCore.QTimer.singleShot(0, lambda: self._resize_detail_panel(expanded=False))
-
-        splitter.addWidget(self.right_splitter)
-        splitter.setSizes([260, 1020])
+        # ---- 初始尺寸 ----
+        splitter.setSizes([290, 800, 390])
         layout.addWidget(splitter, stretch=1)
         self._update_action_state()
+
+        # ---- 属性别名（保持向后兼容） ----
+        # 结果显示widget中的组件
+        self.curve_table = self.result_display_widget.curve_table
+        self.fit_table = self.result_display_widget.fit_table
+
+        # 拟合控制widget中的组件
+        self.candidate_table = self.fitting_control_widget.candidate_table
+        self.force_input = self.fitting_control_widget.force_input
+        self.force_tag_layout = self.fitting_control_widget.force_tag_layout
+        self.coefficient_mode_combo = self.fitting_control_widget.coefficient_mode_combo
+        self.candidate_select_all_btn = self.fitting_control_widget.candidate_select_all_btn
+        self.candidate_clear_btn = self.fitting_control_widget.candidate_clear_btn
+        self.candidate_import_coeff_btn = self.fitting_control_widget.candidate_import_coeff_btn
+        self.candidate_zero_coeff_btn = self.fitting_control_widget.candidate_zero_coeff_btn
 
     def _open_project_settings(self):
         """跳转到项目管理页面。"""
@@ -510,39 +463,63 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         if hasattr(win, "switch_workspace_page"):
             win.switch_workspace_page("project")
 
-    def _toggle_pie_table_visibility(self, checked: bool | None = None) -> None:
-        """Toggle the visibility of the detail tabs and adjust splitter."""
-        expanded = (not self.pie_table_visible) if checked is None else bool(checked)
-        self._apply_detail_panel_state(expanded=expanded)
+    def _toggle_result_display(self, visible: bool | None = None) -> None:
+        """展开/收起结果详情面板"""
+        if visible is None:
+            visible = not self.result_display_widget.isVisible()
 
-    def _apply_detail_panel_state(self, *, expanded: bool) -> None:
-        self.pie_table_visible = expanded
-        self.pie_toggle_table_button.setChecked(expanded)
-        self.detail_tabs.setVisible(self.pie_table_visible)
-        self.pie_toggle_table_button.setText("收起表格" if expanded else "展开表格")
-        if expanded:
-            self.detail_container.setMinimumHeight(220)
-            self.detail_container.setMaximumHeight(16777215)
-            self.detail_container.setSizePolicy(
-                QtWidgets.QSizePolicy.Policy.Expanding,
-                QtWidgets.QSizePolicy.Policy.Expanding,
-            )
+        if visible:
+            # 展开
+            self.result_display_widget.setVisible(True)
+            heights = self.right_splitter.sizes()
+            total = sum(heights)
+            # 重新分配：图表65%、结果35%
+            new_heights = [
+                int(total * 0.65),   # 图表
+                int(total * 0.35)    # 结果详情
+            ]
+            self.right_splitter.setSizes(new_heights)
+            self.show_result_detail_btn.setText("收起结果详情")
         else:
-            self.detail_container.setMinimumHeight(34)
-            self.detail_container.setMaximumHeight(34)
-            self.detail_container.setSizePolicy(
-                QtWidgets.QSizePolicy.Policy.Expanding,
-                QtWidgets.QSizePolicy.Policy.Fixed,
-            )
-        self._resize_detail_panel(expanded=expanded)
+            # 收起
+            self.result_display_widget.setVisible(False)
+            heights = self.right_splitter.sizes()
+            total = sum(heights)
+            # 重新分配：图表100%、结果0%
+            new_heights = [
+                total,    # 图表占满
+                0         # 结果（隐藏）
+            ]
+            self.right_splitter.setSizes(new_heights)
+            self.show_result_detail_btn.setText("查看结果详情")
 
-    def _resize_detail_panel(self, *, expanded: bool) -> None:
-        if expanded:
-            total_height = max(1, self.right_splitter.height())
-            detail_height = min(max(240, int(total_height * 0.34)), 360)
-            self.right_splitter.setSizes([max(360, total_height - detail_height), detail_height])
-        else:
-            self.right_splitter.setSizes([10000, 34])
+    def _on_force_species_changed(self):
+        """强制物种改变时标记dirty并更新状态"""
+        self.mark_pie_config_changed()
+        # 触发实时拟合预览
+        self._rebuild_manual_fit()
+
+    def _on_fitting_config_changed(self):
+        """拟合配置改变时标记dirty、更新结果状态并重新拟合预览"""
+        self.mark_pie_config_changed()
+        # 如果有当前的拟合结果，标记为OBSOLETE
+        if self.current_mz and self.all_fit_results.get(self.current_mz):
+            current_result = self.all_fit_results[self.current_mz]
+            if current_result.get("_status") == "COMPLETED":
+                current_result["_status"] = "OBSOLETE"
+                self.result_display_widget.set_result_status("OBSOLETE")
+        # 触发实时拟合预览
+        self._rebuild_manual_fit()
+
+    def _on_import_coefficients_requested(self):
+        """导入系数请求 - 从当前拟合结果导入"""
+        if self.current_fit is None:
+            return
+        species_list = self.current_fit.get("species", [])
+        if species_list:
+            self.fitting_control_widget.import_coefficients(species_list)
+        # 重新触发拟合预览
+        self._rebuild_manual_fit()
 
     def load_database(self, show_message: bool = True):
         path = self.database_edit.text().strip() if hasattr(self, "database_edit") else ""
@@ -706,16 +683,16 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
     @staticmethod
     def _get_status_display(status_code: str) -> tuple[str, str]:
         """
-        获取状态码对应的显示文本和emoji图标。
-        返回: (显示文本, emoji图标)
+        获取状态码对应的显示文本。
+        返回: (显示文本, 预留字段)
         """
         status_map = {
-            "UNFITTED": ("待拟合", "⏳"),
-            "COMPLETED": ("已拟合", "✅"),
-            "OBSOLETE": ("结果已过期", "⚠️"),
-            "FAILED": ("拟合失败", "❌"),
+            "UNFITTED": ("待拟合", ""),
+            "COMPLETED": ("已拟合", ""),
+            "OBSOLETE": ("结果已过期", ""),
+            "FAILED": ("拟合失败", ""),
         }
-        return status_map.get(status_code, ("待拟合", "⏳"))
+        return status_map.get(status_code, ("待拟合", ""))
 
     # ---- Per-m/z 配置管理 ----
 
@@ -733,9 +710,9 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
     def _restore_mz_config(self, mz: int) -> None:
         """从 per_mz_config 恢复指定 m/z 的配置到 UI 表格"""
-        if mz not in self.per_mz_config or not self._candidate_data:
+        if mz not in self.per_mz_config or not self.fitting_control_widget._candidate_data:
             # 如果没有历史配置，初始化默认配置（全选）
-            self._set_all_candidates_checked(True)
+            self.fitting_control_widget._set_all_candidates_checked(True)
             self.coefficient_mode_combo.setCurrentIndex(0)  # 默认"自动拟合"
             return
 
@@ -747,11 +724,11 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
         # 还原候选物种选择
         selected_species_ids = {int(s.get("id", -1)) for s in selected_species}
-        self._candidate_updating = True
+        self.fitting_control_widget._candidate_updating = True
         try:
             for row in range(self.candidate_table.rowCount()):
-                if row < len(self._candidate_data):
-                    species_id = int(self._candidate_data[row].get("id", row + 1))
+                if row < len(self.fitting_control_widget._candidate_data):
+                    species_id = int(self.fitting_control_widget._candidate_data[row].get("id", row + 1))
                     check_widget = self.candidate_table.cellWidget(row, 0)
                     if check_widget:
                         chk = check_widget.findChild(QtWidgets.QCheckBox)
@@ -770,7 +747,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                         if lock_chk:
                             lock_chk.setChecked(species_id in locked_ids)
         finally:
-            self._candidate_updating = False
+            self.fitting_control_widget._candidate_updating = False
 
         # 还原系数模式
         mode_index = self.coefficient_mode_combo.findData(mode)
@@ -780,66 +757,9 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
     # ---- 候选物种面板方法 ----
 
     def _populate_candidate_table(self, mz: int):
-        """根据选中的m/z填充候选物种表格"""
-        self._candidate_updating = True
-        try:
-            filtered_db = self.get_filtered_database()
-            candidates = [item for item in filtered_db if item.get("mz") == mz]
-            self._candidate_data = candidates
-            self.candidate_table.setRowCount(len(candidates))
-            for row, species in enumerate(candidates):
-                # 选择 checkbox
-                check_widget = QtWidgets.QWidget()
-                check_layout = QtWidgets.QHBoxLayout(check_widget)
-                check_layout.setContentsMargins(0, 0, 0, 0)
-                check_layout.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-                chk = QtWidgets.QCheckBox()
-                chk.setChecked(True)
-                chk.stateChanged.connect(lambda state, r=row: self._on_candidate_changed(r))
-                check_layout.addWidget(chk)
-                self.candidate_table.setCellWidget(row, 0, check_widget)
-
-                # 物种名称
-                name_item = QtWidgets.QTableWidgetItem(str(species.get("species", "")))
-                name_item.setFlags(name_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
-                self.candidate_table.setItem(row, 1, name_item)
-
-                # m/z
-                mz_item = QtWidgets.QTableWidgetItem(str(species.get("mz", "")))
-                mz_item.setFlags(mz_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
-                self.candidate_table.setItem(row, 2, mz_item)
-
-                # IE
-                ie = species.get("ionization_energy")
-                ie_text = f"{ie:.4f}" if ie is not None else ""
-                ie_item = QtWidgets.QTableWidgetItem(ie_text)
-                ie_item.setFlags(ie_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
-                self.candidate_table.setItem(row, 3, ie_item)
-
-                # 系数 spinbox
-                coeff_spin = QtWidgets.QDoubleSpinBox()
-                coeff_spin.setRange(0, 1e6)
-                coeff_spin.setDecimals(6)
-                coeff_spin.setValue(0.0)
-                coeff_spin.setEnabled(False)
-                coeff_spin.valueChanged.connect(lambda val, r=row: self._on_candidate_changed(r))
-                self.candidate_table.setCellWidget(row, 4, coeff_spin)
-
-                # 锁定 checkbox
-                lock_widget = QtWidgets.QWidget()
-                lock_layout = QtWidgets.QHBoxLayout(lock_widget)
-                lock_layout.setContentsMargins(0, 0, 0, 0)
-                lock_layout.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-                lock_chk = QtWidgets.QCheckBox()
-                lock_chk.setEnabled(False)
-                lock_chk.stateChanged.connect(lambda state, r=row: self._on_candidate_changed(r))
-                lock_layout.addWidget(lock_chk)
-                self.candidate_table.setCellWidget(row, 5, lock_widget)
-
-            self.candidate_table.resizeColumnsToContents()
-            self.candidate_table.horizontalHeader().setStretchLastSection(True)
-        finally:
-            self._candidate_updating = False
+        """根据选中的m/z填充候选物种表格（委托给FittingControlWidget）"""
+        filtered_db = self.get_filtered_database()
+        self.fitting_control_widget.populate_candidate_table(mz, filtered_db)
 
     def _on_candidate_changed(self, row: int):
         """候选表格变化时实时刷新拟合预览"""
@@ -919,8 +839,8 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         for row in range(self.candidate_table.rowCount()):
             check_widget = self.candidate_table.cellWidget(row, 0)
             chk = check_widget.findChild(QtWidgets.QCheckBox) if check_widget else None
-            if chk and chk.isChecked() and row < len(self._candidate_data):
-                species = self._candidate_data[row]
+            if chk and chk.isChecked() and row < len(self.fitting_control_widget._candidate_data):
+                species = self.fitting_control_widget._candidate_data[row]
                 species_id = int(species.get("id", row + 1))
                 selected_species.append(species)
 
@@ -945,7 +865,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         """使用候选面板状态重建拟合曲线(NNLS客户端预览)"""
         if self.current_mz is None or self.current_mz not in self.curves:
             return
-        if self._candidate_updating:
+        if self.fitting_control_widget._candidate_updating:
             return
 
         panel_state = self._get_candidate_panel_state()
@@ -1163,7 +1083,6 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                     columns=["物种名称", "电离能(eV)", "匹配系数", "贡献(%)", "R²"],
                 )
                 self.set_dataframe(self.fit_table, fit_df)
-                self.detail_tabs.setCurrentWidget(self.fit_table)
 
                 if first_mz in self.curves:
                     self.update_plot(self.curves[first_mz], first_result['model'])
@@ -1348,7 +1267,6 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                         columns=["物种名称", "电离能(eV)", "匹配系数", "贡献(%)", "R²"],
                     )
                     self.set_dataframe(self.fit_table, fit_df)
-                    self.detail_tabs.setCurrentWidget(self.fit_table)
 
                     if mz in self.curves:
                         self.update_plot(self.curves[mz], result['model'])
@@ -1370,6 +1288,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         # Phase 3 Step 3: Mark results dirty when clearing fits
         self.pie_state_dirty = True
         self.fit_table.setRowCount(0)
+        self.result_display_widget.clear_data()
         self._update_fit_stats(0, 0, None)
         self.refresh_current_plot()
         self._update_action_state()
@@ -2068,8 +1987,8 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 table.clear()
                 table.setRowCount(0)
                 table.setColumnCount(0)
-            self.candidate_table.clearContents()
-            self.candidate_table.setRowCount(0)
+            self.fitting_control_widget.clear_ui()
+            self.result_display_widget.clear_data()
             if self.plot_widget is not None:
                 self.plot_widget.clear_plot(title="未选择 PIE 曲线")
             return
@@ -2088,23 +2007,9 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             if fit_result.get('success') and fit_result.get('model'):
                 self.current_fit = fit_result['model']
 
-                # 显示拟合结果表格
-                results_list = fit_result['model'].get('species', [])
-                fit_df = pd.DataFrame(
-                    [
-                        {
-                            "物种名称": item["species"],
-                            "电离能(eV)": "" if item.get("ie") is None else round(float(item["ie"]), 4),
-                            "匹配系数": round(float(item["coefficient"]), 6),
-                            "贡献(%)": round(float(item["contribution_percent"]), 2),
-                            "R²": round(float(item["r_squared"]), 5),
-                        }
-                        for item in results_list
-                    ],
-                    columns=["物种名称", "电离能(eV)", "匹配系数", "贡献(%)", "R²"],
-                )
-                self.set_dataframe(self.fit_table, fit_df)
-                self.detail_tabs.setCurrentWidget(self.fit_table)
+                # 显示拟合结果（通过result_display_widget）
+                self.result_display_widget.update_fit_table(fit_result['model'])
+                self.result_display_widget.set_result_status(fit_state_code)
 
                 # Phase 2: 在状态栏显示结果有效性
                 if fit_state_code == "OBSOLETE":
@@ -2114,9 +2019,8 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 self.set_busy(False, status_msg)
             else:
                 self.current_fit = None
-                self.fit_table.clear()
-                self.fit_table.setRowCount(0)
-                self.fit_table.setColumnCount(0)
+                self.result_display_widget.clear_data()
+                self.result_display_widget.set_result_status("FAILED")
 
                 # Phase 2: 显示失败状态
                 if not fit_result.get('success'):
@@ -2124,9 +2028,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                     self.set_busy(False, status_msg)
         else:
             self.current_fit = None
-            self.fit_table.clear()
-            self.fit_table.setRowCount(0)
-            self.fit_table.setColumnCount(0)
+            self.result_display_widget.clear_data()
 
         # 显示曲线数据
         curve = self.curves[self.current_mz]
@@ -2141,6 +2043,12 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             ],
             columns=["数据项", *point_columns],
         )
+        self.result_display_widget.update_curve_data({
+            "energies": energies,
+            "experimental": rows["normalized_intensity"].astype(float).to_numpy(),
+            "total_fit": self.current_fit.get("total_fit", []) if self.current_fit else [],
+            "residual": self.current_fit.get("residual", []) if self.current_fit else [],
+        })
         self.set_dataframe(self.curve_table, curve_df)
 
         # 填充候选物种面板
@@ -2346,7 +2254,6 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 columns=["物种名称", "电离能(eV)", "匹配系数", "贡献(%)", "R²"],
             )
             self.set_dataframe(self.fit_table, fit_df)
-            self.detail_tabs.setCurrentWidget(self.fit_table)
             self.update_plot(curve, fit_model)
             self.status_label.setText(
                 f"m/z {self.current_mz}: PICS数据库候选 {fit_model.get('candidate_count', 0)} 个，"
@@ -2438,7 +2345,6 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.set_dataframe(self.fit_table, fit_df)
         self.fit_table.itemSelectionChanged.connect(self._on_combination_selected)
         self._exhaustive_ranked = ranked
-        self.detail_tabs.setCurrentWidget(self.fit_table)
         names = ", ".join(best["species_names"])
         self.status_label.setText(
             f"m/z {self.current_mz}: 最优组合 [{names}] R²={best['r_squared']:.4f} "

@@ -61,7 +61,7 @@ class TestPerM_zConfiguration:
         }
 
         # Populate candidate table with mock species
-        pie_dialog._candidate_data = [
+        pie_dialog.fitting_control_widget._candidate_data = [
             {'id': 1, 'species': 'NO', 'mz': 46},
             {'id': 2, 'species': 'N2O', 'mz': 46},
             {'id': 3, 'species': 'CO2', 'mz': 46},
@@ -92,7 +92,7 @@ class TestPerM_zConfiguration:
     def test_restore_mz_config_restores_selection(self, pie_dialog):
         """Test that restored config restores candidate selection."""
         # Setup mock species
-        pie_dialog._candidate_data = [
+        pie_dialog.fitting_control_widget._candidate_data = [
             {'id': 1, 'species': 'NO', 'mz': 46},
             {'id': 2, 'species': 'N2O', 'mz': 46},
         ]
@@ -131,7 +131,7 @@ class TestPerM_zConfiguration:
 
     def test_restore_mz_config_initializes_default_if_no_history(self, pie_dialog):
         """Test that restore initializes default config if no history."""
-        pie_dialog._candidate_data = [
+        pie_dialog.fitting_control_widget._candidate_data = [
             {'id': 1, 'species': 'NO', 'mz': 46},
         ]
 
@@ -314,7 +314,7 @@ class TestConfigurationOnMZSwitch:
             47: {'mz': 47, 'energies': [10.0], 'intensities': [1.0], 'rows': None},
         }
 
-        pie_dialog._candidate_data = [
+        pie_dialog.fitting_control_widget._candidate_data = [
             {'id': 1, 'species': 'NO', 'mz': 46},
         ]
 
