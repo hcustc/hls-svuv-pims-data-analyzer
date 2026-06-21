@@ -30,9 +30,11 @@ from bl03u_masstool.core.isotope import (
 from bl03u_masstool.core.nist_webbook import default_nist_webbook_client
 from bl03u_masstool.core.output_paths import ensure_output_dir
 from bl03u_masstool.core.pie_analysis import analyze_pie_folder, build_pie_curves, identify_species_for_mz_with_curve, load_species_database, analyze_multiple_pie_folders, merge_pie_segments
+from bl03u_masstool.core.pie_state import PieStateManager
 from bl03u_masstool.core.pics_calculator import calc_pics_single_energy
 from bl03u_masstool.core.elements import get_all_elements_from_database, filter_species_by_elements, COMMON_ELEMENTS, parse_formula as parse_formula_elements, get_elements_from_formula
 from bl03u_masstool.core.normalization import NormalizationSettings, load_normalization_settings, save_normalization_settings
+from bl03u_masstool.core.project_lifecycle import project_root
 from bl03u_masstool.core.project_settings import ProjectSettings
 from bl03u_masstool.core.temperature_scan import (
     TEMPERATURE_CURVE_CLASS_LABELS,
@@ -98,6 +100,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.calibration = calibration
         self.normalization_settings = normalization_settings or NormalizationSettings()
         self.project_settings: ProjectSettings | None = None
+        self.project_dir: str | None = None  # Phase 3: Project directory for state persistence
         self.peak_detection = load_peak_detection_config()
         self.database: list[dict] = []
         self.analysis_df = pd.DataFrame()
@@ -1548,6 +1551,8 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
     def set_project_settings(self, ps: ProjectSettings) -> None:
         """Apply ProjectSettings defaults to summary bar and folder controls."""
         self.project_settings = ps
+        # Phase 3 Step 2: Store project directory for state persistence
+        self.project_dir = str(project_root(ps))
         project_name = ps.project_name or "---"
         system = ps.system or "---"
         pie_path = ps.pie_scan_folder or self.folder_edit.text()
@@ -1560,7 +1565,91 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.merge_method_combo.setCurrentIndex(idx)
         if ps.pie_scan_folder:
             self.folder_edit.setText(ps.pie_scan_folder)
+        # Phase 3 Step 2: Load per-m/z configurations from project state
+        self._load_per_mz_configs()
         self._update_action_state()
+
+    def _load_per_mz_configs(self) -> None:
+        """Load per-m/z configurations from persistent state (Phase 3 Step 2).
+
+        Loads configurations from .bl03u_pie_state/configs.json if it exists.
+        Suppresses errors and only warns if loading fails - does not block project open.
+        Recalculates config hashes after restoration to ensure consistency.
+        """
+        if not self.project_dir or not self.database or not self.curves:
+            # Cannot load without project context or data
+            return
+
+        try:
+            manager = PieStateManager(self.project_dir)
+            result = manager.load_state(self.curves, self.database, self.calibration)
+
+            if not result.get('success'):
+                # Load failure only warns, doesn't block
+                error_msg = result.get('error', 'Unknown error loading per-m/z configurations')
+                print(f"⚠️  PIE configurations: {error_msg}")
+                return
+
+            # Show any warnings (e.g., missing state file for first time)
+            for warning in result.get('warnings', []):
+                print(f"ℹ️  {warning}")
+
+            # Restore per-m/z configurations
+            saved_configs = result.get('configs', {})
+            for mz_str, config in saved_configs.items():
+                try:
+                    mz_int = int(mz_str)
+                    if mz_int in self.curves:
+                        self.per_mz_config[mz_int] = config
+                except (ValueError, KeyError):
+                    # Skip invalid m/z entries
+                    pass
+
+            # Phase 2: Recalculate config hashes after restoration to ensure consistency
+            # This ensures that restored configs have up-to-date hash values
+            for mz_int in self.per_mz_config:
+                hash_val = self._get_current_per_mz_config_hash(mz_int)
+                if hash_val:
+                    self.per_mz_config[mz_int]['config_hash'] = hash_val
+
+            self._update_global_config_hash()
+
+        except Exception as e:
+            # Graceful failure - only warn, don't block
+            print(f"⚠️  Failed to load per-m/z configurations: {e}")
+
+    def save_per_mz_configs(self) -> None:
+        """Save per-m/z configurations to persistent state (Phase 3 Step 2).
+
+        Saves configurations to .bl03u_pie_state/configs.json.
+        Called explicitly (not on every change) to avoid frequent disk writes.
+        Should be called when:
+        - User clicks "Save Project"
+        - Project is closing
+        - On demand via UI action
+        """
+        if not self.project_dir or not self.database or not self.curves:
+            # Cannot save without project context or data
+            return
+
+        try:
+            manager = PieStateManager(self.project_dir)
+            success, error = manager.save_state(
+                self.curves,
+                self.database,
+                self.calibration,
+                self.per_mz_config,
+                {},  # all_fit_results - not saved in Step 2
+                self.global_solver_config.get('config_hash', '')
+            )
+
+            if not success:
+                print(f"⚠️  Failed to save per-m/z configurations: {error}")
+            else:
+                print(f"✓ Per-m/z configurations saved")
+
+        except Exception as e:
+            print(f"⚠️  Error saving per-m/z configurations: {e}")
 
     def open_common_parameters(self):
         dialog = CommonParametersDialog(self.normalization_settings, self.calibration, self)
