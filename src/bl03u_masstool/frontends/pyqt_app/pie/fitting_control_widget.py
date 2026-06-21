@@ -3,8 +3,8 @@ FittingControlWidget - 拟合配置面板
 
 职责：
 - 统一的拟合物种配置界面
-- 合并强制物种和候选物种到单一表格
-- 支持物种来源标记（自动/手动）和约束状态管理（普通/强制）
+- 合并锁定候选物种和候选物种到单一表格
+- 支持物种来源标记（自动/手动）和锁定状态管理（锁定/普通）
 - 所有拟合前的参数设置
 
 设计原则：
@@ -12,6 +12,12 @@ FittingControlWidget - 拟合配置面板
 - 通过信号向上报告配置变更
 - 通过方法接收数据更新（不通过信号）
 - 单一界面，无Tab切换
+
+锁定候选语义：
+- 被锁定的物种始终进入拟合候选集合，不被自动筛选移除
+- 其系数由优化器自由决定，可为0或接近0
+- "锁定"只表示用户要求算法考虑该物种，不表示已鉴别或必须参与
+- 详见 forced_species_analysis.md
 """
 
 from PyQt6 import QtCore, QtWidgets
@@ -22,20 +28,25 @@ class FittingControlWidget(QtWidgets.QWidget):
     """拟合配置面板 - 统一的拟合物种配置"""
 
     # ---- 信号定义 ----
-    # 向后兼容的强制物种相关信号
-    force_species_added = QtCore.pyqtSignal(str)          # 添加单个强制物种
-    force_species_removed = QtCore.pyqtSignal(str)        # 移除单个强制物种
-    force_species_cleared = QtCore.pyqtSignal()           # 清除所有强制物种
+    # 新信号：锁定候选相关（主要使用）
+    locked_candidate_added = QtCore.pyqtSignal(str)          # 添加单个锁定候选
+    locked_candidate_removed = QtCore.pyqtSignal(str)        # 移除单个锁定候选
+    candidate_lock_toggled = QtCore.pyqtSignal(str)          # 物种锁定状态切换
+
+    # 向后兼容的信号（别名，保留但不建议使用）
+    force_species_added = locked_candidate_added             # 别名
+    force_species_removed = locked_candidate_removed         # 别名
+    force_species_cleared = QtCore.pyqtSignal()              # 清除所有锁定候选（保留）
 
     # 统一的配置变更信号
-    coefficient_mode_changed = QtCore.pyqtSignal(str)     # 系数模式: auto/locked_fit/manual
-    species_config_changed = QtCore.pyqtSignal()          # 物种配置整体改变
-    candidate_selection_changed = QtCore.pyqtSignal(list) # 选中的候选物种ID列表
+    coefficient_mode_changed = QtCore.pyqtSignal(str)        # 系数模式: auto/locked_fit/manual
+    species_config_changed = QtCore.pyqtSignal()             # 物种配置整体改变
+    candidate_selection_changed = QtCore.pyqtSignal(list)    # 选中的候选物种ID列表
 
     # ---- 控制变更信号 ----
-    candidates_import_requested = QtCore.pyqtSignal()     # 导入系数按钮点击
-    candidates_zeroed = QtCore.pyqtSignal()               # 清零按钮点击
-    species_forced_toggled = QtCore.pyqtSignal(str)       # 物种约束状态切换
+    candidates_import_requested = QtCore.pyqtSignal()        # 导入系数按钮点击
+    candidates_zeroed = QtCore.pyqtSignal()                  # 清零按钮点击
+    species_forced_toggled = QtCore.pyqtSignal(str)          # 向后兼容：物种状态切换（改用candidate_lock_toggled）
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -59,7 +70,8 @@ class FittingControlWidget(QtWidgets.QWidget):
         """)
 
         # ---- 内部状态 ----
-        self._force_species: list[str] = []                    # 向后兼容：强制物种名称列表
+        self._locked_species: list[str] = []                   # 主要使用：锁定候选物种名称列表
+        self._force_species: list[str] = []                    # 向后兼容：_locked_species的别名
         self._unified_species_data: list[dict] = []            # 统一的物种数据
         self._current_mz: int | None = None                    # 当前m/z
         self._updating = False                                 # 防止递归更新
@@ -95,7 +107,7 @@ class FittingControlWidget(QtWidgets.QWidget):
         input_row = QtWidgets.QHBoxLayout()
         input_row.setSpacing(6)
         self.species_input = QtWidgets.QLineEdit()
-        self.species_input.setPlaceholderText("输入物种名称后回车或点击\"添加\"来添加强制物种...")
+        self.species_input.setPlaceholderText("输入物种名称后回车或点击\"添加\"来添加强制保留物种...")
         self.species_input.returnPressed.connect(self._add_species_from_input)
         input_row.addWidget(self.species_input, stretch=1)
 
@@ -165,7 +177,7 @@ class FittingControlWidget(QtWidgets.QWidget):
     # ---- 物种数据管理方法 ----
 
     def _add_species_from_input(self):
-        """从输入框添加物种为强制物种"""
+        """从输入框添加物种为强制保留物种"""
         name = self.species_input.text().strip()
         if not name:
             return
@@ -205,8 +217,8 @@ class FittingControlWidget(QtWidgets.QWidget):
     def populate_unified_species_table(self, mz: int, filtered_db: list[dict], force_species: list[str]):
         """
         填充统一的物种表格
-        - 合并自动候选物种和手动强制物种
-        - 标记来源和约束状态
+        - 合并自动候选物种和强制保留物种
+        - 标记来源和强制保留状态
         """
         self._current_mz = mz
         self._updating = True
@@ -226,9 +238,10 @@ class FittingControlWidget(QtWidgets.QWidget):
 
     def _merge_species_lists(self, auto_candidates: list[dict], force_species: list[str]) -> list[dict]:
         """
-        合并自动候选物种和手动强制物种
+        合并自动候选物种和强制保留物种
         - 相同species且mz相同视为重复
         - 重复时合并为单一条目，标记为'automatic+manual'
+        - is_forced标记：该物种是否被用户强制保留
         """
         result = []
         seen_species = {}  # key: species_name
@@ -242,7 +255,7 @@ class FittingControlWidget(QtWidgets.QWidget):
                 'mz': auto_item.get('mz'),
                 'ionization_energy': auto_item.get('ionization_energy', 0.0),
                 'source': 'automatic',
-                'is_forced': species_name in force_species,  # 检查是否在强制列表中
+                'is_forced': species_name in force_species,  # 检查是否在强制保留列表中
                 'is_enabled': True,
                 'coefficient': 0.0,
                 'is_locked': False,
@@ -250,7 +263,7 @@ class FittingControlWidget(QtWidgets.QWidget):
                 'energies': auto_item.get('energies', np.array([])),
             }
 
-            # 如果在强制列表中，标记来源为混合
+            # 如果在强制保留列表中，标记来源为混合
             if species_name in force_species:
                 merged_item['source'] = 'automatic+manual'
 
@@ -340,16 +353,20 @@ class FittingControlWidget(QtWidgets.QWidget):
         name_label.setWordWrap(False)
         species_layout.addWidget(name_label, stretch=1)
 
-        # 切换按钮 (※) - 仅在强制参与时显示背景
+        # 切换按钮 (※) - 强制保留标记
+        # 注意：当前机制实现的是"强制保留"（系数锁定为eps，无条件在结果中出现）
+        # 而非"强制参与"（系数受约束但由优化器自由决定）
+        # 详见 forced_species_analysis.md
         toggle_btn = QtWidgets.QPushButton("※")
         toggle_btn.setFixedSize(24, 24)
         toggle_btn.setFlat(False)
-        toggle_btn.setToolTip("点击切换强制/普通状态")
+        toggle_btn.setToolTip("点击切换强制保留/普通状态")
         toggle_btn.clicked.connect(lambda checked=False, r=row: self._toggle_forced_status(r))
 
-        # 根据强制状态设置按钮样式
+        # 根据强制保留状态设置按钮样式
         is_forced = species.get('is_forced', False)
         if is_forced:
+            # 强制保留物种：琥珀色背景，视觉上突出
             toggle_btn.setStyleSheet("""
                 QPushButton {
                     background-color: #fbbf24;
@@ -363,6 +380,7 @@ class FittingControlWidget(QtWidgets.QWidget):
                 }
             """)
         else:
+            # 普通候选物种：灰色背景，低视觉强调
             toggle_btn.setStyleSheet("""
                 QPushButton {
                     background-color: #e5e7eb;
@@ -418,7 +436,7 @@ class FittingControlWidget(QtWidgets.QWidget):
         self.species_table.setCellWidget(row, 3, remove_widget)
 
     def _toggle_forced_status(self, row: int):
-        """切换物种的强制状态"""
+        """切换物种的强制保留状态"""
         if 0 <= row < len(self._unified_species_data):
             species = self._unified_species_data[row]
             species['is_forced'] = not species.get('is_forced', False)
@@ -561,20 +579,52 @@ class FittingControlWidget(QtWidgets.QWidget):
         finally:
             self._updating = False
 
+    # ---- 新方法：锁定候选管理 ----
+
+    def get_locked_species(self) -> list[str]:
+        """获取锁定候选物种列表（主要方法）"""
+        return list(self._locked_species)
+
+    def set_locked_species(self, species: list[str]):
+        """设置锁定候选物种列表（主要方法）"""
+        self._locked_species = list(species)
+        self._force_species = list(species)  # 同步维护向后兼容字段
+
+    def lock_candidate(self, species_name: str):
+        """锁定单个候选物种（主要方法）
+
+        被锁定的物种将不被自动筛选移除，其系数由优化器自由决定
+        """
+        if species_name not in self._locked_species:
+            self._locked_species.append(species_name)
+            self._force_species.append(species_name)  # 同步维护
+            self.locked_candidate_added.emit(species_name)
+            # 触发表格更新
+            self._refresh_table_from_data()
+            self.species_config_changed.emit()
+
+    def unlock_candidate(self, species_name: str):
+        """解锁单个候选物种（主要方法）"""
+        if species_name in self._locked_species:
+            self._locked_species.remove(species_name)
+            self._force_species.remove(species_name)  # 同步维护
+            self.locked_candidate_removed.emit(species_name)
+            self._refresh_table_from_data()
+            self.species_config_changed.emit()
+
     # ---- 向后兼容方法 ----
 
     def get_force_species(self) -> list[str]:
-        """获取强制物种列表（向后兼容）"""
-        return list(self._force_species)
+        """获取锁定候选物种列表（向后兼容，推荐使用get_locked_species）"""
+        return self.get_locked_species()
 
     def set_force_species(self, species: list[str]):
-        """设置强制物种列表（向后兼容）"""
-        self._force_species = list(species)
+        """设置锁定候选物种列表（向后兼容，推荐使用set_locked_species）"""
+        self.set_locked_species(species)
 
     def add_force_species(self, species_name: str):
-        """添加强制物种（向后兼容）"""
-        if species_name not in self._force_species:
-            self._force_species.append(species_name)
+        """锁定单个候选物种（向后兼容，推荐使用lock_candidate）"""
+        self.lock_candidate(species_name)
 
     def get_candidates(self) -> list[dict]:
         """获取当前候选物种列表（向后兼容）"""
