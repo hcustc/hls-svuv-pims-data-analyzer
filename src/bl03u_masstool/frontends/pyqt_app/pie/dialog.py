@@ -698,6 +698,20 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         # 否则标记为过期
         return "OBSOLETE"
 
+    @staticmethod
+    def _get_status_display(status_code: str) -> tuple[str, str]:
+        """
+        获取状态码对应的显示文本和emoji图标。
+        返回: (显示文本, emoji图标)
+        """
+        status_map = {
+            "UNFITTED": ("待拟合", "⏳"),
+            "COMPLETED": ("已拟合", "✅"),
+            "OBSOLETE": ("结果已过期", "⚠️"),
+            "FAILED": ("拟合失败", "❌"),
+        }
+        return status_map.get(status_code, ("待拟合", "⏳"))
+
     # ---- Per-m/z 配置管理 ----
 
     def _save_current_mz_config(self) -> None:
@@ -1805,19 +1819,11 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             current_per_mz_hash = self._get_per_mz_config_hash(mz)
             current_global_hash = self.global_solver_config.get("config_hash", "")
             fit_state_code = self._derive_result_status(result, current_per_mz_hash, current_global_hash)
+            fit_state_text, fit_state_emoji = self._get_status_display(fit_state_code)
 
-            # 映射状态码到显示文本
-            status_map = {
-                "UNFITTED": "待拟合",
-                "COMPLETED": "已拟合",
-                "OBSOLETE": "结果已过期",
-                "FAILED": "拟合失败",
-            }
-            fit_state = status_map.get(fit_state_code, "待拟合")
-
-            item = QtWidgets.QListWidgetItem(f"{mz}{suffix}  ({len(curve['energies'])}点)  {fit_state}")
+            item = QtWidgets.QListWidgetItem(f"{fit_state_emoji} m/z {mz}{suffix}  ({len(curve['energies'])}点)  {fit_state_text}")
             item.setData(QtCore.Qt.ItemDataRole.UserRole, mz)
-            item.setToolTip(f"m/z {mz} | {fit_state}")
+            item.setToolTip(f"m/z {mz} | {fit_state_text}")
             self.mz_list.addItem(item)
             if current_mz == mz:
                 self.mz_list.setCurrentItem(item)
@@ -1834,21 +1840,14 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         current_per_mz_hash = self._get_per_mz_config_hash(mz)
         current_global_hash = self.global_solver_config.get("config_hash", "")
         fit_state_code = self._derive_result_status(result, current_per_mz_hash, current_global_hash)
-
-        status_map = {
-            "UNFITTED": "待拟合",
-            "COMPLETED": "已拟合",
-            "OBSOLETE": "结果已过期",
-            "FAILED": "拟合失败",
-        }
-        fit_state = status_map.get(fit_state_code, "待拟合")
+        fit_state_text, _ = self._get_status_display(fit_state_code)
 
         haystack = " ".join(
             str(value)
             for value in (
                 mz,
                 curve.get("species", ""),
-                fit_state,
+                fit_state_text,
             )
         ).lower()
         return query in haystack
@@ -1875,6 +1874,13 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         # 检查是否有保存的拟合结果
         if self.current_mz in self.all_fit_results:
             fit_result = self.all_fit_results[self.current_mz]
+
+            # Phase 2: 计算结果状态
+            current_per_mz_hash = self._get_per_mz_config_hash(self.current_mz)
+            current_global_hash = self.global_solver_config.get("config_hash", "")
+            fit_state_code = self._derive_result_status(fit_result, current_per_mz_hash, current_global_hash)
+            fit_state_text, fit_state_emoji = self._get_status_display(fit_state_code)
+
             if fit_result.get('success') and fit_result.get('model'):
                 self.current_fit = fit_result['model']
 
@@ -1895,11 +1901,23 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 )
                 self.set_dataframe(self.fit_table, fit_df)
                 self.detail_tabs.setCurrentWidget(self.fit_table)
+
+                # Phase 2: 在状态栏显示结果有效性
+                if fit_state_code == "OBSOLETE":
+                    status_msg = f"{fit_state_emoji} {fit_state_text} - 配置已修改，请重新拟合"
+                else:
+                    status_msg = f"{fit_state_emoji} {fit_state_text}"
+                self.set_busy(False, status_msg)
             else:
                 self.current_fit = None
                 self.fit_table.clear()
                 self.fit_table.setRowCount(0)
                 self.fit_table.setColumnCount(0)
+
+                # Phase 2: 显示失败状态
+                if not fit_result.get('success'):
+                    status_msg = f"{fit_state_emoji} {fit_state_text}"
+                    self.set_busy(False, status_msg)
         else:
             self.current_fit = None
             self.fit_table.clear()
