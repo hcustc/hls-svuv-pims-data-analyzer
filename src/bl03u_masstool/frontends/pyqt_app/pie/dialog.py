@@ -268,7 +268,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.export_pie_button.clicked.connect(self.export_pie_results)
         self.export_pie_button.setEnabled(False)
 
-        self._force_species: list[str] = []
+        self._locked_species: list[str] = []
 
         # 初始化UI状态
         self.toggle_multi_folder_mode(0)
@@ -418,13 +418,13 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.fitting_control_widget.setMaximumWidth(420)
 
         # ---- 连接FittingControlWidget信号 ----
-        self.fitting_control_widget.force_species_added.connect(self._on_force_species_changed)
-        self.fitting_control_widget.force_species_removed.connect(self._on_force_species_changed)
+        self.fitting_control_widget.locked_candidate_added.connect(self._on_locked_species_changed)
+        self.fitting_control_widget.locked_candidate_removed.connect(self._on_locked_species_changed)
         self.fitting_control_widget.species_config_changed.connect(self._on_fitting_config_changed)
         self.fitting_control_widget.coefficient_mode_changed.connect(self._on_fitting_config_changed)
         self.fitting_control_widget.candidates_import_requested.connect(self._on_import_coefficients_requested)
         self.fitting_control_widget.candidates_zeroed.connect(self._on_fitting_config_changed)
-        self.fitting_control_widget.species_forced_toggled.connect(self._on_force_species_changed)
+        self.fitting_control_widget.candidate_lock_toggled.connect(self._on_locked_species_changed)
 
         # ---- 连接ResultDisplayWidget信号 ----
         self.result_display_widget.export_requested.connect(self.export_pie_results)
@@ -527,8 +527,8 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.right_splitter.setSizes(new_heights)
             self.show_result_detail_btn.setText("查看结果详情")
 
-    def _on_force_species_changed(self):
-        """强制物种改变时标记dirty并更新状态"""
+    def _on_locked_species_changed(self):
+        """锁定候选物种改变时标记dirty并更新状态"""
         self.mark_pie_config_changed()
         # 触发实时拟合预览
         self._rebuild_manual_fit()
@@ -794,8 +794,8 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
     def _populate_candidate_table(self, mz: int):
         """根据选中的m/z填充统一的拟合物种表格"""
         filtered_db = self.get_filtered_database()
-        force_species = self.get_force_species()
-        self.fitting_control_widget.populate_unified_species_table(mz, filtered_db, force_species)
+        locked_species = self.fitting_control_widget.get_locked_species()
+        self.fitting_control_widget.populate_unified_species_table(mz, filtered_db, locked_species)
 
     def _get_candidate_panel_state(self) -> dict:
         """从统一的物种表格中获取当前配置状态"""
@@ -808,7 +808,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         unified_data = self.fitting_control_widget._unified_species_data
 
         for row, species in enumerate(unified_data):
-            # 检查启用状态
+            # Col 0: 启用状态 checkbox
             enable_widget = self.species_table.cellWidget(row, 0)
             enable_chk = enable_widget.findChild(QtWidgets.QCheckBox) if enable_widget else None
             if enable_chk and enable_chk.isChecked():
@@ -816,17 +816,14 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
                 species_id = int(species.get("id", row + 1))
 
-                # 提取系数
-                coeff_widget = self.species_table.cellWidget(row, 6)
+                # Col 2: 系数（QDoubleSpinBox）
+                coeff_widget = self.species_table.cellWidget(row, 2)
                 if isinstance(coeff_widget, QtWidgets.QDoubleSpinBox):
                     coefficients[species_id] = coeff_widget.value()
 
-                # 提取锁定状态
-                lock_widget = self.species_table.cellWidget(row, 7)
-                if lock_widget:
-                    lock_chk = lock_widget.findChild(QtWidgets.QCheckBox)
-                    if lock_chk and lock_chk.isChecked():
-                        locked_ids.append(species_id)
+                # 锁定状态：从数据结构中读取 is_locked 字段
+                if species.get("is_locked", False):
+                    locked_ids.append(species_id)
 
         return {
             "mode": mode,
@@ -985,7 +982,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
     def fit_curves_sync(self, mz_list: list) -> dict:
         """拟合指定的质量数曲线"""
         filtered_db = self.get_filtered_database()
-        force_species = self.get_force_species()
+        locked_species = self.fitting_control_widget.get_locked_species()
 
         # Phase 2: 获取全局配置哈希（对所有 m/z 相同）
         global_hash = self.global_solver_config.get("config_hash", "")
@@ -998,7 +995,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             curve = self.curves.get(mz)
             if not curve:
                 continue
-            fit_result = self._fit_curve(mz, curve, filtered_db, force_species)
+            fit_result = self._fit_curve(mz, curve, filtered_db, locked_species)
 
             # Phase 2: 添加版本快照到结果
             if fit_result.get('success'):
@@ -1009,7 +1006,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             results[mz] = fit_result
         return results
 
-    def _fit_curve(self, mz: int, curve: dict, database: list, force_species: list) -> dict:
+    def _fit_curve(self, mz: int, curve: dict, database: list, locked_species: list) -> dict:
         """拟合单条曲线"""
         energies = np.array(curve.get('energies', []))
         intensities = np.array(curve.get('intensities', []))
@@ -1018,7 +1015,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             return {'success': False, 'error': '无数据'}
 
         fit_model = identify_species_for_mz_with_curve(
-            database, mz, energies, intensities, forced_species=force_species
+            database, mz, energies, intensities, locked_species=locked_species
         )
 
         if not fit_model or not fit_model.get('species'):
@@ -1338,13 +1335,13 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
     # ── Force species management (delegated to FittingControlWidget) ───────
 
     def add_force_species(self, species_name: str):
-        """Add a force-fit species (delegated to FittingControlWidget)."""
-        self.fitting_control_widget.add_force_species(species_name)
-        self._on_force_species_changed()
+        """向后兼容：锁定候选物种（推荐使用 lock_candidate）"""
+        self.fitting_control_widget.lock_candidate(species_name)
+        self._on_locked_species_changed()
 
     def get_force_species(self) -> list:
-        """Return current force-fit species list (delegated to FittingControlWidget)."""
-        return self.fitting_control_widget.get_force_species()
+        """向后兼容：获取锁定候选物种列表（推荐使用 get_locked_species）"""
+        return self.fitting_control_widget.get_locked_species()
 
     # ── Fit stats helper ─────────────────────────────────────────────────
 
