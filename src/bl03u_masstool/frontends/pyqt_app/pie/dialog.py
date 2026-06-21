@@ -401,7 +401,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.right_splitter.setCollapsible(1, True)   # 结果详情：可收起
 
         # ---- 配置拟合控制widget的约束 ----
-        self.fitting_control_widget.setMinimumWidth(360)
+        self.fitting_control_widget.setMinimumWidth(380)
         self.fitting_control_widget.setMaximumWidth(420)
 
         # ---- 连接FittingControlWidget信号 ----
@@ -439,7 +439,8 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         splitter.setCollapsible(2, False)  # 右侧：不可收起
 
         # ---- 初始尺寸 ----
-        splitter.setSizes([290, 800, 390])
+        # 左: 310px (m/z列表)，中: 自动伸缩(图表区)，右: 410px (拟合配置)
+        splitter.setSizes([310, 1000, 410])
         layout.addWidget(splitter, stretch=1)
         self._update_action_state()
 
@@ -2176,8 +2177,8 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 bbox=dict(boxstyle="round,pad=0.5", facecolor="#ffffff", edgecolor="#cbd5e1", alpha=0.85),
             )
 
-        # Legend outside plot area, ordered: experimental data → total fit → components
-        self.plot_widget.finish(legend=True, legend_loc="center left", legend_bbox_to_anchor=(1.02, 0.5))
+        # Legend inside plot area, upper-right corner
+        self.plot_widget.finish(legend=True, legend_loc="upper right")
 
     def fit_current_curve(self):
         # 防止并发拟合
