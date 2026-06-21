@@ -105,35 +105,49 @@ class FittingControlWidget(QtWidgets.QWidget):
         self.candidate_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.candidate_table.horizontalHeader().setStretchLastSection(True)
 
-        # 候选控制栏
-        candidate_controls = QtWidgets.QHBoxLayout()
-        candidate_controls.setSpacing(6)
-        candidate_controls.addWidget(QtWidgets.QLabel("系数模式:"))
+        # 候选控制栏 - 分两层以降低密度
+        # 第一层：系数模式选择
+        candidate_mode_row = QtWidgets.QHBoxLayout()
+        candidate_mode_row.setSpacing(6)
+        candidate_mode_row.addWidget(QtWidgets.QLabel("系数模式:"))
         self.coefficient_mode_combo = QtWidgets.QComboBox()
         self.coefficient_mode_combo.addItem("自动拟合", "auto")
         self.coefficient_mode_combo.addItem("锁定已选", "locked_fit")
         self.coefficient_mode_combo.addItem("手动系数", "manual")
         self.coefficient_mode_combo.currentIndexChanged.connect(self._on_coefficient_mode_changed)
-        candidate_controls.addWidget(self.coefficient_mode_combo)
+        candidate_mode_row.addWidget(self.coefficient_mode_combo)
+        candidate_mode_row.addStretch()
+
+        # 第二层：候选物种控制按钮
+        candidate_action_row = QtWidgets.QHBoxLayout()
+        candidate_action_row.setSpacing(6)
         self.candidate_select_all_btn = QtWidgets.QPushButton("全选")
         self.candidate_select_all_btn.clicked.connect(lambda: self._set_all_candidates_checked(True))
-        self.candidate_clear_btn = QtWidgets.QPushButton("清空")
+        self.candidate_clear_btn = QtWidgets.QPushButton("清除选择")
+        self.candidate_clear_btn.setToolTip("取消所有候选物种的勾选")
         self.candidate_clear_btn.clicked.connect(lambda: self._set_all_candidates_checked(False))
         self.candidate_import_coeff_btn = QtWidgets.QPushButton("导入系数")
         self.candidate_import_coeff_btn.setToolTip("从当前拟合结果导入候选物种系数")
         self.candidate_import_coeff_btn.clicked.connect(self._import_coefficients_from_fit)
-        self.candidate_zero_coeff_btn = QtWidgets.QPushButton("清零")
-        self.candidate_zero_coeff_btn.setToolTip("将所有候选物种系数清零")
+        self.candidate_zero_coeff_btn = QtWidgets.QPushButton("系数清零")
+        self.candidate_zero_coeff_btn.setToolTip("将所有候选物种系数值清零")
         self.candidate_zero_coeff_btn.clicked.connect(self._zero_all_coefficients)
         for btn in (self.candidate_select_all_btn, self.candidate_clear_btn,
                      self.candidate_import_coeff_btn, self.candidate_zero_coeff_btn):
             btn.setObjectName("BrowseButton")
-        candidate_controls.addWidget(self.candidate_select_all_btn)
-        candidate_controls.addWidget(self.candidate_clear_btn)
-        candidate_controls.addWidget(self.candidate_import_coeff_btn)
-        candidate_controls.addWidget(self.candidate_zero_coeff_btn)
-        candidate_controls.addStretch()
-        candidate_layout.addLayout(candidate_controls)
+        candidate_action_row.addWidget(self.candidate_select_all_btn)
+        candidate_action_row.addWidget(self.candidate_clear_btn)
+        candidate_action_row.addWidget(self.candidate_import_coeff_btn)
+        candidate_action_row.addWidget(self.candidate_zero_coeff_btn)
+        candidate_action_row.addStretch()
+
+        # 组织两层为垂直控制栏
+        candidate_controls_container = QtWidgets.QVBoxLayout()
+        candidate_controls_container.setSpacing(4)
+        candidate_controls_container.addLayout(candidate_mode_row)
+        candidate_controls_container.addLayout(candidate_action_row)
+
+        candidate_layout.addLayout(candidate_controls_container)
         candidate_layout.addWidget(self.candidate_table, stretch=1)
 
         self.control_tabs.addTab(candidate_panel, "候选物种")
