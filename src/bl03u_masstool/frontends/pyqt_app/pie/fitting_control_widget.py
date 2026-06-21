@@ -80,6 +80,7 @@ class FittingControlWidget(QtWidgets.QWidget):
         self._unified_species_data: list[dict] = []            # 统一的物种数据
         self._current_mz: int | None = None                    # 当前m/z
         self._updating = False                                 # 防止递归更新
+        self._candidates_loaded = False                        # 是否已执行过 PICS 查询
 
         # ---- UI构建 ----
         main_layout = QtWidgets.QVBoxLayout(self)
@@ -108,30 +109,30 @@ class FittingControlWidget(QtWidgets.QWidget):
         header.addStretch()
         main_layout.addWidget(header_frame)
 
-        # ---- 空状态提示（候选为空时显示） ----
+        # ---- 空状态提示（显示初始或查询为空状态） ----
         self.empty_state_widget = QtWidgets.QWidget()
         empty_layout = QtWidgets.QVBoxLayout(self.empty_state_widget)
         empty_layout.setContentsMargins(16, 16, 16, 16)
         empty_layout.setSpacing(12)
 
-        empty_icon = QtWidgets.QLabel("⚠️")
+        empty_icon = QtWidgets.QLabel("ℹ️")
         empty_icon.setStyleSheet("font-size: 32px; text-align: center;")
         empty_icon.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         empty_layout.addWidget(empty_icon)
+        self.empty_icon = empty_icon  # 保存引用以便更新
 
-        empty_title = QtWidgets.QLabel("当前 m/z 未找到候选物种")
+        empty_title = QtWidgets.QLabel("拟合配置")
         empty_title.setStyleSheet("font-weight: bold; font-size: 12pt; text-align: center;")
         empty_title.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         empty_layout.addWidget(empty_title)
+        self.empty_title = empty_title  # 保存引用以便更新
 
-        empty_text = QtWidgets.QLabel(
-            "PICS 数据库中尚未收录该质荷比的物种或缺少截面数据。\n"
-            "请先前往 PICS 导入添加对应物种及完整的截面数据。"
-        )
+        empty_text = QtWidgets.QLabel()
         empty_text.setStyleSheet("color: #666; text-align: center;")
         empty_text.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         empty_text.setWordWrap(True)
         empty_layout.addWidget(empty_text)
+        self.empty_text = empty_text  # 保存引用以便更新
 
         empty_layout.addSpacing(8)
 
@@ -211,6 +212,9 @@ class FittingControlWidget(QtWidgets.QWidget):
         - 显示当前 m/z 的 PICS 数据库候选物种
         - 标记来源和锁定状态
         - 若无候选物种，显示空状态提示
+
+        此方法在 PIE 曲线生成且 m/z 确定后被调用
+        标记候选查询已执行（_candidates_loaded = True）
         """
         self._current_mz = mz
         self._updating = True
@@ -223,20 +227,57 @@ class FittingControlWidget(QtWidgets.QWidget):
                 auto_candidates, locked_species
             )
 
+            # 标记查询已执行
+            self._candidates_loaded = True
+
             # 刷新表格并管理空状态
             self._update_ui_state()
         finally:
             self._updating = False
 
     def _update_ui_state(self):
-        """根据是否有候选物种来显示或隐藏空状态提示"""
+        """
+        根据候选物种和查询状态来显示或隐藏空状态提示
+
+        状态1: 前置数据未准备（初始或清空）
+          - _candidates_loaded = False
+          - 显示空状态："请先生成 PIE 曲线"（ℹ️）
+
+        状态2: 查询已执行但无结果
+          - _candidates_loaded = True，_unified_species_data 为空
+          - 显示空状态："当前 m/z 未找到候选物种"（⚠️ + PICS 导入按钮）
+
+        状态3: 有候选物种
+          - _unified_species_data 不为空
+          - 显示表格，隐藏空状态
+        """
         has_candidates = len(self._unified_species_data) > 0
 
         if has_candidates:
+            # 有候选物种 → 显示表格
             self.empty_state_widget.hide()
             self.species_table.show()
             self._refresh_table_from_data()
+        elif self._candidates_loaded:
+            # 查询已执行但无结果 → 显示"未找到候选物种"空状态
+            self.empty_icon.setText("⚠️")
+            self.empty_title.setText("当前 m/z 未找到候选物种")
+            self.empty_text.setText(
+                "PICS 数据库中尚未收录该质荷比的物种或缺少截面数据。\n"
+                "请先前往 PICS 导入添加对应物种及完整的截面数据。"
+            )
+            self.goto_pics_btn.show()
+            self.empty_state_widget.show()
+            self.species_table.hide()
         else:
+            # 前置数据未准备 → 显示"请先生成 PIE 曲线"空状态
+            self.empty_icon.setText("ℹ️")
+            self.empty_title.setText("等待 PIE 曲线")
+            self.empty_text.setText(
+                "请先在左侧选择质荷比 (m/z) 并生成 PIE 曲线。\n"
+                "生成完成后，对应的候选物种将自动显示在此。"
+            )
+            self.goto_pics_btn.hide()
             self.empty_state_widget.show()
             self.species_table.hide()
 
@@ -654,9 +695,10 @@ class FittingControlWidget(QtWidgets.QWidget):
         return selected_ids
 
     def clear_ui(self):
-        """清空UI内容"""
+        """清空UI内容，重置为初始状态"""
         self._locked_species = []
         self._unified_species_data = []
+        self._candidates_loaded = False  # 重置查询标志
         self.species_table.setRowCount(0)
         self._update_ui_state()
 
