@@ -466,6 +466,32 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         if hasattr(win, "switch_workspace_page"):
             win.switch_workspace_page("project")
 
+    def _update_result_detail_button(self):
+        """根据结果状态更新'查看结果详情'按钮的文本和样式"""
+        if self.current_mz is None or self.current_mz not in self.all_fit_results:
+            self.show_result_detail_btn.setText("查看结果详情")
+            self.show_result_detail_btn.setEnabled(False)
+            return
+
+        result = self.all_fit_results[self.current_mz]
+        current_per_mz_hash = self._get_per_mz_config_hash(self.current_mz)
+        current_global_hash = self.global_solver_config.get("config_hash", "")
+        status = self._derive_result_status(result, current_per_mz_hash, current_global_hash)
+
+        # 根据状态设置按钮文本和样式
+        if status == "COMPLETED":
+            self.show_result_detail_btn.setText("查看结果详情")
+            self.show_result_detail_btn.setEnabled(True)
+        elif status == "OBSOLETE":
+            self.show_result_detail_btn.setText("查看过期结果")
+            self.show_result_detail_btn.setEnabled(True)
+        elif status == "FAILED":
+            self.show_result_detail_btn.setText("查看失败结果")
+            self.show_result_detail_btn.setEnabled(True)
+        else:  # UNFITTED
+            self.show_result_detail_btn.setText("查看结果详情")
+            self.show_result_detail_btn.setEnabled(False)
+
     def _toggle_result_display(self, visible: bool | None = None) -> None:
         """展开/收起结果详情面板"""
         if visible is None:
@@ -2025,6 +2051,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 self.result_display_widget.update_fit_table(fit_result['model'])
                 self.result_display_widget.set_result_status(fit_state_code)
                 self.show_result_detail_btn.setEnabled(True)
+                self._update_result_detail_button()
 
                 # Phase 2: 在状态栏显示结果有效性
                 if fit_state_code == "OBSOLETE":
@@ -2037,6 +2064,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 self.result_display_widget.clear_data()
                 self.result_display_widget.set_result_status("FAILED")
                 self.show_result_detail_btn.setEnabled(False)
+                self._update_result_detail_button()
 
                 # Phase 2: 显示失败状态
                 if not fit_result.get('success'):
@@ -2047,6 +2075,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.result_display_widget.clear_data()
             self.result_display_widget.set_result_status("UNFITTED")
             self.show_result_detail_btn.setEnabled(False)
+            self._update_result_detail_button()
 
         # 显示曲线数据
         curve = self.curves[self.current_mz]
