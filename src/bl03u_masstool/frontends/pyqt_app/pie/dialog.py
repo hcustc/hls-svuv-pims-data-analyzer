@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -105,8 +108,12 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.worker: WorkerThread | None = None
         self.pie_folders: list[str] = []
         self._busy = False
-        # Per-m/z 配置存储：每个 m/z 独立保存候选物种、系数模式等
+        # Per-m/z 配置存储（Phase 1）+ 版本管理（Phase 2）
         self.per_mz_config: dict[int, dict] = {}
+        # Phase 2: 全局求解配置版本管理
+        # 注意：当前拟合函数无可配置的全局求解参数，仅保留接口供未来扩展
+        self.global_solver_config = {}
+        self._update_global_config_hash()
         self.setWindowTitle("PIE物种拟合")
         self.resize(1380, 850)
         layout = QtWidgets.QVBoxLayout(self)
@@ -561,6 +568,135 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 self.database, _ = load_species_database(str(db_path))
         except Exception:
             pass
+
+    # ---- Phase 2: 配置版本管理和过期状态追踪 ----
+
+    @staticmethod
+    def _normalize_float(value: float) -> float:
+        """规范化浮点数，处理 NaN 和 Infinity"""
+        if isinstance(value, (int, float)):
+            if np.isnan(value):
+                return 0.0
+            elif np.isinf(value):
+                return float('inf') if value > 0 else float('-inf')
+            return round(float(value), 10)
+        return 0.0
+
+    @staticmethod
+    def _build_per_mz_config_payload(config: dict) -> dict:
+        """
+        从 per_mz_config 提取纯业务配置（不包括哈希字段）进行规范化。
+        确保顺序一致，以产生稳定的哈希。
+        """
+        selected_species = config.get("selected_species", [])
+        # 按 species ID 排序以保证顺序一致
+        sorted_species = sorted(
+            [{"id": int(s.get("id", 0))} for s in selected_species],
+            key=lambda x: x["id"]
+        )
+
+        coefficients = config.get("coefficients", {})
+        # 按 key 排序，规范化浮点数
+        normalized_coefficients = {
+            str(k): PIESpeciesFitDialog._normalize_float(v)
+            for k, v in sorted(coefficients.items())
+        }
+
+        locked_ids = sorted([int(x) for x in config.get("locked_ids", [])])
+
+        return {
+            "selected_species_ids": [s["id"] for s in sorted_species],
+            "mode": config.get("mode", "auto"),
+            "coefficients": normalized_coefficients,
+            "locked_ids": locked_ids,
+        }
+
+    @staticmethod
+    def _compute_config_hash(config_payload: dict) -> str:
+        """
+        计算配置的规范化哈希。
+        使用 JSON 规范化和 SHA-256 确保跨进程稳定性。
+        """
+        json_str = json.dumps(
+            config_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(json_str.encode()).hexdigest()[:16]
+
+    def _update_global_config_hash(self) -> None:
+        """更新全局配置哈希。当前无真实全局求解参数，仅作接口预留。"""
+        payload = {
+            "solver_type": "nonnegative_lsq",  # 当前固定为非负最小二乘
+        }
+        self.global_solver_config["config_hash"] = self._compute_config_hash(payload)
+
+    def _get_per_mz_config_hash(self, mz: int) -> str:
+        """获取指定 m/z 的当前配置哈希。"""
+        if mz not in self.per_mz_config:
+            # 无历史配置，使用默认值
+            default_config = {
+                "selected_species": [],
+                "mode": "auto",
+                "coefficients": {},
+                "locked_ids": [],
+            }
+            payload = self._build_per_mz_config_payload(default_config)
+        else:
+            config = self.per_mz_config[mz]
+            payload = self._build_per_mz_config_payload(config)
+        return self._compute_config_hash(payload)
+
+    def _get_current_per_mz_config_hash(self, mz: int | None = None) -> str:
+        """获取指定 m/z 的当前候选面板配置哈希（用于检测变化）。"""
+        if mz is None:
+            mz = self.current_mz
+        if mz is None:
+            return ""
+
+        panel_state = self._get_candidate_panel_state()
+        # 只哈希候选物种、模式、系数（来自当前 UI）
+        config = {
+            "selected_species": panel_state.get("selected_species", []),
+            "mode": panel_state.get("mode", "auto"),
+            "coefficients": panel_state.get("coefficients", {}),
+            "locked_ids": panel_state.get("locked_ids", []),
+        }
+        payload = self._build_per_mz_config_payload(config)
+        return self._compute_config_hash(payload)
+
+    @staticmethod
+    def _derive_result_status(
+        result: dict | None,
+        current_per_mz_hash: str,
+        current_global_hash: str,
+    ) -> str:
+        """
+        根据哈希比较推导结果状态，而不是存储字符串状态。
+
+        返回值：
+        - "UNFITTED": 无结果
+        - "COMPLETED": 拟合完成且配置未改
+        - "OBSOLETE": 拟合结果存在但配置已改
+        - "FAILED": 拟合失败
+        """
+        if result is None:
+            return "UNFITTED"
+
+        if not result.get("success"):
+            return "FAILED"
+
+        # 检查配置是否改变
+        fit_per_mz_hash = result.get("fit_config_hash", "")
+        fit_global_hash = result.get("global_config_hash", "")
+
+        # 如果当前哈希与拟合时的哈希相同，结果仍有效
+        if fit_per_mz_hash == current_per_mz_hash and fit_global_hash == current_global_hash:
+            return "COMPLETED"
+
+        # 否则标记为过期
+        return "OBSOLETE"
 
     # ---- Per-m/z 配置管理 ----
 
@@ -1852,6 +1988,11 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         if self.current_mz is None or self.current_mz not in self.curves:
             QtWidgets.QMessageBox.warning(self, "提示", "请先选择一条m/z曲线")
             return
+
+        # Phase 2: 捕获启动时的配置快照（而不是完成时）
+        fit_per_mz_hash = self._get_current_per_mz_config_hash(self.current_mz)
+        fit_global_hash = self.global_solver_config.get("config_hash", "")
+
         self.set_busy(True, f"拟合中...")
         try:
             from bl03u_masstool.core.pie_analysis import fit_species_combination_with_curve
@@ -1898,12 +2039,19 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
             results = fit_model.get("species", [])
             self.current_fit = fit_model
+
+            # Phase 2: 保存拟合结果包含版本快照
             self.all_fit_results[self.current_mz] = {
                 "success": bool(results),
                 "model": fit_model,
                 "species": results[:3],
                 "r_squared": fit_model.get("r_squared", 0.0),
+                # Phase 2 新增：版本快照
+                "fit_config_hash": fit_per_mz_hash,
+                "global_config_hash": fit_global_hash,
+                "fit_timestamp": time.time(),
             }
+
             fit_df = pd.DataFrame(
                 [
                     {
