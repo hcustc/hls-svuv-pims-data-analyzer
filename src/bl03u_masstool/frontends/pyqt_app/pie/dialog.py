@@ -105,6 +105,8 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.worker: WorkerThread | None = None
         self.pie_folders: list[str] = []
         self._busy = False
+        # Per-m/z 配置存储：每个 m/z 独立保存候选物种、系数模式等
+        self.per_mz_config: dict[int, dict] = {}
         self.setWindowTitle("PIE物种拟合")
         self.resize(1380, 850)
         layout = QtWidgets.QVBoxLayout(self)
@@ -233,9 +235,9 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.fit_all_button.setFixedHeight(28)
         self.fit_all_button.setEnabled(False)
 
-        self.refit_selected_button = QtWidgets.QPushButton("重拟合选中")
+        self.refit_selected_button = QtWidgets.QPushButton("拟合选中曲线")
         self.refit_selected_button.setObjectName("BrowseButton")
-        self.refit_selected_button.setToolTip("重新拟合左侧选中的 m/z 曲线")
+        self.refit_selected_button.setToolTip("拟合左侧选中的多个 m/z 曲线")
         self.refit_selected_button.clicked.connect(self.refit_selected_curves)
         self.refit_selected_button.setEnabled(False)
 
@@ -299,14 +301,18 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         refit_row = QtWidgets.QHBoxLayout()
         refit_row.setSpacing(6)
         refit_row.addWidget(self.refit_selected_button)
-        refit_row.addWidget(self.clear_fits_button)
+        # 创建"更多操作"菜单按钮
+        self.more_actions_btn = QtWidgets.QPushButton("更多操作")
+        self.more_actions_btn.setObjectName("BrowseButton")
+        self.more_actions_btn.setToolTip("清除拟合、穷举优选等高级操作")
+        self.more_actions_menu = QtWidgets.QMenu(self)
+        self.more_actions_menu.addAction("清除拟合").triggered.connect(self.clear_all_fits)
+        self.more_actions_menu.addAction("穷举优选").triggered.connect(self._exhaustive_best_fit)
+        self.more_actions_menu.addSeparator()
+        self.more_actions_menu.addAction("重新加载PICS截面数据库").triggered.connect(lambda: self.load_database(show_message=True))
+        self.more_actions_btn.setMenu(self.more_actions_menu)
+        refit_row.addWidget(self.more_actions_btn)
         left_layout.addLayout(refit_row)
-        self.exhaustive_button = QtWidgets.QPushButton("穷举优选")
-        self.exhaustive_button.setObjectName("WarningButton")
-        self.exhaustive_button.setToolTip("穷举候选物种所有组合，按R²排序选出最优")
-        self.exhaustive_button.clicked.connect(self._exhaustive_best_fit)
-        self.exhaustive_button.setEnabled(False)
-        left_layout.addWidget(self.exhaustive_button)
         splitter.addWidget(left_panel)
 
         self.right_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
@@ -429,10 +435,6 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.candidate_zero_coeff_btn = QtWidgets.QPushButton("清零")
         self.candidate_zero_coeff_btn.setToolTip("将所有候选物种系数清零")
         self.candidate_zero_coeff_btn.clicked.connect(self._zero_all_coefficients)
-        self.candidate_apply_btn = QtWidgets.QPushButton("应用")
-        self.candidate_apply_btn.setObjectName("PrimaryToolbarButton")
-        self.candidate_apply_btn.setToolTip("应用当前候选物种设置并拟合")
-        self.candidate_apply_btn.clicked.connect(self.fit_current_curve)
         for btn in (self.candidate_select_all_btn, self.candidate_clear_btn,
                      self.candidate_import_coeff_btn, self.candidate_zero_coeff_btn):
             btn.setObjectName("BrowseButton")
@@ -440,7 +442,6 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         candidate_controls.addWidget(self.candidate_clear_btn)
         candidate_controls.addWidget(self.candidate_import_coeff_btn)
         candidate_controls.addWidget(self.candidate_zero_coeff_btn)
-        candidate_controls.addWidget(self.candidate_apply_btn)
         candidate_controls.addStretch()
         candidate_layout.addLayout(candidate_controls)
         candidate_layout.addWidget(self.candidate_table, stretch=1)
@@ -560,6 +561,66 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 self.database, _ = load_species_database(str(db_path))
         except Exception:
             pass
+
+    # ---- Per-m/z 配置管理 ----
+
+    def _save_current_mz_config(self) -> None:
+        """保存当前 m/z 的候选物种配置到 per_mz_config"""
+        if self.current_mz is None:
+            return
+        config = self._get_candidate_panel_state()
+        self.per_mz_config[self.current_mz] = {
+            "selected_species": config["selected_species"],
+            "mode": config["mode"],
+            "coefficients": config["coefficients"],
+            "locked_ids": config["locked_ids"],
+        }
+
+    def _restore_mz_config(self, mz: int) -> None:
+        """从 per_mz_config 恢复指定 m/z 的配置到 UI 表格"""
+        if mz not in self.per_mz_config or not self._candidate_data:
+            # 如果没有历史配置，初始化默认配置（全选）
+            self._set_all_candidates_checked(True)
+            self.coefficient_mode_combo.setCurrentIndex(0)  # 默认"自动拟合"
+            return
+
+        config = self.per_mz_config[mz]
+        selected_species = config.get("selected_species", [])
+        mode = config.get("mode", "auto")
+        coefficients = config.get("coefficients", {})
+        locked_ids = config.get("locked_ids", [])
+
+        # 还原候选物种选择
+        selected_species_ids = {int(s.get("id", -1)) for s in selected_species}
+        self._candidate_updating = True
+        try:
+            for row in range(self.candidate_table.rowCount()):
+                if row < len(self._candidate_data):
+                    species_id = int(self._candidate_data[row].get("id", row + 1))
+                    check_widget = self.candidate_table.cellWidget(row, 0)
+                    if check_widget:
+                        chk = check_widget.findChild(QtWidgets.QCheckBox)
+                        if chk:
+                            chk.setChecked(species_id in selected_species_ids)
+
+                    # 还原系数
+                    coeff_spin = self.candidate_table.cellWidget(row, 4)
+                    if isinstance(coeff_spin, QtWidgets.QDoubleSpinBox):
+                        coeff_spin.setValue(coefficients.get(species_id, 0.0))
+
+                    # 还原锁定状态
+                    lock_widget = self.candidate_table.cellWidget(row, 5)
+                    if lock_widget:
+                        lock_chk = lock_widget.findChild(QtWidgets.QCheckBox)
+                        if lock_chk:
+                            lock_chk.setChecked(species_id in locked_ids)
+        finally:
+            self._candidate_updating = False
+
+        # 还原系数模式
+        mode_index = self.coefficient_mode_combo.findData(mode)
+        if mode_index >= 0:
+            self.coefficient_mode_combo.setCurrentIndex(mode_index)
 
     # ---- 候选物种面板方法 ----
 
@@ -844,6 +905,9 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
     def fit_all_curves(self):
         """一键拟合所有曲线"""
+        # 防止并发拟合
+        if self._busy:
+            return
         if not self.curves:
             QtWidgets.QMessageBox.warning(self, "提示", "请先生成PIE曲线")
             return
@@ -957,10 +1021,13 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.fit_all_curves()
 
     def refit_selected_curves(self):
-        """重新拟合选中的曲线"""
+        """拟合选中的曲线，使用各自保存的候选物种配置"""
+        # 防止并发拟合
+        if self._busy:
+            return
         selected_items = self.mz_list.selectedItems()
         if not selected_items:
-            QtWidgets.QMessageBox.warning(self, "提示", "请先选择要重新拟合的质量数")
+            QtWidgets.QMessageBox.warning(self, "提示", "请先选择要拟合的质量数")
             return
 
         mz_list = []
@@ -976,15 +1043,91 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         if not mz_list:
             return
 
-        self.set_busy(True, f"正在重新拟合 {len(mz_list)} 条曲线...")
+        self.set_busy(True, f"正在拟合 {len(mz_list)} 条曲线...")
         self.worker = WorkerThread(
-            lambda: self.fit_curves_sync(mz_list),
+            lambda: self.fit_selected_curves_sync(mz_list),
             self,
         )
         self.worker.finished_with_result.connect(self.on_refit_complete)
         self.worker.failed.connect(self.on_analysis_failed)
         self.worker.finished.connect(lambda: self.set_busy(False, "就绪"))
         self.worker.start()
+
+    def fit_selected_curves_sync(self, mz_list: list) -> dict:
+        """使用 per-m/z 配置拟合选中的曲线"""
+        from bl03u_masstool.core.pie_analysis import fit_species_combination_with_curve
+
+        results = {}
+        for mz in mz_list:
+            curve = self.curves.get(mz)
+            if not curve:
+                continue
+
+            energies = np.array(curve.get('energies', []))
+            intensities = np.array(curve.get('intensities', []))
+
+            if len(energies) == 0 or len(intensities) == 0:
+                results[mz] = {'success': False, 'error': '无数据'}
+                continue
+
+            # 获取该 m/z 保存的候选配置
+            if mz in self.per_mz_config:
+                config = self.per_mz_config[mz]
+                selected_species = config.get("selected_species", [])
+                mode = config.get("mode", "auto")
+                coefficients = config.get("coefficients", {})
+                locked_ids = config.get("locked_ids", [])
+            else:
+                # 如果没有保存的配置，使用全局自动识别
+                filtered_db = self.get_filtered_database()
+                selected_species = [item for item in filtered_db if item.get("mz") == mz]
+                mode = "auto"
+                coefficients = {}
+                locked_ids = []
+
+            if not selected_species:
+                results[mz] = {'success': False, 'error': '无匹配物种'}
+                continue
+
+            # 根据模式进行拟合
+            if mode == "auto" or mode == "fit":
+                fit_model = fit_species_combination_with_curve(
+                    selected_species,
+                    energies,
+                    intensities,
+                    coefficient_mode="fit",
+                )
+            elif mode == "manual":
+                fit_model = fit_species_combination_with_curve(
+                    selected_species,
+                    energies,
+                    intensities,
+                    coefficient_mode="manual",
+                    coefficients=coefficients,
+                )
+            elif mode == "locked_fit":
+                fit_model = fit_species_combination_with_curve(
+                    selected_species,
+                    energies,
+                    intensities,
+                    coefficient_mode="locked_fit",
+                    coefficients=coefficients,
+                    locked_species_ids=locked_ids,
+                )
+            else:
+                fit_model = fit_species_combination_with_curve(
+                    selected_species, energies, intensities
+                )
+
+            fit_result_species = fit_model.get('species', [])
+            results[mz] = {
+                'success': bool(fit_result_species),
+                'model': fit_model,
+                'species': fit_result_species[:3],
+                'r_squared': fit_model.get('r_squared', 0.0)
+            }
+
+        return results
 
     def on_refit_complete(self, results: dict):
         """重新拟合完成"""
@@ -1346,11 +1489,14 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.fit_button.setEnabled(has_curves and not busy)
         self.fit_all_button.setEnabled(has_curves and not busy)
         self.refit_selected_button.setEnabled(has_curves and not busy)
-        self.exhaustive_button.setEnabled(has_curves and not busy)
-        self.clear_fits_button.setEnabled(has_fit_records and not busy)
+        self.more_actions_btn.setEnabled(not busy)
+        # 更新菜单项的启用状态
+        for action in self.more_actions_menu.actions():
+            if action.text() == "清除拟合":
+                action.setEnabled(has_fit_records and not busy)
+            elif action.text() == "穷举优选":
+                action.setEnabled(has_curves and not busy)
         self.export_pie_button.setEnabled(has_successful_fits and not busy)
-        if hasattr(self, "candidate_apply_btn"):
-            self.candidate_apply_btn.setEnabled(has_curves and not busy)
 
     def run_pie_analysis_sync(
         self,
@@ -1517,6 +1663,10 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         return query in haystack
 
     def on_mz_selected(self, current, previous=None):
+        # 保存前一个 m/z 的候选物种配置
+        if self.current_mz is not None:
+            self._save_current_mz_config()
+
         if current is None:
             self.current_mz = None
             self.current_fit = None
@@ -1582,6 +1732,9 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
         # 填充候选物种面板
         self._populate_candidate_table(self.current_mz)
+
+        # 恢复该 m/z 的候选物种配置
+        self._restore_mz_config(self.current_mz)
 
         # 更新图表
         self.update_plot(curve, self.current_fit)
@@ -1690,12 +1843,16 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.plot_widget.finish(legend=True, legend_loc="center left", legend_bbox_to_anchor=(1.02, 0.5))
 
     def fit_current_curve(self):
+        # 防止并发拟合
+        if self._busy:
+            return
         if not self.database:
             QtWidgets.QMessageBox.warning(self, "提示", "请先加载PICS截面数据库")
             return
         if self.current_mz is None or self.current_mz not in self.curves:
             QtWidgets.QMessageBox.warning(self, "提示", "请先选择一条m/z曲线")
             return
+        self.set_busy(True, f"拟合中...")
         try:
             from bl03u_masstool.core.pie_analysis import fit_species_combination_with_curve
 
@@ -1778,6 +1935,8 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 QtWidgets.QMessageBox.information(self, "结果", "当前m/z没有匹配到可拟合的物种")
         except Exception as exc:
             QtWidgets.QMessageBox.warning(self, "错误", str(exc))
+        finally:
+            self.set_busy(False, "就绪")
 
     def _exhaustive_best_fit(self):
         """穷举候选物种所有组合，按R²排序，选出最优组合。"""
