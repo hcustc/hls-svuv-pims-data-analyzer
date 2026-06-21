@@ -39,7 +39,7 @@ class PICSImportWidget(QtWidgets.QWidget):
         header_layout.addWidget(title)
 
         subtitle = QtWidgets.QLabel(
-            "导入外部光电离截面 (PICS) 数据到本地物种数据库，支持 CSV、XLSX 等格式"
+            "导入外部光电离截面 (PICS) 数据到本地PICS截面数据库，支持 CSV、XLSX 等格式"
         )
         subtitle.setObjectName("ProjectHint")
         subtitle.setWordWrap(True)

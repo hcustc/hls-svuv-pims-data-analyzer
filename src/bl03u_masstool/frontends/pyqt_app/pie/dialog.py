@@ -367,7 +367,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.detail_tabs = QtWidgets.QTabWidget()
         self.detail_tabs.setMinimumHeight(170)
         self.detail_tabs.addTab(self.curve_table, "曲线数据")
-        self.detail_tabs.addTab(self.fit_table, "PICS拟合")
+        self.detail_tabs.addTab(self.fit_table, "物种贡献明细")
 
         # ---- 强制物种面板 ----
         force_panel = QtWidgets.QWidget()
@@ -536,7 +536,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         if not path:
             path, _ = QtWidgets.QFileDialog.getOpenFileName(
                 self,
-                "选择物种数据库",
+                "选择PICS截面数据库",
                 "",
                 "SQLite Files (*.sqlite *.sqlite3 *.db);;All Files (*)",
             )
@@ -546,14 +546,14 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 self.database_edit.setText(path)
         try:
             self.database, _ = load_species_database(path)
-            self.status_label.setText(f"已加载PICS库: {len(self.database)} 个物种")
+            self.status_label.setText(f"已加载PICS截面数据库: {len(self.database)} 个物种")
             if show_message:
                 QtWidgets.QMessageBox.information(self, "完成", f"已加载 {len(self.database)} 个物种")
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, "错误", str(exc))
 
     def _auto_load_database(self):
-        """自动加载内置PICS数据库"""
+        """自动加载内置PICS截面数据库"""
         try:
             db_path = species_database_path()
             if db_path.exists():
@@ -1607,7 +1607,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         r_squared_text = ""
         if fit_model is not None and fit_model.get("r_squared") is not None:
             r_squared_text = f"R² = {fit_model.get('r_squared', 0.0):.4f}"
-        title = f"m/z {curve['mz']} PIE–PICS 拟合"
+        title = f"m/z {curve['mz']} PIE物种识别拟合"
         self.plot_widget.clear_plot(title=title, xlabel="光子能量 (eV)", ylabel="相对强度")
         if x_values.size == 0:
             self.plot_widget.show_empty("无有效数据", title=f"m/z {curve['mz']} PIE")
@@ -1691,7 +1691,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
     def fit_current_curve(self):
         if not self.database:
-            QtWidgets.QMessageBox.warning(self, "提示", "请先加载物种数据库")
+            QtWidgets.QMessageBox.warning(self, "提示", "请先加载PICS截面数据库")
             return
         if self.current_mz is None or self.current_mz not in self.curves:
             QtWidgets.QMessageBox.warning(self, "提示", "请先选择一条m/z曲线")
@@ -1764,7 +1764,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.detail_tabs.setCurrentWidget(self.fit_table)
             self.update_plot(curve, fit_model)
             self.status_label.setText(
-                f"m/z {self.current_mz}: PICS候选 {fit_model.get('candidate_count', 0)} 个，"
+                f"m/z {self.current_mz}: PICS数据库候选 {fit_model.get('candidate_count', 0)} 个，"
                 f"命中 {len(results)} 个，R²={fit_model.get('r_squared', 0.0):.4f}"
             )
             fitted_count = sum(1 for r in self.all_fit_results.values() if r.get("success"))
@@ -1835,7 +1835,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         }
         curve = self.curves[self.current_mz]
         self.update_plot(curve, best["model"])
-        # 更新PICS拟合表: 排名 / 物种组合 / 物种数 / R² / RMSE
+        # 更新拟合结果表: 排名 / 物种组合 / 物种数 / R² / RMSE
         fit_df = pd.DataFrame([
             {
                 "排名": i + 1,

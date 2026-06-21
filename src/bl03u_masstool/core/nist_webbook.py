@@ -284,7 +284,7 @@ def local_match_to_compound(
     match: LocalIonizationEnergyMatch,
     *,
     source: str = "local_database",
-    message: str = "本地物种数据库命中。",
+    message: str = "本地PICS截面数据库命中。",
 ) -> NistCompoundIonization:
     ie = NistIonizationEnergy(
         value=match.ionization_energy_ev,
@@ -309,14 +309,14 @@ def local_match_to_compound(
 
 
 def local_match_to_result(query: str, match: LocalIonizationEnergyMatch) -> NistWebBookResult:
-    compound = local_match_to_compound(match, message="本地物种数据库命中，未访问 NIST WebBook。")
+    compound = local_match_to_compound(match, message="本地PICS截面数据库命中，未访问 NIST WebBook。")
     return NistWebBookResult(
         query=query.strip(),
         search_type="local_database",
         requested_url="local:species_database.sqlite",
         compounds=(compound,),
         selected_compound=compound,
-        message=f"本地物种数据库命中: {match.name}，未访问 NIST WebBook。",
+        message=f"本地PICS截面数据库命中: {match.name}，未访问 NIST WebBook。",
     )
 
 
@@ -654,7 +654,7 @@ class NistWebBookClient:
                         local_match_to_compound(
                             match,
                             source="local_mz_candidate",
-                            message=f"本地物种数据库按分子式名义质量 m/z={nominal_mz} 命中候选；请人工确认结构。",
+                            message=f"本地PICS截面数据库按分子式名义质量 m/z={nominal_mz} 命中候选；请人工确认结构。",
                         )
                         for match in lookup_local_ionization_candidates_by_mz(
                             nominal_mz,
@@ -750,7 +750,7 @@ class NistWebBookClient:
             local_compound = local_match_to_compound(
                 match,
                 source="local_database",
-                message="本地物种数据库与 WebBook 候选名称精确匹配。",
+                message="本地PICS截面数据库与 WebBook 候选名称精确匹配。",
             )
             if local_compound.nist_id not in seen_local_ids:
                 local_by_webbook_name.append(local_compound)

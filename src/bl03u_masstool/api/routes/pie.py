@@ -134,7 +134,7 @@ def create_router(deps) -> APIRouter:
             raise HTTPException(status_code=409, detail=f"job status is {job.status}")
         database_path = Path(job.database_path)
         if not database_path.exists() or not database_path.is_file():
-            raise HTTPException(status_code=404, detail="SQLite PICS库不存在")
+            raise HTTPException(status_code=404, detail="SQLite PICS截面数据库不存在")
         return {"rows": deps._query_fit_candidates(database_path, int(mz))}
 
     @router.get("/api/pie/candidate_curves/{job_id}/{mz}")
@@ -144,7 +144,7 @@ def create_router(deps) -> APIRouter:
             raise HTTPException(status_code=409, detail=f"job status is {job.status}")
         database_path = Path(job.database_path)
         if not database_path.exists() or not database_path.is_file():
-            raise HTTPException(status_code=404, detail="SQLite PICS库不存在")
+            raise HTTPException(status_code=404, detail="SQLite PICS截面数据库不存在")
         selected_ids = deps._parse_species_ids(species_ids)
         if not selected_ids:
             selected_ids = [row["id"] for row in deps._query_fit_candidates(database_path, int(mz))]

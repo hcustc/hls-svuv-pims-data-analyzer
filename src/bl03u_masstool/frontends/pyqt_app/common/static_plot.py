@@ -157,7 +157,7 @@ class StaticCurvePlot(QtWidgets.QWidget):
         *,
         x_pad_min: float = 0.2,
         y_pad_min: float = 0.05,
-        y_floor: float | None = 0.0,
+        y_floor: float | None = None,
     ) -> None:
         if self.axes is None:
             return
@@ -175,14 +175,18 @@ class StaticCurvePlot(QtWidgets.QWidget):
         if y_min == y_max:
             y_min -= y_pad_min
             y_max += y_pad_min
-        # Apply 5% margins
-        x_pad = max(x_pad_min, (x_max - x_min) * 0.05)
-        y_pad = max(y_pad_min, (y_max - y_min) * 0.05)
+        # Apply 8% margins (between 5-10% as specified)
+        x_pad = max(x_pad_min, (x_max - x_min) * 0.08)
+        y_pad = max(y_pad_min, (y_max - y_min) * 0.08)
+        upper_y = y_max + y_pad
         lower_y = y_min - y_pad
-        if y_floor is not None:
+        # Special handling when y_min is 0: add modest negative margin (20% of padding)
+        if y_min == 0.0:
+            lower_y = -y_pad * 0.2
+        elif y_floor is not None:
             lower_y = max(y_floor, lower_y)
         self.axes.set_xlim(x_min - x_pad, x_max + x_pad)
-        self.axes.set_ylim(lower_y, y_max + y_pad)
+        self.axes.set_ylim(lower_y, upper_y)
 
     def finish(self, *, legend: bool = False, legend_loc: str = "best", legend_bbox_to_anchor: tuple[float, float] | None = None) -> None:
         if self.axes is None or self.canvas is None:
