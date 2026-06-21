@@ -361,9 +361,9 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         # 拟合统计条属于图表区域，不作为 splitter 的独立面板，避免挤占下方功能区。
         stats_bar = QtWidgets.QFrame()
         stats_bar.setObjectName("StatsBar")
-        stats_bar.setFixedHeight(32)
+        stats_bar.setFixedHeight(36)  # Adjusted from 32px to 36px for better visual proportion
         stats_bar_layout = QtWidgets.QHBoxLayout(stats_bar)
-        stats_bar_layout.setContentsMargins(10, 2, 10, 2)
+        stats_bar_layout.setContentsMargins(10, 4, 10, 4)  # Adjusted from (10, 2, 10, 2) for 36px height
         stats_bar_layout.setSpacing(12)
         stats_title = QtWidgets.QLabel("拟合统计")
         stats_title.setObjectName("StatsTitle")

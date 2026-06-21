@@ -202,7 +202,7 @@ class StaticCurvePlot(QtWidgets.QWidget):
                     "ncol": column_count,
                     "labelspacing": 0.35,
                     "handlelength": 1.8,
-                    "borderpad": 0.5,
+                    "borderpad": 0.8,  # Increased from 0.5 to 0.8 for 10-15px padding
                 }
                 if legend_bbox_to_anchor is not None:
                     legend_kwargs["bbox_to_anchor"] = legend_bbox_to_anchor
