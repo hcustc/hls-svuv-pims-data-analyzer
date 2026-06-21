@@ -150,11 +150,11 @@ class FittingControlWidget(QtWidgets.QWidget):
         control_row2.addStretch()
         main_layout.addLayout(control_row2)
 
-        # ---- 下方：统一物种表格 ----
+        # ---- 下方：简化物种表格（4列：启用 | 物种(※) | 系数 | 操作） ----
         self.species_table = QtWidgets.QTableWidget()
-        self.species_table.setColumnCount(9)
+        self.species_table.setColumnCount(4)
         self.species_table.setHorizontalHeaderLabels([
-            "启用", "物种", "m/z", "IE(eV)", "来源", "约束状态", "系数", "锁定", "移除"
+            "启用", "物种", "系数", "操作"
         ])
         self.species_table.setWordWrap(False)
         self.species_table.setAlternatingRowColors(True)
@@ -292,18 +292,23 @@ class FittingControlWidget(QtWidgets.QWidget):
         try:
             self.species_table.setRowCount(len(self._unified_species_data))
 
+            # 更新header显示当前m/z
+            if self._current_mz is not None:
+                self.species_table.horizontalHeader().setSectionResizeMode(
+                    0, QtWidgets.QHeaderView.ResizeMode.ResizeToContents
+                )
+                self.species_table.setHorizontalHeaderLabels([
+                    "启用", f"物种 (m/z={self._current_mz})", "系数", "操作"
+                ])
+
             header = self.species_table.horizontalHeader()
-            # 设置列宽
-            self.species_table.setColumnWidth(0, 40)   # 启用
-            self.species_table.setColumnWidth(2, 50)   # m/z
-            self.species_table.setColumnWidth(3, 70)   # IE
-            self.species_table.setColumnWidth(4, 80)   # 来源
-            self.species_table.setColumnWidth(5, 100)  # 约束状态
-            self.species_table.setColumnWidth(8, 50)   # 移除
+            # 设置列宽（简化后的4列）
+            self.species_table.setColumnWidth(0, 40)   # 启用 checkbox
+            self.species_table.setColumnWidth(2, 120)  # 系数
+            self.species_table.setColumnWidth(3, 50)   # 操作 (删除按钮)
 
             # 自适应列
             header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Stretch)  # 物种名称
-            header.setSectionResizeMode(6, QtWidgets.QHeaderView.ResizeMode.Stretch)  # 系数
 
             for row, species in enumerate(self._unified_species_data):
                 self._populate_table_row(row, species)
@@ -311,7 +316,7 @@ class FittingControlWidget(QtWidgets.QWidget):
             self._updating = False
 
     def _populate_table_row(self, row: int, species: dict):
-        """填充表格的一行"""
+        """填充表格的一行（简化为4列）"""
         # Col 0: 启用 checkbox
         enable_widget = QtWidgets.QWidget()
         enable_layout = QtWidgets.QHBoxLayout(enable_widget)
@@ -323,47 +328,72 @@ class FittingControlWidget(QtWidgets.QWidget):
         enable_layout.addWidget(enable_chk)
         self.species_table.setCellWidget(row, 0, enable_widget)
 
-        # Col 1: 物种名称
-        name_item = QtWidgets.QTableWidgetItem(str(species.get('species', '')))
-        name_item.setFlags(name_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
-        self.species_table.setItem(row, 1, name_item)
+        # Col 1: 物种名称 + 切换按钮 (※)
+        species_widget = QtWidgets.QWidget()
+        species_layout = QtWidgets.QHBoxLayout(species_widget)
+        species_layout.setContentsMargins(4, 0, 4, 0)
+        species_layout.setSpacing(4)
 
-        # Col 2: m/z
-        mz_item = QtWidgets.QTableWidgetItem(str(species.get('mz', '')))
-        mz_item.setFlags(mz_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
-        self.species_table.setItem(row, 2, mz_item)
+        # 物种名称 (QLabel)
+        species_name = species.get('species', '')
+        name_label = QtWidgets.QLabel(species_name)
+        name_label.setWordWrap(False)
+        species_layout.addWidget(name_label, stretch=1)
 
-        # Col 3: IE(eV)
+        # 切换按钮 (※) - 仅在强制参与时显示背景
+        toggle_btn = QtWidgets.QPushButton("※")
+        toggle_btn.setFixedSize(24, 24)
+        toggle_btn.setFlat(False)
+        toggle_btn.setToolTip("点击切换强制/普通状态")
+        toggle_btn.clicked.connect(lambda checked=False, r=row: self._toggle_forced_status(r))
+
+        # 根据强制状态设置按钮样式
+        is_forced = species.get('is_forced', False)
+        if is_forced:
+            toggle_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #fbbf24;
+                    border: 1px solid #f59e0b;
+                    border-radius: 3px;
+                    font-weight: bold;
+                    color: #92400e;
+                }
+                QPushButton:hover {
+                    background-color: #fcd34d;
+                }
+            """)
+        else:
+            toggle_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #e5e7eb;
+                    border: 1px solid #d1d5db;
+                    border-radius: 3px;
+                }
+                QPushButton:hover {
+                    background-color: #f3f4f6;
+                }
+            """)
+
+        species_layout.addWidget(toggle_btn)
+
+        # 添加Tooltip：m/z、IE、来源、锁定状态
         ie = species.get('ionization_energy', 0.0)
-        ie_text = f"{float(ie):.4f}" if ie else ""
-        ie_item = QtWidgets.QTableWidgetItem(ie_text)
-        ie_item.setFlags(ie_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
-        self.species_table.setItem(row, 3, ie_item)
+        ie_text = f"{float(ie):.4f}" if ie else "N/A"
+        source = species.get('source', '自动')
+        locked = "是" if species.get('is_locked', False) else "否"
+        tooltip_text = (
+            f"物种: {species_name}\n"
+            f"m/z: {species.get('mz', 'N/A')}\n"
+            f"IE: {ie_text} eV\n"
+            f"来源: {source}\n"
+            f"锁定: {locked}"
+        )
+        name_label.setToolTip(tooltip_text)
+        toggle_btn.setToolTip(tooltip_text + "\n\n点击切换强制/普通状态")
 
-        # Col 4: 来源（显示标签）
-        source_label = "自动"
-        if species.get('source') == 'manual':
-            source_label = "手动"
-        elif species.get('source') == 'automatic+manual':
-            source_label = "自动+手动"
-        source_item = QtWidgets.QTableWidgetItem(source_label)
-        source_item.setFlags(source_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
-        self.species_table.setItem(row, 4, source_item)
+        self.species_table.setCellWidget(row, 1, species_widget)
 
-        # Col 5: 约束状态（可点击按钮切换）
-        status_widget = QtWidgets.QWidget()
-        status_layout = QtWidgets.QHBoxLayout(status_widget)
-        status_layout.setContentsMargins(2, 0, 2, 0)
-        status_btn = QtWidgets.QPushButton()
-        status_text = "强制参与" if species.get('is_forced') else "普通候选"
-        status_btn.setText(status_text)
-        status_btn.setFixedHeight(24)
-        status_btn.setToolTip("点击切换约束状态")
-        status_btn.clicked.connect(lambda checked=False, r=row: self._toggle_forced_status(r))
-        status_layout.addWidget(status_btn)
-        self.species_table.setCellWidget(row, 5, status_widget)
-
-        # Col 6: 系数（QDoubleSpinBox）
+        # Col 2: 系数（QDoubleSpinBox）
         coeff_spin = QtWidgets.QDoubleSpinBox()
         coeff_spin.setRange(0, 1e6)
         coeff_spin.setDecimals(6)
@@ -373,22 +403,9 @@ class FittingControlWidget(QtWidgets.QWidget):
         coeff_spin.setFixedHeight(24)
         coeff_spin.setContentsMargins(0, 0, 0, 0)
         coeff_spin.valueChanged.connect(lambda val, r=row: self._on_row_changed(r))
-        self.species_table.setCellWidget(row, 6, coeff_spin)
+        self.species_table.setCellWidget(row, 2, coeff_spin)
 
-        # Col 7: 锁定 checkbox
-        lock_widget = QtWidgets.QWidget()
-        lock_layout = QtWidgets.QHBoxLayout(lock_widget)
-        lock_layout.setContentsMargins(0, 0, 0, 0)
-        lock_layout.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        lock_chk = QtWidgets.QCheckBox()
-        lock_chk.setChecked(species.get('is_locked', False))
-        mode = self.coefficient_mode_combo.currentData()
-        lock_chk.setEnabled(mode == "locked_fit")
-        lock_chk.stateChanged.connect(lambda state, r=row: self._on_row_changed(r))
-        lock_layout.addWidget(lock_chk)
-        self.species_table.setCellWidget(row, 7, lock_widget)
-
-        # Col 8: 移除按钮
+        # Col 3: 操作 (删除按钮)
         remove_widget = QtWidgets.QWidget()
         remove_layout = QtWidgets.QHBoxLayout(remove_widget)
         remove_layout.setContentsMargins(0, 0, 0, 0)
@@ -398,7 +415,7 @@ class FittingControlWidget(QtWidgets.QWidget):
         remove_btn.setToolTip("移除物种")
         remove_btn.clicked.connect(lambda checked=False, r=row: self._remove_row(r))
         remove_layout.addWidget(remove_btn)
-        self.species_table.setCellWidget(row, 8, remove_widget)
+        self.species_table.setCellWidget(row, 3, remove_widget)
 
     def _toggle_forced_status(self, row: int):
         """切换物种的强制状态"""
@@ -415,13 +432,36 @@ class FittingControlWidget(QtWidgets.QWidget):
                 self._force_species.remove(species_name)
                 self.force_species_removed.emit(species_name)
 
-            # 刷新按钮文本
-            status_widget = self.species_table.cellWidget(row, 5)
-            if status_widget:
-                status_btn = status_widget.findChild(QtWidgets.QPushButton)
-                if status_btn:
-                    status_text = "强制参与" if species['is_forced'] else "普通候选"
-                    status_btn.setText(status_text)
+            # 刷新按钮样式 (Col 1 的切换按钮)
+            species_widget = self.species_table.cellWidget(row, 1)
+            if species_widget:
+                toggle_btn = species_widget.findChild(QtWidgets.QPushButton)
+                if toggle_btn:
+                    is_forced = species['is_forced']
+                    if is_forced:
+                        toggle_btn.setStyleSheet("""
+                            QPushButton {
+                                background-color: #fbbf24;
+                                border: 1px solid #f59e0b;
+                                border-radius: 3px;
+                                font-weight: bold;
+                                color: #92400e;
+                            }
+                            QPushButton:hover {
+                                background-color: #fcd34d;
+                            }
+                        """)
+                    else:
+                        toggle_btn.setStyleSheet("""
+                            QPushButton {
+                                background-color: #e5e7eb;
+                                border: 1px solid #d1d5db;
+                                border-radius: 3px;
+                            }
+                            QPushButton:hover {
+                                background-color: #f3f4f6;
+                            }
+                        """)
 
             self.species_config_changed.emit()
             self.species_forced_toggled.emit(species_name)
@@ -454,17 +494,10 @@ class FittingControlWidget(QtWidgets.QWidget):
             if enable_chk:
                 species['is_enabled'] = enable_chk.isChecked()
 
-        # 更新系数
-        coeff_widget = self.species_table.cellWidget(row, 6)
+        # 更新系数 (Col 2)
+        coeff_widget = self.species_table.cellWidget(row, 2)
         if isinstance(coeff_widget, QtWidgets.QDoubleSpinBox):
             species['coefficient'] = coeff_widget.value()
-
-        # 更新锁定状态
-        lock_widget = self.species_table.cellWidget(row, 7)
-        if lock_widget:
-            lock_chk = lock_widget.findChild(QtWidgets.QCheckBox)
-            if lock_chk:
-                species['is_locked'] = lock_chk.isChecked()
 
         self.species_config_changed.emit()
 
@@ -473,19 +506,10 @@ class FittingControlWidget(QtWidgets.QWidget):
         mode = self.coefficient_mode_combo.currentData()
 
         for row in range(self.species_table.rowCount()):
-            # 更新系数输入框启用状态
-            coeff_widget = self.species_table.cellWidget(row, 6)
+            # 更新系数输入框启用状态 (Col 2)
+            coeff_widget = self.species_table.cellWidget(row, 2)
             if isinstance(coeff_widget, QtWidgets.QDoubleSpinBox):
                 coeff_widget.setEnabled(mode != "auto")
-
-            # 更新锁定checkbox启用状态
-            lock_widget = self.species_table.cellWidget(row, 7)
-            if lock_widget:
-                lock_chk = lock_widget.findChild(QtWidgets.QCheckBox)
-                if lock_chk:
-                    lock_chk.setEnabled(mode == "locked_fit")
-                    if mode != "locked_fit":
-                        lock_chk.setChecked(False)
 
         self.coefficient_mode_changed.emit(mode)
 
@@ -509,7 +533,7 @@ class FittingControlWidget(QtWidgets.QWidget):
         self._updating = True
         try:
             for row in range(self.species_table.rowCount()):
-                coeff_widget = self.species_table.cellWidget(row, 6)
+                coeff_widget = self.species_table.cellWidget(row, 2)  # Col 2: 系数
                 if isinstance(coeff_widget, QtWidgets.QDoubleSpinBox):
                     coeff_widget.setValue(0.0)
                     self._unified_species_data[row]['coefficient'] = 0.0
@@ -525,12 +549,15 @@ class FittingControlWidget(QtWidgets.QWidget):
         try:
             coeff_by_name = {sp.get("species"): float(sp.get("coefficient", 0)) for sp in species_list}
             for row in range(self.species_table.rowCount()):
-                name_item = self.species_table.item(row, 1)
-                if name_item and name_item.text() in coeff_by_name:
-                    coeff_spin = self.species_table.cellWidget(row, 6)
-                    if isinstance(coeff_spin, QtWidgets.QDoubleSpinBox):
-                        coeff_spin.setValue(coeff_by_name[name_item.text()])
-                        self._unified_species_data[row]['coefficient'] = coeff_by_name[name_item.text()]
+                # 获取物种名 (从 Col 1 的 widget 中)
+                species_widget = self.species_table.cellWidget(row, 1)
+                if species_widget:
+                    name_label = species_widget.findChild(QtWidgets.QLabel)
+                    if name_label and name_label.text() in coeff_by_name:
+                        coeff_spin = self.species_table.cellWidget(row, 2)  # Col 2: 系数
+                        if isinstance(coeff_spin, QtWidgets.QDoubleSpinBox):
+                            coeff_spin.setValue(coeff_by_name[name_label.text()])
+                            self._unified_species_data[row]['coefficient'] = coeff_by_name[name_label.text()]
         finally:
             self._updating = False
 
