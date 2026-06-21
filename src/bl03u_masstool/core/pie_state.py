@@ -238,7 +238,38 @@ class PieStateManager:
                     for array_name, ref in arrays_ref.items():
                         if ':' in ref:
                             npz_file = ref.split(':')[0]
+
+                            # Security: Validate NPZ filename format
+                            # Must be mz_<number>.npz
+                            import re
+                            if not re.match(r'^mz_\d+\.npz$', npz_file):
+                                result['success'] = False
+                                result['error'] = f'Invalid array reference format: {ref}'
+                                obsolete_reasons[mz_str] = f'无效的数组引用: {ref}'
+                                warnings.append(
+                                    f'm/z {mz_str} 的数组引用格式无效，结果已禁用'
+                                )
+                                break
+
+                            # Build and validate path
                             npz_path = os.path.join(self.state_dir, 'arrays', npz_file)
+                            try:
+                                real_path = os.path.realpath(npz_path)
+                                real_state_dir = os.path.realpath(self.state_dir)
+                                if not real_path.startswith(real_state_dir + os.sep):
+                                    result['success'] = False
+                                    result['error'] = '数组文件路径超出状态目录'
+                                    obsolete_reasons[mz_str] = '非法的数组路径'
+                                    warnings.append(
+                                        f'm/z {mz_str} 的数组路径超出范围，结果已禁用'
+                                    )
+                                    break
+                            except (OSError, ValueError):
+                                result['success'] = False
+                                result['error'] = '数组文件路径验证失败'
+                                obsolete_reasons[mz_str] = '路径验证失败'
+                                break
+
                             if not os.path.exists(npz_path):
                                 result['success'] = False
                                 result['error'] = f'数组文件缺失: {npz_file}'
@@ -281,12 +312,48 @@ class PieStateManager:
             Dict of {array_name: numpy_array}
         """
         npz_path = os.path.join(self.state_dir, 'arrays', f'mz_{mz}.npz')
+
+        # Security: Verify path is within state_dir (prevent path traversal)
+        try:
+            real_path = os.path.realpath(npz_path)
+            real_state_dir = os.path.realpath(self.state_dir)
+            if not real_path.startswith(real_state_dir + os.sep):
+                logger.error(f'Path traversal attempt detected: {npz_path}')
+                return {}
+        except (OSError, ValueError):
+            return {}
+
         if not os.path.exists(npz_path):
             return {}
 
         try:
+            # Safe load: no pickle deserialization
             data = np.load(npz_path, allow_pickle=False)
             arrays = {name: data[name] for name in data.files}
+
+            # Validate array shapes and dtypes
+            expected_arrays = {
+                'energies': (float, 1),  # (dtype, ndim)
+                'intensities': (float, 1),
+                'fitted_curve': (float, 1),
+                'component_curves': (None, None),  # Variable shape
+                'residuals': (float, 1),
+            }
+
+            for array_name, array in arrays.items():
+                if array_name in expected_arrays:
+                    expected_dtype, expected_ndim = expected_arrays[array_name]
+                    if expected_dtype is not None:
+                        if array.dtype.kind != 'f':  # float type check
+                            logger.warning(
+                                f'Unexpected dtype for {array_name}: {array.dtype}'
+                            )
+                    if expected_ndim is not None:
+                        if array.ndim != expected_ndim:
+                            logger.warning(
+                                f'Unexpected ndim for {array_name}: {array.ndim}'
+                            )
+
             return arrays
         except Exception as e:
             logger.error(f'Failed to load arrays for m/z {mz}: {e}')
