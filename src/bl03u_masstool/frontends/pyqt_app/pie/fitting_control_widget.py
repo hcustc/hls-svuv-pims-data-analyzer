@@ -252,12 +252,14 @@ class FittingControlWidget(QtWidgets.QWidget):
                 ie_item.setFlags(ie_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
                 self.candidate_table.setItem(row, 3, ie_item)
 
-                # 系数 spinbox
+                # 系数 spinbox（减小高度和内边距以节省空间）
                 coeff_spin = QtWidgets.QDoubleSpinBox()
                 coeff_spin.setRange(0, 1e6)
                 coeff_spin.setDecimals(6)
                 coeff_spin.setValue(0.0)
                 coeff_spin.setEnabled(False)
+                coeff_spin.setFixedHeight(24)  # 固定高度，避免占用过多空间
+                coeff_spin.setContentsMargins(0, 0, 0, 0)
                 coeff_spin.valueChanged.connect(lambda val, r=row: self._on_candidate_changed(r))
                 self.candidate_table.setCellWidget(row, 4, coeff_spin)
 
@@ -272,8 +274,17 @@ class FittingControlWidget(QtWidgets.QWidget):
                 lock_layout.addWidget(lock_chk)
                 self.candidate_table.setCellWidget(row, 5, lock_widget)
 
-            self.candidate_table.resizeColumnsToContents()
-            self.candidate_table.horizontalHeader().setStretchLastSection(True)
+            # 设置列宽策略
+            header = self.candidate_table.horizontalHeader()
+            # 固定宽列：选择、m/z、IE、锁定
+            self.candidate_table.setColumnWidth(0, 40)   # 选择 checkbox
+            self.candidate_table.setColumnWidth(2, 50)   # m/z
+            self.candidate_table.setColumnWidth(3, 70)   # IE
+            self.candidate_table.setColumnWidth(5, 40)   # 锁定 checkbox
+
+            # 自适应列：物种名称、系数
+            header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Stretch)  # 物种名称
+            header.setSectionResizeMode(4, QtWidgets.QHeaderView.ResizeMode.Stretch)  # 系数
         finally:
             self._candidate_updating = False
 
