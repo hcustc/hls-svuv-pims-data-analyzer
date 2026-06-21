@@ -420,12 +420,11 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         # ---- 连接FittingControlWidget信号 ----
         self.fitting_control_widget.force_species_added.connect(self._on_force_species_changed)
         self.fitting_control_widget.force_species_removed.connect(self._on_force_species_changed)
-        self.fitting_control_widget.force_species_cleared.connect(self._on_force_species_changed)
+        self.fitting_control_widget.species_config_changed.connect(self._on_fitting_config_changed)
         self.fitting_control_widget.coefficient_mode_changed.connect(self._on_fitting_config_changed)
-        self.fitting_control_widget.candidate_selection_changed.connect(self._on_fitting_config_changed)
-        self.fitting_control_widget.candidate_coefficient_changed.connect(self._on_fitting_config_changed)
         self.fitting_control_widget.candidates_import_requested.connect(self._on_import_coefficients_requested)
         self.fitting_control_widget.candidates_zeroed.connect(self._on_fitting_config_changed)
+        self.fitting_control_widget.species_forced_toggled.connect(self._on_force_species_changed)
 
         # ---- 连接ResultDisplayWidget信号 ----
         self.result_display_widget.export_requested.connect(self.export_pie_results)
@@ -462,15 +461,12 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.curve_table = self.result_display_widget.curve_table
         self.fit_table = self.result_display_widget.fit_table
 
-        # 拟合控制widget中的组件
-        self.candidate_table = self.fitting_control_widget.candidate_table
-        self.force_input = self.fitting_control_widget.force_input
-        self.force_tag_layout = self.fitting_control_widget.force_tag_layout
+        # 拟合控制widget中的组件（为兼容性创建引用）
+        self.species_table = self.fitting_control_widget.species_table
+        self.species_input = self.fitting_control_widget.species_input
         self.coefficient_mode_combo = self.fitting_control_widget.coefficient_mode_combo
-        self.candidate_select_all_btn = self.fitting_control_widget.candidate_select_all_btn
-        self.candidate_clear_btn = self.fitting_control_widget.candidate_clear_btn
-        self.candidate_import_coeff_btn = self.fitting_control_widget.candidate_import_coeff_btn
-        self.candidate_zero_coeff_btn = self.fitting_control_widget.candidate_zero_coeff_btn
+        # 向后兼容性别名
+        self.candidate_table = self.species_table
 
     def _open_project_settings(self):
         """跳转到项目管理页面。"""
@@ -748,10 +744,10 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         }
 
     def _restore_mz_config(self, mz: int) -> None:
-        """从 per_mz_config 恢复指定 m/z 的配置到 UI 表格"""
-        if mz not in self.per_mz_config or not self.fitting_control_widget._candidate_data:
+        """从 per_mz_config 恢复指定 m/z 的配置到 UI表格"""
+        if mz not in self.per_mz_config:
             # 如果没有历史配置，初始化默认配置（全选）
-            self.fitting_control_widget._set_all_candidates_checked(True)
+            self.fitting_control_widget._set_all_rows_checked(True)
             self.coefficient_mode_combo.setCurrentIndex(0)  # 默认"自动拟合"
             return
 
@@ -761,32 +757,33 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         coefficients = config.get("coefficients", {})
         locked_ids = config.get("locked_ids", [])
 
-        # 还原候选物种选择
+        # 还原物种选择
         selected_species_ids = {int(s.get("id", -1)) for s in selected_species}
-        self.fitting_control_widget._candidate_updating = True
+        self.fitting_control_widget._updating = True
         try:
-            for row in range(self.candidate_table.rowCount()):
-                if row < len(self.fitting_control_widget._candidate_data):
-                    species_id = int(self.fitting_control_widget._candidate_data[row].get("id", row + 1))
-                    check_widget = self.candidate_table.cellWidget(row, 0)
-                    if check_widget:
-                        chk = check_widget.findChild(QtWidgets.QCheckBox)
-                        if chk:
-                            chk.setChecked(species_id in selected_species_ids)
+            unified_data = self.fitting_control_widget._unified_species_data
+            for row in range(self.species_table.rowCount()):
+                if row < len(unified_data):
+                    species_id = int(unified_data[row].get("id", row + 1))
+                    enable_widget = self.species_table.cellWidget(row, 0)
+                    if enable_widget:
+                        enable_chk = enable_widget.findChild(QtWidgets.QCheckBox)
+                        if enable_chk:
+                            enable_chk.setChecked(species_id in selected_species_ids)
 
                     # 还原系数
-                    coeff_spin = self.candidate_table.cellWidget(row, 4)
-                    if isinstance(coeff_spin, QtWidgets.QDoubleSpinBox):
-                        coeff_spin.setValue(coefficients.get(species_id, 0.0))
+                    coeff_widget = self.species_table.cellWidget(row, 6)
+                    if isinstance(coeff_widget, QtWidgets.QDoubleSpinBox):
+                        coeff_widget.setValue(coefficients.get(species_id, 0.0))
 
                     # 还原锁定状态
-                    lock_widget = self.candidate_table.cellWidget(row, 5)
+                    lock_widget = self.species_table.cellWidget(row, 7)
                     if lock_widget:
                         lock_chk = lock_widget.findChild(QtWidgets.QCheckBox)
                         if lock_chk:
                             lock_chk.setChecked(species_id in locked_ids)
         finally:
-            self.fitting_control_widget._candidate_updating = False
+            self.fitting_control_widget._updating = False
 
         # 还原系数模式
         mode_index = self.coefficient_mode_combo.findData(mode)
@@ -796,98 +793,37 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
     # ---- 候选物种面板方法 ----
 
     def _populate_candidate_table(self, mz: int):
-        """根据选中的m/z填充候选物种表格（委托给FittingControlWidget）"""
+        """根据选中的m/z填充统一的拟合物种表格"""
         filtered_db = self.get_filtered_database()
-        self.fitting_control_widget.populate_candidate_table(mz, filtered_db)
-
-    def _on_candidate_changed(self, row: int):
-        """候选表格变化时实时刷新拟合预览"""
-        if self._candidate_updating:
-            return
-        self._rebuild_manual_fit()
-
-    def _on_coefficient_mode_changed(self, index: int):
-        """系数模式切换"""
-        mode = self.coefficient_mode_combo.currentData()
-        for row in range(self.candidate_table.rowCount()):
-            coeff_spin = self.candidate_table.cellWidget(row, 4)
-            if isinstance(coeff_spin, QtWidgets.QDoubleSpinBox):
-                coeff_spin.setEnabled(mode != "auto")
-            lock_widget = self.candidate_table.cellWidget(row, 5)
-            if lock_widget:
-                lock_chk = lock_widget.findChild(QtWidgets.QCheckBox)
-                if lock_chk:
-                    lock_chk.setEnabled(mode == "locked_fit")
-                    if mode != "locked_fit":
-                        lock_chk.setChecked(False)
-        self._rebuild_manual_fit()
-
-    def _set_all_candidates_checked(self, checked: bool):
-        """全选或清空候选物种"""
-        self._candidate_updating = True
-        try:
-            for row in range(self.candidate_table.rowCount()):
-                check_widget = self.candidate_table.cellWidget(row, 0)
-                if check_widget:
-                    chk = check_widget.findChild(QtWidgets.QCheckBox)
-                    if chk:
-                        chk.setChecked(checked)
-        finally:
-            self._candidate_updating = False
-        self._rebuild_manual_fit()
-
-    def _import_coefficients_from_fit(self):
-        """从当前拟合结果导入系数到候选面板"""
-        if self.current_fit is None:
-            return
-        species_list = self.current_fit.get("species", [])
-        if not species_list:
-            return
-        self._candidate_updating = True
-        try:
-            coeff_by_name = {sp.get("species"): float(sp.get("coefficient", 0)) for sp in species_list}
-            for row in range(self.candidate_table.rowCount()):
-                name_item = self.candidate_table.item(row, 1)
-                if name_item and name_item.text() in coeff_by_name:
-                    coeff_spin = self.candidate_table.cellWidget(row, 4)
-                    if isinstance(coeff_spin, QtWidgets.QDoubleSpinBox):
-                        coeff_spin.setValue(coeff_by_name[name_item.text()])
-        finally:
-            self._candidate_updating = False
-        self._rebuild_manual_fit()
-
-    def _zero_all_coefficients(self):
-        """将所有候选物种系数清零"""
-        self._candidate_updating = True
-        try:
-            for row in range(self.candidate_table.rowCount()):
-                coeff_spin = self.candidate_table.cellWidget(row, 4)
-                if isinstance(coeff_spin, QtWidgets.QDoubleSpinBox):
-                    coeff_spin.setValue(0.0)
-        finally:
-            self._candidate_updating = False
-        self._rebuild_manual_fit()
+        force_species = self.get_force_species()
+        self.fitting_control_widget.populate_unified_species_table(mz, filtered_db, force_species)
 
     def _get_candidate_panel_state(self) -> dict:
-        """获取候选面板当前状态"""
+        """从统一的物种表格中获取当前配置状态"""
         mode = self.coefficient_mode_combo.currentData()
         selected_species = []
         locked_ids = []
         coefficients = {}
 
-        for row in range(self.candidate_table.rowCount()):
-            check_widget = self.candidate_table.cellWidget(row, 0)
-            chk = check_widget.findChild(QtWidgets.QCheckBox) if check_widget else None
-            if chk and chk.isChecked() and row < len(self.fitting_control_widget._candidate_data):
-                species = self.fitting_control_widget._candidate_data[row]
-                species_id = int(species.get("id", row + 1))
+        # 从统一的数据结构中提取
+        unified_data = self.fitting_control_widget._unified_species_data
+
+        for row, species in enumerate(unified_data):
+            # 检查启用状态
+            enable_widget = self.species_table.cellWidget(row, 0)
+            enable_chk = enable_widget.findChild(QtWidgets.QCheckBox) if enable_widget else None
+            if enable_chk and enable_chk.isChecked():
                 selected_species.append(species)
 
-                coeff_spin = self.candidate_table.cellWidget(row, 4)
-                if isinstance(coeff_spin, QtWidgets.QDoubleSpinBox):
-                    coefficients[species_id] = coeff_spin.value()
+                species_id = int(species.get("id", row + 1))
 
-                lock_widget = self.candidate_table.cellWidget(row, 5)
+                # 提取系数
+                coeff_widget = self.species_table.cellWidget(row, 6)
+                if isinstance(coeff_widget, QtWidgets.QDoubleSpinBox):
+                    coefficients[species_id] = coeff_widget.value()
+
+                # 提取锁定状态
+                lock_widget = self.species_table.cellWidget(row, 7)
                 if lock_widget:
                     lock_chk = lock_widget.findChild(QtWidgets.QCheckBox)
                     if lock_chk and lock_chk.isChecked():
