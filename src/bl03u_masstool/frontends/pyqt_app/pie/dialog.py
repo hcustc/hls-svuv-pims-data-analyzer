@@ -244,6 +244,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
         # ── 曲线列表区拟合控制 ──
         self.fit_all_button = QtWidgets.QPushButton("拟合全部")
+        self.fit_all_button.setObjectName("BrowseButton")  # Secondary style
         self.fit_all_button.setToolTip("一键拟合所有PIE曲线")
         self.fit_all_button.clicked.connect(self.fit_all_curves)
         self.fit_all_button.setFixedHeight(28)
