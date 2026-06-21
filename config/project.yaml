@@ -16,7 +16,8 @@ data_sources:
     30 torr/peak_ranges-DHMC.csv
 analysis_artifacts:
   temperature_scan_result_file: ''
-  pie_identification_result_file: ''
+  pie_identification_result_file: /Users/huangchen/VscodeProject/BL03U_MSTool_clean_repo/BL03U_MassSpectrumTool/tests/fixtures/bl03u_sample/顺-13-二甲基环己烷
+    30 torr/PIE_identification_results-DHMC.xlsx
   mole_fraction_result_file: ''
 calibration:
   a: 3.66334e-07

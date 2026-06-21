@@ -26,6 +26,7 @@ from bl03u_masstool.core.isotope import (
 )
 from bl03u_masstool.core.nist_webbook import default_nist_webbook_client
 from bl03u_masstool.core.output_paths import ensure_output_dir
+from bl03u_masstool.core.peak_ranges import load_peak_ranges
 from bl03u_masstool.core.pie_analysis import analyze_pie_folder, build_pie_curves, identify_species_for_mz_with_curve, load_species_database, analyze_multiple_pie_folders, merge_pie_segments
 from bl03u_masstool.core.pics_calculator import calc_pics_single_energy
 from bl03u_masstool.core.elements import get_all_elements_from_database, filter_species_by_elements, COMMON_ELEMENTS, parse_formula as parse_formula_elements, get_elements_from_formula
@@ -140,6 +141,8 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
     def set_project_settings(self, ps: ProjectSettings) -> None:
         """Apply ProjectSettings defaults to MoleFractionDialog controls."""
         self.project_settings = ps
+        # 卡峰范围由项目管理统一维护，在此自动加载
+        self._load_peak_ranges_from_project()
         if hasattr(self, "spin_md_exponent"):
             self.spin_md_exponent.setValue(ps.mf_mass_disc_exponent)
         if hasattr(self, "spin_parent_mz"):
@@ -188,139 +191,125 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
     def _create_data_tab(self):
         widget = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(widget)
+        layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(8)
 
-        source_bar = QtWidgets.QWidget()
-        source_layout = QtWidgets.QHBoxLayout(source_bar)
-        source_layout.setContentsMargins(0, 0, 0, 0)
-        source_layout.setSpacing(8)
-        # PICS database is auto-loaded (built-in, not user-selectable)
-        source_layout.addStretch()
-        source_bar.setMaximumHeight(42)
-        source_bar.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
-        layout.addWidget(source_bar)
+        # 上下排布数据加载卡片
+        cards_container = QtWidgets.QWidget()
+        cards_layout = QtWidgets.QVBoxLayout(cards_container)
+        cards_layout.setContentsMargins(0, 0, 0, 0)
+        cards_layout.setSpacing(8)
 
-        self.data_load_tabs = QtWidgets.QTabWidget()
+        # ========== 温度扫描卡片 ==========
+        ts_card = QtWidgets.QGroupBox("温度扫描数据")
+        ts_card_layout = QtWidgets.QVBoxLayout(ts_card)
+        ts_card_layout.setContentsMargins(10, 6, 10, 6)
+        ts_card_layout.setSpacing(6)
 
-        ts_panel = QtWidgets.QWidget()
-        ts_layout = QtWidgets.QVBoxLayout(ts_panel)
-        ts_layout.setContentsMargins(8, 8, 8, 8)
-        ts_layout.setSpacing(8)
-        ts_control_panel = QtWidgets.QWidget()
-        ts_control_panel.setObjectName("ControlBar")
-        ts_control_panel_layout = QtWidgets.QVBoxLayout(ts_control_panel)
-        ts_control_panel_layout.setContentsMargins(10, 8, 10, 8)
-        ts_control_panel_layout.setSpacing(8)
-
-        file_peak_layout = QtWidgets.QHBoxLayout()
-        file_peak_layout.setSpacing(8)
-        file_peak_layout.addWidget(QtWidgets.QLabel("温度结果:"))
+        # 单行：数据载入 + 能量选择 + 状态
+        ts_row = QtWidgets.QHBoxLayout()
+        ts_row.setSpacing(6)
         self.btn_load_project_ts_result = QtWidgets.QPushButton("从项目载入")
         self.btn_load_project_ts_result.setToolTip("读取项目管理中登记的温度扫描结果文件")
         self.btn_load_project_ts_result.clicked.connect(self._load_project_temperature_result)
         self.btn_load_project_ts_result.setEnabled(False)
-        file_peak_layout.addWidget(self.btn_load_project_ts_result)
+        ts_row.addWidget(self.btn_load_project_ts_result)
         btn_load_ts_result = QtWidgets.QPushButton("选择结果文件")
         btn_load_ts_result.setToolTip("选择温度扫描导出的xlsx/csv结果文件")
         btn_load_ts_result.clicked.connect(self._load_temperature_result_file)
-        file_peak_layout.addWidget(btn_load_ts_result)
+        ts_row.addWidget(btn_load_ts_result)
         btn_add_folder = QtWidgets.QPushButton("添加能量文件夹")
         btn_add_folder.setToolTip("备用入口：添加包含温度扫描txt文件的能量文件夹并重新分析")
         btn_add_folder.clicked.connect(self._add_energy_folder)
-        file_peak_layout.addWidget(btn_add_folder)
-        btn_clear = QtWidgets.QPushButton("清空数据")
+        ts_row.addWidget(btn_add_folder)
+        btn_clear = QtWidgets.QPushButton("清空")
         btn_clear.setToolTip("清空所有已加载的温度扫描数据")
         btn_clear.clicked.connect(self._clear_temperature_scan)
-        file_peak_layout.addWidget(btn_clear)
-        self.lbl_ts_folder = QtWidgets.QLabel("未选择文件夹")
-        self.lbl_ts_folder.setStyleSheet("color: rgba(232, 232, 232, 0.6);")
-        self.lbl_ts_folder.setMinimumWidth(120)
-        self.lbl_ts_folder.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Preferred)
-        file_peak_layout.addWidget(self.lbl_ts_folder, 1)
-        self.lbl_ts_project_artifact = QtWidgets.QLabel("项目未登记温度结果")
-        self.lbl_ts_project_artifact.setStyleSheet("color: rgba(232, 232, 232, 0.6);")
-        file_peak_layout.addWidget(self.lbl_ts_project_artifact)
-
-        file_peak_layout.addSpacing(16)
-        file_peak_layout.addWidget(QtWidgets.QLabel("卡峰:"))
-        self.btn_import_peaks = QtWidgets.QPushButton("导入卡峰范围")
-        self.btn_import_peaks.setToolTip("导入包含质量数、起始通道、结束通道的CSV或Excel文件，并按该范围手动积分")
-        self.btn_import_peaks.clicked.connect(self._import_peak_ranges)
-        file_peak_layout.addWidget(self.btn_import_peaks)
-        self.btn_auto_find_peaks = QtWidgets.QPushButton("恢复自动寻峰")
-        self.btn_auto_find_peaks.setToolTip("清除手动卡峰范围，并对已加载温度扫描数据重新自动寻峰")
-        self.btn_auto_find_peaks.clicked.connect(self._auto_find_peaks)
-        file_peak_layout.addWidget(self.btn_auto_find_peaks)
-        self.lbl_peak_status = QtWidgets.QLabel("未设置（将自动寻峰）")
-        self.lbl_peak_status.setStyleSheet("color: #6495ed;")
-        self.lbl_peak_status.setMinimumWidth(150)
-        self.lbl_peak_status.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Preferred)
-        file_peak_layout.addWidget(self.lbl_peak_status, 1)
-        ts_control_panel_layout.addLayout(file_peak_layout)
-
-        energy_layout = QtWidgets.QHBoxLayout()
-        energy_layout.setSpacing(8)
-        energy_layout.addWidget(QtWidgets.QLabel("能量:"))
+        ts_row.addWidget(btn_clear)
+        ts_row.addSpacing(12)
+        ts_row.addWidget(QtWidgets.QLabel("能量:"))
         self.combo_energy_select = QtWidgets.QComboBox()
         self.combo_energy_select.addItem("全部能量")
         self.combo_energy_select.setMinimumWidth(120)
-        energy_layout.addWidget(self.combo_energy_select)
+        ts_row.addWidget(self.combo_energy_select)
         self.lbl_energy_count = QtWidgets.QLabel("")
         self.lbl_energy_count.setStyleSheet("color: #6495ed;")
-        energy_layout.addWidget(self.lbl_energy_count)
+        ts_row.addWidget(self.lbl_energy_count)
         self.btn_remove_energy = QtWidgets.QPushButton("移除选中能量")
         self.btn_remove_energy.clicked.connect(self._remove_selected_energy)
         self.btn_remove_energy.setEnabled(False)
         self.combo_energy_select.currentTextChanged.connect(self._on_energy_select)
-        energy_layout.addWidget(self.btn_remove_energy)
-        energy_layout.addStretch()
-        ts_control_panel_layout.addLayout(energy_layout)
-        ts_layout.addWidget(ts_control_panel)
+        ts_row.addWidget(self.btn_remove_energy)
+        ts_row.addSpacing(12)
+        self.lbl_ts_folder = QtWidgets.QLabel("未选择文件夹")
+        self.lbl_ts_folder.setStyleSheet("color: rgba(232, 232, 232, 0.6);")
+        ts_row.addWidget(self.lbl_ts_folder, 1)
+        self.lbl_ts_project_artifact = QtWidgets.QLabel("项目未登记温度结果")
+        self.lbl_ts_project_artifact.setStyleSheet("color: rgba(232, 232, 232, 0.6);")
+        ts_row.addWidget(self.lbl_ts_project_artifact)
+        ts_card_layout.addLayout(ts_row)
 
+        # 可展开数据表格（默认隐藏）
+        self.ts_table_group = QtWidgets.QGroupBox("数据详情")
+        self.ts_table_group.setCheckable(True)
+        self.ts_table_group.setChecked(False)
+        self.ts_table_group.setStyleSheet("QGroupBox::title { subcontrol-position: left top; }")
+        ts_table_layout = QtWidgets.QVBoxLayout(self.ts_table_group)
+        ts_table_layout.setContentsMargins(4, 4, 4, 4)
         self.ts_data_table = QtWidgets.QTableWidget()
         self.ts_data_table.setColumnCount(6)
         self.ts_data_table.setHorizontalHeaderLabels(["能量(eV)", "温度(°C)", "文件名", "IO(nA)", "重复次数", "检测到的质量数"])
         self.ts_data_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
-        self.ts_data_table.setMinimumHeight(140)
-        ts_layout.addWidget(self.ts_data_table, 1)
-        self.data_load_tabs.addTab(ts_panel, "温度扫描数据")
+        self.ts_data_table.setMaximumHeight(200)
+        ts_table_layout.addWidget(self.ts_data_table)
+        ts_card_layout.addWidget(self.ts_table_group)
 
-        pie_panel = QtWidgets.QWidget()
-        pie_layout = QtWidgets.QVBoxLayout(pie_panel)
-        pie_layout.setContentsMargins(8, 8, 8, 8)
-        pie_layout.setSpacing(8)
-        pie_control_panel = QtWidgets.QWidget()
-        pie_control_panel.setObjectName("ControlBar")
-        pie_control_layout = QtWidgets.QHBoxLayout(pie_control_panel)
-        pie_control_layout.setContentsMargins(10, 8, 10, 8)
-        pie_control_layout.setSpacing(8)
+        cards_layout.addWidget(ts_card)
+
+        # ========== PIE鉴定结果卡片 ==========
+        pie_card = QtWidgets.QGroupBox("PIE鉴定结果")
+        pie_card_layout = QtWidgets.QVBoxLayout(pie_card)
+        pie_card_layout.setContentsMargins(10, 6, 10, 6)
+        pie_card_layout.setSpacing(6)
+
+        pie_row = QtWidgets.QHBoxLayout()
+        pie_row.setSpacing(6)
         self.btn_load_project_pie_result = QtWidgets.QPushButton("从项目载入")
         self.btn_load_project_pie_result.setToolTip("读取项目管理中登记的PIE鉴定结果文件")
         self.btn_load_project_pie_result.clicked.connect(self._load_project_pie_results)
         self.btn_load_project_pie_result.setEnabled(False)
-        pie_control_layout.addWidget(self.btn_load_project_pie_result)
+        pie_row.addWidget(self.btn_load_project_pie_result)
         btn_load_pie = QtWidgets.QPushButton("加载PIE鉴定结果")
         btn_load_pie.clicked.connect(self._load_pie_results)
-        pie_control_layout.addWidget(btn_load_pie)
+        pie_row.addWidget(btn_load_pie)
+        pie_row.addSpacing(12)
         self.lbl_pie_status = QtWidgets.QLabel("未加载")
         self.lbl_pie_status.setStyleSheet("color: rgba(232, 232, 232, 0.6);")
-        pie_control_layout.addWidget(self.lbl_pie_status)
+        pie_row.addWidget(self.lbl_pie_status, 1)
         self.lbl_pie_project_artifact = QtWidgets.QLabel("项目未登记PIE结果")
         self.lbl_pie_project_artifact.setStyleSheet("color: rgba(232, 232, 232, 0.6);")
-        pie_control_layout.addWidget(self.lbl_pie_project_artifact)
-        pie_control_layout.addStretch()
-        pie_layout.addWidget(pie_control_panel)
+        pie_row.addWidget(self.lbl_pie_project_artifact)
+        pie_card_layout.addLayout(pie_row)
 
+        # 可展开物种表格（默认隐藏）
+        self.pie_table_group = QtWidgets.QGroupBox("物种列表")
+        self.pie_table_group.setCheckable(True)
+        self.pie_table_group.setChecked(False)
+        self.pie_table_group.setStyleSheet("QGroupBox::title { subcontrol-position: left top; }")
+        pie_table_layout = QtWidgets.QVBoxLayout(self.pie_table_group)
+        pie_table_layout.setContentsMargins(4, 4, 4, 4)
         self.pie_species_table = QtWidgets.QTableWidget()
         self.pie_species_table.setColumnCount(5)
         self.pie_species_table.setHorizontalHeaderLabels(["质量数", "物种名称", "电离能(eV)", "贡献比例(%)", "R²"])
         self.pie_species_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
         self.pie_species_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
-        self.pie_species_table.setMinimumHeight(150)
-        pie_layout.addWidget(self.pie_species_table, 1)
-        self.data_load_tabs.addTab(pie_panel, "PIE鉴定结果")
+        self.pie_species_table.setMaximumHeight(200)
+        pie_table_layout.addWidget(self.pie_species_table)
+        pie_card_layout.addWidget(self.pie_table_group)
 
-        layout.addWidget(self.data_load_tabs, 1)
+        cards_layout.addWidget(pie_card)
+        layout.addWidget(cards_container)
+        layout.addStretch()
         return widget
 
     def _create_params_tab(self):
@@ -907,133 +896,30 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
     def _apply_mz_calibration(self, raw_index):
         return self.calibration.a * raw_index ** 2 + self.calibration.b * raw_index + self.calibration.c
 
-    def _import_peak_ranges(self):
-        file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self,
-            "选择卡峰范围文件",
-            "",
-            "Excel Files (*.xlsx *.xls);;CSV/TXT Files (*.csv *.txt);;All Files (*)",
-        )
-        if not file_path:
+    def _load_peak_ranges_from_project(self) -> None:
+        """从项目管理的 manual_peak_file 加载卡峰范围。
+
+        项目管理是卡峰配置的唯一来源；摩尔分数对话框不再提供独立的卡峰导入UI。
+        加载失败时静默回退到自动寻峰。
+        """
+        ps = self.project_settings
+        manual_path = getattr(ps, "manual_peak_file", "") if ps is not None else ""
+        if not manual_path or not Path(manual_path).exists():
+            self.peak_ranges = {}
             return
-
         try:
-            path_lower = file_path.lower()
-            if path_lower.endswith((".xlsx", ".xls")):
-                df = pd.read_excel(file_path)
-            else:
-                df = pd.read_csv(file_path, encoding="utf-8-sig", sep=None, engine="python")
-
-            column_mapping = self._detect_peak_range_columns(df)
-            if len(column_mapping) < 3:
-                missing = []
-                if "mz" not in column_mapping:
-                    missing.append("质量数（mz/mass/m/z）")
-                if "start" not in column_mapping:
-                    missing.append("起始通道（start/left/起始）")
-                if "end" not in column_mapping:
-                    missing.append("结束通道（end/right/结束）")
-                QtWidgets.QMessageBox.warning(
-                    self,
-                    "提示",
-                    "无法识别所有必需列。\n"
-                    "请确保文件包含质量数、起始通道、结束通道三列。\n\n"
-                    f"当前列: {', '.join(str(c) for c in df.columns)}\n"
-                    f"无法识别: {', '.join(missing)}",
-                )
-                return
-
+            ranges = load_peak_ranges(manual_path, calibration=self.calibration)
             peak_ranges: dict[int, tuple[int, int]] = {}
-            for _, row in df.iterrows():
-                mz_val = row.get(column_mapping["mz"])
-                start_val = row.get(column_mapping["start"])
-                end_val = row.get(column_mapping["end"])
-                if pd.isna(mz_val) or pd.isna(start_val) or pd.isna(end_val):
-                    continue
-
-                mz = int(round(float(mz_val)))
-                start = int(round(float(start_val)))
-                end = int(round(float(end_val)))
-                if start > end:
-                    start, end = end, start
-                peak_ranges[mz] = (start, end)
-
-            if not peak_ranges:
-                QtWidgets.QMessageBox.warning(self, "提示", "未读取到有效卡峰范围")
-                return
-
+            for item in ranges:
+                mz = int(round(item.mz))
+                left = int(item.left_bound)
+                right = int(item.right_bound)
+                if left > right:
+                    left, right = right, left
+                peak_ranges[mz] = (left, right)
             self.peak_ranges = peak_ranges
-            peak_count = self._recompute_peak_info() if self.temperature_scan_data else 0
-            suffix = f"，已重新积分 {peak_count} 个峰" if self.temperature_scan_data else ""
-            self.lbl_peak_status.setText(f"已导入 {len(self.peak_ranges)} 个卡峰范围{suffix}")
-            self.lbl_peak_status.setStyleSheet("color: #4ecdc4;")
-            QtWidgets.QMessageBox.information(
-                self,
-                "成功",
-                f"导入了 {len(self.peak_ranges)} 个卡峰范围{suffix}",
-            )
-        except Exception as e:
-            import traceback
-
-            QtWidgets.QMessageBox.critical(self, "错误", f"导入卡峰范围失败: {e}\n{traceback.format_exc()}")
-
-    def _detect_peak_range_columns(self, df: pd.DataFrame) -> dict[str, str]:
-        def find_column(candidates: list[str], keywords: list[str]) -> str | None:
-            candidate_lowers = {c.lower() for c in candidates}
-            for col in df.columns:
-                col_text = str(col).strip()
-                col_lower = col_text.lower()
-                if col_text in candidates or col_lower in candidate_lowers:
-                    return col
-            for col in df.columns:
-                col_text = str(col).strip()
-                col_lower = col_text.lower()
-                if any(keyword in col_text or keyword.lower() in col_lower for keyword in keywords):
-                    return col
-            return None
-
-        mapping: dict[str, str] = {}
-        mz_col = find_column(
-            ["质量数", "mz", "mass", "m/z", "m_z", "mass_number", "M/Z", "质量数(m/z)", "质量数 (m/z)"],
-            ["质量数", "m/z", "mass", "mz"],
-        )
-        start_col = find_column(
-            ["起始通道", "起始", "start", "start_idx", "left", "left_idx", "begin", "左边界", "左边界索引"],
-            ["起始", "start", "left", "begin", "左边界"],
-        )
-        end_col = find_column(
-            ["结束通道", "结束", "end", "end_idx", "right", "right_idx", "finish", "右边界", "右边界索引"],
-            ["结束", "end", "right", "finish", "右边界"],
-        )
-        if mz_col is not None:
-            mapping["mz"] = mz_col
-        if start_col is not None:
-            mapping["start"] = start_col
-        if end_col is not None:
-            mapping["end"] = end_col
-        return mapping
-
-    def _auto_find_peaks(self):
-        self.peak_ranges = {}
-        if not self.temperature_scan_data:
-            self.lbl_peak_status.setText("未设置（将自动寻峰）")
-            self.lbl_peak_status.setStyleSheet("color: #6495ed;")
-            QtWidgets.QMessageBox.information(self, "提示", "已清除手动卡峰范围，后续加载数据将自动寻峰")
-            return
-
-        try:
-            self.lbl_peak_status.setText("正在自动寻峰...")
-            self.lbl_peak_status.setStyleSheet("color: #f39c12;")
-            peak_count = self._recompute_peak_info()
-            self.lbl_peak_status.setText(f"自动寻峰完成，检测到 {peak_count} 个峰")
-            self.lbl_peak_status.setStyleSheet("color: #4ecdc4;")
-            QtWidgets.QMessageBox.information(self, "成功", f"自动寻峰完成，检测到 {peak_count} 个峰")
-        except Exception as e:
-            import traceback
-
-            QtWidgets.QMessageBox.critical(self, "错误", f"自动寻峰失败: {e}\n{traceback.format_exc()}")
-            self.lbl_peak_status.setText("自动寻峰失败")
-            self.lbl_peak_status.setStyleSheet("color: #e74c3c;")
+        except Exception:
+            self.peak_ranges = {}
 
     def _recompute_peak_info(self) -> int:
         peak_ranges = self.peak_ranges or None
@@ -1063,7 +949,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
     def _load_database(self):
         file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, "选择物种数据库文件", "",
+            self, "选择PICS截面数据库文件", "",
             "SQLite Files (*.sqlite *.db);;Pickle Files (*.pkl);;Excel Files (*.xlsx);;All Files (*)"
         )
         if not file_path:
@@ -1327,6 +1213,9 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             unique_species = len(set(d["species"] for d in self.pie_species_data))
             self.lbl_pie_status.setText(f"已加载 {unique_mz} 个质量数, {unique_species} 个物种")
             self.lbl_pie_status.setStyleSheet("color: #6495ed;")
+            # Auto-expand PIE table group if data is present
+            if hasattr(self, "pie_table_group"):
+                self.pie_table_group.setChecked(self.pie_species_table.rowCount() > 0)
 
             self._update_ts_table_with_species()
             self._update_parent_species_list()
@@ -1620,6 +1509,9 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 self.ts_data_table.setItem(row, 3, QtWidgets.QTableWidgetItem(f"{info['avg_io']:.2f}"))
                 self.ts_data_table.setItem(row, 4, QtWidgets.QTableWidgetItem(f"{info['repeat_count']}"))
                 self.ts_data_table.setItem(row, 5, QtWidgets.QTableWidgetItem(peak_info_text))
+        # Auto-expand table group if data is present
+        if hasattr(self, "ts_table_group"):
+            self.ts_table_group.setChecked(self.ts_data_table.rowCount() > 0)
 
     def _detect_and_integrate_peaks(self, data, peak_ranges=None):
         peaks_info = []
@@ -1851,7 +1743,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
     def _preview_mass_discrimination(self):
         if not self.database:
-            QtWidgets.QMessageBox.warning(self, "提示", "请先加载物种数据库")
+            QtWidgets.QMessageBox.warning(self, "提示", "请先加载PICS截面数据库")
             return
         seen: set[tuple] = set()
         species_list = []

@@ -208,7 +208,7 @@ class ArtifactCategory(Enum):
     TEMPERATURE = ("temperature_scan", "温度扫描", "temperature_scan")
     PIE = ("pie", "PIE拟合", "pie_analysis")
     MOLE_FRACTION = ("mole_fraction", "摩尔分数", "mole_fraction")
-    PICS = ("pics", "PICS数据库", "final_report")
+    PICS = ("pics", "PICS截面数据库", "final_report")
     REPORTS = ("reports", "综合报告", "final_report")
     SNAPSHOTS = ("snapshots", "版本快照", "versions")
 

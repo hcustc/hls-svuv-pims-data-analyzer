@@ -265,7 +265,7 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
         no_cs_layout.addWidget(self.lbl_no_cs_status)
 
         btn_load_no_cs = QtWidgets.QPushButton("从数据库加载NO光电离截面")
-        btn_load_no_cs.setToolTip("从物种数据库加载NO在不同光子能量下的光电离截面数据")
+        btn_load_no_cs.setToolTip("从PICS截面数据库加载NO在不同光子能量下的光电离截面数据")
         btn_load_no_cs.clicked.connect(self._load_no_cross_sections)
         no_cs_layout.addWidget(btn_load_no_cs)
 

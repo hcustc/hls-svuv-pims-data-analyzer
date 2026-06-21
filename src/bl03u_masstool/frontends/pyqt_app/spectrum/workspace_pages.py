@@ -723,8 +723,8 @@ class WorkspacePagesMixin:
         ref_layout.setVerticalSpacing(5)
         ref_layout.setColumnStretch(1, 1)
 
-        ref_label = QtWidgets.QLabel("PICS数据库", self.datasource_card)
-        ref_label.setFixedWidth(88)
+        ref_label = QtWidgets.QLabel("PICS截面数据库", self.datasource_card)
+        ref_label.setFixedWidth(110)
         self.project_pics_database_display = QLineEdit(self.datasource_card)
         self.project_pics_database_display.setReadOnly(True)
         self.project_pics_database_display.setPlaceholderText("系统参考数据库（自动配置）")

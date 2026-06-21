@@ -48,10 +48,18 @@ def test_manual_peak_ranges_integrate_fixed_bounds(qapp):
 def test_data_loading_uses_switchable_data_views(qapp):
     dialog = MoleFractionDialog(Calibration(a=0.0, b=1.0, c=0.0), None)
     try:
-        assert dialog.data_load_tabs.count() == 2
-        assert dialog.data_load_tabs.tabText(0) == "温度扫描数据"
-        assert dialog.data_load_tabs.tabText(1) == "PIE鉴定结果"
-        assert dialog.ts_data_table.parent() is not dialog.pie_species_table.parent()
+        # Verify parallel card layout with expandable tables
+        assert hasattr(dialog, "ts_table_group")
+        assert hasattr(dialog, "pie_table_group")
+        assert hasattr(dialog, "ts_data_table")
+        assert hasattr(dialog, "pie_species_table")
+        # Tables should be in separate GroupBoxes (different parents)
+        assert dialog.ts_data_table.parent() != dialog.pie_species_table.parent()
+        # GroupBoxes should be checkable (expandable) and initially unchecked
+        assert dialog.ts_table_group.isCheckable()
+        assert dialog.pie_table_group.isCheckable()
+        assert not dialog.ts_table_group.isChecked()
+        assert not dialog.pie_table_group.isChecked()
     finally:
         dialog.deleteLater()
 
