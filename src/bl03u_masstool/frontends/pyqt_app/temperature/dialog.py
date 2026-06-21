@@ -5,7 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from PyQt6 import QtCore, QtWidgets
+from PyQt6 import QtCore, QtGui, QtWidgets
 
 from bl03u_masstool.core.calibration import Calibration, tof_to_mz
 from bl03u_masstool.core.config import (
@@ -58,6 +58,14 @@ from bl03u_masstool.frontends.pyqt_app.common.widgets import DataFrameTableMixin
 from bl03u_masstool.frontends.pyqt_app.common.static_plot import StaticCurvePlot
 
 class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
+    # 曲线分类颜色映射
+    CURVE_CLASS_COLORS = {
+        "formation": "#10b981",      # 绿色 - 生成(升高)
+        "consumption": "#ef4444",    # 红色 - 消耗(减少)
+        "intermediate": "#f59e0b",   # 橙色 - 中间体(先升后降)
+        "unclassified": "#6b7280",   # 灰色 - 暂未区分
+    }
+
     def __init__(self, calibration: Calibration, normalization_settings: NormalizationSettings | None = None, parent=None):
         super().__init__(parent)
         self.calibration = calibration
@@ -109,6 +117,12 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.export_plot_button.setEnabled(False)
         self.export_plot_button.clicked.connect(self.export_plot)
 
+        self.preview_data_button = QtWidgets.QPushButton("预览数据")
+        self.preview_data_button.setObjectName("ExportButton")
+        self.preview_data_button.setToolTip("预览全部积分结果")
+        self.preview_data_button.setEnabled(False)
+        self.preview_data_button.clicked.connect(self.show_data_preview)
+
         self.summary_open_project_btn = QtWidgets.QPushButton("项目管理")
         self.summary_open_project_btn.setObjectName("BrowseButton")
         self.summary_open_project_btn.setToolTip("在项目管理中修改数据源、寻峰、归一化和温度扫描默认参数")
@@ -123,7 +137,7 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.sidebar_toggle_btn.clicked.connect(self._toggle_sidebar)
 
         for btn in (self.run_button, self.export_button, self.export_plot_button,
-                    self.summary_open_project_btn, self.sidebar_toggle_btn):
+                    self.preview_data_button, self.summary_open_project_btn, self.sidebar_toggle_btn):
             toolbar_layout.addWidget(btn)
 
         # Inline status
@@ -233,7 +247,7 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self._empty_state = QtWidgets.QWidget()
         empty_layout = QtWidgets.QVBoxLayout(self._empty_state)
         empty_layout.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        empty_icon = QtWidgets.QLabel("📊")
+        empty_icon = QtWidgets.QLabel("[数据]")
         empty_icon.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         empty_icon.setStyleSheet("font-size: 48px;")
         empty_msg = QtWidgets.QLabel('尚未生成温度扫描曲线\n\n在项目管理确认数据源和参数后，点击"开始分析"')
@@ -244,7 +258,7 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         empty_layout.addWidget(empty_msg)
         plot_stack.addWidget(self._empty_state)
 
-        self.plot_widget = StaticCurvePlot("Temperature (C)", "Normalized Area")
+        self.plot_widget = StaticCurvePlot("温度 / °C", "归一化信号")
         plot_stack.addWidget(self.plot_widget)
 
         plot_stack.setCurrentIndex(0)  # show empty state initially
@@ -266,7 +280,7 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         curve_stats_layout.addWidget(self.current_curve_metric_label, stretch=1)
 
         # Toggle table visibility button
-        self.toggle_table_button = QtWidgets.QPushButton("📈 展开表格")
+        self.toggle_table_button = QtWidgets.QPushButton("查看数据")
         self.toggle_table_button.setCheckable(True)
         self.toggle_table_button.setToolTip("点击显示/隐藏下方数据表格")
         self.toggle_table_button.setFixedWidth(90)
@@ -282,13 +296,10 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.detail_tabs.setObjectName("PeakResultTabs")
         self.detail_tabs.setVisible(False)  # Start hidden
         self.curve_table = QtWidgets.QTableWidget()
-        self.table = QtWidgets.QTableWidget()
-        for table in (self.curve_table, self.table):
-            table.setWordWrap(False)
-            table.setAlternatingRowColors(True)
-            table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.curve_table.setWordWrap(False)
+        self.curve_table.setAlternatingRowColors(True)
+        self.curve_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.detail_tabs.addTab(self.curve_table, "当前曲线")
-        self.detail_tabs.addTab(self.table, "全部积分结果")
         right_layout.addWidget(self.detail_tabs, stretch=2)
 
     def _open_project_settings(self):
@@ -305,7 +316,7 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         """Toggle the visibility of the data tables and adjust layout."""
         self.table_visible = not self.table_visible
         self.detail_tabs.setVisible(self.table_visible)
-        self.toggle_table_button.setText("📊 数据表格" if self.table_visible else "📈 展开表格")
+        self.toggle_table_button.setText("隐藏数据" if self.table_visible else "查看数据")
         # Force layout recalculation to adjust the plot area
         parent = self.detail_tabs.parentWidget()
         if parent and parent.layout():
@@ -469,6 +480,8 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 cwt_snr_threshold=peak_config.cwt_snr_threshold,
                 cwt_wavelet_max_width=peak_config.cwt_wavelet_max_width,
                 weak_tail_cutoff_idx=peak_config.weak_tail_cutoff_idx,
+                temp_curve_class_change_threshold=ps.temp_curve_class_change_threshold,
+                temp_curve_class_peak_fraction=ps.temp_curve_class_peak_fraction,
             ),
             self,
         )
@@ -569,7 +582,6 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
     def on_analysis_complete(self, result: object) -> None:
         self.result_df = result
         self.curves = build_temperature_curves(self.result_df)
-        self.set_dataframe(self.table, self.result_df)
         self.populate_mz_list()
         temperature_count = self.result_df["temperature"].nunique() if not self.result_df.empty else 0
         self.summary_label.setText(f"{len(self.curves)} 条m/z曲线 | {temperature_count} 个温度点")
@@ -577,6 +589,7 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self._show_plot()  # reveal plot, hide empty state
         self.export_button.setEnabled(True)
         self.export_plot_button.setEnabled(True)
+        self.preview_data_button.setEnabled(True)
         self._show_inline_success(f"已完成分析，生成 {len(self.result_df)} 行温度扫描结果")
 
     def on_analysis_failed(self, message: str) -> None:
@@ -611,10 +624,18 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
             parent = QtWidgets.QTreeWidgetItem([f"{TEMPERATURE_CURVE_CLASS_LABELS[group_key]} ({len(items)}条)"])
             parent.setData(0, QtCore.Qt.ItemDataRole.UserRole, None)
             parent.setFlags(parent.flags() & ~QtCore.Qt.ItemFlag.ItemIsSelectable)
+            # 设置分类组的颜色
+            color = self.CURVE_CLASS_COLORS.get(group_key, "#6b7280")
+            parent.setForeground(0, QtGui.QColor(color))
+            font = parent.font(0)
+            font.setBold(True)
+            parent.setFont(0, font)
             self.mz_list.addTopLevelItem(parent)
             for mz, curve in items:
                 child = QtWidgets.QTreeWidgetItem([self.curve_tree_label(mz, curve, include_group=False)])
                 child.setData(0, QtCore.Qt.ItemDataRole.UserRole, mz)
+                # 设置每条曲线的颜色
+                child.setForeground(0, QtGui.QColor(color))
                 parent.addChild(child)
             parent.setExpanded(True)
 
@@ -627,6 +648,10 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 continue
             item = QtWidgets.QTreeWidgetItem([self.curve_tree_label(mz, curve, include_group=True)])
             item.setData(0, QtCore.Qt.ItemDataRole.UserRole, mz)
+            # 设置曲线颜色
+            group_key = curve.get("curve_class", "unclassified")
+            color = self.CURVE_CLASS_COLORS.get(group_key, "#6b7280")
+            item.setForeground(0, QtGui.QColor(color))
             self.mz_list.addTopLevelItem(item)
 
     def curve_matches_filter(self, mz: int, curve: dict) -> bool:
@@ -693,18 +718,40 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         rows = curve["rows"].copy()
         curve_df = pd.DataFrame(
             {
-                "分类": [curve.get("curve_class_label", "")] * len(rows),
-                "温度(C)": np.round(rows["temperature"].astype(float), 4),
+                "温度(C)": np.round(rows["temperature"].astype(float), 1),
                 "原始积分": np.round(rows["raw_area"].astype(float), 4),
                 "IO归一化": np.round(rows["photon_normalized_area"].astype(float), 4),
                 "λ(T)": np.round(rows["expansion_lambda"].astype(float), 6),
                 "最终强度": np.round(rows["area"].astype(float), 4),
             }
         )
-        self.set_dataframe(self.curve_table, curve_df)
+        # 转置表格，使温度点成为列头
+        curve_df_transposed = curve_df.set_index("温度(C)").T
+        self.set_dataframe(self.curve_table, curve_df_transposed)
         class_label = curve.get("curve_class_label", "")
         self.current_curve_label.setText(f"m/z {self.current_mz}")
-        self.current_curve_metric_label.setText(f"{class_label} | {len(curve['temperatures'])} 个温度点")
+
+        # 改进状态栏：添加温度范围和最大值信息
+        temperatures = np.asarray(curve["temperatures"], dtype=float)
+        areas = np.asarray(curve["areas"], dtype=float)
+        valid = np.isfinite(temperatures) & np.isfinite(areas)
+        temperatures = temperatures[valid]
+        areas = areas[valid]
+
+        if len(temperatures) > 0:
+            t_min = float(np.nanmin(temperatures))
+            t_max = float(np.nanmax(temperatures))
+            max_idx = int(np.nanargmax(areas))
+            max_value = float(areas[max_idx])
+            t_at_max = float(temperatures[max_idx])
+            status_text = (
+                f"{class_label} | {len(curve['temperatures'])} 个点 | "
+                f"{t_min:.0f}–{t_max:.0f} °C | 最大值 {max_value:.2f} @ {t_at_max:.0f} °C"
+            )
+        else:
+            status_text = f"{class_label} | {len(curve['temperatures'])} 个温度点"
+
+        self.current_curve_metric_label.setText(status_text)
         self.update_plot(curve)
 
     def update_plot(self, curve: dict):
@@ -715,19 +762,56 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         valid = np.isfinite(x_values) & np.isfinite(y_values)
         x_values = x_values[valid]
         y_values = y_values[valid]
-        title = f"m/z {curve['mz']} 温度扫描 - {curve.get('curve_class_label', '')}"
-        self.plot_widget.clear_plot(title=title, xlabel="Temperature (C)", ylabel="Normalized Area")
+
+        # 简化标题：仅显示对象和图表类型，分类信息在状态栏
+        title = f"m/z {curve['mz']} 温度响应曲线"
+        # 改为中文坐标轴标签
+        self.plot_widget.clear_plot(title=title, xlabel="温度 / °C", ylabel="归一化信号")
+
         if x_values.size == 0:
             self.plot_widget.show_empty("无有效数据", title=f"m/z {curve['mz']} 温度曲线")
             return
+
+        # 根据分类获取颜色
+        group_key = curve.get("curve_class", "unclassified")
+        color = self.CURVE_CLASS_COLORS.get(group_key, "#6b7280")
+
+        # 改进曲线绘制：线宽 2.2、标记点 6.0、白色描边（已内置），避免粘连
         plot_x, plot_y = self.plot_widget.plot_series(
             x_values,
             y_values,
-            color="#2563eb",
-            linewidth=2.4,
-            markersize=6,
+            color=color,
+            linewidth=2.2,
+            marker="o",
+            markersize=6.0,
         )
-        self.plot_widget.apply_data_limits([plot_x], [plot_y], x_pad_min=5.0, y_pad_min=1.0)
+
+        # 优化纵轴范围：减少顶部无效留白
+        x_min, x_max = float(np.nanmin(x_values)), float(np.nanmax(x_values))
+        y_min, y_max = float(np.nanmin(y_values)), float(np.nanmax(y_values))
+
+        x_span = max(x_max - x_min, 1.0)
+        y_span = max(y_max - y_min, 1e-6)
+
+        x_pad = 0.025 * x_span  # 2.5% 边距
+        y_pad = max(0.08 * y_span, 0.03 * max(abs(y_max), 1.0))  # 8% 或最小 3%
+
+        # 手动设置数据范围避免留白过大
+        if self.plot_widget.axes is not None:
+            self.plot_widget.axes.set_xlim(x_min - x_pad, x_max + x_pad)
+            self.plot_widget.axes.set_ylim(y_min - y_pad, y_max + y_pad)
+
+            # 添加零基线（如果有物理意义）
+            if y_min < 0 < y_max:
+                self.plot_widget.axes.axhline(
+                    0.0,
+                    color="#94A3B8",
+                    linewidth=1.0,
+                    linestyle=(0, (4, 4)),
+                    alpha=0.55,
+                    zorder=0,
+                )
+
         self.plot_widget.finish()
 
     def run_analysis_sync(
@@ -744,6 +828,8 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         mass_discrimination: float = 1.0,
         light_source: str = "io",
         expansion_factors: dict[float, float] | None = None,
+        temp_curve_class_change_threshold: float = 0.25,
+        temp_curve_class_peak_fraction: float = 0.65,
     ) -> pd.DataFrame:
         peak_config = load_peak_detection_config()
         return analyze_temperature_folder(
@@ -768,6 +854,8 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
             mass_discrimination=mass_discrimination,
             light_source=light_source,
             expansion_factors=expansion_factors,
+            temp_curve_class_change_threshold=temp_curve_class_change_threshold,
+            temp_curve_class_peak_fraction=temp_curve_class_peak_fraction,
         )
 
     def export_result(self):
@@ -816,3 +904,32 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
             QtWidgets.QMessageBox.information(self, "成功", f"曲线图已导出：{path}")
         else:
             QtWidgets.QMessageBox.warning(self, "错误", "导出图表失败")
+
+    def show_data_preview(self):
+        """打开独立窗口预览全部积分结果表格"""
+        if self.result_df.empty:
+            QtWidgets.QMessageBox.warning(self, "提示", "没有可预览的数据")
+            return
+
+        # 创建非模态预览窗口
+        preview_win = QtWidgets.QMainWindow()
+        preview_win.setWindowTitle("温度扫描数据预览")
+        preview_win.resize(1000, 600)
+
+        # 创建表格
+        preview_table = QtWidgets.QTableWidget()
+        preview_table.setWordWrap(False)
+        preview_table.setAlternatingRowColors(True)
+        preview_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.set_dataframe(preview_table, self.result_df)
+
+        # 设置为中心widget
+        preview_win.setCentralWidget(preview_table)
+
+        # 非模态显示
+        preview_win.show()
+        # 保持窗口引用，防止被垃圾回收
+        if not hasattr(self, '_preview_windows'):
+            self._preview_windows = []
+        self._preview_windows.append(preview_win)
+

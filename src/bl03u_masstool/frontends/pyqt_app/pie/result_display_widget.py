@@ -21,7 +21,6 @@ class ResultDisplayWidget(QtWidgets.QWidget):
     """结果详情面板 - 曲线数据和物种贡献明细"""
 
     # ---- 信号定义 ----
-    export_requested = QtCore.pyqtSignal()           # 导出按钮点击
     visibility_changed = QtCore.pyqtSignal(bool)    # 展开/收起时发出
 
     def __init__(self, parent=None):
@@ -72,7 +71,7 @@ class ResultDisplayWidget(QtWidgets.QWidget):
         header = QtWidgets.QHBoxLayout(header_frame)
         header.setContentsMargins(8, 4, 8, 4)
         header.setSpacing(8)
-        title = QtWidgets.QLabel("结果详情")
+        title = QtWidgets.QLabel("详细数据")
         title.setObjectName("ReadoutLabel")
         header.addWidget(title)
 
@@ -83,14 +82,6 @@ class ResultDisplayWidget(QtWidgets.QWidget):
         header.addWidget(self.status_indicator)
 
         header.addStretch()
-
-        self.export_button = QtWidgets.QPushButton("导出鉴定结果")
-        self.export_button.setObjectName("ExportButton")
-        self.export_button.setToolTip("导出PIE物种鉴定结果")
-        self.export_button.setFixedHeight(24)
-        self.export_button.clicked.connect(self.export_requested.emit)
-        self.export_button.setEnabled(False)
-        header.addWidget(self.export_button)
 
         main_layout.addWidget(header_frame)
 
@@ -265,20 +256,26 @@ class ResultDisplayWidget(QtWidgets.QWidget):
         设置结果有效性状态
 
         Args:
-            status: "UNFITTED" | "COMPLETED" | "OBSOLETE" | "FAILED"
+            status: "UNFITTED" | "COMPLETED" | "OBSOLETE" | "FAILED" | "CONFIRMED"
         """
         self._current_status = status
 
         status_text = {
             "UNFITTED": "",
-            "COMPLETED": "[COMPLETED]",
-            "OBSOLETE": "[OBSOLETE]",
-            "FAILED": "[FAILED]"
+            "COMPLETED": "[已拟合]",
+            "OBSOLETE": "[结果过期]",
+            "FAILED": "[拟合失败]",
+            "CONFIRMED": "[✓ 已确认]",
         }
         self.status_indicator.setText(status_text.get(status, ""))
 
-        # 仅在COMPLETED状态启用导出按钮
-        self.export_button.setEnabled(status == "COMPLETED")
+        status_color = {
+            "COMPLETED": "color: #1d4ed8;",
+            "OBSOLETE": "color: #92400e;",
+            "FAILED": "color: #dc2626;",
+            "CONFIRMED": "color: #166534; font-weight: bold;",
+        }
+        self.status_indicator.setStyleSheet(status_color.get(status, ""))
 
     def get_result_status(self) -> str:
         """获取当前结果状态"""

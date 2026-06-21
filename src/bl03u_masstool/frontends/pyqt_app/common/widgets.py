@@ -61,19 +61,23 @@ except Exception:  # pragma: no cover - only used when optional plotting is unav
 
 class DataFrameTableMixin:
     def set_dataframe(self, table: QtWidgets.QTableWidget, df: pd.DataFrame) -> None:
+        table.blockSignals(True)
         table.setUpdatesEnabled(False)
-        table.clear()
+        table.clearContents()
         table.setRowCount(len(df))
         table.setColumnCount(len(df.columns))
         table.setHorizontalHeaderLabels([str(col) for col in df.columns])
         for row_idx, (_, row) in enumerate(df.iterrows()):
             for col_idx, value in enumerate(row):
                 table.setItem(row_idx, col_idx, QtWidgets.QTableWidgetItem("" if pd.isna(value) else str(value)))
+        table.clearSelection()
+        table.setCurrentItem(None)
         table.setAlternatingRowColors(True)
         table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         table.resizeColumnsToContents()
         table.setUpdatesEnabled(True)
+        table.blockSignals(False)
 
 
 def combo_set_data(combo: QtWidgets.QComboBox, value: object) -> None:

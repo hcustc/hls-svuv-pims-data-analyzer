@@ -95,6 +95,8 @@ class ProjectSettings:
     temp_reference_mode: str = "sum"  # Only used when temp_peak_source == "auto"
     temp_prefer_gaussian: bool = True
     temp_kr_mz: int = 84
+    temp_curve_class_change_threshold: float = 0.25  # 相对变化阈值：判断"生成"或"消耗"需要达到最大值的多少百分比
+    temp_curve_class_peak_fraction: float = 0.65  # 端点峰值比例：端点信号需达到最大值的多少百分比才判定为"生成"或"消耗"
 
     # === PICS Defaults ===
     pics_no_mz: int = 30
