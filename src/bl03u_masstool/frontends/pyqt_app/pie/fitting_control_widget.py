@@ -3,21 +3,26 @@ FittingControlWidget - 拟合配置面板
 
 职责：
 - 统一的拟合物种配置界面
-- 合并锁定候选物种和候选物种到单一表格
-- 支持物种来源标记（自动/手动）和锁定状态管理（锁定/普通）
+- 显示当前 m/z 的候选物种列表（来源：PICS 数据库）
+- 支持物种启用/禁用、锁定/解锁、系数配置
 - 所有拟合前的参数设置
 
 设计原则：
+- 候选物种 100% 由当前 m/z 对应的 PICS 数据库查询结果提供
+- 不支持在此界面临时添加物种（缺少 PICS 数据会导致拟合条件不完整）
+- 若某 m/z 无候选，显示空状态并引导用户前往 PICS 导入
 - 仅负责UI展示和用户输入收集
 - 通过信号向上报告配置变更
 - 通过方法接收数据更新（不通过信号）
 - 单一界面，无Tab切换
 
 锁定候选语义：
-- 被锁定的物种始终进入拟合候选集合，不被自动筛选移除
+- 被锁定的物种在自动筛选中不被移除，始终进入拟合候选集合
 - 其系数由优化器自由决定，可为0或接近0
 - "锁定"只表示用户要求算法考虑该物种，不表示已鉴别或必须参与
-- 详见 forced_species_analysis.md
+- PICS 数据完整性只决定物种是否具备拟合条件，不代表物种已被确认存在
+- 物种鉴别由实验曲线与拟合结果支持
+- 详见 locked_candidates_refactor_plan.md
 """
 
 from PyQt6 import QtCore, QtWidgets
@@ -46,6 +51,7 @@ class FittingControlWidget(QtWidgets.QWidget):
     # ---- 控制变更信号 ----
     candidates_import_requested = QtCore.pyqtSignal()        # 导入系数按钮点击
     candidates_zeroed = QtCore.pyqtSignal()                  # 清零按钮点击
+    pics_import_requested = QtCore.pyqtSignal()              # PICS 导入按钮点击（空状态）
     species_forced_toggled = QtCore.pyqtSignal(str)          # 向后兼容：物种状态切换（改用candidate_lock_toggled）
 
     def __init__(self, parent=None):
@@ -102,20 +108,41 @@ class FittingControlWidget(QtWidgets.QWidget):
         header.addStretch()
         main_layout.addWidget(header_frame)
 
-        # ---- 顶部：物种输入面板 ----
-        input_row = QtWidgets.QHBoxLayout()
-        input_row.setSpacing(6)
-        self.species_input = QtWidgets.QLineEdit()
-        self.species_input.setPlaceholderText("输入物种名称后按回车或点击\"添加候选\"来添加候选物种...")
-        self.species_input.returnPressed.connect(self._add_species_from_input)
-        input_row.addWidget(self.species_input, stretch=1)
+        # ---- 空状态提示（候选为空时显示） ----
+        self.empty_state_widget = QtWidgets.QWidget()
+        empty_layout = QtWidgets.QVBoxLayout(self.empty_state_widget)
+        empty_layout.setContentsMargins(16, 16, 16, 16)
+        empty_layout.setSpacing(12)
 
-        add_species_btn = QtWidgets.QPushButton("添加候选")
-        add_species_btn.setObjectName("BrowseButton")
-        add_species_btn.setFixedHeight(28)
-        add_species_btn.clicked.connect(self._add_species_from_input)
-        input_row.addWidget(add_species_btn)
-        main_layout.addLayout(input_row)
+        empty_icon = QtWidgets.QLabel("⚠️")
+        empty_icon.setStyleSheet("font-size: 32px; text-align: center;")
+        empty_icon.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        empty_layout.addWidget(empty_icon)
+
+        empty_title = QtWidgets.QLabel("当前 m/z 未找到候选物种")
+        empty_title.setStyleSheet("font-weight: bold; font-size: 12pt; text-align: center;")
+        empty_title.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        empty_layout.addWidget(empty_title)
+
+        empty_text = QtWidgets.QLabel(
+            "PICS 数据库中尚未收录该质荷比的物种或缺少截面数据。\n"
+            "请先前往 PICS 导入添加对应物种及完整的截面数据。"
+        )
+        empty_text.setStyleSheet("color: #666; text-align: center;")
+        empty_text.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        empty_text.setWordWrap(True)
+        empty_layout.addWidget(empty_text)
+
+        empty_layout.addSpacing(8)
+
+        self.goto_pics_btn = QtWidgets.QPushButton("前往 PICS 导入")
+        self.goto_pics_btn.setObjectName("BrowseButton")
+        self.goto_pics_btn.setFixedHeight(32)
+        self.goto_pics_btn.clicked.connect(lambda: self.pics_import_requested.emit())
+        empty_layout.addWidget(self.goto_pics_btn, alignment=QtCore.Qt.AlignmentFlag.AlignCenter)
+        empty_layout.addStretch()
+
+        main_layout.addWidget(self.empty_state_widget, stretch=1)
 
         # ---- 中间：控制栏（系数模式 + 按钮）----
         control_row1 = QtWidgets.QHBoxLayout()
@@ -173,44 +200,17 @@ class FittingControlWidget(QtWidgets.QWidget):
         self.species_table.horizontalHeader().setStretchLastSection(False)
         main_layout.addWidget(self.species_table, stretch=1)
 
+        # 初始化空状态显示
+        self._update_ui_state()
+
     # ---- 物种数据管理方法 ----
-
-    def _add_species_from_input(self):
-        """从输入框添加物种为普通候选，用户可后续点击按钮锁定"""
-        name = self.species_input.text().strip()
-        if not name:
-            return
-
-        # 检查该物种是否已存在于当前m/z的候选中
-        already_exists = any(
-            species.get('species') == name and species.get('mz') == self._current_mz
-            for species in self._unified_species_data
-        )
-
-        if not already_exists:
-            # 添加新的普通候选物种（默认不锁定）
-            new_species = {
-                'id': self._generate_new_id(),
-                'species': name,
-                'mz': self._current_mz,
-                'ionization_energy': 0.0,
-                'source': 'manual',
-                'is_locked': False,  # 新添加的候选默认为普通状态
-                'is_enabled': True,
-                'coefficient': 0.0,
-            }
-            self._unified_species_data.append(new_species)
-
-            self._refresh_table_from_data()
-            self.species_config_changed.emit()
-
-        self.species_input.clear()
 
     def populate_unified_species_table(self, mz: int, filtered_db: list[dict], locked_species: list[str]):
         """
         填充统一的物种表格
-        - 合并自动候选物种和锁定候选物种
+        - 显示当前 m/z 的 PICS 数据库候选物种
         - 标记来源和锁定状态
+        - 若无候选物种，显示空状态提示
         """
         self._current_mz = mz
         self._updating = True
@@ -223,10 +223,22 @@ class FittingControlWidget(QtWidgets.QWidget):
                 auto_candidates, locked_species
             )
 
-            # 刷新表格
-            self._refresh_table_from_data()
+            # 刷新表格并管理空状态
+            self._update_ui_state()
         finally:
             self._updating = False
+
+    def _update_ui_state(self):
+        """根据是否有候选物种来显示或隐藏空状态提示"""
+        has_candidates = len(self._unified_species_data) > 0
+
+        if has_candidates:
+            self.empty_state_widget.hide()
+            self.species_table.show()
+            self._refresh_table_from_data()
+        else:
+            self.empty_state_widget.show()
+            self.species_table.hide()
 
     def _merge_species_lists(self, auto_candidates: list[dict], locked_species: list[str]) -> list[dict]:
         """
@@ -645,8 +657,8 @@ class FittingControlWidget(QtWidgets.QWidget):
         """清空UI内容"""
         self._locked_species = []
         self._unified_species_data = []
-        self.species_input.clear()
         self.species_table.setRowCount(0)
+        self._update_ui_state()
 
     # ---- 向后兼容属性 ----
 
