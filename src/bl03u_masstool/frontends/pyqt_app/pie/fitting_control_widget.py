@@ -44,6 +44,16 @@ class FittingControlWidget(QtWidgets.QWidget):
         self.setMinimumHeight(100)
         self.setMaximumHeight(16777215)  # 允许展开但不强制
 
+        # ---- 面板样式 ----
+        self.setObjectName("FittingConfigPanel")
+        self.setStyleSheet("""
+            #FittingConfigPanel {
+                border: 1px solid #cbd5e1;
+                border-radius: 4px;
+                background-color: #ffffff;
+            }
+        """)
+
         # ---- 内部状态 ----
         self._force_species: list[str] = []
         self._candidate_data: list[dict] = []
@@ -51,15 +61,30 @@ class FittingControlWidget(QtWidgets.QWidget):
 
         # ---- UI构建 ----
         main_layout = QtWidgets.QVBoxLayout(self)
-        main_layout.setContentsMargins(0, 0, 0, 0)
-        main_layout.setSpacing(2)
+        main_layout.setContentsMargins(8, 8, 8, 8)  # 添加内边距
+        main_layout.setSpacing(6)
 
-        # Header: "拟合配置"
-        header = QtWidgets.QHBoxLayout()
+        # Header: "拟合配置" (with background)
+        header_frame = QtWidgets.QFrame()
+        header_frame.setObjectName("PanelHeader")
+        header_frame.setStyleSheet("""
+            #PanelHeader {
+                background-color: #f1f5f9;
+                border-bottom: 1px solid #e2e8f0;
+                border-radius: 3px;
+                padding: 4px 0px;
+                margin-bottom: 4px;
+            }
+        """)
+        header_frame.setFixedHeight(32)
+        header = QtWidgets.QHBoxLayout(header_frame)
+        header.setContentsMargins(8, 4, 8, 4)
+        header.setSpacing(0)
         title = QtWidgets.QLabel("拟合配置")
         title.setObjectName("ReadoutLabel")
         header.addWidget(title)
         header.addStretch()
+        main_layout.addWidget(header_frame)
 
         # Tab widget
         self.control_tabs = QtWidgets.QTabWidget()
@@ -152,7 +177,6 @@ class FittingControlWidget(QtWidgets.QWidget):
 
         self.control_tabs.addTab(candidate_panel, "候选物种")
 
-        main_layout.addLayout(header)
         main_layout.addWidget(self.control_tabs, stretch=1)
 
     # ---- 强制物种方法 ----

@@ -38,23 +38,47 @@ class ResultDisplayWidget(QtWidgets.QWidget):
         # ---- 初始隐藏 ----
         self.setVisible(False)
 
+        # ---- 面板样式 ----
+        self.setObjectName("ResultDisplayPanel")
+        self.setStyleSheet("""
+            #ResultDisplayPanel {
+                border: 1px solid #cbd5e1;
+                border-radius: 4px;
+                background-color: #ffffff;
+            }
+        """)
+
         # ---- 内部状态 ----
         self._current_status = "UNFITTED"
 
         # ---- UI构建 ----
         main_layout = QtWidgets.QVBoxLayout(self)
-        main_layout.setContentsMargins(0, 0, 0, 0)
-        main_layout.setSpacing(4)
+        main_layout.setContentsMargins(8, 8, 8, 8)  # 添加内边距
+        main_layout.setSpacing(6)
 
-        # Header: "结果详情" [状态] + [导出按钮]
-        header = QtWidgets.QHBoxLayout()
+        # Header: "结果详情" [状态] + [导出按钮] (with background)
+        header_frame = QtWidgets.QFrame()
+        header_frame.setObjectName("ResultPanelHeader")
+        header_frame.setStyleSheet("""
+            #ResultPanelHeader {
+                background-color: #f1f5f9;
+                border-bottom: 1px solid #e2e8f0;
+                border-radius: 3px;
+                padding: 4px 0px;
+                margin-bottom: 4px;
+            }
+        """)
+        header_frame.setFixedHeight(32)
+        header = QtWidgets.QHBoxLayout(header_frame)
+        header.setContentsMargins(8, 4, 8, 4)
+        header.setSpacing(8)
         title = QtWidgets.QLabel("结果详情")
         title.setObjectName("ReadoutLabel")
         header.addWidget(title)
 
         # ► 状态指示器
         self.status_indicator = QtWidgets.QLabel("")  # 显示状态文字
-        self.status_indicator.setFixedWidth(80)
+        self.status_indicator.setFixedWidth(100)
         self.status_indicator.setToolTip("结果有效性状态: COMPLETED / OBSOLETE / FAILED")
         header.addWidget(self.status_indicator)
 
@@ -63,10 +87,12 @@ class ResultDisplayWidget(QtWidgets.QWidget):
         self.export_button = QtWidgets.QPushButton("导出鉴定结果")
         self.export_button.setObjectName("ExportButton")
         self.export_button.setToolTip("导出PIE物种鉴定结果")
-        self.export_button.setFixedHeight(26)
+        self.export_button.setFixedHeight(24)
         self.export_button.clicked.connect(self.export_requested.emit)
         self.export_button.setEnabled(False)
         header.addWidget(self.export_button)
+
+        main_layout.addWidget(header_frame)
 
         # Tab widget (curve_data, fit_table)
         self.result_tabs = QtWidgets.QTabWidget()
@@ -86,7 +112,6 @@ class ResultDisplayWidget(QtWidgets.QWidget):
         self.fit_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.result_tabs.addTab(self.fit_table, "物种贡献明细")
 
-        main_layout.addLayout(header)
         main_layout.addWidget(self.result_tabs, stretch=1)
 
     # ---- 数据更新方法 ----
