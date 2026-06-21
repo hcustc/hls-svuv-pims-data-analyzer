@@ -503,6 +503,9 @@ def fit_species_combination_with_curve(
             coefficient_map.get(species_id, 0.0) for species_id in active_species_ids
         ], dtype=float)
     elif coefficient_mode == "locked_fit":
+        # locked_fit模式：用于"强制保留"物种
+        # 将指定物种系数锁定为coefficients[id]（通常为eps），然后优化其他物种
+        # 这确保锁定物种无条件出现在结果表中，但对拟合贡献极小
         locked_indices = [idx for idx, sid in enumerate(active_species_ids) if sid in locked_ids]
         free_indices = [idx for idx, sid in enumerate(active_species_ids) if sid not in locked_ids]
         for idx in locked_indices:
@@ -525,6 +528,10 @@ def fit_species_combination_with_curve(
     fitted_area = float(np.sum(fitted))
     merged: dict[tuple[str, float | None], dict] = {}
     for idx, species in enumerate(active_species):
+        # 结果包含条件：
+        # 1. 系数>0.001（普通物种，贡献度判断）
+        # 2. OR 该物种在locked_ids中（强制保留物种，无条件包含）
+        # TODO: 改进为贡献度范数判断，而非绝对系数阈值（见forced_species_analysis.md P2）
         if coeffs[idx] > 0.001 or active_species_ids[idx] in locked_ids:
             component = design[:, idx] * coeffs[idx]
             key = (species["species"], species.get("ie"))
@@ -596,6 +603,18 @@ def identify_species_for_mz_with_curve(
     *,
     forced_species: list[str] | None = None,
 ) -> dict:
+    """
+    识别给定m/z的物种并拟合曲线
+
+    Args:
+        forced_species: 强制保留物种名称列表
+                       （注意：当前实现为系数锁定为eps，名为"强制保留"而非"强制参与"）
+
+    当存在强制保留物种时，切换到locked_fit模式，将其系数设为eps并扣除后优化其他物种。
+    这确保强制保留物种无条件出现在结果表中，但对拟合贡献≈0。
+
+    详见 forced_species_analysis.md 中关于"强制保留"vs"强制参与"的区别。
+    """
     candidates = [item for item in database if item["mz"] == int(mz)]
     forced_names = {name for name in (forced_species or []) if name}
     if forced_names:
