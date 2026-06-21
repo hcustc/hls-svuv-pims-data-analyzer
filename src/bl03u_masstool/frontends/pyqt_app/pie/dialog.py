@@ -373,13 +373,25 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         stats_bar_layout.addWidget(stats_title)
         stats_bar_layout.addWidget(self.fit_stats_label, stretch=1)
 
-        # 添加"查看结果详情"按钮到统计条右侧
-        self.show_result_detail_btn = QtWidgets.QPushButton("查看结果详情")
-        self.show_result_detail_btn.setObjectName("BrowseButton")
+        # 添加"结果详情 ›"轻量链接到统计条右侧
+        self.show_result_detail_btn = QtWidgets.QPushButton("结果详情 ›")
+        self.show_result_detail_btn.setObjectName("ResultDetailLink")
         self.show_result_detail_btn.setToolTip("展开/收起结果详情面板")
-        self.show_result_detail_btn.setFixedWidth(100)
-        self.show_result_detail_btn.setFixedHeight(24)
-        self.show_result_detail_btn.setEnabled(False)  # 初始禁用，拟合完成后启用
+        self.show_result_detail_btn.setFixedHeight(20)
+        self.show_result_detail_btn.setStyleSheet("""
+            #ResultDetailLink {
+                border: none;
+                background-color: transparent;
+                color: #0369a1;
+                padding: 2px 4px;
+                text-decoration: underline;
+                font-size: 12px;
+            }
+            #ResultDetailLink:hover {
+                color: #0284c7;
+            }
+        """)
+        self.show_result_detail_btn.setVisible(False)  # 初始隐藏，拟合完成后显示
         stats_bar_layout.addWidget(self.show_result_detail_btn)
 
         plot_container_layout.addWidget(stats_bar)
@@ -467,10 +479,9 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             win.switch_workspace_page("project")
 
     def _update_result_detail_button(self):
-        """根据结果状态更新'查看结果详情'按钮的文本和样式"""
+        """根据结果状态更新'结果详情 ›'按钮的可见性和文本"""
         if self.current_mz is None or self.current_mz not in self.all_fit_results:
-            self.show_result_detail_btn.setText("查看结果详情")
-            self.show_result_detail_btn.setEnabled(False)
+            self.show_result_detail_btn.setVisible(False)
             return
 
         result = self.all_fit_results[self.current_mz]
@@ -478,19 +489,18 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         current_global_hash = self.global_solver_config.get("config_hash", "")
         status = self._derive_result_status(result, current_per_mz_hash, current_global_hash)
 
-        # 根据状态设置按钮文本和样式
+        # 根据状态设置按钮文本和可见性
         if status == "COMPLETED":
-            self.show_result_detail_btn.setText("查看结果详情")
-            self.show_result_detail_btn.setEnabled(True)
+            self.show_result_detail_btn.setText("结果详情 ›")
+            self.show_result_detail_btn.setVisible(True)
         elif status == "OBSOLETE":
-            self.show_result_detail_btn.setText("查看过期结果")
-            self.show_result_detail_btn.setEnabled(True)
+            self.show_result_detail_btn.setText("⚠ 查看过期结果")
+            self.show_result_detail_btn.setVisible(True)
         elif status == "FAILED":
             self.show_result_detail_btn.setText("查看失败结果")
-            self.show_result_detail_btn.setEnabled(True)
+            self.show_result_detail_btn.setVisible(True)
         else:  # UNFITTED
-            self.show_result_detail_btn.setText("查看结果详情")
-            self.show_result_detail_btn.setEnabled(False)
+            self.show_result_detail_btn.setVisible(False)
 
     def _toggle_result_display(self, visible: bool | None = None) -> None:
         """展开/收起结果详情面板"""
@@ -2050,7 +2060,6 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 # 显示拟合结果（通过result_display_widget）
                 self.result_display_widget.update_fit_table(fit_result['model'])
                 self.result_display_widget.set_result_status(fit_state_code)
-                self.show_result_detail_btn.setEnabled(True)
                 self._update_result_detail_button()
 
                 # Phase 2: 在状态栏显示结果有效性
@@ -2063,7 +2072,6 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 self.current_fit = None
                 self.result_display_widget.clear_data()
                 self.result_display_widget.set_result_status("FAILED")
-                self.show_result_detail_btn.setEnabled(False)
                 self._update_result_detail_button()
 
                 # Phase 2: 显示失败状态
@@ -2074,7 +2082,6 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.current_fit = None
             self.result_display_widget.clear_data()
             self.result_display_widget.set_result_status("UNFITTED")
-            self.show_result_detail_btn.setEnabled(False)
             self._update_result_detail_button()
 
         # 显示曲线数据
@@ -2207,8 +2214,8 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 bbox=dict(boxstyle="round,pad=0.5", facecolor="#ffffff", edgecolor="#cbd5e1", alpha=0.85),
             )
 
-        # Legend inside plot area, upper-right corner
-        self.plot_widget.finish(legend=True, legend_loc="upper right")
+        # Legend inside plot area, upper-left corner (avoids high-energy curve data)
+        self.plot_widget.finish(legend=True, legend_loc="upper left")
 
     def fit_current_curve(self):
         # 防止并发拟合
