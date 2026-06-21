@@ -1549,7 +1549,19 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.pie_folders.clear()
 
     def set_project_settings(self, ps: ProjectSettings) -> None:
-        """Apply ProjectSettings defaults to summary bar and folder controls."""
+        """Apply ProjectSettings defaults to summary bar and folder controls.
+
+        Also loads per-m/z configurations from the new project's state.
+        Clears previous project's in-memory state to prevent data leakage.
+        """
+        # Phase 3 Step 2: Clear previous project's memory state before loading new one
+        # This prevents m/z configs from project A appearing in project B
+        self.per_mz_config = {}  # Clear configs
+        self.all_fit_results = {}  # Clear fit results (Phase 3 Step 3)
+        self.current_mz = None  # Clear current selection
+        # Note: global_solver_config is app-wide, so don't clear it here
+        # Just reset hash after project loads below
+
         self.project_settings = ps
         # Phase 3 Step 2: Store project directory for state persistence
         self.project_dir = str(project_root(ps))
@@ -1566,6 +1578,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         if ps.pie_scan_folder:
             self.folder_edit.setText(ps.pie_scan_folder)
         # Phase 3 Step 2: Load per-m/z configurations from project state
+        # (After clearing previous project's state)
         self._load_per_mz_configs()
         self._update_action_state()
 
@@ -1623,6 +1636,10 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
         Saves configurations to .bl03u_pie_state/configs.json.
         Called explicitly (not on every change) to avoid frequent disk writes.
+
+        CRITICAL: Preserves existing results and arrays to avoid data loss.
+        Loads current state, updates configs, and saves complete state atomically.
+
         Should be called when:
         - User clicks "Save Project"
         - Project is closing
@@ -1634,12 +1651,29 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
         try:
             manager = PieStateManager(self.project_dir)
+
+            # Phase 3 Step 2 + Step 3 coordination:
+            # Load current state to preserve results and arrays
+            current_state = manager.load_state(self.curves, self.database, self.calibration)
+
+            # Extract existing results (will be empty if this is first save)
+            all_fit_results = {}
+            if current_state.get('success'):
+                for mz_str, result in current_state.get('results', {}).items():
+                    try:
+                        mz_int = int(mz_str)
+                        all_fit_results[mz_int] = result
+                    except (ValueError, KeyError):
+                        pass  # Skip invalid m/z entries
+
+            # Save complete state (configs + results + arrays)
+            # This ensures atomic transaction - either all-or-nothing
             success, error = manager.save_state(
                 self.curves,
                 self.database,
                 self.calibration,
                 self.per_mz_config,
-                {},  # all_fit_results - not saved in Step 2
+                all_fit_results,  # Preserve existing results (from Step 3)
                 self.global_solver_config.get('config_hash', '')
             )
 
