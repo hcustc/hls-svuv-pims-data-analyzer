@@ -1062,12 +1062,26 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         """拟合指定的质量数曲线"""
         filtered_db = self.get_filtered_database()
         force_species = self.get_force_species()
+
+        # Phase 2: 获取全局配置哈希（对所有 m/z 相同）
+        global_hash = self.global_solver_config.get("config_hash", "")
+
         results = {}
         for mz in mz_list:
+            # Phase 2: 为这个 m/z 捕获启动时的配置哈希
+            per_mz_hash = self._get_per_mz_config_hash(mz)
+
             curve = self.curves.get(mz)
             if not curve:
                 continue
             fit_result = self._fit_curve(mz, curve, filtered_db, force_species)
+
+            # Phase 2: 添加版本快照到结果
+            if fit_result.get('success'):
+                fit_result['fit_config_hash'] = per_mz_hash
+                fit_result['global_config_hash'] = global_hash
+                fit_result['fit_timestamp'] = time.time()
+
             results[mz] = fit_result
         return results
 
@@ -1193,8 +1207,14 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         """使用 per-m/z 配置拟合选中的曲线"""
         from bl03u_masstool.core.pie_analysis import fit_species_combination_with_curve
 
+        # Phase 2: 获取全局配置哈希（对所有 m/z 相同）
+        global_hash = self.global_solver_config.get("config_hash", "")
+
         results = {}
         for mz in mz_list:
+            # Phase 2: 为这个 m/z 捕获启动时的配置哈希
+            per_mz_hash = self._get_per_mz_config_hash(mz)
+
             curve = self.curves.get(mz)
             if not curve:
                 continue
@@ -1256,11 +1276,16 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 )
 
             fit_result_species = fit_model.get('species', [])
+            # Phase 2: 保存版本快照
             results[mz] = {
                 'success': bool(fit_result_species),
                 'model': fit_model,
                 'species': fit_result_species[:3],
-                'r_squared': fit_model.get('r_squared', 0.0)
+                'r_squared': fit_model.get('r_squared', 0.0),
+                # Phase 2 新增：版本快照
+                'fit_config_hash': per_mz_hash,
+                'global_config_hash': global_hash,
+                'fit_timestamp': time.time(),
             }
 
         return results
@@ -1774,7 +1799,22 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 continue
             label = curve.get("species") or ""
             suffix = f" {label}" if label and label != "Unknown" else ""
-            fit_state = "已拟合" if mz in self.all_fit_results and self.all_fit_results[mz].get("success") else "待拟合"
+
+            # Phase 2: 使用哈希推导结果状态
+            result = self.all_fit_results.get(mz)
+            current_per_mz_hash = self._get_per_mz_config_hash(mz)
+            current_global_hash = self.global_solver_config.get("config_hash", "")
+            fit_state_code = self._derive_result_status(result, current_per_mz_hash, current_global_hash)
+
+            # 映射状态码到显示文本
+            status_map = {
+                "UNFITTED": "待拟合",
+                "COMPLETED": "已拟合",
+                "OBSOLETE": "结果已过期",
+                "FAILED": "拟合失败",
+            }
+            fit_state = status_map.get(fit_state_code, "待拟合")
+
             item = QtWidgets.QListWidgetItem(f"{mz}{suffix}  ({len(curve['energies'])}点)  {fit_state}")
             item.setData(QtCore.Qt.ItemDataRole.UserRole, mz)
             item.setToolTip(f"m/z {mz} | {fit_state}")
@@ -1788,12 +1828,27 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         query = self.mz_filter_edit.text().strip().lower() if hasattr(self, "mz_filter_edit") else ""
         if not query:
             return True
+
+        # Phase 2: 使用哈希推导结果状态以匹配过滤
+        result = self.all_fit_results.get(mz)
+        current_per_mz_hash = self._get_per_mz_config_hash(mz)
+        current_global_hash = self.global_solver_config.get("config_hash", "")
+        fit_state_code = self._derive_result_status(result, current_per_mz_hash, current_global_hash)
+
+        status_map = {
+            "UNFITTED": "待拟合",
+            "COMPLETED": "已拟合",
+            "OBSOLETE": "结果已过期",
+            "FAILED": "拟合失败",
+        }
+        fit_state = status_map.get(fit_state_code, "待拟合")
+
         haystack = " ".join(
             str(value)
             for value in (
                 mz,
                 curve.get("species", ""),
-                "已拟合" if mz in self.all_fit_results else "待拟合",
+                fit_state,
             )
         ).lower()
         return query in haystack
