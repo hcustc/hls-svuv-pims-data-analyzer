@@ -523,8 +523,8 @@ class TestPieStateManagerLoad:
         arrays = manager.load_mz_arrays(46)
 
         assert 'energies' in arrays
-        assert 'intensities' in arrays
-        assert 'fitted_curve' in arrays
+        assert 'experimental' in arrays
+        assert 'total_fit' in arrays
         assert isinstance(arrays['energies'], np.ndarray)
 
 
@@ -628,8 +628,8 @@ class TestSecurityAndIntegrity:
 
         # Check shapes
         assert arrays['energies'].ndim == 1
-        assert arrays['intensities'].ndim == 1
-        assert arrays['fitted_curve'].ndim == 1
+        assert arrays['experimental'].ndim == 1
+        assert arrays['total_fit'].ndim == 1
 
     def test_missing_required_fields(self, temp_project_dir, sample_curves, sample_database):
         """Test handling of missing required fields in loaded JSON."""
