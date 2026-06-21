@@ -1307,11 +1307,21 @@ class WorkspacePagesMixin:
         self._collect_function_params_from_ui(ps)
         self.project_settings_manager.set(ps)
         self.project_settings_manager.save()
+
+        # Phase 3 Step 2: Persist PIE configuration state after ProjectSettings save
+        if hasattr(self, "pie_page"):
+            success, error = self.pie_page.persist_per_mz_config_state()
+            if not success:
+                self.statusbar.showMessage(f"功能参数已保存，但 PIE 配置保存失败: {error}", 5000)
+            else:
+                self.statusbar.showMessage("功能参数已保存，项目摘要已更新", 3000)
+        else:
+            self.statusbar.showMessage("功能参数已保存，项目摘要已更新", 3000)
+
         self._sync_project_settings_to_tool_pages(ps)
         self.update_project_title()
         self.refresh_project_lifecycle(ps)
         self.refresh_project_parameter_summary()
-        self.statusbar.showMessage("功能参数已保存，项目摘要已更新", 3000)
 
     def _auto_save_datasource(self) -> None:
         """Auto-save data source settings and sync to tool pages."""
@@ -1325,6 +1335,11 @@ class WorkspacePagesMixin:
         val = self.project_sum_folder_edit.text().strip()
         if val:
             self.folder_path.setText(val)
+
+        # Phase 3 Step 2: Persist PIE configuration state after ProjectSettings save
+        if hasattr(self, "pie_page"):
+            self.pie_page.persist_per_mz_config_state()
+
         # Sync project settings to all tool pages (Temperature, PIE, etc.)
         self._sync_project_settings_to_tool_pages(ps)
         self.refresh_project_lifecycle(ps)
