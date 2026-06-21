@@ -463,7 +463,6 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
         # 拟合控制widget中的组件（为兼容性创建引用）
         self.species_table = self.fitting_control_widget.species_table
-        self.species_input = self.fitting_control_widget.species_input
         self.coefficient_mode_combo = self.fitting_control_widget.coefficient_mode_combo
         # 向后兼容性别名
         self.candidate_table = self.species_table
@@ -1700,7 +1699,6 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.common_params_button.setEnabled(not busy)
         self.use_multi_folders.setEnabled(not busy)
         self.summary_open_project_btn.setEnabled(not busy)
-        self.species_input.setEnabled(not busy)
         self.toggle_multi_folder_mode(self.use_multi_folders.isChecked())
         self._update_action_state()
 
