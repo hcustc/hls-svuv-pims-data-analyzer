@@ -1102,7 +1102,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.all_fit_results = results
 
         fitted_count = sum(1 for r in results.values() if r.get('success'))
-        total_count = len(results)
+        total_count = len(self.curves)
 
         all_r_squared = [r.get('r_squared', 0.0) for r in results.values() if r.get('success')]
         avg_r_squared = sum(all_r_squared) / len(all_r_squared) if all_r_squared else 0.0
@@ -1339,7 +1339,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.pie_state_dirty = True
         self.fit_table.setRowCount(0)
         self.result_display_widget.clear_data()
-        self._update_fit_stats(0, 0, None)
+        self._update_fit_stats(0, len(self.curves), None)
         self.refresh_current_plot()
         self._update_action_state()
 
