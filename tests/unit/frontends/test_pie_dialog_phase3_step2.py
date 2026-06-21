@@ -466,3 +466,259 @@ class TestNoSaveOnEveryChange:
 
         # Now state file should exist
         assert state_file.exists(), "State should exist after explicit save"
+
+
+class TestDirtyFlagManagement:
+    """Test dirty flag tracking for unsaved changes."""
+
+    def test_config_change_sets_dirty_flag(self, pie_dialog):
+        """Test that marking config as changed sets dirty flag."""
+        pie_dialog.pie_state_dirty = False
+        pie_dialog.mark_pie_config_changed()
+        assert pie_dialog.pie_state_dirty is True
+
+    def test_successful_save_clears_dirty_flag(
+        self, pie_dialog, project_settings, sample_curves, sample_database
+    ):
+        """Test that successful save clears dirty flag."""
+        pie_dialog.project_settings = project_settings
+        pie_dialog.project_dir = str(project_root(project_settings))
+        pie_dialog.curves = sample_curves
+        pie_dialog.database = sample_database
+        pie_dialog.pie_state_dirty = True
+
+        pie_dialog.per_mz_config[46] = {
+            "mz": 46,
+            "selected_species": [
+                {"id": 1, "species": "NO", "ionization_energy": 9.26}
+            ],
+            "mode": "auto",
+            "coefficients": {"1": 0.75},
+            "locked_ids": [],
+        }
+
+        # Save should clear dirty
+        pie_dialog.save_per_mz_configs()
+        assert pie_dialog.pie_state_dirty is False
+
+    def test_persist_interface_returns_success(
+        self, pie_dialog, project_settings, sample_curves, sample_database
+    ):
+        """Test persist_per_mz_config_state() returns (True, None) on success."""
+        pie_dialog.project_settings = project_settings
+        pie_dialog.project_dir = str(project_root(project_settings))
+        pie_dialog.curves = sample_curves
+        pie_dialog.database = sample_database
+        pie_dialog._auto_load_database()
+
+        pie_dialog.per_mz_config[46] = {
+            "mz": 46,
+            "selected_species": [
+                {"id": 1, "species": "NO", "ionization_energy": 9.26}
+            ],
+            "mode": "auto",
+            "coefficients": {"1": 0.75},
+            "locked_ids": [],
+        }
+
+        success, error = pie_dialog.persist_per_mz_config_state()
+        assert success is True
+        assert error is None
+        assert pie_dialog.pie_state_dirty is False
+
+    def test_persist_interface_returns_failure_on_error(
+        self, pie_dialog, project_settings, sample_curves, sample_database
+    ):
+        """Test persist_per_mz_config_state() returns error on failure."""
+        # Set invalid project_dir to simulate save failure
+        pie_dialog.project_dir = "/nonexistent/path/that/does/not/exist"
+        pie_dialog.curves = sample_curves
+        pie_dialog.database = sample_database
+
+        success, error = pie_dialog.persist_per_mz_config_state()
+        assert success is False
+        assert error is not None
+        # Dirty flag should remain on failure
+        assert pie_dialog.pie_state_dirty is True
+
+
+class TestProjectSwitchingCleansState:
+    """Test that project switching properly isolates state."""
+
+    def test_project_switch_clears_per_mz_config(
+        self, pie_dialog, project_settings, sample_curves, sample_database
+    ):
+        """Test that switching projects clears per_mz_config."""
+        # Setup project A with config
+        pie_dialog.project_settings = project_settings
+        pie_dialog.project_dir = str(project_root(project_settings))
+        pie_dialog.curves = sample_curves
+        pie_dialog.database = sample_database
+
+        pie_dialog.per_mz_config[46] = {
+            "mz": 46,
+            "selected_species": [
+                {"id": 1, "species": "NO", "ionization_energy": 9.26}
+            ],
+            "mode": "auto",
+            "coefficients": {"1": 0.75},
+            "locked_ids": [],
+        }
+
+        # Switch to project B with no state file
+        ps_b = ProjectSettings(
+            project_name="Project B",
+            system="System B",
+            output_dir=tempfile.mkdtemp(prefix="pie_project_b_"),
+        )
+        try:
+            pie_dialog.set_project_settings(ps_b)
+
+            # Config from project A should be cleared
+            assert len(pie_dialog.per_mz_config) == 0
+            assert pie_dialog.project_dir == str(project_root(ps_b))
+        finally:
+            shutil.rmtree(str(project_root(ps_b)), ignore_errors=True)
+
+    def test_project_switch_clears_all_fit_results(
+        self, pie_dialog, project_settings, sample_curves, sample_database
+    ):
+        """Test that switching projects clears all_fit_results."""
+        pie_dialog.project_settings = project_settings
+        pie_dialog.project_dir = str(project_root(project_settings))
+        pie_dialog.curves = sample_curves
+        pie_dialog.database = sample_database
+
+        # Add fit results
+        pie_dialog.all_fit_results[46] = {
+            "success": True,
+            "r_squared": 0.95,
+        }
+
+        # Switch project
+        ps_b = ProjectSettings(
+            project_name="Project B",
+            system="System B",
+            output_dir=tempfile.mkdtemp(prefix="pie_project_b_"),
+        )
+        try:
+            pie_dialog.set_project_settings(ps_b)
+
+            # Results from project A should be cleared
+            assert len(pie_dialog.all_fit_results) == 0
+        finally:
+            shutil.rmtree(str(project_root(ps_b)), ignore_errors=True)
+
+
+class TestLoadingDoesNotSetDirty:
+    """Test that loading configurations doesn't mark as dirty."""
+
+    def test_load_configs_does_not_set_dirty(
+        self, pie_dialog, project_settings, sample_curves, sample_database
+    ):
+        """Test that loading saved configs doesn't set dirty flag."""
+        pie_dialog.project_settings = project_settings
+        pie_dialog.project_dir = str(project_root(project_settings))
+        pie_dialog.curves = sample_curves
+        pie_dialog.database = sample_database
+        pie_dialog._auto_load_database()
+
+        # Save a config
+        pie_dialog.per_mz_config[46] = {
+            "mz": 46,
+            "selected_species": [
+                {"id": 1, "species": "NO", "ionization_energy": 9.26}
+            ],
+            "mode": "auto",
+            "coefficients": {"1": 0.75},
+            "locked_ids": [],
+        }
+        pie_dialog.save_per_mz_configs()
+        pie_dialog.pie_state_dirty = False
+
+        # Now load in new instance
+        pie_dialog2 = PIESpeciesFitDialog(pie_dialog.calibration)
+        pie_dialog2.project_settings = project_settings
+        pie_dialog2.project_dir = str(project_root(project_settings))
+        pie_dialog2.curves = sample_curves
+        pie_dialog2.database = sample_database
+
+        # Load should not set dirty
+        pie_dialog2._load_per_mz_configs()
+        assert pie_dialog2.pie_state_dirty is False
+
+        pie_dialog2.deleteLater()
+
+
+class TestPreservingResultsOnPartialSave:
+    """Test that saving configs doesn't delete results."""
+
+    def test_save_config_preserves_existing_results(
+        self, pie_dialog, project_settings, sample_curves, sample_database
+    ):
+        """Test that saving configs preserves already-saved results."""
+        pie_dialog.project_settings = project_settings
+        pie_dialog.project_dir = str(project_root(project_settings))
+        pie_dialog.curves = sample_curves
+        pie_dialog.database = sample_database
+        pie_dialog._auto_load_database()
+
+        # First: save config only (no results)
+        pie_dialog.per_mz_config[46] = {
+            "mz": 46,
+            "selected_species": [
+                {"id": 1, "species": "NO", "ionization_energy": 9.26}
+            ],
+            "mode": "auto",
+            "coefficients": {"1": 0.75},
+            "locked_ids": [],
+        }
+        pie_dialog.save_per_mz_configs()
+
+        # Manually add result data (simulating Step 3 behavior)
+        state_dir = Path(pie_dialog.project_dir) / ".bl03u_pie_state"
+        results_file = state_dir / "results.json"
+        results_data = {
+            "per_mz_results": {
+                "46": {
+                    "mz": 46,
+                    "success": True,
+                    "r_squared": 0.95,
+                    "fit_config_hash": "abc123",
+                }
+            }
+        }
+        with open(results_file, 'w') as f:
+            json.dump(results_data, f)
+
+        # Now save config again (different instance)
+        pie_dialog2 = PIESpeciesFitDialog(pie_dialog.calibration)
+        pie_dialog2.project_settings = project_settings
+        pie_dialog2.project_dir = str(project_root(project_settings))
+        pie_dialog2.curves = sample_curves
+        pie_dialog2.database = sample_database
+
+        pie_dialog2.per_mz_config[46] = {
+            "mz": 46,
+            "selected_species": [
+                {"id": 1, "species": "NO", "ionization_energy": 9.26},
+                {"id": 2, "species": "N2O", "ionization_energy": 12.89},
+            ],
+            "mode": "manual",
+            "coefficients": {"1": 0.5, "2": 0.5},
+            "locked_ids": [2],
+        }
+
+        # Save again - should preserve results
+        pie_dialog2.persist_per_mz_config_state()
+
+        # Load and verify results still exist
+        manager = PieStateManager(pie_dialog2.project_dir)
+        state = manager.load_state(sample_curves, sample_database, pie_dialog.calibration)
+
+        assert state['success']
+        results = state.get('results', {})
+        assert '46' in results
+        assert results['46'].get('success') is True
+
+        pie_dialog2.deleteLater()

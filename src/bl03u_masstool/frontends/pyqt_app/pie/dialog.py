@@ -5,6 +5,7 @@ import json
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Tuple
 
 import numpy as np
 import pandas as pd
@@ -101,6 +102,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.normalization_settings = normalization_settings or NormalizationSettings()
         self.project_settings: ProjectSettings | None = None
         self.project_dir: str | None = None  # Phase 3: Project directory for state persistence
+        self.pie_state_dirty = False  # Phase 3 Step 2: dirty flag for unsaved config changes
         self.peak_detection = load_peak_detection_config()
         self.database: list[dict] = []
         self.analysis_df = pd.DataFrame()
@@ -1679,11 +1681,76 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
             if not success:
                 print(f"⚠️  Failed to save per-m/z configurations: {error}")
+                # Keep dirty flag on failure
             else:
                 print(f"✓ Per-m/z configurations saved")
+                # Clear dirty flag on success
+                self.pie_state_dirty = False
 
         except Exception as e:
             print(f"⚠️  Error saving per-m/z configurations: {e}")
+            # Keep dirty flag on exception
+
+    def persist_per_mz_config_state(self) -> Tuple[bool, str | None]:
+        """Public interface for project save lifecycle (Phase 3 Step 2).
+
+        Called by project save handler after ProjectSettings.save().
+        Will be extended in Phase 3 Step 3 to save configs + results together.
+
+        Returns:
+            (success, error_message)
+        """
+        if not self.project_dir or not self.database or not self.curves:
+            # No state to save (project not yet fully initialized)
+            return (True, None)
+
+        try:
+            manager = PieStateManager(self.project_dir)
+
+            # Load current state to preserve results and arrays
+            current_state = manager.load_state(self.curves, self.database, self.calibration)
+
+            # Extract existing results (will be empty if this is first save)
+            all_fit_results = {}
+            if current_state.get('success'):
+                for mz_str, result in current_state.get('results', {}).items():
+                    try:
+                        mz_int = int(mz_str)
+                        all_fit_results[mz_int] = result
+                    except (ValueError, KeyError):
+                        pass
+
+            # Save complete state (configs + results + arrays)
+            success, error = manager.save_state(
+                self.curves,
+                self.database,
+                self.calibration,
+                self.per_mz_config,
+                all_fit_results,
+                self.global_solver_config.get('config_hash', '')
+            )
+
+            if success:
+                self.pie_state_dirty = False
+            else:
+                self.pie_state_dirty = True
+
+            return (success, error)
+
+        except Exception as e:
+            self.pie_state_dirty = True
+            return (False, str(e))
+
+    def mark_pie_config_changed(self) -> None:
+        """Mark PIE configuration as changed (dirty).
+
+        Called when user modifies per-m/z configuration:
+        - Candidate species selection
+        - Locked coefficients
+        - Forced species
+        - Other per-m/z constraints
+        """
+        self.pie_state_dirty = True
 
     def open_common_parameters(self):
         dialog = CommonParametersDialog(self.normalization_settings, self.calibration, self)
