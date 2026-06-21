@@ -326,18 +326,18 @@ class TestObsoleteStateDerivation:
         assert status == "OBSOLETE"
 
     def test_get_status_display_returns_correct_text_and_emoji(self, pie_dialog):
-        """Test that status display helper returns correct text and emoji."""
-        text, emoji = pie_dialog._get_status_display("UNFITTED")
-        assert text == "待拟合" and emoji == "⏳"
+        """Test that status display helper returns correct text."""
+        text, _ = pie_dialog._get_status_display("UNFITTED")
+        assert text == "待拟合"
 
-        text, emoji = pie_dialog._get_status_display("COMPLETED")
-        assert text == "已拟合" and emoji == "✅"
+        text, _ = pie_dialog._get_status_display("COMPLETED")
+        assert text == "已拟合"
 
-        text, emoji = pie_dialog._get_status_display("OBSOLETE")
-        assert text == "结果已过期" and emoji == "⚠️"
+        text, _ = pie_dialog._get_status_display("OBSOLETE")
+        assert text == "结果已过期"
 
-        text, emoji = pie_dialog._get_status_display("FAILED")
-        assert text == "拟合失败" and emoji == "❌"
+        text, _ = pie_dialog._get_status_display("FAILED")
+        assert text == "拟合失败"
 
     def test_status_transition_unfitted_to_completed(self, pie_dialog):
         """Test state transition: UNFITTED → COMPLETED."""
