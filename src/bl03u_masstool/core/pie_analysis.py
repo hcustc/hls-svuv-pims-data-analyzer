@@ -503,9 +503,9 @@ def fit_species_combination_with_curve(
             coefficient_map.get(species_id, 0.0) for species_id in active_species_ids
         ], dtype=float)
     elif coefficient_mode == "locked_fit":
-        # locked_fit模式：用于"强制保留"物种
-        # 将指定物种系数锁定为coefficients[id]（通常为eps），然后优化其他物种
-        # 这确保锁定物种无条件出现在结果表中，但对拟合贡献极小
+        # locked_fit模式：将指定物种系数锁定为 coefficients[id]，然后用 NNLS 优化其余物种
+        # 注意：identify_species_for_mz_with_curve 已不再使用此模式
+        # 此模式仍可由 UI 手动配置（coefficient_mode_combo = "锁定已选"）时触发
         locked_indices = [idx for idx, sid in enumerate(active_species_ids) if sid in locked_ids]
         free_indices = [idx for idx, sid in enumerate(active_species_ids) if sid not in locked_ids]
         for idx in locked_indices:
@@ -530,8 +530,8 @@ def fit_species_combination_with_curve(
     for idx, species in enumerate(active_species):
         # 结果包含条件：
         # 1. 系数>0.001（普通物种，贡献度判断）
-        # 2. OR 该物种在locked_ids中（强制保留物种，无条件包含）
-        # TODO: 改进为贡献度范数判断，而非绝对系数阈值（见forced_species_analysis.md P2）
+        # 2. OR 该物种在locked_ids中（锁定候选，不被自动筛除，系数由 NNLS 正常优化）
+        # TODO: 改进为贡献度范数判断，而非绝对系数阈值（见 locked_candidates_refactor_plan.md Phase 4）
         if coeffs[idx] > 0.001 or active_species_ids[idx] in locked_ids:
             component = design[:, idx] * coeffs[idx]
             key = (species["species"], species.get("ie"))
@@ -601,35 +601,41 @@ def identify_species_for_mz_with_curve(
     energies,
     intensities,
     *,
-    forced_species: list[str] | None = None,
+    locked_species: list[str] | None = None,
+    forced_species: list[str] | None = None,  # 向后兼容别名
 ) -> dict:
     """
     识别给定m/z的物种并拟合曲线
 
     Args:
-        forced_species: 强制保留物种名称列表
-                       （注意：当前实现为系数锁定为eps，名为"强制保留"而非"强制参与"）
+        locked_species: 锁定候选物种名称列表
+                       锁定物种不被自动筛选移除，系数由优化器正常决定
+                       "锁定"不表示已鉴别或系数必须非零
+        forced_species: 向后兼容别名，等同于 locked_species
 
-    当存在强制保留物种时，切换到locked_fit模式，将其系数设为eps并扣除后优化其他物种。
-    这确保强制保留物种无条件出现在结果表中，但对拟合贡献≈0。
-
-    详见 forced_species_analysis.md 中关于"强制保留"vs"强制参与"的区别。
+    当存在锁定候选物种时，这些物种的系数由 NNLS 自由优化，不强制为 eps。
+    锁定只保证它们出现在结果集合中（无论系数是否 > 阈值）。
+    物种鉴别由实验曲线与拟合结果共同支持。
     """
+    # 向后兼容：如果只传了 forced_species，使用它
+    if locked_species is None and forced_species is not None:
+        locked_species = forced_species
+
     candidates = [item for item in database if item["mz"] == int(mz)]
-    forced_names = {name for name in (forced_species or []) if name}
-    if forced_names:
+    locked_names = {name for name in (locked_species or []) if name}
+    if locked_names:
         locked_ids = [
             int(item.get("id", index + 1))
             for index, item in enumerate(candidates)
-            if item.get("species") in forced_names
+            if item.get("species") in locked_names
         ]
         return fit_species_combination_with_curve(
             candidates,
             energies,
             intensities,
-            coefficient_mode="locked_fit",
-            coefficients={species_id: np.finfo(float).eps for species_id in locked_ids},
             locked_species_ids=locked_ids,
+            # 不传 coefficient_mode="locked_fit"，使用默认 "fit"（NNLS 正常优化）
+            # locked_species_ids 仅用于结果包含逻辑，不影响系数优化
         )
     return fit_species_combination_with_curve(candidates, energies, intensities)
 
