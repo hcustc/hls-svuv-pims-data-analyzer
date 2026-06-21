@@ -9,7 +9,7 @@ from typing import Tuple
 
 import numpy as np
 import pandas as pd
-from PyQt6 import QtCore, QtWidgets
+from PyQt6 import QtCore, QtGui, QtWidgets
 
 from bl03u_masstool.core.calibration import Calibration, tof_to_mz
 from bl03u_masstool.core.config import (
@@ -269,6 +269,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.export_pie_button.setEnabled(False)
 
         self._locked_species: list[str] = []
+        self._result_panel_expanded: bool = False  # 记录用户展开/收起状态，切换m/z时保留
 
         # 初始化UI状态
         self.toggle_multi_folder_mode(0)
@@ -474,9 +475,12 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             win.switch_workspace_page("project")
 
     def _update_result_detail_button(self):
-        """根据结果状态更新'结果详情 ›'按钮的可见性和文本"""
+        """根据结果状态更新'结果详情 ›'按钮的可见性和文本，并保留用户展开状态"""
         if self.current_mz is None or self.current_mz not in self.all_fit_results:
             self.show_result_detail_btn.setVisible(False)
+            # 无结果时收起面板（不改变记录的展开状态）
+            if self.result_display_widget.isVisible():
+                self._apply_result_panel_visibility(False, update_state=False)
             return
 
         result = self.all_fit_results[self.current_mz]
@@ -486,46 +490,51 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
         # 根据状态设置按钮文本和可见性
         if status == "COMPLETED":
-            self.show_result_detail_btn.setText("结果详情 ›")
             self.show_result_detail_btn.setVisible(True)
+            if self._result_panel_expanded:
+                self._apply_result_panel_visibility(True, update_state=False)
+                self.show_result_detail_btn.setText("收起结果详情")
+            else:
+                self._apply_result_panel_visibility(False, update_state=False)
+                self.show_result_detail_btn.setText("结果详情 ›")
         elif status == "OBSOLETE":
-            self.show_result_detail_btn.setText("⚠ 查看过期结果")
             self.show_result_detail_btn.setVisible(True)
+            if self._result_panel_expanded:
+                self._apply_result_panel_visibility(True, update_state=False)
+                self.show_result_detail_btn.setText("收起结果详情")
+            else:
+                self._apply_result_panel_visibility(False, update_state=False)
+                self.show_result_detail_btn.setText("⚠ 查看过期结果")
         elif status == "FAILED":
-            self.show_result_detail_btn.setText("查看失败结果")
             self.show_result_detail_btn.setVisible(True)
+            self._apply_result_panel_visibility(False, update_state=False)
+            self.show_result_detail_btn.setText("查看失败结果")
         else:  # UNFITTED
             self.show_result_detail_btn.setVisible(False)
+            self._apply_result_panel_visibility(False, update_state=False)
 
     def _toggle_result_display(self, visible: bool | None = None) -> None:
-        """展开/收起结果详情面板"""
+        """展开/收起结果详情面板（用户手动触发，记录展开状态）"""
         if visible is None:
             visible = not self.result_display_widget.isVisible()
+        self._apply_result_panel_visibility(visible, update_state=True)
 
+    def _apply_result_panel_visibility(self, visible: bool, update_state: bool = True) -> None:
+        """实际执行展开/收起，可控制是否更新 _result_panel_expanded 记录"""
         if visible:
-            # 展开
             self.result_display_widget.setVisible(True)
             heights = self.right_splitter.sizes()
             total = sum(heights)
-            # 重新分配：图表65%、结果35%
-            new_heights = [
-                int(total * 0.65),   # 图表
-                int(total * 0.35)    # 结果详情
-            ]
-            self.right_splitter.setSizes(new_heights)
+            self.right_splitter.setSizes([int(total * 0.65), int(total * 0.35)])
             self.show_result_detail_btn.setText("收起结果详情")
         else:
-            # 收起
             self.result_display_widget.setVisible(False)
             heights = self.right_splitter.sizes()
             total = sum(heights)
-            # 重新分配：图表100%、结果0%
-            new_heights = [
-                total,    # 图表占满
-                0         # 结果（隐藏）
-            ]
-            self.right_splitter.setSizes(new_heights)
+            self.right_splitter.setSizes([total, 0])
             self.show_result_detail_btn.setText("查看结果详情")
+        if update_state:
+            self._result_panel_expanded = visible
 
     def _on_locked_species_changed(self):
         """锁定候选物种改变时标记dirty并更新状态"""
@@ -1864,11 +1873,42 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             current_per_mz_hash = self._get_per_mz_config_hash(mz)
             current_global_hash = self.global_solver_config.get("config_hash", "")
             fit_state_code = self._derive_result_status(result, current_per_mz_hash, current_global_hash)
-            fit_state_text, fit_state_emoji = self._get_status_display(fit_state_code)
 
-            item = QtWidgets.QListWidgetItem(f"{fit_state_emoji} m/z {mz}{suffix}  ({len(curve['energies'])}点)  {fit_state_text}")
+            # 状态文字和颜色配置
+            if fit_state_code == "COMPLETED":
+                r2 = result.get("r_squared", 0.0) if result else 0.0
+                r2_str = f"{r2:.3f}"
+                status_str = f"R²={r2_str}"
+                if r2 >= 0.8:
+                    fg_color = QtGui.QColor("#166534")   # 深绿
+                    bg_color = QtGui.QColor("#dcfce7")   # 浅绿背景
+                elif r2 >= 0.5:
+                    fg_color = QtGui.QColor("#92400e")   # 深琥珀
+                    bg_color = QtGui.QColor("#fef9c3")   # 浅黄背景
+                else:
+                    fg_color = QtGui.QColor("#991b1b")   # 深红
+                    bg_color = QtGui.QColor("#fee2e2")   # 浅红背景
+            elif fit_state_code == "OBSOLETE":
+                r2 = result.get("r_squared", 0.0) if result else 0.0
+                status_str = f"R²={r2:.3f} (过期)"
+                fg_color = QtGui.QColor("#6b7280")       # 灰色
+                bg_color = QtGui.QColor("#f3f4f6")       # 浅灰背景
+            elif fit_state_code == "FAILED":
+                status_str = "失败"
+                fg_color = QtGui.QColor("#991b1b")
+                bg_color = QtGui.QColor("#fee2e2")
+            else:  # UNFITTED
+                status_str = "待拟合"
+                fg_color = QtGui.QColor("#374151")       # 深灰文字
+                bg_color = None                          # 无背景色
+
+            item_text = f"m/z {mz}{suffix}  [{status_str}]  ({len(curve['energies'])}点)"
+            item = QtWidgets.QListWidgetItem(item_text)
             item.setData(QtCore.Qt.ItemDataRole.UserRole, mz)
-            item.setToolTip(f"m/z {mz} | {fit_state_text}")
+            item.setForeground(QtGui.QBrush(fg_color))
+            if bg_color:
+                item.setBackground(QtGui.QBrush(bg_color))
+            item.setToolTip(f"m/z {mz}{suffix} | {status_str} | {len(curve['energies'])} 个能量点")
             self.mz_list.addItem(item)
             if current_mz == mz:
                 self.mz_list.setCurrentItem(item)
