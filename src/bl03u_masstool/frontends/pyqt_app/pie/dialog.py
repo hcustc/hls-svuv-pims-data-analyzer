@@ -1316,6 +1316,9 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             if result.get('success'):
                 self.all_fit_results[mz] = result
 
+        # Phase 3 Step 3: Mark results dirty when refit completes
+        self.pie_state_dirty = True
+
         fitted_count = sum(1 for r in self.all_fit_results.values() if r.get('success'))
         total_count = len(self.curves)
 
@@ -1364,6 +1367,8 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         """清除所有拟合"""
         self.current_fit = None
         self.all_fit_results = {}
+        # Phase 3 Step 3: Mark results dirty when clearing fits
+        self.pie_state_dirty = True
         self.fit_table.setRowCount(0)
         self._update_fit_stats(0, 0, None)
         self.refresh_current_plot()
@@ -1691,11 +1696,16 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             print(f"⚠️  Error saving per-m/z configurations: {e}")
             # Keep dirty flag on exception
 
-    def persist_per_mz_config_state(self) -> Tuple[bool, str | None]:
-        """Public interface for project save lifecycle (Phase 3 Step 2).
+    def persist_pie_project_state(self) -> Tuple[bool, str | None]:
+        """Public interface for PIE project state persistence.
 
-        Called by project save handler after ProjectSettings.save().
-        Will be extended in Phase 3 Step 3 to save configs + results together.
+        Phase 3 Step 3: Saves complete PIE project state atomically:
+        - Configuration (per-m/z solver parameters)
+        - Results (fitting metrics, species contributions, arrays)
+        - Arrays (energies, fitted curves, residuals, components)
+        - Manifest (fingerprints, metadata)
+
+        Called by project save handlers after ProjectSettings.save().
 
         Returns:
             (success, error_message)
@@ -1740,6 +1750,10 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         except Exception as e:
             self.pie_state_dirty = True
             return (False, str(e))
+
+    def persist_per_mz_config_state(self) -> Tuple[bool, str | None]:
+        """Backward compatibility alias for persist_pie_project_state()."""
+        return self.persist_pie_project_state()
 
     def mark_pie_config_changed(self) -> None:
         """Mark PIE configuration as changed (dirty).
@@ -2315,6 +2329,9 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 "fit_timestamp": time.time(),
             }
 
+            # Phase 3 Step 3: Mark results dirty when fitting completes
+            self.pie_state_dirty = True
+
             fit_df = pd.DataFrame(
                 [
                     {
@@ -2403,6 +2420,8 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             "species": best["model"].get("species", [])[:3],
             "r_squared": best["r_squared"],
         }
+        # Phase 3 Step 3: Mark results dirty when exhaustive fitting completes
+        self.pie_state_dirty = True
         curve = self.curves[self.current_mz]
         self.update_plot(curve, best["model"])
         # 更新拟合结果表: 排名 / 物种组合 / 物种数 / R² / RMSE
