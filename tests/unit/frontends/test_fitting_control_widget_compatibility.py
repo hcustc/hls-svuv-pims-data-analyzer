@@ -7,8 +7,22 @@
 3. 旧代码的读写行为与新代码一致
 """
 
+from __future__ import annotations
+
+import os
+
 import pytest
-from PyQt6 import QtWidgets
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+pytest.importorskip("PyQt6")
+try:
+    from PyQt6 import QtWidgets
+except ImportError as e:
+    pytest.skip(f"PyQt6 display libraries not available: {e}", allow_module_level=True)
+
+pytestmark = pytest.mark.gui
+
 from bl03u_masstool.frontends.pyqt_app.pie.fitting_control_widget import FittingControlWidget
 
 
