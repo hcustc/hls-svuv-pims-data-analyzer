@@ -382,6 +382,30 @@ class WorkspacePagesMixin:
         action_layout.setContentsMargins(8, 6, 8, 6)
         action_layout.setSpacing(6)
 
+        # 新建项目按钮（突出显示）
+        self.project_new_button = QPushButton("➕ 新建项目", action_bar)
+        self.project_new_button.setObjectName("PrimaryButton")
+        self.project_new_button.setToolTip("清空当前表单，开始创建新项目")
+        self.project_new_button.setFixedHeight(32)
+        self.project_new_button.setStyleSheet("""
+            QPushButton#PrimaryButton {
+                background-color: #4CAF50;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 0px 16px;
+                font-weight: bold;
+            }
+            QPushButton#PrimaryButton:hover {
+                background-color: #45a049;
+            }
+            QPushButton#PrimaryButton:pressed {
+                background-color: #3d8b40;
+            }
+        """)
+        action_layout.addWidget(self.project_new_button)
+        action_layout.addSpacing(12)
+
         self.project_read_paths_button = QPushButton("读取工具路径", action_bar)
         self.project_initialize_button = QPushButton("初始化项目", action_bar)
         self.project_save_and_apply_button = QPushButton("保存并应用", action_bar)
@@ -435,6 +459,7 @@ class WorkspacePagesMixin:
         form_layout.addRow("项目目录", output_row)
         card_layout.addLayout(form_layout)
 
+        self.project_new_button.clicked.connect(self.new_project)
         self.project_read_paths_button.clicked.connect(self.read_paths_from_tools)
         self.project_initialize_button.clicked.connect(self.initialize_project_structure)
         self.project_save_and_apply_button.clicked.connect(self.save_and_apply_project_settings)
@@ -1199,6 +1224,15 @@ class WorkspacePagesMixin:
         ps.mf_parent_initial_mf = self.fp_mf_parent_initial_mf.value()
         ps.mf_photon_energy = self.fp_mf_photon_energy.value()
         ps.mf_reference_temperature = float(self.fp_mf_reference_temperature.value())
+
+    def new_project(self) -> None:
+        """清空表单，准备创建新项目"""
+        self.project_name_edit.clear()
+        self.project_system_edit.clear()
+        self.project_description_edit.clear()
+        self.project_output_dir_edit.clear()
+        self.project_name_edit.setFocus()
+        self.statusbar.showMessage("已清空表单，请填写项目信息并点击'保存并应用'", 3000)
 
     def save_and_apply_project_settings(self) -> None:
         """Save project settings, create project structure, and sync to tools.
