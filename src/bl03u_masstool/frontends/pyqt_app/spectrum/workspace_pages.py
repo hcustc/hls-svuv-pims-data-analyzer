@@ -952,7 +952,37 @@ class WorkspacePagesMixin:
         return ps
 
     def load_project_settings(self) -> None:
+        """加载项目配置。
+
+        流程：
+        1. 检查当前项目的输出目录（从UI或ProjectSettings）
+        2. 如果项目配置存在，自动设置项目路径
+        3. 加载项目级或全局配置
+        4. 同步到所有UI元素
+        """
+        from pathlib import Path
+
+        # Step 1: 获取当前项目的输出目录
+        current_output_dir = self.project_output_dir_edit.text().strip()
+
+        # 如果UI中没有项目路径，尝试从manager获取
+        if not current_output_dir or current_output_dir == "output":
+            # 先get一次（可能是全局配置）
+            ps_temp = self.project_settings_manager.get()
+            if ps_temp and ps_temp.output_dir and ps_temp.output_dir.strip() != "output":
+                current_output_dir = ps_temp.output_dir
+
+        # Step 2: 如果有有效的项目路径，设置它
+        if current_output_dir and current_output_dir.strip() != "output":
+            project_path = Path(current_output_dir)
+            # 检查项目级配置文件是否存在
+            project_config = project_path / "config" / "project.yaml"
+            if project_config.exists():
+                self.project_settings_manager.set_project_path(project_path)
+
+        # Step 3: 现在加载配置（可能是项目级或全局的）
         ps = self.project_settings_manager.get()
+
         # Do NOT auto-fill paths here - only display what's actually saved in config
         # Users must use the import wizard to set up data sources
         self._read_project_settings_to_ui(ps)
@@ -960,8 +990,10 @@ class WorkspacePagesMixin:
         # 同步ProjectSettings到参数widgets
         if hasattr(self, "project_common_parameters_widget"):
             self.project_common_parameters_widget.set_project_settings(ps)
+            self.project_common_parameters_widget.load_from_settings()  # 立即加载到UI
         if hasattr(self, "project_peak_detection_widget"):
             self.project_peak_detection_widget.set_project_settings(ps)
+            self.project_peak_detection_widget.load_from_settings()  # 立即加载到UI
         self.update_project_title()
         self.refresh_project_lifecycle()
         self.refresh_project_datasource_page()

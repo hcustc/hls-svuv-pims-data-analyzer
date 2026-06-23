@@ -306,7 +306,8 @@ def _nested_to_flat(data: dict) -> dict:
 
         mf = fp.get("mole_fraction", {})
         if isinstance(mf, dict):
-            for k, kk in [("mf_mass_disc_exponent", "mass_disc_exponent"),
+            for k, kk in [("mf_md_preset", "md_preset"),
+                          ("mf_mass_disc_exponent", "mass_disc_exponent"),
                           ("mf_parent_mz", "parent_mz"),
                           ("mf_parent_initial_mf", "parent_initial_mf"),
                           ("mf_reference_temperature", "reference_temperature"),
@@ -417,6 +418,7 @@ def _flat_to_nested(settings: ProjectSettings) -> dict:
                 "new_species_mf": d["pics_new_species_mf"],
             },
             "mole_fraction": {
+                "md_preset": d["mf_md_preset"],
                 "mass_disc_exponent": d["mf_mass_disc_exponent"],
                 "parent_mz": d["mf_parent_mz"],
                 "parent_initial_mf": d["mf_parent_initial_mf"],

@@ -1,7 +1,7 @@
 normalization:
   light_source: io
   temperature_photon_normalize: true
-  temperature_kr_correct: false
+  temperature_kr_correct: true
   pie_photon_mode: first
   mass_discrimination: 1.0
   kr_calibration_folder: /Users/huangchen/VscodeProject/BL03U_MSTool_clean_repo/BL03U_MassSpectrumTool/tests/fixtures/bl03u_sample/顺-13-二甲基环己烷
