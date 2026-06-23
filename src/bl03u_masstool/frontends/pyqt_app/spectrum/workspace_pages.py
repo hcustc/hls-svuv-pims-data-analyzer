@@ -554,23 +554,6 @@ class WorkspacePagesMixin:
         _add_path_row(analysis_layout, 2, "manual_peak", "手动卡峰文件", self.project_manual_peak_edit, self.project_manual_peak_button)
         card_layout.addWidget(analysis_group)
 
-        # ── 参考数据库（只读）──
-        ref_group = QtWidgets.QGroupBox("参考数据库", self.datasource_card)
-        ref_layout = QtWidgets.QGridLayout(ref_group)
-        ref_layout.setContentsMargins(8, 8, 8, 8)
-        ref_layout.setHorizontalSpacing(6)
-        ref_layout.setVerticalSpacing(5)
-        ref_layout.setColumnStretch(1, 1)
-
-        ref_label = QtWidgets.QLabel("PICS截面数据库", self.datasource_card)
-        ref_label.setFixedWidth(110)
-        self.project_pics_database_display = QLineEdit(self.datasource_card)
-        self.project_pics_database_display.setReadOnly(True)
-        self.project_pics_database_display.setPlaceholderText("系统参考数据库（自动配置）")
-        ref_layout.addWidget(ref_label, 0, 0)
-        ref_layout.addWidget(self.project_pics_database_display, 0, 1)
-        card_layout.addWidget(ref_group)
-
         self.project_single_file_button.clicked.connect(self.select_project_single_file)
         self.project_sum_folder_button.clicked.connect(
             lambda: self.select_project_folder(self.project_sum_folder_edit, "选择累计谱文件夹")
@@ -783,9 +766,6 @@ class WorkspacePagesMixin:
         self.project_temperature_folder_edit.setText(ps.temperature_scan_folder)
         self.project_pie_folder_edit.setText(ps.pie_scan_folder)
         self.project_manual_peak_edit.setText(ps.manual_peak_file)
-        # PICS database is read-only reference database
-        if hasattr(self, "project_pics_database_display"):
-            self.project_pics_database_display.setText(ps.pics_database_path)
 
     def _collect_project_settings_from_ui(self) -> ProjectSettings:
         """Build a ProjectSettings from all UI fields (does not save)."""
