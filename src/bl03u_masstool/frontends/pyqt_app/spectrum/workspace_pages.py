@@ -393,24 +393,19 @@ class WorkspacePagesMixin:
         action_layout.addSpacing(12)
 
         self.project_read_paths_button = QPushButton("读取工具路径", action_bar)
-        self.project_initialize_button = QPushButton("初始化项目", action_bar)
         self.project_save_and_apply_button = QPushButton("保存并应用", action_bar)
 
         self.project_read_paths_button.setToolTip(
             "从质谱工作台读取已选择的单谱和累计谱路径，回填到项目设置页。"
         )
-        self.project_initialize_button.setToolTip(
-            "创建项目文件夹结构并保存配置。仅初始化项目，不同步参数到工具。"
-        )
         self.project_save_and_apply_button.setToolTip(
             "保存项目设置 → 创建项目文件夹 → 同步参数到各工具页面。完整初始化和配置。"
         )
 
-        for button in (self.project_read_paths_button, self.project_initialize_button, self.project_save_and_apply_button):
+        for button in (self.project_read_paths_button, self.project_save_and_apply_button):
             button.setFixedHeight(28)
             action_layout.addWidget(button)
 
-        self.project_initialize_button.setObjectName("BrowseButton")
         self.project_save_and_apply_button.setObjectName("BrowseButton")
         hero_layout.addWidget(action_bar)
         card_layout.addWidget(hero)
@@ -448,7 +443,6 @@ class WorkspacePagesMixin:
         self.project_new_button.clicked.connect(self.new_project)
         self.project_open_button.clicked.connect(self.open_project)
         self.project_read_paths_button.clicked.connect(self.read_paths_from_tools)
-        self.project_initialize_button.clicked.connect(self.initialize_project_structure)
         self.project_save_and_apply_button.clicked.connect(self.save_and_apply_project_settings)
         self.project_output_dir_button.clicked.connect(
             lambda: self.select_project_folder(self.project_output_dir_edit, "选择输出目录")
