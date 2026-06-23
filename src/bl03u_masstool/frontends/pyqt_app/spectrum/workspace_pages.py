@@ -469,6 +469,12 @@ class WorkspacePagesMixin:
         title_column.addWidget(datasource_hint)
         title_column.addWidget(self.datasource_status_label)
         top_bar.addLayout(title_column, stretch=1)
+
+        self.datasource_import_button = QPushButton("启动导入向导", self.datasource_card)
+        self.datasource_import_button.setObjectName("PrimaryButton")
+        self.datasource_import_button.setToolTip("选择原始数据源，并复制/登记到当前项目")
+        self.datasource_import_button.setFixedHeight(30)
+        top_bar.addWidget(self.datasource_import_button)
         card_layout.addLayout(top_bar)
 
         # ── 工作流能力标签行 ──
