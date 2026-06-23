@@ -259,6 +259,11 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
         self.compute_kr_button = QtWidgets.QPushButton("▶  计算 Kr 膨胀系数")
         self.compute_kr_button.clicked.connect(self.compute_kr_factors)
 
+        # 能量选择（仅在多能量时显示）
+        self.energy_combo = QtWidgets.QComboBox()
+        self.energy_combo.setVisible(False)
+        self.energy_combo.currentIndexChanged.connect(self.on_energy_selected)
+
         kr_form.addWidget(QtWidgets.QLabel("扫描文件夹:"), 0, 0)
         kr_form.addWidget(self.kr_folder_edit, 0, 1)
         kr_form.addWidget(self.kr_folder_button, 0, 2)
@@ -274,7 +279,11 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
         kr_form.addWidget(QtWidgets.QLabel("卡峰文件:"), 2, 0)
         kr_form.addWidget(self.kr_peak_file_edit, 2, 1)
         kr_form.addWidget(self.kr_peak_file_button, 2, 2)
-        kr_form.addWidget(self.compute_kr_button, 3, 1)
+
+        kr_form.addWidget(QtWidgets.QLabel("能量选择:"), 3, 0)
+        kr_form.addWidget(self.energy_combo, 3, 1)
+
+        kr_form.addWidget(self.compute_kr_button, 4, 1)
         kr_form.setColumnStretch(1, 1)
         kr_layout.addLayout(kr_form)
 
@@ -503,24 +512,100 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
 
     def on_kr_factors_ready(self, result: object) -> None:
         df = result
+        import pandas as pd
         from bl03u_masstool.core.mole_fraction import parse_expansion_factors_from_result
 
-        # 使用新的辅助函数处理膨胀系数
-        self.settings.expansion_factors = parse_expansion_factors_from_result(df)
+        # 保存原始结果用于能量选择
+        self._kr_result_df = df
 
-        # 保存kr_signal用于展示
-        self._kr_signal_data = {
-            float(row["temperature"]): float(row["kr_signal"])
-            for _, row in df.iterrows()
-        }
+        # 检查是否为多能量数据
+        is_multi_energy = "photon_energy" in df.columns and df["photon_energy"].nunique() > 1
 
-        # 显示计算结果
-        total_factors = len(self.settings.expansion_factors)
-        msg = f"已计算 {total_factors} 个温度点的Kr膨胀系数"
+        if is_multi_energy:
+            # 多能量：计算平均结果
+            avg_data = []
+            for temp in sorted(df["temperature"].unique()):
+                temp_data = df[df["temperature"] == temp]
+                avg_lambda = float(temp_data["expansion_lambda"].mean())
+                avg_signal = float(temp_data["kr_signal"].mean())
+                avg_data.append({
+                    "temperature": float(temp),
+                    "kr_signal": avg_signal,
+                    "expansion_lambda": avg_lambda,
+                })
+            avg_df = pd.DataFrame(avg_data)
+            self.settings.expansion_factors = parse_expansion_factors_from_result(avg_df)
+
+            # 填充能量下拉列表
+            energies = sorted(df["photon_energy"].unique())
+            self.energy_combo.blockSignals(True)
+            self.energy_combo.clear()
+            self.energy_combo.addItem("平均结果", None)
+            for energy in energies:
+                self.energy_combo.addItem(f"E={energy:.4f} eV", float(energy))
+            self.energy_combo.blockSignals(False)
+            self.energy_combo.setVisible(True)
+
+            # 显示平均结果
+            self._kr_signal_data = {
+                float(row["temperature"]): float(row["kr_signal"])
+                for _, row in avg_df.iterrows()
+            }
+            msg = f"已计算 {len(energies)} 个能量点 × {len(df)//len(energies)} 个温度点，"
+            msg += f"显示 {len(self.settings.expansion_factors)} 个温度点的平均膨胀系数"
+        else:
+            # 单能量
+            self.settings.expansion_factors = parse_expansion_factors_from_result(df)
+            self._kr_signal_data = {
+                float(row["temperature"]): float(row["kr_signal"])
+                for _, row in df.iterrows()
+            }
+            self.energy_combo.setVisible(False)
+            msg = f"已计算 {len(self.settings.expansion_factors)} 个温度点的Kr膨胀系数"
 
         self.refresh_factor_table()
         save_normalization_settings(self.settings)
         self.status_label.setText(msg)
+
+    def on_energy_selected(self, index: int) -> None:
+        """能量选择改变时更新表格"""
+        if not hasattr(self, '_kr_result_df'):
+            return
+
+        selected_energy = self.energy_combo.currentData()
+        df = self._kr_result_df
+
+        if selected_energy is None:
+            # 显示平均结果
+            result_data = []
+            for temp in sorted(df["temperature"].unique()):
+                temp_data = df[df["temperature"] == temp]
+                avg_lambda = float(temp_data["expansion_lambda"].mean())
+                avg_signal = float(temp_data["kr_signal"].mean())
+                result_data.append({
+                    "temperature": float(temp),
+                    "kr_signal": avg_signal,
+                    "expansion_lambda": avg_lambda,
+                })
+        else:
+            # 显示特定能量的结果
+            energy_data = df[df["photon_energy"] == selected_energy].sort_values("temperature")
+            result_data = [
+                {
+                    "temperature": float(row["temperature"]),
+                    "kr_signal": float(row["kr_signal"]),
+                    "expansion_lambda": float(row["expansion_lambda"]),
+                }
+                for _, row in energy_data.iterrows()
+            ]
+
+        # 更新 Kr 信号数据用于显示
+        self._kr_signal_data = {
+            float(row["temperature"]): float(row["kr_signal"])
+            for row in result_data
+        }
+
+        self.refresh_factor_table()
 
 
     def on_kr_factors_failed(self, message: str) -> None:

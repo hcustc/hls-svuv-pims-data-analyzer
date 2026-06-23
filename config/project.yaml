@@ -4,7 +4,8 @@ project:
   description: test
   output_dir: /Users/huangchen/Downloads/
 data_sources:
-  single_spectrum_file: ''
+  single_spectrum_file: /Users/huangchen/VscodeProject/BL03U_MSTool_clean_repo/BL03U_MassSpectrumTool/tests/fixtures/bl03u_sample/顺-13-二甲基环己烷
+    30 torr/温度扫描/10.5eV/C24110905-0000.txt
   sum_spectrum_folder: tests/fixtures/bl03u_sample/C6F11O2H/Temp_Scan/12.5eV
   temperature_scan_folder: /Users/huangchen/VscodeProject/BL03U_MSTool_clean_repo/BL03U_MassSpectrumTool/tests/fixtures/bl03u_sample/顺-13-二甲基环己烷
     30 torr/温度扫描/10.5eV/

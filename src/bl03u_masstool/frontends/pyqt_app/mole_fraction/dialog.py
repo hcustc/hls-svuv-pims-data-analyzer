@@ -36,13 +36,11 @@ from bl03u_masstool.core.temperature_scan import (
     TEMPERATURE_CURVE_CLASS_LABELS,
     analyze_temperature_folder,
     build_temperature_curves,
-    compute_kr_expansion_factors,
 )
 from bl03u_masstool.core.mole_fraction import (
     MASS_DISCRIMINATION_PRESETS,
     MoleFractionSettings,
     _interpolate_cross_section,
-    calc_expansion_coefficients,
     calc_isomeric_separation,
     calc_mass_discrimination,
     calc_parent_mole_fraction,
@@ -82,7 +80,6 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.pie_species_data: list[dict] = []
         self.available_energies: list[float] = []
         self.all_species_mf: dict[tuple, dict[float, float]] = {}
-        self.kr_data: dict[float, float] = dict(self.settings.kr_data)
         self.peak_ranges: dict[int, tuple[int, int]] = {}
         self._init_ui()
         self._auto_load_database()
@@ -119,9 +116,8 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
         self.tabs = QtWidgets.QTabWidget()
         self.tabs.addTab(self._create_data_tab(), "1. 数据加载")
-        self.tabs.addTab(self._create_params_tab(), "2. 参数设置")
-        self.tabs.addTab(self._create_energy_parent_tab(), "2.5 多能量母体配置")
-        self.tabs.addTab(self._create_parent_tab(), "3. 母体摩尔分数")
+        self.tabs.addTab(self._create_parent_tab(), "2. 母体摩尔分数")
+        self.tabs.addTab(self._create_energy_parent_tab(), "3. 低能参考物种")
         self.tabs.addTab(self._create_auto_mf_tab(), "4. 自动计算摩尔分数")
         self.tabs.addTab(self._create_results_tab(), "5. 结果汇总")
         layout.addWidget(self.tabs)
@@ -138,17 +134,29 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         except Exception:
             pass
 
+    @property
+    def _mass_disc_exponent(self) -> float:
+        """统一读取质量歧视因子指数：优先使用项目设置，回退到legacy设置。"""
+        if self.project_settings is not None:
+            return self.project_settings.mf_mass_disc_exponent
+        return self._mass_disc_exponent
+
     def set_project_settings(self, ps: ProjectSettings) -> None:
         """Apply ProjectSettings defaults to MoleFractionDialog controls."""
         self.project_settings = ps
         # 卡峰范围由项目管理统一维护，在此自动加载
         self._load_peak_ranges_from_project()
-        if hasattr(self, "spin_md_exponent"):
-            self.spin_md_exponent.setValue(ps.mf_mass_disc_exponent)
         if hasattr(self, "spin_parent_mz"):
             self.spin_parent_mz.setValue(ps.mf_parent_mz)
-        if ps.mf_kr_data:
-            self.kr_data = dict(ps.mf_kr_data)
+        if hasattr(self, "spin_parent_mf0"):
+            self.spin_parent_mf0.setValue(ps.mf_parent_initial_mf)
+        if hasattr(self, "spin_parent_energy"):
+            self.spin_parent_energy.setValue(ps.mf_photon_energy)
+        if hasattr(self, "spin_parent_t0") and ps.mf_reference_temperature is not None:
+            self.spin_parent_t0.setValue(int(ps.mf_reference_temperature))
+        # 膨胀系数从项目全局设置同步（通用参数中计算的）
+        if ps.expansion_factors:
+            self.expansion_coefficients = dict(ps.expansion_factors)
         # 更新摘要栏
         if hasattr(self, "summary_project_label"):
             project_name = ps.project_name or "---"
@@ -164,6 +172,9 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 artifacts.append("摩尔分数结果")
             data_flow = ", ".join(artifacts) if artifacts else (ps.temperature_scan_folder or ps.pie_scan_folder or "---")
             self.summary_data_label.setText(f"数据流: {data_flow}")
+        if hasattr(self, "btn_load_project_ts_folder"):
+            has_ts_folder = bool(ps.temperature_scan_folder)
+            self.btn_load_project_ts_folder.setEnabled(has_ts_folder)
         if hasattr(self, "btn_load_project_ts_result"):
             has_ts_result = bool(ps.temperature_scan_result_file)
             self.btn_load_project_ts_result.setEnabled(has_ts_result)
@@ -209,7 +220,12 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         # 单行：数据载入 + 能量选择 + 状态
         ts_row = QtWidgets.QHBoxLayout()
         ts_row.setSpacing(6)
-        self.btn_load_project_ts_result = QtWidgets.QPushButton("从项目载入")
+        self.btn_load_project_ts_folder = QtWidgets.QPushButton("项目原始目录")
+        self.btn_load_project_ts_folder.setToolTip("从项目管理配置的温度扫描根目录自动载入各能量子文件夹")
+        self.btn_load_project_ts_folder.clicked.connect(self._load_project_temperature_scan_folder)
+        self.btn_load_project_ts_folder.setEnabled(False)
+        ts_row.addWidget(self.btn_load_project_ts_folder)
+        self.btn_load_project_ts_result = QtWidgets.QPushButton("项目结果")
         self.btn_load_project_ts_result.setToolTip("读取项目管理中登记的温度扫描结果文件")
         self.btn_load_project_ts_result.clicked.connect(self._load_project_temperature_result)
         self.btn_load_project_ts_result.setEnabled(False)
@@ -312,149 +328,21 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         layout.addStretch()
         return widget
 
-    def _create_params_tab(self):
-        widget = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(widget)
-        layout.setSpacing(8)
-
-        calib_group = QtWidgets.QGroupBox("质量数校准（来自主程序）")
-        calib_layout = QtWidgets.QGridLayout(calib_group)
-        calib_layout.setContentsMargins(10, 8, 10, 8)
-        calib_layout.setHorizontalSpacing(8)
-        calib_layout.setVerticalSpacing(4)
-        calib_layout.addWidget(QtWidgets.QLabel("校准状态:"), 0, 0)
-        self.lbl_calib_status = QtWidgets.QLabel("已同步主程序校准")
-        self.lbl_calib_status.setStyleSheet("color: #4ecdc4;")
-        calib_layout.addWidget(self.lbl_calib_status, 0, 1)
-        formula_label = QtWidgets.QLabel("m/z = A*x² + B*x + C")
-        calib_layout.addWidget(formula_label, 0, 2, 1, 4)
-        calib_layout.addWidget(QtWidgets.QLabel("A:"), 1, 0)
-        self.txt_calib_A = QtWidgets.QLineEdit(f"{self.calibration.a:.10f}")
-        self.txt_calib_A.setFixedWidth(150)
-        self.txt_calib_A.setReadOnly(True)
-        calib_layout.addWidget(self.txt_calib_A, 1, 1)
-        calib_layout.addWidget(QtWidgets.QLabel("B:"), 1, 2)
-        self.txt_calib_B = QtWidgets.QLineEdit(f"{self.calibration.b:.6f}")
-        self.txt_calib_B.setFixedWidth(130)
-        self.txt_calib_B.setReadOnly(True)
-        calib_layout.addWidget(self.txt_calib_B, 1, 3)
-        calib_layout.addWidget(QtWidgets.QLabel("C:"), 1, 4)
-        self.txt_calib_C = QtWidgets.QLineEdit(f"{self.calibration.c:.4f}")
-        self.txt_calib_C.setFixedWidth(130)
-        self.txt_calib_C.setReadOnly(True)
-        calib_layout.addWidget(self.txt_calib_C, 1, 5)
-        calib_layout.setColumnStretch(6, 1)
-        calib_group.setMaximumHeight(92)
-        calib_group.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
-        layout.addWidget(calib_group)
-
-        self.params_preview_tabs = QtWidgets.QTabWidget()
-
-        md_panel = QtWidgets.QWidget()
-        md_layout = QtWidgets.QVBoxLayout(md_panel)
-        md_layout.setContentsMargins(8, 8, 8, 8)
-        md_layout.setSpacing(8)
-        md_control_panel = QtWidgets.QWidget()
-        md_control_panel.setObjectName("ControlBar")
-        md_controls = QtWidgets.QHBoxLayout(md_control_panel)
-        md_controls.setContentsMargins(10, 8, 10, 8)
-        md_controls.setSpacing(8)
-        md_controls.addWidget(QtWidgets.QLabel("实验条件:"))
-        self.combo_md_preset = QtWidgets.QComboBox()
-        self.combo_md_preset.setToolTip("选择实验条件预设值，自动设置质量歧视指数n")
-        for name in MASS_DISCRIMINATION_PRESETS:
-            self.combo_md_preset.addItem(name)
-        self.combo_md_preset.currentTextChanged.connect(self._on_md_preset_changed)
-        md_controls.addWidget(self.combo_md_preset)
-        md_controls.addWidget(QtWidgets.QLabel("指数 n:"))
-        self.spin_md_exponent = QtWidgets.QDoubleSpinBox()
-        self.spin_md_exponent.setToolTip("质量歧视因子公式 D_i = (MW/30)^n 中的指数n，n值取决于离子源类型和质量分析器特性")
-        self.spin_md_exponent.setDecimals(5)
-        self.spin_md_exponent.setValue(self.settings.mass_disc_exponent)
-        self.spin_md_exponent.setSingleStep(0.001)
-        self.spin_md_exponent.valueChanged.connect(self._on_md_exponent_changed)
-        md_controls.addWidget(self.spin_md_exponent)
-        md_formula = QtWidgets.QLabel("D_i = (MW/30)^n")
-        md_controls.addWidget(md_formula)
-        md_controls.addStretch()
-        btn_calc_md = QtWidgets.QPushButton("预览质量歧视因子")
-        btn_calc_md.clicked.connect(self._preview_mass_discrimination)
-        md_controls.addWidget(btn_calc_md)
-        md_layout.addWidget(md_control_panel)
-        self.md_preview_table = QtWidgets.QTableWidget()
-        self.md_preview_table.setColumnCount(3)
-        self.md_preview_table.setHorizontalHeaderLabels(["物种", "分子量", "D_i"])
-        self.md_preview_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
-        self.md_preview_table.setMinimumHeight(150)
-        self.md_preview_table.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Expanding)
-        md_layout.addWidget(self.md_preview_table, 1)
-        self.params_preview_tabs.addTab(md_panel, "质量歧视因子")
-
-        ec_panel = QtWidgets.QWidget()
-        ec_layout = QtWidgets.QVBoxLayout(ec_panel)
-        ec_layout.setContentsMargins(8, 8, 8, 8)
-        ec_layout.setSpacing(8)
-        ec_control_panel = QtWidgets.QWidget()
-        ec_control_panel.setObjectName("ControlBar")
-        ec_top = QtWidgets.QGridLayout()
-        ec_top.setContentsMargins(10, 8, 10, 8)
-        ec_top.setHorizontalSpacing(8)
-        ec_top.setVerticalSpacing(6)
-        ec_top.addWidget(QtWidgets.QLabel("Kr数据来源:"), 0, 0)
-        self.combo_kr_source = QtWidgets.QComboBox()
-        self.combo_kr_source.setToolTip("选择Kr膨胀系数λ(T)的数据来源：内置默认数据/自定义文件/从温度扫描数据提取")
-        self.combo_kr_source.addItems(["使用默认数据", "从文件加载", "从高能量温度扫描提取"])
-        self.combo_kr_source.currentTextChanged.connect(self._on_kr_source_changed)
-        ec_top.addWidget(self.combo_kr_source, 0, 1)
-        ec_top.addWidget(QtWidgets.QLabel("Kr质量数 m/z:"), 0, 2)
-        self.spin_kr_mz = QtWidgets.QSpinBox()
-        self.spin_kr_mz.setToolTip("Kr同位素峰质量数，默认使用 m/z 84")
-        self.spin_kr_mz.setRange(1, 200)
-        self.spin_kr_mz.setValue(84)
-        ec_top.addWidget(self.spin_kr_mz, 0, 3)
-        self.btn_load_kr = QtWidgets.QPushButton("加载Kr数据")
-        self.btn_load_kr.clicked.connect(self._load_kr_data)
-        self.btn_load_kr.setEnabled(False)
-        self.btn_extract_kr = QtWidgets.QPushButton("从温度扫描提取Kr")
-        self.btn_extract_kr.clicked.connect(self._extract_kr_from_scan)
-        self.btn_extract_kr.setEnabled(False)
-        ec_top.addWidget(self.btn_load_kr, 0, 4)
-        ec_top.addWidget(self.btn_extract_kr, 0, 5)
-        btn_calc_lambda = QtWidgets.QPushButton("计算膨胀系数")
-        btn_calc_lambda.clicked.connect(self._calc_expansion_coefficients)
-        ec_top.addWidget(btn_calc_lambda, 0, 6)
-        ec_top.setColumnStretch(7, 1)
-        ec_control_panel.setLayout(ec_top)
-        ec_layout.addWidget(ec_control_panel)
-
-        self.kr_table = QtWidgets.QTableWidget()
-        self.kr_table.setColumnCount(4)
-        self.kr_table.setHorizontalHeaderLabels(["温度(°C)", "文件名", "Kr信号积分", "λ(T)"])
-        self.kr_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
-        self.kr_table.setMinimumHeight(180)
-        self.kr_table.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Expanding)
-        ec_layout.addWidget(self.kr_table, 1)
-        self.params_preview_tabs.addTab(ec_panel, "膨胀系数")
-        layout.addWidget(self.params_preview_tabs, 1)
-
-        self._fill_kr_table()
-        return widget
-
     def _create_energy_parent_tab(self):
         widget = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(widget)
 
         top_layout = QtWidgets.QHBoxLayout()
         btn_refresh = QtWidgets.QPushButton("刷新可用能量")
-        btn_refresh.setToolTip("根据已加载温度扫描数据刷新每个能量的母体配置行")
+        btn_refresh.setToolTip("根据已加载温度扫描数据刷新可设置替代参考物种的能量行")
         btn_refresh.clicked.connect(self._refresh_energy_parent_table)
         top_layout.addWidget(btn_refresh)
 
-        btn_reset = QtWidgets.QPushButton("重置为默认母体")
+        btn_reset = QtWidgets.QPushButton("清除替代参考")
         btn_reset.clicked.connect(self._reset_energy_parent_config)
         top_layout.addWidget(btn_reset)
 
-        btn_apply = QtWidgets.QPushButton("应用配置")
+        btn_apply = QtWidgets.QPushButton("应用替代参考")
         btn_apply.clicked.connect(self._apply_energy_parent_config)
         top_layout.addWidget(btn_apply)
 
@@ -465,7 +353,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
         self.energy_parent_table = QtWidgets.QTableWidget()
         self.energy_parent_table.setColumnCount(4)
-        self.energy_parent_table.setHorizontalHeaderLabels(["能量(eV)", "参考母体 m/z", "参考母体物种", "状态"])
+        self.energy_parent_table.setHorizontalHeaderLabels(["计算能量(eV)", "参考物种 m/z", "参考物种", "状态"])
         self.energy_parent_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
         layout.addWidget(self.energy_parent_table, 1)
 
@@ -671,7 +559,8 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self._set_combo_current_data(species_combo, cfg.get("species_name", default_species))
             self.energy_parent_table.setCellWidget(row, 2, species_combo)
 
-            status_item = QtWidgets.QTableWidgetItem("已配置" if cfg else "默认")
+            status_text = "替代参考" if cfg else "继承主母体"
+            status_item = QtWidgets.QTableWidgetItem(status_text)
             status_item.setFlags(status_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
             self.energy_parent_table.setItem(row, 3, status_item)
 
@@ -684,7 +573,10 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 )
             )
 
-        self.lbl_energy_parent_status.setText(f"已加载 {len(self.available_energies)} 个能量配置行")
+        self.lbl_energy_parent_status.setText(
+            f"已加载 {len(self.available_energies)} 个能量行，"
+            f"{len(self.energy_parent_config)} 个替代参考"
+        )
 
     def _on_mz_changed_for_parent_config(self, row: int, energy: float):
         mz_combo = self.energy_parent_table.cellWidget(row, 1)
@@ -709,10 +601,14 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         if mz is None:
             return
         species_name = species_combo.currentData()
-        self.energy_parent_config[energy] = {
+        cfg = {
             "mz": int(mz),
             "species_name": str(species_name) if species_name else None,
         }
+        if self._is_default_reference_config(cfg):
+            self.energy_parent_config.pop(energy, None)
+        else:
+            self.energy_parent_config[energy] = cfg
         self.parent_mf_by_energy = {}
         self.parent_signal_by_energy = {}
         self.parent_config_by_energy = {}
@@ -723,9 +619,10 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.parent_signal_by_energy = {}
         self.parent_config_by_energy = {}
         self._refresh_energy_parent_table()
-        self.lbl_energy_parent_status.setText("已重置为默认母体")
+        self.lbl_energy_parent_status.setText("已清除替代参考，自动计算将继承主母体摩尔分数")
 
     def _apply_energy_parent_config(self):
+        new_config: dict[float, dict] = {}
         if hasattr(self, "energy_parent_table"):
             for row in range(self.energy_parent_table.rowCount()):
                 energy_item = self.energy_parent_table.item(row, 0)
@@ -738,17 +635,21 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 if mz is None:
                     continue
                 species_name = species_combo.currentData()
-                self.energy_parent_config[energy] = {
+                cfg = {
                     "mz": int(mz),
                     "species_name": str(species_name) if species_name else None,
                 }
+                if not self._is_default_reference_config(cfg):
+                    new_config[energy] = cfg
 
+        self.energy_parent_config = new_config
         config_count = len(self.energy_parent_config)
         if self.parent_mf_results:
             self._recalculate_parent_mf_by_energy()
         self._refresh_results_view()
-        self.lbl_energy_parent_status.setText(f"已应用 {config_count} 个能量的母体配置")
-        QtWidgets.QMessageBox.information(self, "成功", f"已应用 {config_count} 个能量的母体配置")
+        self._refresh_energy_parent_table()
+        self.lbl_energy_parent_status.setText(f"已应用 {config_count} 个能量的替代参考")
+        QtWidgets.QMessageBox.information(self, "成功", f"已应用 {config_count} 个能量的替代参考")
 
     def _get_parent_config_for_energy(self, energy: float) -> dict:
         if energy in self.energy_parent_config:
@@ -762,6 +663,41 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             "mz": int(self.spin_parent_mz.value()),
             "species_name": self._selected_parent_species_name(),
         }
+
+    def _is_default_reference_config(self, cfg: dict) -> bool:
+        default_mz = int(self.spin_parent_mz.value()) if hasattr(self, "spin_parent_mz") else self.settings.parent_mz
+        default_species = self._selected_parent_species_name()
+        cfg_species = cfg.get("species_name")
+        return int(cfg.get("mz") or default_mz) == default_mz and cfg_species == default_species
+
+    def _species_ie(self, mz: int, species_name: str | None) -> float | None:
+        for name, ie in self._species_options_for_mz(mz):
+            if species_name is None or name == species_name:
+                return ie
+        record = self._find_species_record(mz, species_name)
+        if record is None:
+            return None
+        return record.get("ie")
+
+    def _resolved_reference_species_name(self, mz: int, species_name: str | None) -> str | None:
+        if species_name:
+            return species_name
+        options = self._species_options_for_mz(mz)
+        if options:
+            return options[0][0]
+        record = self._find_species_record(mz)
+        if record is None:
+            return None
+        return record.get("species") or record.get("name")
+
+    def _mf_value_at_reference_temperature(self, mf: dict[float, float]) -> float:
+        if not mf:
+            return 0.0
+        T0 = float(self.spin_parent_t0.value())
+        if T0 in mf:
+            return float(mf[T0])
+        closest_temp = min(mf.keys(), key=lambda temp: abs(float(temp) - T0))
+        return float(mf[closest_temp])
 
     def _create_auto_mf_tab(self):
         widget = QtWidgets.QWidget()
@@ -988,6 +924,35 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             QtWidgets.QMessageBox.warning(self, "提示", f"项目登记的温度扫描结果文件不存在:\n{file_path}")
             return
         self._load_temperature_result_file(file_path, show_message=False)
+
+    def _load_project_temperature_scan_folder(self):
+        folder = self._project_artifact_path("temperature_scan_folder")
+        if not folder:
+            QtWidgets.QMessageBox.warning(self, "提示", "项目管理中尚未配置温度扫描数据文件夹")
+            return
+        root = Path(folder)
+        if not root.exists() or not root.is_dir():
+            QtWidgets.QMessageBox.warning(self, "提示", f"项目配置的温度扫描数据文件夹不存在:\n{folder}")
+            return
+
+        folders = self._discover_energy_folders(root)
+        if not folders:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "提示",
+                "未在项目温度扫描目录中找到可识别的能量子文件夹。\n"
+                "请确保子文件夹名称包含能量信息，例如 8.0eV、9.5 eV。",
+            )
+            return
+
+        self._load_peak_ranges_from_project()
+        self._load_energy_folders(
+            folders,
+            source_label=f"项目原始目录: {root.name}",
+            show_message=True,
+            confirm_overwrite=False,
+            replace_all=True,
+        )
 
     def _load_temperature_result_file(self, file_path: str | Path | None = None, *, show_message: bool = True):
         if isinstance(file_path, bool):
@@ -1257,45 +1222,85 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
                             matched_species.extend(species_by_mz[mz])
                 info["matched_species"] = matched_species
 
-    def _add_energy_folder(self):
-        dlg = QtWidgets.QFileDialog(self)
-        dlg.setWindowTitle("选择温度扫描文件夹（可多选）")
-        dlg.setFileMode(QtWidgets.QFileDialog.FileMode.Directory)
-        dlg.setOption(QtWidgets.QFileDialog.Option.DontUseNativeDialog, True)
-        list_view = dlg.findChild(QtWidgets.QListView)
-        if list_view:
-            list_view.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.MultiSelection)
-        tree_view = dlg.findChild(QtWidgets.QTreeView)
-        if tree_view:
-            tree_view.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.MultiSelection)
-        if not dlg.exec():
-            return
-        folders = dlg.selectedFiles()
-        if not folders:
-            return
-
+    def _energy_from_folder_name(self, folder: str | Path) -> float | None:
         import re
+
+        match = re.search(r"([\d.]+)\s*[eE][vV]", Path(folder).name)
+        if not match:
+            return None
+        try:
+            return float(match.group(1))
+        except ValueError:
+            return None
+
+    def _discover_energy_folders(self, root: Path) -> list[Path]:
+        folders: list[Path] = []
+        if self._energy_from_folder_name(root) is not None and any(root.glob("*.txt")):
+            folders.append(root)
+        for child in sorted(root.iterdir()):
+            if not child.is_dir():
+                continue
+            if self._energy_from_folder_name(child) is None:
+                continue
+            if any(child.glob("*.txt")):
+                folders.append(child)
+        return folders
+
+    def _refresh_loaded_temperature_scan_state(self, source_label: str) -> None:
+        self.available_energies = sorted(self.temperature_scan_data.keys())
+        self.combo_energy_select.clear()
+        self.combo_energy_select.addItem("全部能量")
+        for e in self.available_energies:
+            self.combo_energy_select.addItem(f"{e:.2f} eV")
+        self.lbl_energy_count.setText(f"共 {len(self.available_energies)} 个能量点")
+        self.parent_mf_by_energy = {}
+        self.parent_signal_by_energy = {}
+        self.parent_config_by_energy = {}
+        self._update_ts_table_with_species()
+        self._refresh_ts_table()
+        self._refresh_energy_parent_table()
+        self.lbl_ts_folder.setText(f"{source_label}，已加载 {len(self.available_energies)} 个能量点")
+        self.lbl_ts_folder.setStyleSheet("color: #6495ed;")
+
+    def _load_energy_folders(
+        self,
+        folders: list[str | Path],
+        *,
+        source_label: str = "温度扫描文件夹",
+        show_message: bool = True,
+        confirm_overwrite: bool = True,
+        replace_all: bool = False,
+    ) -> int:
+        import re
+
+        if replace_all:
+            self.temperature_scan_data = {}
+
         added_count = 0
         skipped_count = 0
 
-        for folder in folders:
+        for folder_value in folders:
+            folder = Path(folder_value)
             try:
-                energy = None
-                folder_name = Path(folder).name
-                energy_match = re.search(r"([\d.]+)\s*[eE][vV]", folder_name)
-                if energy_match:
-                    energy = float(energy_match.group(1))
+                energy = self._energy_from_folder_name(folder)
+                folder_name = folder.name
                 if energy is None:
-                    QtWidgets.QMessageBox.warning(self, "提示", f"无法从文件夹名 '{folder_name}' 中识别能量值，请确保文件夹名包含能量信息（如 8.0eV）")
+                    if show_message:
+                        QtWidgets.QMessageBox.warning(
+                            self,
+                            "提示",
+                            f"无法从文件夹名 '{folder_name}' 中识别能量值，请确保文件夹名包含能量信息（如 8.0eV）",
+                        )
                     skipped_count += 1
                     continue
-                if energy in self.available_energies:
+                if energy in self.temperature_scan_data and confirm_overwrite:
                     if QtWidgets.QMessageBox.question(self, "确认", f"能量 {energy:.2f} eV 已存在，是否覆盖？") != QtWidgets.QMessageBox.StandardButton.Yes:
                         skipped_count += 1
                         continue
-                files = [f for f in Path(folder).iterdir() if f.suffix == ".txt"]
+                files = [f for f in folder.iterdir() if f.suffix.lower() == ".txt"]
                 if not files:
-                    QtWidgets.QMessageBox.warning(self, "提示", f"文件夹 '{folder_name}' 中没有txt文件")
+                    if show_message:
+                        QtWidgets.QMessageBox.warning(self, "提示", f"文件夹 '{folder_name}' 中没有txt文件")
                     skipped_count += 1
                     continue
 
@@ -1327,9 +1332,12 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
                             temp = int(temp_match.group(1))
                         else:
                             try:
-                                temp = int(re.search(r"(\d+)", file_path.name).group(1))
+                                fallback_match = re.search(r"(\d+)", file_path.name)
+                                temp = int(fallback_match.group(1)) if fallback_match else None
                             except Exception:
-                                continue
+                                temp = None
+                    if temp is None:
+                        continue
 
                     io = None
                     for line in lines[:10]:
@@ -1358,16 +1366,17 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
                         "temp": temp,
                     })
 
-                if energy not in self.temperature_scan_data:
-                    self.temperature_scan_data[energy] = {}
-
                 temp_groups: dict[int, list] = {}
                 for entry in raw_data[energy]:
                     t = entry["temp"]
                     if t not in temp_groups:
                         temp_groups[t] = []
                     temp_groups[t].append(entry)
+                if not temp_groups:
+                    skipped_count += 1
+                    continue
 
+                self.temperature_scan_data[energy] = {}
                 for temp, repeats in temp_groups.items():
                     n = len(repeats)
                     max_len = max(len(r["data"]) for r in repeats)
@@ -1393,7 +1402,6 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
                 temps_list = sorted(temp_groups.keys())
                 if temps_list:
-                    best_temp = None
                     best_peak_count = -1
                     best_peaks_info = None
                     peak_ranges = self.peak_ranges or None
@@ -1403,7 +1411,6 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
                         t_count = len(t_peaks)
                         if t_count > best_peak_count:
                             best_peak_count = t_count
-                            best_temp = t
                             best_peaks_info = t_peaks
                     peaks_info = best_peaks_info if best_peaks_info is not None else []
 
@@ -1413,24 +1420,41 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 added_count += 1
 
             except Exception as e:
-                QtWidgets.QMessageBox.critical(self, "错误", f"添加能量文件夹失败: {e}")
-
-        self.available_energies = sorted(self.temperature_scan_data.keys())
-        self.combo_energy_select.clear()
-        self.combo_energy_select.addItem("全部能量")
-        for e in self.available_energies:
-            self.combo_energy_select.addItem(f"{e:.2f} eV")
-        self.lbl_energy_count.setText(f"共 {len(self.available_energies)} 个能量点")
-        self._update_ts_table_with_species()
-        self._refresh_ts_table()
-        self._refresh_energy_parent_table()
-        self.lbl_ts_folder.setText(f"已加载 {len(self.available_energies)} 个能量点")
-        self.lbl_ts_folder.setStyleSheet("color: #6495ed;")
+                if show_message:
+                    QtWidgets.QMessageBox.critical(self, "错误", f"添加能量文件夹失败: {e}")
+                skipped_count += 1
 
         if added_count > 0:
-            QtWidgets.QMessageBox.information(self, "成功", f"成功添加 {added_count} 个能量点的数据")
+            self._refresh_loaded_temperature_scan_state(source_label)
+
+        if added_count > 0:
+            if show_message:
+                QtWidgets.QMessageBox.information(self, "成功", f"成功添加 {added_count} 个能量点的数据")
+            self.status_label.setText(f"已加载温度扫描原始数据: {added_count} 个能量点")
         if skipped_count > 0:
-            QtWidgets.QMessageBox.information(self, "提示", f"跳过了 {skipped_count} 个文件夹")
+            if show_message:
+                QtWidgets.QMessageBox.information(self, "提示", f"跳过了 {skipped_count} 个文件夹")
+        if added_count == 0 and show_message:
+            QtWidgets.QMessageBox.warning(self, "提示", "未从所选文件夹读取到有效温度扫描数据")
+        return added_count
+
+    def _add_energy_folder(self):
+        dlg = QtWidgets.QFileDialog(self)
+        dlg.setWindowTitle("选择温度扫描文件夹（可多选）")
+        dlg.setFileMode(QtWidgets.QFileDialog.FileMode.Directory)
+        dlg.setOption(QtWidgets.QFileDialog.Option.DontUseNativeDialog, True)
+        list_view = dlg.findChild(QtWidgets.QListView)
+        if list_view:
+            list_view.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.MultiSelection)
+        tree_view = dlg.findChild(QtWidgets.QTreeView)
+        if tree_view:
+            tree_view.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.MultiSelection)
+        if not dlg.exec():
+            return
+        folders = dlg.selectedFiles()
+        if not folders:
+            return
+        self._load_energy_folders(folders, source_label="手动选择")
 
     def _clear_temperature_scan(self):
         if not self.temperature_scan_data:
@@ -1659,6 +1683,26 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
         return left_idx, right_idx
 
+    def _get_precomputed_signal_data(self, mz: int, energies_to_check: list[float]) -> dict[float, float]:
+        result: dict[float, float] = {}
+        target_mz = int(mz)
+        for energy in energies_to_check:
+            if energy not in self.temperature_scan_data:
+                continue
+            for temp, info in self.temperature_scan_data[energy].items():
+                if temp in result:
+                    continue
+                signals = info.get("precomputed_signals", {})
+                if target_mz not in signals:
+                    continue
+                try:
+                    signal_val = float(signals[target_mz])
+                except Exception:
+                    continue
+                if np.isfinite(signal_val):
+                    result[float(temp)] = signal_val
+        return result
+
     def _get_signal_from_scan_data(self, mz, energy=None):
         if not self.temperature_scan_data:
             return {}
@@ -1668,23 +1712,6 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             energies_to_check = [energy]
         else:
             energies_to_check = self.available_energies
-
-        has_precomputed = any(
-            int(mz) in info.get("precomputed_signals", {})
-            for e in energies_to_check
-            if e in self.temperature_scan_data
-            for info in self.temperature_scan_data[e].values()
-        )
-        if has_precomputed:
-            target_mz = int(mz)
-            for e in energies_to_check:
-                if e not in self.temperature_scan_data:
-                    continue
-                for temp, info in self.temperature_scan_data[e].items():
-                    signals = info.get("precomputed_signals", {})
-                    if target_mz in signals and temp not in result:
-                        result[temp] = float(signals[target_mz])
-            return result
 
         target_peak = None
 
@@ -1706,14 +1733,14 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             peaks_info = self.temperature_scan_data[e][best_temp].get("peaks_info", [])
 
             for peak in peaks_info:
-                if peak["mz_rounded"] == mz and not peak.get("overlapped", False):
+                if peak["mz_rounded"] == mz:
                     target_peak = peak
                     break
             if target_peak is not None:
                 break
 
         if target_peak is None:
-            return result
+            return self._get_precomputed_signal_data(int(mz), energies_to_check)
 
         for e in energies_to_check:
             if e not in self.temperature_scan_data:
@@ -1722,183 +1749,21 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 if temp in result:
                     continue
                 data = info.get("avg_data", [])
-                if not data:
+                if data is None or len(data) == 0:
                     continue
                 io = info.get("avg_io", 100.0)
 
-                left_idx = target_peak["left_idx"]
-                right_idx = target_peak["right_idx"]
+                left_idx = max(0, int(target_peak["left_idx"]))
+                right_idx = min(len(data) - 1, int(target_peak["right_idx"]))
+                if right_idx < left_idx:
+                    continue
                 peak_integral = sum(data[left_idx : right_idx + 1])
                 signal_val = peak_integral / io if io > 0 else peak_integral
-                result[temp] = signal_val
+                result[float(temp)] = signal_val
 
-        return result
-
-    def _on_md_preset_changed(self, text):
-        if text in MASS_DISCRIMINATION_PRESETS:
-            self.spin_md_exponent.setValue(MASS_DISCRIMINATION_PRESETS[text])
-
-    def _on_md_exponent_changed(self, val):
-        self.settings.mass_disc_exponent = val
-
-    def _preview_mass_discrimination(self):
-        if not self.database:
-            QtWidgets.QMessageBox.warning(self, "提示", "请先加载PICS截面数据库")
-            return
-        seen: set[tuple] = set()
-        species_list = []
-        for spec in self.database:
-            key = (spec.get("species", spec.get("name", "")), spec["mz"])
-            if key not in seen:
-                seen.add(key)
-                species_list.append(spec)
-        self.md_preview_table.setRowCount(0)
-        for spec in species_list[:30]:
-            row = self.md_preview_table.rowCount()
-            self.md_preview_table.insertRow(row)
-            name = spec.get("species", spec.get("name", ""))
-            self.md_preview_table.setItem(row, 0, QtWidgets.QTableWidgetItem(name))
-            self.md_preview_table.setItem(row, 1, QtWidgets.QTableWidgetItem(str(spec["mz"])))
-            D_i = calc_mass_discrimination(spec["mz"], self.spin_md_exponent.value())
-            self.md_preview_table.setItem(row, 2, QtWidgets.QTableWidgetItem(f"{D_i:.6f}"))
-
-    def _on_kr_source_changed(self, text):
-        self.btn_load_kr.setEnabled(text == "从文件加载")
-        self.btn_extract_kr.setEnabled(text == "从高能量温度扫描提取")
-        if text == "使用默认数据":
-            self.kr_data = dict(self.settings.kr_data)
-            self._fill_kr_table()
-
-    def _fill_kr_table(self):
-        self.kr_table.setRowCount(0)
-        for temp in sorted(self.kr_data.keys()):
-            row = self.kr_table.rowCount()
-            self.kr_table.insertRow(row)
-            self.kr_table.setItem(row, 0, QtWidgets.QTableWidgetItem(f"{int(temp)}"))
-            val = self.kr_data[temp]
-            if isinstance(val, dict):
-                self.kr_table.setItem(row, 1, QtWidgets.QTableWidgetItem(val.get("filename", "")))
-                self.kr_table.setItem(row, 2, QtWidgets.QTableWidgetItem(f"{val.get('signal', 0):.6f}"))
-            else:
-                self.kr_table.setItem(row, 1, QtWidgets.QTableWidgetItem("-"))
-                self.kr_table.setItem(row, 2, QtWidgets.QTableWidgetItem(f"{val:.6f}"))
-            self.kr_table.setItem(row, 3, QtWidgets.QTableWidgetItem("-"))
-
-    def _load_kr_data(self):
-        file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, "加载Kr数据", "",
-            "Excel Files (*.xlsx);;CSV Files (*.csv);;All Files (*)"
-        )
-        if not file_path:
-            return
-        try:
-            if file_path.endswith(".xlsx"):
-                df = pd.read_excel(file_path)
-            else:
-                df = pd.read_csv(file_path)
-            self.kr_data = {}
-            for _, row in df.iterrows():
-                temp = float(row.iloc[0])
-                signal = float(row.iloc[1])
-                self.kr_data[int(temp)] = signal
-            self._fill_kr_table()
-            QtWidgets.QMessageBox.information(self, "成功", f"加载了 {len(self.kr_data)} 个Kr数据点")
-        except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "错误", f"加载Kr数据失败: {e}")
-
-    def _extract_kr_from_scan(self):
-        if not self.temperature_scan_data:
-            QtWidgets.QMessageBox.warning(self, "提示", "请先在数据加载选项卡中加载温度扫描数据")
-            return
-        self.set_busy(True, "正在从温度扫描提取Kr信号...")
-        try:
-            kr_mz = self.spin_kr_mz.value()
-            self.kr_data = {}
-            target_peak = None
-            target_energy = None
-
-            energies_sorted = sorted(self.available_energies, reverse=True)
-
-            for energy in energies_sorted:
-                if energy not in self.temperature_scan_data:
-                    continue
-                temps = list(self.temperature_scan_data[energy].keys())
-                if not temps:
-                    continue
-                best_temp = None
-                best_count = -1
-                for t in temps:
-                    t_peaks = self.temperature_scan_data[energy][t].get("peaks_info", [])
-                    if len(t_peaks) > best_count:
-                        best_count = len(t_peaks)
-                        best_temp = t
-                if best_temp is None:
-                    continue
-                peaks_info = self.temperature_scan_data[energy][best_temp].get("peaks_info", [])
-
-                for peak in peaks_info:
-                    if peak["mz_rounded"] == kr_mz and not peak.get("overlapped", False):
-                        target_peak = peak
-                        target_energy = energy
-                        break
-                if target_peak is not None:
-                    break
-
-            if target_peak is None:
-                QtWidgets.QMessageBox.warning(self, "提示", f"在峰最多的温度点未找到质量数 {kr_mz} 的峰")
-                return
-
-            for energy in energies_sorted:
-                if energy not in self.temperature_scan_data:
-                    continue
-                for temp, info in self.temperature_scan_data[energy].items():
-                    if temp in self.kr_data:
-                        continue
-                    signals = info.get("precomputed_signals", {})
-                    if kr_mz in signals:
-                        self.kr_data[temp] = {"filename": info.get("filenames", ""), "signal": float(signals[kr_mz])}
-                        continue
-
-                    data = info.get("avg_data", [])
-                    if not data:
-                        continue
-                    io = info.get("avg_io", 100.0)
-
-                    left_idx = target_peak["left_idx"]
-                    right_idx = target_peak["right_idx"]
-                    peak_integral = sum(data[left_idx : right_idx + 1])
-                    kr_signal = peak_integral / io if io > 0 else peak_integral
-                    self.kr_data[temp] = {"filename": info.get("filenames", ""), "signal": kr_signal}
-
-            self._fill_kr_table()
-            QtWidgets.QMessageBox.information(
-                self, "成功",
-                f"从 {len(self.kr_data)} 个温度扫描文件中提取了Kr信号\n"
-                f"质量数: {kr_mz}, 积分范围: {target_peak['left_idx']} - {target_peak['right_idx']}\n"
-                f"参考能量: {target_energy:.2f} eV"
-            )
-        finally:
-            self.set_busy(False, "就绪")
-
-    def _calc_expansion_coefficients(self):
-        self.set_busy(True, "正在计算膨胀系数...")
-        try:
-            kr_signal_data: dict[float, float] = {}
-            for temp, data in self.kr_data.items():
-                if isinstance(data, dict):
-                    kr_signal_data[temp] = data.get("signal", 0)
-                else:
-                    kr_signal_data[temp] = data
-            self.expansion_coefficients = calc_expansion_coefficients(kr_signal_data)
-            for row in range(self.kr_table.rowCount()):
-                temp_item = self.kr_table.item(row, 0)
-                if temp_item:
-                    temp = float(temp_item.text())
-                    if temp in self.expansion_coefficients:
-                        self.kr_table.setItem(row, 3, QtWidgets.QTableWidgetItem(f"{self.expansion_coefficients[temp]:.6f}"))
-            QtWidgets.QMessageBox.information(self, "成功", f"计算了 {len(self.expansion_coefficients)} 个温度点的膨胀系数")
-        finally:
-            self.set_busy(False, "就绪")
+        if result:
+            return result
+        return self._get_precomputed_signal_data(int(mz), energies_to_check)
 
     def _species_record_matches(self, record: dict, mz: int, species_name: str | None = None) -> bool:
         if record.get("mz") != mz:
@@ -1918,41 +1783,72 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         return None
 
     def _recalculate_parent_mf_by_energy(self) -> None:
-        if not self.available_energies:
+        if not self.available_energies or not self.parent_mf_results:
             self.parent_mf_by_energy = {}
             self.parent_signal_by_energy = {}
             self.parent_config_by_energy = {}
             return
 
-        T0 = float(self.spin_parent_t0.value())
-        X0 = self.spin_parent_mf0.value()
         self.parent_mf_by_energy = {}
         self.parent_signal_by_energy = {}
         self.parent_config_by_energy = {}
 
-        for energy in sorted(self.available_energies):
-            cfg = self._get_parent_config_for_energy(energy)
+        if not self.energy_parent_config:
+            return
+
+        main_parent_mz = self.spin_parent_mz.value()
+        main_parent_energy = self.spin_parent_energy.value()
+        main_parent_signal = self._get_signal_from_scan_data(main_parent_mz, main_parent_energy)
+        if not main_parent_signal:
+            return
+
+        main_parent_mf_at_tm = self._mf_value_at_reference_temperature(self.parent_mf_results)
+        if main_parent_mf_at_tm <= 0:
+            return
+
+        main_parent_species_name = self._selected_parent_species_name()
+        for energy, cfg in sorted(self.energy_parent_config.items()):
+            if energy not in self.temperature_scan_data:
+                continue
             mz = int(cfg["mz"])
             signal_data = self._get_signal_from_scan_data(mz, energy)
             if not signal_data:
                 continue
-            mf = calc_parent_mole_fraction(
+
+            species_name = self._resolved_reference_species_name(mz, cfg.get("species_name"))
+            species = {
+                "mz": mz,
+                "species": species_name or "参考物种",
+                "ie": self._species_ie(mz, species_name),
+            }
+            mf = self._calc_product_mf_auto(
+                mz,
+                species,
+                main_parent_mz,
+                float(main_parent_mz),
+                main_parent_energy,
+                main_parent_signal,
+                main_parent_mf_at_tm,
                 signal_data,
-                reference_temperature=T0,
-                parent_initial_mf=X0,
-                expansion_coefficients=self.expansion_coefficients,
+                calc_energy=energy,
+                ref_species_name=main_parent_species_name,
             )
             if not mf:
                 continue
             self.parent_mf_by_energy[energy] = mf
             self.parent_signal_by_energy[energy] = signal_data
-            self.parent_config_by_energy[energy] = cfg
+            self.parent_config_by_energy[energy] = {
+                "mz": mz,
+                "species_name": species_name,
+            }
 
     def _reference_parent_for_energy(self, energy: float) -> tuple[int, float, float, dict[float, float], float, str | None] | None:
-        if not self.parent_mf_by_energy:
+        if self.energy_parent_config and not self.parent_mf_by_energy:
             self._recalculate_parent_mf_by_energy()
 
-        T0 = float(self.spin_parent_t0.value())
+        if energy in self.energy_parent_config and energy not in self.parent_mf_by_energy:
+            return None
+
         if energy in self.parent_mf_by_energy and energy in self.parent_signal_by_energy:
             cfg = self.parent_config_by_energy.get(energy, self._get_parent_config_for_energy(energy))
             mf = self.parent_mf_by_energy[energy]
@@ -1961,7 +1857,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 float(cfg["mz"]),
                 energy,
                 self.parent_signal_by_energy[energy],
-                mf.get(T0, mf.get(max(mf.keys()), 0.0)),
+                self._mf_value_at_reference_temperature(mf),
                 cfg.get("species_name"),
             )
 
@@ -1969,16 +1865,133 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             parent_energy = self.spin_parent_energy.value()
             parent_mz = self.spin_parent_mz.value()
             parent_signal = self._get_signal_from_scan_data(parent_mz, parent_energy)
+            if not parent_signal:
+                return None
             return (
                 parent_mz,
                 float(parent_mz),
                 parent_energy,
                 parent_signal,
-                self.parent_mf_results.get(T0, self.parent_mf_results.get(max(self.parent_mf_results.keys()), 0.0)),
+                self._mf_value_at_reference_temperature(self.parent_mf_results),
                 self._selected_parent_species_name(),
             )
 
         return None
+
+    def _reference_signal_for_candidate(
+        self,
+        mz: int,
+        preferred_energy: float,
+        fallback_energy: float,
+        fallback_signal: dict[float, float] | None = None,
+    ) -> tuple[float, dict[float, float]] | None:
+        signal = self._get_signal_from_scan_data(mz, preferred_energy)
+        if signal:
+            return preferred_energy, signal
+        if fallback_signal:
+            return fallback_energy, fallback_signal
+        for energy in sorted(self.available_energies):
+            signal = self._get_signal_from_scan_data(mz, energy)
+            if signal:
+                return energy, signal
+        return None
+
+    def _reference_parent_for_species(
+        self,
+        energy: float,
+        species_ie: float | None,
+    ) -> tuple[int, float, float, dict[float, float], float, str | None] | None:
+        if self.energy_parent_config and not self.parent_mf_by_energy:
+            self._recalculate_parent_mf_by_energy()
+
+        candidates: list[dict] = []
+
+        if self.parent_mf_results:
+            main_parent_mz = int(self.spin_parent_mz.value())
+            main_parent_energy = float(self.spin_parent_energy.value())
+            main_parent_species = self._selected_parent_species_name()
+            main_parent_signal = self._get_signal_from_scan_data(main_parent_mz, main_parent_energy)
+            signal_info = self._reference_signal_for_candidate(
+                main_parent_mz,
+                energy,
+                main_parent_energy,
+                main_parent_signal,
+            )
+            if signal_info is not None:
+                signal_energy, signal_data = signal_info
+                candidates.append(
+                    {
+                        "mz": main_parent_mz,
+                        "species_name": main_parent_species,
+                        "ie": self._species_ie(main_parent_mz, main_parent_species),
+                        "configured_energy": main_parent_energy,
+                        "signal_energy": signal_energy,
+                        "signal_data": signal_data,
+                        "mf_at_tm": self._mf_value_at_reference_temperature(self.parent_mf_results),
+                    }
+                )
+
+        for configured_energy, mf in sorted(self.parent_mf_by_energy.items()):
+            cfg = self.parent_config_by_energy.get(configured_energy, self._get_parent_config_for_energy(configured_energy))
+            mz = int(cfg["mz"])
+            species_name = cfg.get("species_name")
+            signal_info = self._reference_signal_for_candidate(
+                mz,
+                energy,
+                float(configured_energy),
+                self.parent_signal_by_energy.get(configured_energy),
+            )
+            if signal_info is None:
+                continue
+            signal_energy, signal_data = signal_info
+            candidates.append(
+                {
+                    "mz": mz,
+                    "species_name": species_name,
+                    "ie": self._species_ie(mz, species_name),
+                    "configured_energy": float(configured_energy),
+                    "signal_energy": signal_energy,
+                    "signal_data": signal_data,
+                    "mf_at_tm": self._mf_value_at_reference_temperature(mf),
+                }
+            )
+
+        if not candidates:
+            return None
+
+        eligible: list[dict] = []
+        if species_ie is not None and np.isfinite(species_ie):
+            eligible = [
+                candidate
+                for candidate in candidates
+                if candidate["ie"] is not None and candidate["ie"] <= species_ie
+            ]
+
+        if eligible:
+            selected = min(
+                eligible,
+                key=lambda candidate: (
+                    float(species_ie) - float(candidate["ie"]),
+                    abs(float(candidate["signal_energy"]) - float(energy)),
+                ),
+            )
+        else:
+            exact_energy_candidates = [
+                candidate
+                for candidate in candidates
+                if abs(float(candidate["configured_energy"]) - float(energy)) < 1e-9
+                or abs(float(candidate["signal_energy"]) - float(energy)) < 1e-9
+            ]
+            selected = exact_energy_candidates[0] if exact_energy_candidates else candidates[0]
+
+        return (
+            int(selected["mz"]),
+            float(selected["mz"]),
+            float(selected["signal_energy"]),
+            selected["signal_data"],
+            float(selected["mf_at_tm"]),
+            selected["species_name"],
+        )
 
     def _calc_parent_mole_fraction(self):
         if not self.expansion_coefficients:
@@ -1987,7 +2000,6 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.set_busy(True, "正在计算母体摩尔分数...")
         try:
             mz = self.spin_parent_mz.value()
-            parent_species_name = self._selected_parent_species_name()
             T0 = self.spin_parent_t0.value()
             X0 = self.spin_parent_mf0.value()
             energy = self.spin_parent_energy.value()
@@ -2022,16 +2034,13 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 self.parent_result_table.setItem(row, 3, QtWidgets.QTableWidgetItem(f"{self.parent_mf_results[temp]:.6f}"))
 
             self._recalculate_parent_mf_by_energy()
-            if energy not in self.parent_mf_by_energy:
-                self.parent_mf_by_energy[energy] = self.parent_mf_results
-                self.parent_signal_by_energy[energy] = signal_data
-                self.parent_config_by_energy[energy] = {
-                    "mz": mz,
-                    "species_name": parent_species_name,
-                }
             self._refresh_results_view()
 
-            extra_msg = f"\n已准备 {len(self.parent_mf_by_energy)} 个能量的参考母体缓存"
+            extra_msg = (
+                f"\n已准备 {len(self.parent_mf_by_energy)} 个替代参考缓存"
+                if self.parent_mf_by_energy
+                else ""
+            )
             QtWidgets.QMessageBox.information(self, "成功", f"计算了 {len(self.parent_mf_results)} 个温度点的母体摩尔分数{extra_msg}")
         finally:
             self.set_busy(False, "就绪")
@@ -2070,27 +2079,38 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             parent_mw = float(parent_mz)
             parent_energy = self.spin_parent_energy.value()
             parent_signal = self._get_signal_from_scan_data(parent_mz, parent_energy)
-            parent_mf_at_tm = self.parent_mf_results.get(float(self.spin_parent_t0.value()), 0)
+            parent_mf_at_tm = self._mf_value_at_reference_temperature(self.parent_mf_results)
             parent_species_name = self._selected_parent_species_name()
 
-            parent_mz_values = set()
+            parent_reference_keys = {(parent_mz, parent_species_name or "母体")}
+            if parent_species_name is None:
+                parent_reference_keys.update(
+                    (parent_mz, species["species"])
+                    for species in species_by_mz.get(parent_mz, [])
+                )
+            self.all_species_mf[(parent_mz, parent_species_name or "母体", parent_energy)] = self.parent_mf_results
             for energy, mf in self.parent_mf_by_energy.items():
                 cfg = self.parent_config_by_energy.get(energy, self._get_parent_config_for_energy(energy))
                 cfg_mz = int(cfg["mz"])
-                parent_mz_values.add(cfg_mz)
-                label = cfg.get("species_name") or "母体"
+                label = cfg.get("species_name") or "参考物种"
+                parent_reference_keys.add((cfg_mz, label))
+                if cfg.get("species_name") is None:
+                    parent_reference_keys.update(
+                        (cfg_mz, species["species"])
+                        for species in species_by_mz.get(cfg_mz, [])
+                    )
                 self.all_species_mf[(cfg_mz, label, energy)] = mf
 
-            if not parent_mz_values:
-                parent_mz_values.add(parent_mz)
-                self.all_species_mf[(parent_mz, parent_species_name or "母体", parent_energy)] = self.parent_mf_results
-
             for mz, species_list in species_by_mz.items():
-                if mz in parent_mz_values:
+                active_species = [
+                    species for species in species_list
+                    if (mz, species["species"]) not in parent_reference_keys
+                ]
+                if not active_species:
                     continue
 
-                if len(species_list) == 1:
-                    species = species_list[0]
+                if len(active_species) == 1:
+                    species = active_species[0]
                     ie = species.get("ie", 0) or 0
                     usable_energies = [e for e in all_energies if e >= ie]
 
@@ -2099,15 +2119,28 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
                         continue
 
                     calc_energy = select_calc_energy(ie, usable_energies)
-                    ref = self._reference_parent_for_energy(calc_energy)
+                    signal_data = self._get_signal_from_scan_data(mz, calc_energy)
+                    if not signal_data:
+                        sorted_usable = sorted(usable_energies)
+                        start_idx = sorted_usable.index(calc_energy) if calc_energy in sorted_usable else -1
+                        for candidate_energy in sorted_usable[start_idx + 1:]:
+                            signal_data = self._get_signal_from_scan_data(mz, candidate_energy)
+                            if signal_data:
+                                calc_energy = candidate_energy
+                                break
+                    if not signal_data:
+                        warnings.append(
+                            f"质量数 {mz} 物种 {species['species']}: "
+                            f"在 {calc_energy:.2f} eV 及更高能量均没有信号数据"
+                        )
+                        continue
+
+                    ref = self._reference_parent_for_species(calc_energy, ie)
                     if ref is None:
-                        warnings.append(f"质量数 {mz} 物种 {species['species']}: 缺少 {calc_energy:.2f} eV 的参考母体")
+                        warnings.append(f"质量数 {mz} 物种 {species['species']}: 缺少 {calc_energy:.2f} eV 的可用参考物种")
                         continue
 
                     ref_mz, ref_mw, ref_energy, ref_signal, ref_mf_at_tm, ref_species_name = ref
-                    signal_data = self._get_signal_from_scan_data(mz, calc_energy)
-                    if not signal_data:
-                        continue
 
                     mf = self._calc_product_mf_auto(
                         mz, species, ref_mz, ref_mw,
@@ -2119,18 +2152,18 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
                         self.all_species_mf[(mz, species["species"], calc_energy)] = mf
                 else:
                     species_list_sorted = sorted(
-                        species_list,
+                        active_species,
                         key=lambda x: x.get("ie") if x.get("ie") is not None else float("inf"),
                     )
                     result = self._calc_multi_species_mf_auto(
                         mz, species_list_sorted, all_energies,
                         parent_mz, parent_mw, parent_energy,
                         parent_signal, parent_mf_at_tm,
-                        ref_provider=self._reference_parent_for_energy,
+                        ref_provider=self._reference_parent_for_species,
                     )
                     if result:
                         for key, mf in result.items():
-                            if key != "warning":
+                            if key != "warning" and (key[0], key[1]) not in parent_reference_keys:
                                 self.all_species_mf[key] = mf
                         if "warning" in result:
                             warnings.append(result["warning"])
@@ -2203,8 +2236,8 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         if sigma_i == 0 or sigma_A == 0:
             return None
 
-        D_i = calc_mass_discrimination(mz, self.settings.mass_disc_exponent)
-        D_A = calc_mass_discrimination(ref_mw, self.settings.mass_disc_exponent)
+        D_i = calc_mass_discrimination(mz, self._mass_disc_exponent)
+        D_A = calc_mass_discrimination(ref_mw, self._mass_disc_exponent)
 
         T_M = float(self.spin_parent_t0.value())
         if T_M not in ref_signal_data:
@@ -2297,7 +2330,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
                     continue
                 calc_e = select_calc_energy(float(ie), usable_energies)
                 if ref_provider is not None:
-                    ref = ref_provider(calc_e)
+                    ref = ref_provider(calc_e, None if ie == float("inf") else float(ie))
                     if ref is not None:
                         ref_mz, ref_mw, ref_energy, ref_signal_data, ref_mf_at_tm, ref_species_name = ref
                     else:
@@ -2354,7 +2387,8 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
                         continue
                     calc_e = select_calc_energy(float(ie), usable_energies)
                 if ref_provider is not None:
-                    ref = ref_provider(calc_e)
+                    species_ie = species.get("ie") if species.get("ie") is not None else None
+                    ref = ref_provider(calc_e, species_ie)
                     if ref is not None:
                         ref_mz, ref_mw, ref_energy, ref_signal_data, ref_mf_at_tm, ref_species_name = ref
                     else:
@@ -2380,7 +2414,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
                     continue
                 calc_e = select_calc_energy(float(ie), usable_energies)
                 if ref_provider is not None:
-                    ref = ref_provider(calc_e)
+                    ref = ref_provider(calc_e, None if ie == float("inf") else float(ie))
                     if ref is not None:
                         ref_mz, ref_mw, ref_energy, ref_signal_data, ref_mf_at_tm, ref_species_name = ref
                     else:
@@ -2440,8 +2474,8 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         if sigma_i == 0 or sigma_A == 0:
             return None
 
-        D_i = calc_mass_discrimination(mz, self.settings.mass_disc_exponent)
-        D_A = calc_mass_discrimination(ref_mw, self.settings.mass_disc_exponent)
+        D_i = calc_mass_discrimination(mz, self._mass_disc_exponent)
+        D_A = calc_mass_discrimination(ref_mw, self._mass_disc_exponent)
 
         T_M = float(self.spin_parent_t0.value())
         if T_M not in ref_signal_data:
@@ -2476,7 +2510,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         mz, species, energy = key
         cfg = self.parent_config_by_energy.get(energy)
         if cfg:
-            cfg_label = cfg.get("species_name") or "母体"
+            cfg_label = cfg.get("species_name") or "参考物种"
             return int(cfg.get("mz", -1)) == mz and cfg_label == species
 
         parent_energy = self.spin_parent_energy.value() if hasattr(self, "spin_parent_energy") else None
@@ -2678,20 +2712,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 }
             )
 
-        if self.parent_mf_by_energy:
-            for energy, mf in sorted(self.parent_mf_by_energy.items()):
-                cfg = self.parent_config_by_energy.get(energy, self._get_parent_config_for_energy(energy))
-                mz = int(cfg["mz"])
-                species_name = cfg.get("species_name") or "母体"
-                add_series(
-                    "母体",
-                    self._parent_result_label(mz, cfg.get("species_name"), energy),
-                    mf,
-                    mz=mz,
-                    species=species_name,
-                    energy=energy,
-                )
-        elif self.parent_mf_results:
+        if self.parent_mf_results:
             mz = self.spin_parent_mz.value()
             species_name = self._selected_parent_species_name() or "母体"
             add_series(
@@ -2701,6 +2722,20 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 mz=mz,
                 species=species_name,
             )
+
+        if self.parent_mf_by_energy:
+            for energy, mf in sorted(self.parent_mf_by_energy.items()):
+                cfg = self.parent_config_by_energy.get(energy, self._get_parent_config_for_energy(energy))
+                mz = int(cfg["mz"])
+                species_name = cfg.get("species_name") or "参考物种"
+                add_series(
+                    "母体参考",
+                    self._parent_result_label(mz, cfg.get("species_name"), energy),
+                    mf,
+                    mz=mz,
+                    species=species_name,
+                    energy=energy,
+                )
 
         for label, values in self.product_mf_results.items():
             add_series("产物", label, values, species=label)

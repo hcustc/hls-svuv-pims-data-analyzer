@@ -54,10 +54,22 @@ def load_normalization_settings(path: str | Path = DEFAULT_NORMALIZATION_CONFIG)
         raise ValueError("normalization config must be a mapping")
     if "expansion_factors" in settings_data:
         settings_data = settings_data.copy()
-        settings_data["expansion_factors"] = {
-            float(key): float(value) for key, value in (settings_data.get("expansion_factors") or {}).items()
-        }
+        raw_factors = settings_data.get("expansion_factors") or {}
+
+        # 处理两种格式：单能量 {温度: 值} 或多能量 {能量: {温度: 值}}
+        parsed_factors = {}
+        for key, value in raw_factors.items():
+            float_key = float(key)
+            if isinstance(value, dict):
+                # 多能量格式
+                parsed_factors[float_key] = {float(k): float(v) for k, v in value.items()}
+            else:
+                # 单能量格式
+                parsed_factors[float_key] = float(value)
+
+        settings_data["expansion_factors"] = parsed_factors
     return NormalizationSettings(**{key: value for key, value in settings_data.items() if key in NormalizationSettings.__dataclass_fields__})
+
 
 
 def save_normalization_settings(
@@ -67,7 +79,23 @@ def save_normalization_settings(
     config_path = writable_project_path(path)
     config_path.parent.mkdir(parents=True, exist_ok=True)
     data: dict[str, Any] = asdict(settings)
-    data["expansion_factors"] = {float(key): float(value) for key, value in settings.expansion_factors.items()}
+
+    # 处理膨胀系数的序列化（支持单能量和多能量格式）
+    serialized_factors = {}
+    for key, value in settings.expansion_factors.items():
+        float_key = float(key)
+        if isinstance(value, dict):
+            # 嵌套字典：{能量: {温度: 值}} 或 {温度: {温度: 值}}（边界情况）
+            serialized_factors[float_key] = {float(k): float(v) for k, v in value.items()}
+        else:
+            # 简单值：{温度: 值} 或其他标量值
+            try:
+                serialized_factors[float_key] = float(value)
+            except (TypeError, ValueError):
+                # 如果无法转换为float，保持原样
+                serialized_factors[float_key] = value
+
+    data["expansion_factors"] = serialized_factors
     with config_path.open("w", encoding="utf-8") as handle:
         yaml.safe_dump({"normalization": data}, handle, allow_unicode=True, sort_keys=False)
     return config_path

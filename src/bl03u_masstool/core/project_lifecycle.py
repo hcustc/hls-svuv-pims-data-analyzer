@@ -232,6 +232,7 @@ class ArtifactRecord:
 
 
 PROJECT_DIRECTORIES: tuple[ProjectDirectorySpec, ...] = (
+    ProjectDirectorySpec("config", "项目配置", "config", "项目级设置（YAML）"),
     ProjectDirectorySpec("raw_data", "原始输入", "raw_data", "原始谱图、样品信息和导入记录"),
     ProjectDirectorySpec("calibration", "标定", "calibration", "定标点、定标参数和标定结果"),
     ProjectDirectorySpec("spectrum_analysis", "谱图分析", "spectrum_analysis", "寻峰、卡峰范围和高斯拟合产物"),
