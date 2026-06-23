@@ -449,11 +449,9 @@ def compute_kr_expansion_factors(
     is_multi_energy = unique_energies > 1
 
     if is_multi_energy:
-        # 多能量：按能量分别计算膨胀系数，然后按温度求平均值
-        temp_lambda_values = {}  # {温度: [膨胀系数列表]}
-        temp_kr_signals = {}     # {温度: [Kr信号列表]}
-        all_ref_temps = []
-
+        # 多能量：保留所有能量点的单独计算结果
+        # widget层将处理平均和显示选项
+        result_rows = []
         for energy in sorted(kr_rows["photon_energy"].unique()):
             energy_kr = kr_rows[kr_rows["photon_energy"] == energy]
             kr_by_temperature = energy_kr.groupby("temperature")["photon_normalized_area"].sum().sort_index()
@@ -467,36 +465,22 @@ def compute_kr_expansion_factors(
             if kr_ref <= 0:
                 continue
 
-            all_ref_temps.append(t0)
             lambda_by_temperature = kr_by_temperature / kr_ref
-
-            # 收集每个温度的膨胀系数和信号
             for temp, signal, lambda_val in zip(
                 kr_by_temperature.index.astype(float),
                 kr_by_temperature.astype(float).values,
                 lambda_by_temperature.astype(float).values,
             ):
-                if temp not in temp_lambda_values:
-                    temp_lambda_values[temp] = []
-                    temp_kr_signals[temp] = []
-                temp_lambda_values[temp].append(lambda_val)
-                temp_kr_signals[temp].append(signal)
+                result_rows.append({
+                    "photon_energy": float(energy),
+                    "temperature": float(temp),
+                    "kr_signal": float(signal),
+                    "expansion_lambda": float(lambda_val),
+                    "reference_temperature": t0,
+                })
 
-        if not temp_lambda_values:
+        if not result_rows:
             raise ValueError("No valid Kr signals found at any energy point")
-
-        # 按温度求平均值
-        result_rows = []
-        reference_temp = float(np.mean(all_ref_temps)) if all_ref_temps else min(temp_lambda_values.keys())
-        for temp in sorted(temp_lambda_values.keys()):
-            avg_lambda = float(np.mean(temp_lambda_values[temp]))
-            avg_signal = float(np.mean(temp_kr_signals[temp]))
-            result_rows.append({
-                "temperature": float(temp),
-                "kr_signal": avg_signal,
-                "expansion_lambda": avg_lambda,
-                "reference_temperature": reference_temp,
-            })
 
         return pd.DataFrame(result_rows)
     else:

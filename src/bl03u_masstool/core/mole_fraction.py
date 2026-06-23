@@ -127,6 +127,81 @@ def get_expansion_coefficient(
     return float(np.interp(temperature, temps, coeffs))
 
 
+def parse_expansion_factors_from_result(result_df) -> dict:
+    """从 compute_kr_expansion_factors 的 DataFrame 结果转换成可存储的格式。
+
+    支持两种格式：
+    - 单能量：{温度: 膨胀系数}
+    - 多能量：{能量: {温度: 膨胀系数}}
+    """
+    if result_df.empty:
+        return {}
+
+    # 检查是否包含能量列（多能量）
+    if "photon_energy" in result_df.columns:
+        # 多能量格式
+        result = {}
+        for energy in result_df["photon_energy"].unique():
+            energy_data = result_df[result_df["photon_energy"] == energy]
+            energy_factors = {
+                float(row["temperature"]): float(row["expansion_lambda"])
+                for _, row in energy_data.iterrows()
+            }
+            result[float(energy)] = energy_factors
+        return result
+    else:
+        # 单能量格式（向后兼容）
+        return {
+            float(row["temperature"]): float(row["expansion_lambda"])
+            for _, row in result_df.iterrows()
+        }
+
+
+def get_expansion_coefficient_for_energy(
+    temperature: float,
+    energy: float | None,
+    expansion_factors: dict,
+) -> float:
+    """获取特定温度和能量的膨胀系数。
+
+    支持以下格式：
+    - 单能量格式：{温度: 膨胀系数}
+    - 多能量格式：{能量: {温度: 膨胀系数}}
+
+    Args:
+        temperature: 目标温度
+        energy: 目标能量（如果为None，使用单能量逻辑）
+        expansion_factors: 膨胀系数字典
+    """
+    if not expansion_factors:
+        return 1.0
+
+    # 检测格式
+    first_key = next(iter(expansion_factors.keys()), None)
+    if first_key is None:
+        return 1.0
+
+    # 判断是多能量还是单能量
+    is_multi_energy = isinstance(expansion_factors[first_key], dict)
+
+    if is_multi_energy:
+        # 多能量格式：选择最接近的能量
+        if energy is None:
+            # 如果没有指定能量，使用第一个能量的数据
+            energy_factors = next(iter(expansion_factors.values()))
+        else:
+            # 找最接近的能量
+            energies = list(expansion_factors.keys())
+            closest_energy = min(energies, key=lambda e: abs(e - energy))
+            energy_factors = expansion_factors[closest_energy]
+
+        return get_expansion_coefficient(temperature, energy_factors)
+    else:
+        # 单能量格式
+        return get_expansion_coefficient(temperature, expansion_factors)
+
+
+
 def select_calc_energy(
     ie: float, usable_energies: list[float], threshold: float = 0.05
 ) -> float:

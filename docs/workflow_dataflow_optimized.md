@@ -1,0 +1,113 @@
+# BL03U 质谱分析工作流 / 数据流优化示意图
+
+## 项目级总览
+
+```mermaid
+flowchart LR
+    %% BL03U MassSpectrumTool workflow/dataflow overview
+
+    subgraph L0["项目与配置层"]
+        PM["项目生命周期管理\nproject_lifecycle.py\n- 初始化项目目录\n- 导入/登记数据源\n- 阶段状态与下一步提示"]
+        RAW["原始数据源\n- 单谱 / 累计谱目录\n- PIE 扫描目录\n- 温度扫描目录\n- 样品信息\n- 手动卡峰文件"]
+        CFG["参数配置 YAML\n- 标定 calibration\n- 寻峰 peak_detection\n- 归一化 normalization\n- 峰积分 peak_integration\n- 摩尔分数 mole_fraction"]
+        DB["PICS SQLite 数据库\nspecies_database.sqlite\nspecies + pic_cross_sections"]
+    end
+
+    subgraph L1["公共预处理与峰信息层"]
+        IO["谱图读取\nspectrum_io.read_spectrum"]
+        CAL["TOF -> m/z 标定\ncalibration.py"]
+        PEAK["寻峰 / 卡峰 / 高斯拟合\nprominence | legacy | cwt\nmanual peak ranges"]
+        AREA["峰面积积分与归一化\nbaseline / gaussian area\nIO 光强归一化\n空白扣除 / 质量歧视"]
+        PEAKART["谱图分析产物\n峰列表、峰边界、拟合参数\nspectrum_analysis/"]
+    end
+
+    subgraph L2["分支分析层"]
+        PIE0["PIE 扫描分析\nanalyze_pie_folder\n按 photon energy 分组\n平均谱图 + blank 扣除"]
+        PIE1["m/z 级 PIE 曲线\nbuild_pie_curves\nenergy -> intensity"]
+        PIE2["PIE 物种拟合\nquery species by m/z\nPICS 插值 -> NNLS/手动系数\nR² / RMSE / 残差"]
+        PIE3["物种鉴别结果\n同一 m/z 候选物种贡献\ncomponent intensities\npie_analysis/"]
+
+        TEMP0["温度扫描分析\nanalyze_temperature_folder\n按 temperature 聚合\nsum/max/manual 参考谱"]
+        TEMP1["m/z 温度曲线\nbuild_temperature_curves\ntemperature -> area"]
+        TEMP2["温度响应分类\nformation / consumption\nintermediate / unclassified"]
+        TEMP3["温度扫描结果\ntemperature_scan/"]
+
+        MF0["摩尔分数计算\ncompute_all_mole_fractions"]
+        MF1["定量浓度曲线\nX_parent(T), X_product(T)\n质量歧视 + 膨胀系数 + PICS"]
+        MF2["机理讨论输入\n物种随温度定量变化\nmole_fraction/"]
+
+        PICS0["PICS 截面计算\npics_calculator.py\nNO 比值法 / 多能量平均"]
+        PICS1["新/修订截面数据\ncross_section(E)\n可用于数据库维护"]
+    end
+
+    subgraph L3["输出与项目闭环"]
+        ART["分析产物登记\nproject_artifacts.py\n写回 project.yaml"]
+        OUT["输出文件\nExcel / CSV / 图像 / manifest / report\noutput/exports + output/images"]
+        REPORT["综合报告与项目备份\nfinal_report/ + versions/"]
+        STATUS["项目阶段状态刷新\n数据导入 -> 标定 -> 谱图分析\n-> 温度扫描 / PIE 拟合\n-> 摩尔分数 -> 综合报告"]
+    end
+
+    PM --> RAW
+    PM --> CFG
+    PM --> DB
+    RAW --> IO
+    CFG --> CAL
+    CFG --> PEAK
+    CFG --> AREA
+    IO --> CAL --> PEAK --> AREA --> PEAKART
+
+    AREA --> PIE0 --> PIE1 --> PIE2 --> PIE3
+    DB --> PIE2
+    CFG --> PIE0
+
+    AREA --> TEMP0 --> TEMP1 --> TEMP2 --> TEMP3
+    CFG --> TEMP0
+
+    TEMP1 --> MF0
+    PIE3 --> MF0
+    DB --> MF0
+    CFG --> MF0
+    MF0 --> MF1 --> MF2
+
+    TEMP1 --> PICS0
+    MF1 --> PICS0
+    CFG --> PICS0
+    PICS0 --> PICS1
+    PICS1 -.->|审核后更新| DB
+
+    PEAKART --> ART
+    PIE3 --> ART
+    TEMP3 --> ART
+    MF2 --> ART
+    PICS1 --> ART
+    ART --> OUT --> REPORT
+    ART --> STATUS --> PM
+```
+
+## PIE 拟合内部数据流
+
+```mermaid
+flowchart TB
+    A["选择 m/z\nPIESpeciesFitDialog.on_mz_selected"] --> B["读取当前 PIE 曲线\nenergies + normalized_intensity"]
+    B --> C["按 m/z 查询候选物种\nPICS SQLite: species + cross_sections"]
+    C --> D["合并自动候选与锁定/手动物种\nFittingControlWidget.populate_unified_species_table"]
+    D --> E["用户配置\n启用/禁用物种\n系数模式: fit / manual / locked_fit\n手动系数 / 锁定候选"]
+    E --> F["重建拟合\n_rebuild_manual_fit"]
+    F --> G["PICS 曲线插值到实验能量网格"]
+    G --> H["设计矩阵 X\n每列 = 一个候选物种 PICS(E)"]
+    H --> I["非负最小二乘或手动系数\ny_exp ~= X * coef"]
+    I --> J["拟合质量\nR², RMSE, MAE, residuals"]
+    I --> K["物种贡献\ncoefficient, contribution_percent\ncomponent_intensities"]
+    J --> L["ResultDisplayWidget\n曲线数据 + 物种贡献明细"]
+    K --> L
+    L --> M["导出 PIE 结果\nExcel / 证据对象 / 项目产物登记"]
+```
+
+## 相比原图的优化点
+
+- 将“项目管理”拆成项目生命周期、原始数据源、参数配置和 PICS 数据库，避免把控制层与数据源混在同一个框里。
+- 增加公共预处理层：谱图读取、TOF 到 m/z 标定、寻峰/卡峰/高斯拟合、峰面积积分和归一化，这是 PIE 与温度扫描共同依赖的数据基础。
+- 明确 PIE 拟合不是单纯“物种鉴别”，而是 `m/z 曲线 -> PICS 数据库候选 -> 插值设计矩阵 -> NNLS/手动系数 -> 贡献与拟合质量`。
+- 明确温度扫描输出不仅是“m/z 随温度变化”，还包含 IO/Kr 校正、膨胀系数归一化和生成/消耗/中间体分类。
+- 将摩尔分数计算放在 PIE 鉴别结果、温度曲线、PICS 数据库和配置参数的交汇处，突出它是定量机理分析的下游模块。
+- 增加产物登记闭环：各分析模块导出后写回 `project.yaml`，项目页刷新阶段状态，并进入综合报告/项目备份。

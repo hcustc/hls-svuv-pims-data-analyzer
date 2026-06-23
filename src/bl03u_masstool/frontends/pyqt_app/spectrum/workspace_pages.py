@@ -40,7 +40,7 @@ from bl03u_masstool.frontends.pyqt_app.worker import (
 from bl03u_masstool.frontends.pyqt_app.worker_manager import WorkerManager
 from bl03u_masstool.frontends.pyqt_app.mole_fraction.dialog import MoleFractionDialog
 from bl03u_masstool.frontends.pyqt_app.nist.widget import IonizationEnergyLookupWidget
-from bl03u_masstool.frontends.pyqt_app.normalization.widget import NormalizationSettingsWidget
+from bl03u_masstool.frontends.pyqt_app.normalization.widget import CommonParametersWidget, PeakDetectionWidget
 from bl03u_masstool.frontends.pyqt_app.pics.dialog import PICSCalculatorDialog
 from bl03u_masstool.frontends.pyqt_app.pics.import_widget import PICSImportWidget
 from bl03u_masstool.frontends.pyqt_app.pie.dialog import PIESpeciesFitDialog
@@ -283,7 +283,45 @@ class WorkspacePagesMixin:
         datasource_layout.addWidget(self.datasource_card)
         datasource_layout.addStretch(1)
 
-        # --- Tab 3: 产物管理 ---
+        # --- Tab 3: 通用参数 ---
+        self.project_common_parameters_widget = CommonParametersWidget(
+            self.normalization_settings,
+            self.current_calibration(),
+            self.project_tabs,
+        )
+        self.project_common_parameters_widget.save_button.clicked.connect(self.on_project_common_parameters_saved)
+        self.project_common_parameters_widget.settings_saved.connect(self.on_project_common_parameters_saved)
+        # 立即设置ProjectSettings
+        self.project_common_parameters_widget.set_project_settings(ProjectSettingsManager().get())
+
+        # --- Tab 4: 寻峰参数 ---
+        self.project_peak_detection_widget = PeakDetectionWidget(self.project_tabs)
+        self.project_peak_detection_widget.save_button.clicked.connect(self.on_project_common_parameters_saved)
+        self.project_peak_detection_widget.settings_saved.connect(self.on_project_common_parameters_saved)
+        # 立即设置ProjectSettings
+        self.project_peak_detection_widget.set_project_settings(ProjectSettingsManager().get())
+
+        # --- Tab 5: 功能参数 ---
+        self.project_function_params_page = QtWidgets.QWidget(self.project_tabs)
+        function_params_layout = QVBoxLayout(self.project_function_params_page)
+        function_params_layout.setContentsMargins(8, 8, 8, 8)
+        function_params_layout.setSpacing(10)
+
+        func_section_title = QtWidgets.QLabel("功能默认参数（PIE·温度扫描·PICS·摩尔分数）")
+        func_section_title.setObjectName("ProjectTitle")
+        func_hint = QtWidgets.QLabel(
+            '以下默认值在"应用到工具"或切换工具页时自动同步；保存后写入项目配置。',
+        )
+        func_hint.setObjectName("ProjectHint")
+        func_hint.setWordWrap(True)
+        self._build_function_params_card(self.project_function_params_page)
+
+        function_params_layout.addWidget(func_section_title)
+        function_params_layout.addWidget(func_hint)
+        function_params_layout.addWidget(self.function_params_card)
+        function_params_layout.addStretch(1)
+
+        # --- Tab 6: 产物管理 ---
         self.project_artifacts_page = QtWidgets.QWidget(self.project_tabs)
         artifacts_layout = QVBoxLayout(self.project_artifacts_page)
         artifacts_layout.setContentsMargins(8, 8, 8, 8)
@@ -291,66 +329,12 @@ class WorkspacePagesMixin:
         self._build_artifact_manager_card(self.project_artifacts_page)
         artifacts_layout.addWidget(self.artifact_manager_card, stretch=1)
 
-        # --- Tab 4: 参数配置 (通用参数 + 功能参数 merged) ---
-        self.project_common_page = QtWidgets.QWidget(self.project_tabs)
-        common_layout = QVBoxLayout(self.project_common_page)
-        common_layout.setContentsMargins(0, 0, 0, 0)
-        common_scroll = QtWidgets.QScrollArea(self.project_common_page)
-        common_scroll.setWidgetResizable(True)
-        common_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
-        common_scroll_widget = QtWidgets.QWidget()
-        common_scroll_layout = QVBoxLayout(common_scroll_widget)
-        common_scroll_layout.setContentsMargins(8, 8, 8, 8)
-        common_scroll_layout.setSpacing(12)
-
-        # Section header: 通用参数
-        common_section_title = QtWidgets.QLabel("通用参数（定标·归一化·寻峰）", common_scroll_widget)
-        common_section_title.setObjectName("ProjectTitle")
-        common_hint = QtWidgets.QLabel(
-            "以下参数影响主工作台、温度扫描、PIE、摩尔分数和 PICS；保存后自动同步到各工具。",
-            common_scroll_widget,
-        )
-        common_hint.setObjectName("ProjectHint")
-        common_hint.setWordWrap(True)
-        self.project_common_settings_widget = NormalizationSettingsWidget(
-            self.normalization_settings,
-            self.current_calibration(),
-            common_scroll_widget,
-        )
-        self.project_common_settings_widget.save_button.clicked.connect(self.on_project_common_parameters_saved)
-        self.project_common_settings_widget.settings_saved.connect(self.on_project_common_parameters_saved)
-
-        # Divider
-        divider = QtWidgets.QFrame(common_scroll_widget)
-        divider.setFrameShape(QtWidgets.QFrame.Shape.HLine)
-        divider.setObjectName("NavSeparator")
-
-        # Section header: 功能参数
-        func_section_title = QtWidgets.QLabel("功能默认参数（PIE·温度扫描·PICS·摩尔分数）", common_scroll_widget)
-        func_section_title.setObjectName("ProjectTitle")
-        func_hint = QtWidgets.QLabel(
-            '以下默认值在"应用到工具"或切换工具页时自动同步；保存后写入项目配置。',
-            common_scroll_widget,
-        )
-        func_hint.setObjectName("ProjectHint")
-        func_hint.setWordWrap(True)
-        self._build_function_params_card(common_scroll_widget)
-
-        common_scroll_layout.addWidget(common_section_title)
-        common_scroll_layout.addWidget(common_hint)
-        common_scroll_layout.addWidget(self.project_common_settings_widget)
-        common_scroll_layout.addWidget(divider)
-        common_scroll_layout.addWidget(func_section_title)
-        common_scroll_layout.addWidget(func_hint)
-        common_scroll_layout.addWidget(self.function_params_card)
-        common_scroll_layout.addStretch(1)
-        common_scroll.setWidget(common_scroll_widget)
-        common_layout.addWidget(common_scroll)
-
         self.project_tabs.addTab(self.project_identity_page, "项目设置")
         self.project_tabs.addTab(self.project_datasource_page, "数据导入")
+        self.project_tabs.addTab(self.project_common_parameters_widget, "通用参数")
+        self.project_tabs.addTab(self.project_peak_detection_widget, "寻峰参数")
+        self.project_tabs.addTab(self.project_function_params_page, "功能参数")
         self.project_tabs.addTab(self.project_artifacts_page, "产物管理")
-        self.project_tabs.addTab(self.project_common_page, "参数配置")
         page_layout.addWidget(self.project_tabs, stretch=1)
 
         self.load_project_settings()
@@ -876,7 +860,7 @@ class WorkspacePagesMixin:
         self.fp_mf_parent_mz.setRange(1, 1000)
         self.fp_mf_parent_mz.setValue(128)
         self.fp_mf_parent_initial_mf = QtWidgets.QDoubleSpinBox()
-        self.fp_mf_parent_initial_mf.setToolTip("母体物种在反应器入口的摩尔分数（已知或假设值）")
+        self.fp_mf_parent_initial_mf.setToolTip("母体物种在参考温度T₀处的摩尔分数（已知或假设值）")
         self.fp_mf_parent_initial_mf.setRange(0, 1)
         self.fp_mf_parent_initial_mf.setDecimals(6)
         self.fp_mf_parent_initial_mf.setValue(0.002)
@@ -885,6 +869,10 @@ class WorkspacePagesMixin:
         self.fp_mf_photon_energy.setRange(0, 100)
         self.fp_mf_photon_energy.setDecimals(4)
         self.fp_mf_photon_energy.setValue(10.0)
+        self.fp_mf_reference_temperature = QtWidgets.QSpinBox()
+        self.fp_mf_reference_temperature.setToolTip("参考温度T₀ (°C)：在此温度下母体摩尔分数为已知的初始值")
+        self.fp_mf_reference_temperature.setRange(0, 2000)
+        self.fp_mf_reference_temperature.setValue(550)
 
         mf_layout.addWidget(QtWidgets.QLabel("质量歧视指数"), 0, 0)
         mf_layout.addWidget(self.fp_mf_mass_disc_exponent, 0, 1)
@@ -894,6 +882,8 @@ class WorkspacePagesMixin:
         mf_layout.addWidget(self.fp_mf_parent_initial_mf, 1, 1)
         mf_layout.addWidget(QtWidgets.QLabel("光子能量 (eV)"), 1, 2)
         mf_layout.addWidget(self.fp_mf_photon_energy, 1, 3)
+        mf_layout.addWidget(QtWidgets.QLabel("参考温度 T₀ (°C)"), 2, 0)
+        mf_layout.addWidget(self.fp_mf_reference_temperature, 2, 1)
         params_grid.addWidget(mf_group, 1, 1)
         card_layout.addLayout(params_grid)
 
@@ -967,6 +957,11 @@ class WorkspacePagesMixin:
         # Users must use the import wizard to set up data sources
         self._read_project_settings_to_ui(ps)
         self._load_function_params_to_ui(ps)
+        # 同步ProjectSettings到参数widgets
+        if hasattr(self, "project_common_parameters_widget"):
+            self.project_common_parameters_widget.set_project_settings(ps)
+        if hasattr(self, "project_peak_detection_widget"):
+            self.project_peak_detection_widget.set_project_settings(ps)
         self.update_project_title()
         self.refresh_project_lifecycle()
         self.refresh_project_datasource_page()
@@ -994,6 +989,7 @@ class WorkspacePagesMixin:
         self.fp_mf_parent_mz.setValue(ps.mf_parent_mz)
         self.fp_mf_parent_initial_mf.setValue(ps.mf_parent_initial_mf)
         self.fp_mf_photon_energy.setValue(ps.mf_photon_energy)
+        self.fp_mf_reference_temperature.setValue(int(ps.mf_reference_temperature) if ps.mf_reference_temperature is not None else 550)
 
     def update_project_ui_state(self, ps: ProjectSettings | None = None) -> None:
         """Update main action button and progress bar based on project state"""
@@ -1170,6 +1166,7 @@ class WorkspacePagesMixin:
         ps.mf_parent_mz = self.fp_mf_parent_mz.value()
         ps.mf_parent_initial_mf = self.fp_mf_parent_initial_mf.value()
         ps.mf_photon_energy = self.fp_mf_photon_energy.value()
+        ps.mf_reference_temperature = float(self.fp_mf_reference_temperature.value())
 
     def save_and_apply_project_settings(self) -> None:
         """Save project settings, create project structure, and sync to tools.
@@ -1193,17 +1190,21 @@ class WorkspacePagesMixin:
             QtWidgets.QMessageBox.critical(self, "初始化项目失败", str(exc))
             return
 
-        # Step 2: Save configuration
+        # Step 2: Set project config path (before saving)
+        from pathlib import Path
+        self.project_settings_manager.set_project_path(Path(ps.output_dir))
+
+        # Step 3: Save configuration to project-specific location
         self.project_settings_manager.set(ps)
         self.project_settings_manager.save()
 
-        # Step 3: Read settings back to UI
+        # Step 4: Read settings back to UI
         self._read_project_settings_to_ui(ps)
 
-        # Step 4: Sync to tools
+        # Step 5: Sync to tools
         self._apply_settings_to_tools(ps)
 
-        # Step 5: Refresh UI
+        # Step 6: Refresh UI
         self.update_project_title()
         self.refresh_project_lifecycle(ps)
         self.refresh_project_parameter_summary()
@@ -1233,7 +1234,11 @@ class WorkspacePagesMixin:
             QtWidgets.QMessageBox.critical(self, "初始化项目失败", str(exc))
             return
 
-        # Save configuration
+        # Set project config path (before saving)
+        from pathlib import Path
+        self.project_settings_manager.set_project_path(Path(ps.output_dir))
+
+        # Save configuration to project-specific location
         self.project_settings_manager.set(ps)
         self.project_settings_manager.save()
 
@@ -1428,6 +1433,10 @@ class WorkspacePagesMixin:
     def _collect_and_save_project_settings(self) -> ProjectSettings:
         ps = self._collect_project_settings_from_ui()
         self._collect_function_params_from_ui(ps)
+        # Set project config path before saving
+        from pathlib import Path
+        if ps.output_dir and ps.output_dir.strip() != "output":
+            self.project_settings_manager.set_project_path(Path(ps.output_dir))
         self.project_settings_manager.set(ps)
         self.project_settings_manager.save()
         return ps
@@ -1439,6 +1448,9 @@ class WorkspacePagesMixin:
             ps = self._collect_project_settings_from_ui()
         self._collect_function_params_from_ui(ps)
         ensure_project_structure(ps)
+        # Set project config path early (before dialog)
+        from pathlib import Path
+        self.project_settings_manager.set_project_path(Path(ps.output_dir))
         dialog = ProjectImportDialog(ps, self)
         if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
             return
@@ -1993,10 +2005,18 @@ class WorkspacePagesMixin:
             self.refresh_project_parameter_summary()
 
     def open_common_parameters(self):
-        if hasattr(self, "project_common_settings_widget"):
-            self.project_common_settings_widget.settings = self.normalization_settings
-            self.project_common_settings_widget.calibration = self.current_calibration()
-            self.project_common_settings_widget.load_from_settings()
+        if hasattr(self, "project_common_parameters_widget"):
+            self.project_common_parameters_widget.settings = self.normalization_settings
+            self.project_common_parameters_widget.calibration = self.current_calibration()
+            # 设置ProjectSettings
+            from bl03u_masstool.core.project_settings import ProjectSettingsManager
+            ps = ProjectSettingsManager().get()
+            self.project_common_parameters_widget.set_project_settings(ps)
+            self.project_common_parameters_widget.load_from_settings()
+        if hasattr(self, "project_peak_detection_widget"):
+            ps = ProjectSettingsManager().get()
+            self.project_peak_detection_widget.set_project_settings(ps)
+            self.project_peak_detection_widget.load_from_settings()
         self.switch_workspace_page("project")
         if hasattr(self, "project_tabs"):
-            self.project_tabs.setCurrentWidget(self.project_common_page)
+            self.project_tabs.setCurrentWidget(self.project_common_parameters_widget)

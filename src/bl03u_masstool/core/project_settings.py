@@ -106,6 +106,7 @@ class ProjectSettings:
 
     # === Mole Fraction Defaults ===
     mf_mass_disc_exponent: float = 0.77897
+    mf_md_preset: str = "光电离"  # 实验条件预设名称
     mf_parent_mz: int = 128
     mf_parent_initial_mf: float = 0.002
     mf_reference_temperature: float | None = None
@@ -521,39 +522,72 @@ def migrate_from_legacy_configs() -> ProjectSettings:
 
 
 class ProjectSettingsManager:
-    """Singleton holding the active ProjectSettings instance."""
+    """Singleton holding the active ProjectSettings instance.
+
+    Supports both global config (config/project.yaml) and per-project configs (project_root/config/project.yaml).
+    """
 
     _instance: ProjectSettingsManager | None = None
     _settings: ProjectSettings | None = None
+    _project_config_path: Path | None = None  # 项目特定配置路径
 
     def __new__(cls) -> ProjectSettingsManager:
         if cls._instance is None:
             cls._instance = super().__new__(cls)
         return cls._instance
 
+    def set_project_path(self, project_root: Path | str) -> None:
+        """设置项目级配置路径。当打开项目时调用此方法。
+
+        Args:
+            project_root: 项目根目录路径
+        """
+        if isinstance(project_root, str):
+            project_root = Path(project_root)
+        self._project_config_path = project_root / "config" / "project.yaml"
+        # 重新加载设置以使用新的项目路径
+        self.reload()
+
+    def get_project_config_path(self) -> Path:
+        """获取当前使用的项目配置路径。"""
+        if self._project_config_path:
+            return self._project_config_path
+        return DEFAULT_PROJECT_CONFIG
+
     def get(self) -> ProjectSettings:
         if self._settings is None:
-            self._settings = load_project_settings()
-            if self._is_fresh():
+            config_path = self.get_project_config_path()
+            self._settings = load_project_settings(config_path)
+            if self._is_fresh(config_path):
                 try:
                     self._settings = migrate_from_legacy_configs()
-                    save_project_settings(self._settings)
+                    save_project_settings(self._settings, config_path)
                 except Exception:
                     pass
         return self._settings
 
     def save(self) -> Path:
-        return save_project_settings(self.get())
+        config_path = self.get_project_config_path()
+        return save_project_settings(self.get(), config_path)
 
     def reload(self) -> ProjectSettings:
-        self._settings = load_project_settings()
+        config_path = self.get_project_config_path()
+        self._settings = load_project_settings(config_path)
         return self._settings
 
     def set(self, settings: ProjectSettings) -> None:
         self._settings = settings
 
-    def _is_fresh(self) -> bool:
+    def _is_fresh(self, config_path: Path = None) -> bool:
+        """检查项目配置是否为新建（不存在）。"""
+        if config_path is None:
+            config_path = self.get_project_config_path()
         try:
-            return not readable_config_path(DEFAULT_PROJECT_CONFIG).exists()
+            return not readable_config_path(config_path).exists()
         except Exception:
             return True
+
+    def clear_project_path(self) -> None:
+        """清除项目路径，恢复为使用全局配置。"""
+        self._project_config_path = None
+        self._settings = None
