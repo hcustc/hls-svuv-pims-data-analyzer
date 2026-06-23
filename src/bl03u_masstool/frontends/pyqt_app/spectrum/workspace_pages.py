@@ -455,19 +455,8 @@ class WorkspacePagesMixin:
 
         datasource_title = QtWidgets.QLabel("项目数据源", self.datasource_card)
         datasource_title.setObjectName("ProjectTitle")
-        datasource_hint = QtWidgets.QLabel(
-            "通过导入向导把外部数据复制并登记到项目；下方路径可用于检查或微调已登记的数据源。",
-            self.datasource_card,
-        )
-        datasource_hint.setObjectName("ProjectHint")
-        datasource_hint.setWordWrap(True)
-        self.datasource_status_label = QtWidgets.QLabel("", self.datasource_card)
-        self.datasource_status_label.setObjectName("ProjectHint")
-        self.datasource_status_label.setWordWrap(False)
 
         title_column.addWidget(datasource_title)
-        title_column.addWidget(datasource_hint)
-        title_column.addWidget(self.datasource_status_label)
         top_bar.addLayout(title_column, stretch=1)
 
         self.datasource_import_button = QPushButton("启动导入向导", self.datasource_card)
@@ -476,13 +465,6 @@ class WorkspacePagesMixin:
         self.datasource_import_button.setFixedHeight(30)
         top_bar.addWidget(self.datasource_import_button)
         card_layout.addLayout(top_bar)
-
-        # ── 工作流能力标签行 ──
-        self.datasource_workflow_bar = QHBoxLayout()
-        self.datasource_workflow_bar.setContentsMargins(0, 0, 0, 0)
-        self.datasource_workflow_bar.setSpacing(6)
-        self.datasource_workflow_bar.addStretch(1)
-        card_layout.addLayout(self.datasource_workflow_bar)
 
         # 分割线
         sep = QtWidgets.QFrame(self.datasource_card)
@@ -851,27 +833,9 @@ class WorkspacePagesMixin:
         # 项目未初始化
         root_exists = project_root(ps).exists()
         if not root_exists:
-            if hasattr(self, "datasource_status_label"):
-                self.datasource_status_label.setText("请先在「项目设置」页初始化项目")
             self._clear_datasource_row_statuses()
             self._refresh_workflow_chips([])
             return
-
-        # 顶部状态文字（单行简洁）
-        if hasattr(self, "datasource_status_label"):
-            valid_records = [r for r in validation_records if r.is_valid]
-            invalid_records = [r for r in validation_records if r.path and not r.is_valid]
-            total_files = sum(r.file_count for r in valid_records)
-
-            if validation_status == DataSourceValidationStatus.UNCONFIGURED:
-                status_text = "尚未配置数据源，请使用导入向导或在下方填入数据路径"
-            elif validation_status == DataSourceValidationStatus.INVALID:
-                status_text = f"[警告] {len(invalid_records)} 个路径失效，请重新导入"
-            elif validation_status == DataSourceValidationStatus.PARTIAL:
-                status_text = f"{len(valid_records)} 个数据源就绪，共 {total_files} 个文件"
-            else:
-                status_text = f"✓ 全部就绪 — {len(valid_records)} 个数据源，共 {total_files} 个文件"
-            self.datasource_status_label.setText(status_text)
 
         # 每行内联状态
         record_map = {r.source_key: r for r in validation_records}
@@ -919,26 +883,8 @@ class WorkspacePagesMixin:
                 lbl.setStyleSheet("")
 
     def _refresh_workflow_chips(self, available: list[str]) -> None:
-        if not hasattr(self, "datasource_workflow_bar"):
-            return
-        # 清空旧 chips（保留末尾 stretch）
-        while self.datasource_workflow_bar.count() > 1:
-            item = self.datasource_workflow_bar.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        if not available:
-            return
-        prefix = QtWidgets.QLabel("可用工作流：", None)
-        prefix.setObjectName("ProjectHint")
-        self.datasource_workflow_bar.insertWidget(0, prefix)
-        for i, name in enumerate(available):
-            chip = QtWidgets.QLabel(name, None)
-            chip.setObjectName("WorkflowChip")
-            chip.setStyleSheet(
-                "QLabel { background: #27ae60; color: white; border-radius: 10px;"
-                " padding: 1px 8px; font-size: 11px; }"
-            )
-            self.datasource_workflow_bar.insertWidget(i + 1, chip)
+        """Placeholder method - workflow display removed"""
+        pass
 
     def _collect_function_params_from_ui(self, ps: ProjectSettings) -> None:
         """Deprecated: Use FunctionDefaultsWidget.apply_to_settings() instead.
