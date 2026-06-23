@@ -1,72 +1,73 @@
 project:
-  name: ""
-  system: ""
-  description: ""
-  output_dir: ""
+  name: ''
+  system: ''
+  description: ''
+  output_dir: output
 data_sources:
-  single_spectrum_file: ""
-  sum_spectrum_folder: ""
-  temperature_scan_folder: ""
-  pie_scan_folder: ""
-  pics_database_path: ""
-  manual_peak_file: ""
+  single_spectrum_file: ''
+  sum_spectrum_folder: ''
+  temperature_scan_folder: ''
+  pie_scan_folder: ''
+  pics_database_path: ''
+  manual_peak_file: ''
 analysis_artifacts:
-  temperature_scan_result_file: ""
-  pie_identification_result_file: ""
-  mole_fraction_result_file: ""
+  temperature_scan_result_file: ''
+  pie_identification_result_file: ''
+  mole_fraction_result_file: ''
 calibration:
   a: 3.66334e-07
   b: 0.000637719
   c: 0.272489072
   points: []
-normalization:
-  light_source: io
-  temperature_photon_normalize: true
-  temperature_kr_correct: false
-  pie_photon_mode: first
-  mass_discrimination: 1.0
-  kr_calibration_folder: ""
-  kr_calibration_peak_file: ""
-  expansion_factors: {}
-  selected_elements:
-  - H
-  - C
-  - N
-  - O
-  - F
-  - Cl
-  - Br
-  - I
-  - S
-  - P
-  - Si
-peak_detection:
-  algorithm: ensemble
-  detection_min_idx: 3000
-  threshold_end: 2.0
-  min_intensity: 3.0
-  nearby_peak_window: 30
-  duplicate_window: 20
-  weak_tail_early_window: 90
-  weak_tail_late_window: 50
-  weak_tail_ratio: 5.0
-  gaussian_window_max: 30
-  gaussian_boundary_scale: 1.5
-  boundary_padding: 2
-  prominence_ratio: 0.005
-  smoothing_window: 5
-  smoothing_poly_order: 2
-  baseline_window: 301
-  baseline_percentile: 5.0
-  min_peak_width: 1
-  max_peak_width: 80
-  cwt_snr_threshold: 0.02
-  cwt_wavelet_max_width: 30
-  weak_tail_cutoff_idx: 15000
-  vote_threshold: 0.667
-  min_intensity_for_single_vote: 5.0
-  mz_tolerance: 0.2
-function_params:
+general_parameters:
+  normalization:
+    light_source: io
+    temperature_photon_normalize: true
+    temperature_kr_correct: false
+    pie_photon_mode: first
+    mass_discrimination: 1.0
+    kr_calibration_folder: ''
+    kr_calibration_peak_file: ''
+    expansion_factors: {}
+    selected_elements:
+    - H
+    - C
+    - N
+    - O
+    - F
+    - Cl
+    - Br
+    - I
+    - S
+    - P
+    - Si
+function_defaults:
+  peak_detection:
+    algorithm: ensemble
+    detection_min_idx: 3000
+    threshold_end: 2.0
+    min_intensity: 3.0
+    nearby_peak_window: 30
+    duplicate_window: 20
+    weak_tail_early_window: 90
+    weak_tail_late_window: 50
+    weak_tail_ratio: 5.0
+    gaussian_window_max: 30
+    gaussian_boundary_scale: 1.5
+    boundary_padding: 2
+    prominence_ratio: 0.005
+    smoothing_window: 5
+    smoothing_poly_order: 2
+    baseline_window: 301
+    baseline_percentile: 5.0
+    min_peak_width: 1
+    max_peak_width: 80
+    cwt_snr_threshold: 0.02
+    cwt_wavelet_max_width: 30
+    weak_tail_cutoff_idx: 15000
+    vote_threshold: 0.667
+    min_intensity_for_single_vote: 5.0
+    mz_tolerance: 0.2
   pie:
     energy_decimals: 1
     recursive: true
@@ -78,14 +79,16 @@ function_params:
     reference_mode: sum
     prefer_gaussian: true
     kr_mz: 84
+    curve_class_change_threshold: 0.25
+    curve_class_peak_fraction: 0.65
   pics:
     no_mz: 30
     no_formula: 'NO'
     no_mf: 0.01
     new_species_mf: 0.002
   mole_fraction:
-    mass_disc_exponent: 0.77897
     md_preset: 光电离
+    mass_disc_exponent: 0.77897
     parent_mz: 128
     parent_initial_mf: 0.002
     reference_temperature: null
@@ -94,4 +97,3 @@ function_params:
     reference_species_mf_at_tm: 0.001
     photon_energy: 10.0
     kr_data: {}
-

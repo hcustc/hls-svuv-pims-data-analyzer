@@ -25,6 +25,7 @@ from bl03u_masstool.core.project_lifecycle import ProjectSettings, ensure_projec
 from bl03u_masstool.frontends.pyqt_app.progress_dialog import ProgressDialog
 from bl03u_masstool.frontends.pyqt_app.worker import (
     ExportWorker,
+    ImportWorker,
     OperationCancelledError,
     ProjectWorker,
     ScanWorker,
@@ -207,6 +208,38 @@ class TestExportWorker:
             assert worker.settings == settings
             assert worker.destination == export_path
             assert worker.export_path is None
+
+
+class TestImportWorker:
+    """Test ImportWorker implementation."""
+
+    def test_import_worker_run_success_returns_registration_fields(self, qapp):
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            settings = ProjectSettings(
+                output_dir=str(root / "project"),
+                project_name="test",
+                system="test",
+            )
+            ensure_project_structure(settings)
+            source = root / "external_temp"
+            source.mkdir()
+            (source / "temp.txt").write_text("tof intensity\n1 2\n", encoding="utf-8")
+
+            worker = ImportWorker(settings, source, "temperature_scan")
+            worker.progress = MagicMock()
+            worker.finished = MagicMock()
+            worker.error = MagicMock()
+
+            worker.run()
+
+            assert worker.finished.emit.called
+            result = worker.finished.emit.call_args[0][0]
+            assert result["success"] is True
+            assert result["field_name"] == "temperature_scan_folder"
+            assert result["label"] == "温度扫描目录"
+            assert result["source_key"] == "temperature_scan"
+            assert Path(result["destination"]).exists()
 
     def test_export_worker_run_success(self, qapp):
         """Test successful project export."""

@@ -312,7 +312,9 @@ def _nested_to_flat(data: dict) -> dict:
             for k, kk in [("temp_peak_source", "peak_source"),
                           ("temp_reference_mode", "reference_mode"),
                           ("temp_prefer_gaussian", "prefer_gaussian"),
-                          ("temp_kr_mz", "kr_mz")]:
+                          ("temp_kr_mz", "kr_mz"),
+                          ("temp_curve_class_change_threshold", "curve_class_change_threshold"),
+                          ("temp_curve_class_peak_fraction", "curve_class_peak_fraction")]:
                 if kk in temp:
                     flat[k] = temp[kk]
 
@@ -508,6 +510,8 @@ def _flat_to_nested(settings: ProjectSettings) -> dict:
                 "reference_mode": d["temp_reference_mode"],
                 "prefer_gaussian": d["temp_prefer_gaussian"],
                 "kr_mz": d["temp_kr_mz"],
+                "curve_class_change_threshold": d["temp_curve_class_change_threshold"],
+                "curve_class_peak_fraction": d["temp_curve_class_peak_fraction"],
             },
             "pics": {
                 "no_mz": d["pics_no_mz"],
@@ -653,6 +657,10 @@ class ProjectSettingsManager:
         if self._project_config_path:
             return self._project_config_path
         return DEFAULT_PROJECT_CONFIG
+
+    def has_project_path(self) -> bool:
+        """Return True when settings are scoped to an opened project folder."""
+        return self._project_config_path is not None
 
     def get(self) -> ProjectSettings:
         if self._settings is None:

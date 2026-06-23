@@ -139,12 +139,31 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
 
     def apply_config_defaults(self):
         try:
-            calibration = load_calibration_config()
+            calibration_points = None
+            try:
+                from bl03u_masstool.core.project_settings import ProjectSettingsManager
+
+                manager = ProjectSettingsManager()
+                if manager.has_project_path():
+                    project_settings = manager.get()
+                    calibration = project_settings.to_calibration()
+                    calibration_points = project_settings.calibration_points
+                else:
+                    calibration = load_calibration_config()
+            except Exception:
+                calibration = load_calibration_config()
             self.lineEdit_4.setText(f"{calibration.a:.6e}")
             self.lineEdit_5.setText(f"{calibration.b:.6e}")
             self.lineEdit_6.setText(f"{calibration.c:.6e}")
 
-            points = load_calibration_points()
+            if calibration_points is None:
+                points = load_calibration_points()
+            else:
+                points = [
+                    (float(item["tof"]), float(item["mz"]))
+                    for item in calibration_points
+                    if "tof" in item and "mz" in item
+                ]
             if points:
                 self.region.setRowCount(len(points))
                 for row, (tof, mz) in enumerate(points):

@@ -46,13 +46,20 @@ def test_project_settings_round_trip_preserves_nested_yaml_fields(tmp_path):
         temp_reference_mode="kr",
         temp_prefer_gaussian=False,
         temp_kr_mz=86,
+        temp_curve_class_change_threshold=0.33,
+        temp_curve_class_peak_fraction=0.72,
         pics_no_mz=31,
         pics_no_formula="15NO",
         pics_no_mf=0.02,
         pics_new_species_mf=0.003,
+        mf_md_preset="30 Torr (Catalysis)",
         mf_mass_disc_exponent=0.7,
         mf_parent_mz=130,
         mf_parent_initial_mf=0.004,
+        mf_reference_temperature=575.0,
+        mf_reference_species_mz=44,
+        mf_reference_species_tm=590.0,
+        mf_reference_species_mf_at_tm=0.005,
         mf_photon_energy=11.2,
         mf_kr_data={550.0: 12.3},
     )
@@ -98,13 +105,20 @@ def test_project_settings_round_trip_preserves_nested_yaml_fields(tmp_path):
     assert loaded.temp_reference_mode == settings.temp_reference_mode
     assert loaded.temp_prefer_gaussian is False
     assert loaded.temp_kr_mz == settings.temp_kr_mz
+    assert loaded.temp_curve_class_change_threshold == settings.temp_curve_class_change_threshold
+    assert loaded.temp_curve_class_peak_fraction == settings.temp_curve_class_peak_fraction
     assert loaded.pics_no_mz == settings.pics_no_mz
     assert loaded.pics_no_formula == settings.pics_no_formula
     assert loaded.pics_no_mf == settings.pics_no_mf
     assert loaded.pics_new_species_mf == settings.pics_new_species_mf
+    assert loaded.mf_md_preset == settings.mf_md_preset
     assert loaded.mf_mass_disc_exponent == settings.mf_mass_disc_exponent
     assert loaded.mf_parent_mz == settings.mf_parent_mz
     assert loaded.mf_parent_initial_mf == settings.mf_parent_initial_mf
+    assert loaded.mf_reference_temperature == settings.mf_reference_temperature
+    assert loaded.mf_reference_species_mz == settings.mf_reference_species_mz
+    assert loaded.mf_reference_species_tm == settings.mf_reference_species_tm
+    assert loaded.mf_reference_species_mf_at_tm == settings.mf_reference_species_mf_at_tm
     assert loaded.mf_photon_energy == settings.mf_photon_energy
     assert loaded.mf_kr_data == settings.mf_kr_data
 
