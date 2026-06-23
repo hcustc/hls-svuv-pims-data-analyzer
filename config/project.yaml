@@ -1,25 +1,20 @@
 project:
-  name: test
-  system: test
-  description: test
-  output_dir: /Users/huangchen/Downloads/
+  name: ""
+  system: ""
+  description: ""
+  output_dir: ""
 data_sources:
-  single_spectrum_file: /Users/huangchen/VscodeProject/BL03U_MSTool_clean_repo/BL03U_MassSpectrumTool/tests/fixtures/bl03u_sample/顺-13-二甲基环己烷
-    30 torr/温度扫描/10.5eV/C24110905-0000.txt
-  sum_spectrum_folder: tests/fixtures/bl03u_sample/C6F11O2H/Temp_Scan/12.5eV
-  temperature_scan_folder: /Users/huangchen/VscodeProject/BL03U_MSTool_clean_repo/BL03U_MassSpectrumTool/tests/fixtures/bl03u_sample/顺-13-二甲基环己烷
-    30 torr/温度扫描/10.5eV/
-  pie_scan_folder: /Users/huangchen/VscodeProject/BL03U_MSTool_clean_repo/BL03U_MassSpectrumTool/tests/fixtures/bl03u_sample/顺-13-二甲基环己烷
-    30 torr/8.0-11.5eV/
-  sample_info_file: ''
-  pics_database_path: /Users/huangchen/VscodeProject/BL03U_MSTool_clean_repo/BL03U_MassSpectrumTool/database/species_database.sqlite
-  manual_peak_file: /Users/huangchen/VscodeProject/BL03U_MSTool_clean_repo/BL03U_MassSpectrumTool/tests/fixtures/bl03u_sample/顺-13-二甲基环己烷
-    30 torr/peak_ranges-DHMC.csv
+  single_spectrum_file: ""
+  sum_spectrum_folder: ""
+  temperature_scan_folder: ""
+  pie_scan_folder: ""
+  sample_info_file: ""
+  pics_database_path: ""
+  manual_peak_file: ""
 analysis_artifacts:
-  temperature_scan_result_file: ''
-  pie_identification_result_file: /Users/huangchen/VscodeProject/BL03U_MSTool_clean_repo/BL03U_MassSpectrumTool/tests/fixtures/bl03u_sample/顺-13-二甲基环己烷
-    30 torr/PIE_identification_results-DHMC.xlsx
-  mole_fraction_result_file: ''
+  temperature_scan_result_file: ""
+  pie_identification_result_file: ""
+  mole_fraction_result_file: ""
 calibration:
   a: 3.66334e-07
   b: 0.000637719
@@ -28,24 +23,12 @@ calibration:
 normalization:
   light_source: io
   temperature_photon_normalize: true
-  temperature_kr_correct: true
+  temperature_kr_correct: false
   pie_photon_mode: first
   mass_discrimination: 1.0
-  kr_calibration_folder: null
-  kr_calibration_peak_file: config/peak_integration.yaml
-  expansion_factors:
-    550.0: 1.0
-    600.0: 1.006062757054481
-    650.0: 0.8610833069413769
-    700.0: 0.8693145505699037
-    750.0: 0.8814520705989174
-    800.0: 0.8967398322758013
-    850.0: 0.9040653932656396
-    900.0: 0.9133398529070991
-    950.0: 0.9179382470617404
-    1000.0: 0.9229133320095494
-    1050.0: 0.9302750232338569
-    1100.0: 0.9452532044592329
+  kr_calibration_folder: ""
+  kr_calibration_peak_file: ""
+  expansion_factors: {}
   selected_elements:
   - H
   - C
@@ -59,7 +42,7 @@ normalization:
   - P
   - Si
 peak_detection:
-  algorithm: prominence
+  algorithm: ensemble
   detection_min_idx: 3000
   threshold_end: 2.0
   min_intensity: 3.0
@@ -103,6 +86,7 @@ function_params:
     new_species_mf: 0.002
   mole_fraction:
     mass_disc_exponent: 0.77897
+    md_preset: 光电离
     parent_mz: 128
     parent_initial_mf: 0.002
     reference_temperature: null
@@ -110,16 +94,5 @@ function_params:
     reference_species_tm: null
     reference_species_mf_at_tm: 0.001
     photon_energy: 10.0
-    kr_data:
-      550.0: 393.399604
-      600.0: 378.4250953
-      650.0: 286.9776109
-      700.0: 309.1328046
-      750.0: 282.8007667
-      800.0: 308.1926573
-      850.0: 337.9213882
-      900.0: 338.1595463
-      950.0: 360.2213739
-      1000.0: 335.0853736
-      1050.0: 372.9785567
-      1100.0: 356.4303333
+    kr_data: {}
+
