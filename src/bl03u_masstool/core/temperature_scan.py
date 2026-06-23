@@ -407,6 +407,17 @@ def compute_kr_expansion_factors(
     gaussian_boundary_scale: float = 1.5,
     boundary_padding: int = 2,
 ) -> pd.DataFrame:
+    """计算Kr膨胀系数，自动处理多能量温度扫描数据。
+
+    单能量数据：返回标准格式 (temperature, kr_signal, expansion_lambda)
+
+    多能量数据：
+    1. 分别对每个能量点计算膨胀系数
+    2. 按温度对所有能量的膨胀系数取平均值
+    3. 返回平均后的单能量形式 (temperature, avg_kr_signal, avg_expansion_lambda)
+
+    这样可以利用多个能量点的数据来提高膨胀系数的鲁棒性，同时保持输出格式的一致性。
+    """
     result = analyze_temperature_folder(
         folder,
         calibration=calibration,
@@ -432,23 +443,82 @@ def compute_kr_expansion_factors(
     kr_rows = result[result["mz_rounded"].astype(int) == int(kr_mz)]
     if kr_rows.empty:
         raise ValueError(f"Kr m/z {kr_mz} was not found in the calibration folder")
-    kr_by_temperature = kr_rows.groupby("temperature")["photon_normalized_area"].sum().sort_index()
-    positive_kr = kr_by_temperature[kr_by_temperature > 0]
-    if positive_kr.empty:
-        raise ValueError("all Kr calibration signals are zero")
-    t0 = float(positive_kr.index.min())
-    kr_ref = float(kr_by_temperature.loc[t0])
-    if kr_ref <= 0:
-        raise ValueError("Kr reference signal is zero; cannot compute expansion correction")
-    lambda_by_temperature = kr_by_temperature / kr_ref
-    return pd.DataFrame(
-        {
-            "temperature": kr_by_temperature.index.astype(float),
-            "kr_signal": kr_by_temperature.astype(float).values,
-            "expansion_lambda": lambda_by_temperature.astype(float).values,
-            "reference_temperature": t0,
-        }
-    )
+
+    # 检测是否为多能量数据
+    unique_energies = kr_rows["photon_energy"].nunique()
+    is_multi_energy = unique_energies > 1
+
+    if is_multi_energy:
+        # 多能量：按能量分别计算膨胀系数，然后按温度求平均值
+        temp_lambda_values = {}  # {温度: [膨胀系数列表]}
+        temp_kr_signals = {}     # {温度: [Kr信号列表]}
+        all_ref_temps = []
+
+        for energy in sorted(kr_rows["photon_energy"].unique()):
+            energy_kr = kr_rows[kr_rows["photon_energy"] == energy]
+            kr_by_temperature = energy_kr.groupby("temperature")["photon_normalized_area"].sum().sort_index()
+            positive_kr = kr_by_temperature[kr_by_temperature > 0]
+
+            if positive_kr.empty:
+                continue
+
+            t0 = float(positive_kr.index.min())
+            kr_ref = float(kr_by_temperature.loc[t0])
+            if kr_ref <= 0:
+                continue
+
+            all_ref_temps.append(t0)
+            lambda_by_temperature = kr_by_temperature / kr_ref
+
+            # 收集每个温度的膨胀系数和信号
+            for temp, signal, lambda_val in zip(
+                kr_by_temperature.index.astype(float),
+                kr_by_temperature.astype(float).values,
+                lambda_by_temperature.astype(float).values,
+            ):
+                if temp not in temp_lambda_values:
+                    temp_lambda_values[temp] = []
+                    temp_kr_signals[temp] = []
+                temp_lambda_values[temp].append(lambda_val)
+                temp_kr_signals[temp].append(signal)
+
+        if not temp_lambda_values:
+            raise ValueError("No valid Kr signals found at any energy point")
+
+        # 按温度求平均值
+        result_rows = []
+        reference_temp = float(np.mean(all_ref_temps)) if all_ref_temps else min(temp_lambda_values.keys())
+        for temp in sorted(temp_lambda_values.keys()):
+            avg_lambda = float(np.mean(temp_lambda_values[temp]))
+            avg_signal = float(np.mean(temp_kr_signals[temp]))
+            result_rows.append({
+                "temperature": float(temp),
+                "kr_signal": avg_signal,
+                "expansion_lambda": avg_lambda,
+                "reference_temperature": reference_temp,
+            })
+
+        return pd.DataFrame(result_rows)
+    else:
+        # 单能量：使用原有逻辑（向后兼容）
+        kr_by_temperature = kr_rows.groupby("temperature")["photon_normalized_area"].sum().sort_index()
+        positive_kr = kr_by_temperature[kr_by_temperature > 0]
+        if positive_kr.empty:
+            raise ValueError("all Kr calibration signals are zero")
+        t0 = float(positive_kr.index.min())
+        kr_ref = float(kr_by_temperature.loc[t0])
+        if kr_ref <= 0:
+            raise ValueError("Kr reference signal is zero; cannot compute expansion correction")
+        lambda_by_temperature = kr_by_temperature / kr_ref
+        return pd.DataFrame(
+            {
+                "temperature": kr_by_temperature.index.astype(float),
+                "kr_signal": kr_by_temperature.astype(float).values,
+                "expansion_lambda": lambda_by_temperature.astype(float).values,
+                "reference_temperature": t0,
+            }
+        )
+
 
 
 def build_temperature_curves(

@@ -505,7 +505,7 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
         df = result
         from bl03u_masstool.core.mole_fraction import parse_expansion_factors_from_result
 
-        # 使用新的辅助函数处理膨胀系数（支持单能量和多能量）
+        # 使用新的辅助函数处理膨胀系数
         self.settings.expansion_factors = parse_expansion_factors_from_result(df)
 
         # 保存kr_signal用于展示
@@ -514,15 +514,9 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
             for _, row in df.iterrows()
         }
 
-        # 计算总的因子数（对于多能量，这是所有能量的总数）
-        is_multi_energy = "photon_energy" in df.columns
-        if is_multi_energy:
-            total_factors = len(df)
-            energy_count = df["photon_energy"].nunique()
-            msg = f"已计算 {energy_count} 个能量 × {total_factors // energy_count} 个温度点的Kr膨胀系数（多能量）"
-        else:
-            total_factors = len(self.settings.expansion_factors)
-            msg = f"已计算 {total_factors} 个温度点的Kr膨胀系数"
+        # 显示计算结果
+        total_factors = len(self.settings.expansion_factors)
+        msg = f"已计算 {total_factors} 个温度点的Kr膨胀系数"
 
         self.refresh_factor_table()
         save_normalization_settings(self.settings)
