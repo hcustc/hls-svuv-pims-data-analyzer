@@ -22,59 +22,41 @@ TEMPERATURE_CURVE_CLASS_LABELS = {
 }
 
 
-def cluster_energies(energies: list[float], n_clusters: int = 5, tolerance: float = 0.01) -> dict[int, list[float]]:
-    """将能量值聚类，用于处理光栅波动导致的能量微小变化。
+def group_energies_by_tolerance(energies: list[float], tolerance: float = 0.01) -> dict[float, list[float]]:
+    """按误差容忍度将能量值分组。
 
     Args:
         energies: 所有能量值列表
-        n_clusters: 期望的簇数（默认5个能量点）
-        tolerance: 同一簇内能量的最大差值（eV）
+        tolerance: 误差容忍度（eV）
 
     Returns:
-        {簇索引: [能量值列表]}，簇按平均能量升序排列
+        {代表能量: [该组的所有能量值]}
+        代表能量为该组的平均值，按升序排列
     """
     if not energies:
         return {}
 
-    sorted_energies = sorted(energies)
+    sorted_energies = sorted(set(energies))  # 去重并排序
+    groups = {}
 
-    # 使用简单的基于间隙的聚类
-    clusters = []
-    current_cluster = [sorted_energies[0]]
+    for energy in sorted_energies:
+        # 检查是否与已有的组匹配
+        matched = False
+        for group_key in groups:
+            if abs(energy - group_key) <= tolerance:
+                groups[group_key].append(energy)
+                matched = True
+                break
 
-    for energy in sorted_energies[1:]:
-        # 如果当前能量与簇内最后一个能量的差 < tolerance，加入当前簇
-        if energy - current_cluster[-1] < tolerance:
-            current_cluster.append(energy)
-        else:
-            # 否则开始新簇
-            clusters.append(current_cluster)
-            current_cluster = [energy]
+        # 如果没有匹配的组，创建新组
+        if not matched:
+            groups[energy] = [energy]
 
-    # 添加最后一个簇
-    if current_cluster:
-        clusters.append(current_cluster)
-
-    # 如果簇数太多，可能需要调整tolerance或合并
-    # 这里先尝试合并最近的簇
-    while len(clusters) > n_clusters and len(clusters) > 1:
-        # 找到间隙最小的两个相邻簇
-        min_gap = float('inf')
-        merge_idx = 0
-        for i in range(len(clusters) - 1):
-            gap = clusters[i + 1][0] - clusters[i][-1]
-            if gap < min_gap:
-                min_gap = gap
-                merge_idx = i
-
-        # 合并两个簇
-        clusters[merge_idx].extend(clusters[merge_idx + 1])
-        clusters.pop(merge_idx + 1)
-
-    # 转换为 {簇索引: [能量值]}，并计算每个簇的中心能量
+    # 重新计算每组的平均能量作为key
     result = {}
-    for i, cluster in enumerate(clusters):
-        result[i] = cluster
+    for energies_in_group in groups.values():
+        avg_energy = float(np.mean(energies_in_group))
+        result[avg_energy] = energies_in_group
 
     return result
 
