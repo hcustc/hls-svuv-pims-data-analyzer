@@ -975,3 +975,179 @@ class CommonParametersDialog(QtWidgets.QDialog):
 
 # Legacy alias for backward compatibility with core_tools/dialog.py
 NormalizationSettingsWidget = CommonParametersWidget
+
+
+class FunctionDefaultsWidget(QtWidgets.QWidget):
+    """集成寻峰参数和功能默认参数的统一 Widget。
+
+    包含内容：
+    - 寻峰参数（自动寻峰算法、边界检测等）
+    - PIE 拟合、温度扫描、PICS 计算、摩尔分数等功能的默认参数
+    """
+    settings_saved = QtCore.pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.peak_detection = load_peak_detection_config()
+        self.project_settings: ProjectSettings | None = None
+
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # 使用标签页组织功能参数
+        self.tabs = QtWidgets.QTabWidget()
+        self.tabs.addTab(self._build_peak_detection_tab(), "寻峰积分")
+        # TODO: 后续添加其他功能标签页
+        # self.tabs.addTab(self._build_temperature_scan_tab(), "温度扫描")
+        # self.tabs.addTab(self._build_pie_fitting_tab(), "PIE 拟合")
+        # self.tabs.addTab(self._build_pics_tab(), "PICS 计算")
+        # self.tabs.addTab(self._build_mole_fraction_tab(), "摩尔分数")
+        root.addWidget(self.tabs, 1)
+
+        # 底部工具栏
+        bottom_bar = QtWidgets.QWidget()
+        bl = QtWidgets.QHBoxLayout(bottom_bar)
+        bl.setContentsMargins(8, 4, 8, 4)
+        bl.setSpacing(8)
+        self.save_button = QtWidgets.QPushButton("💾  保存功能默认参数")
+        self.save_button.setFixedHeight(30)
+        self.save_button.clicked.connect(self.save_settings)
+        self.status_label = QtWidgets.QLabel("")
+        self.status_label.setObjectName("ProjectStatus")
+        bl.addWidget(self.save_button)
+        bl.addWidget(self.status_label, 1)
+        root.addWidget(bottom_bar)
+
+        self.load_from_settings()
+
+    def _build_peak_detection_tab(self) -> QtWidgets.QWidget:
+        """寻峰积分参数标签页"""
+        widget = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(widget)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        peak_group = QtWidgets.QGroupBox("自动寻峰参数")
+        peak_layout = QtWidgets.QGridLayout(peak_group)
+        peak_layout.setHorizontalSpacing(8)
+        peak_layout.setVerticalSpacing(8)
+
+        self.peak_algorithm_combo = QtWidgets.QComboBox()
+        self.peak_algorithm_combo.addItem("Ensemble 融合检测（推荐）", "ensemble")
+        self.peak_algorithm_combo.addItem("Prominence", "prominence")
+        self.peak_algorithm_combo.addItem("传统局部极大", "legacy")
+        self.peak_algorithm_combo.addItem("CWT 小波", "cwt")
+        self.peak_algorithm_combo.setToolTip("主工作台自动寻峰使用的算法")
+
+        self.peak_detection_min_idx_edit = QtWidgets.QSpinBox()
+        self.peak_detection_min_idx_edit.setRange(0, 10_000_000)
+        self.peak_detection_min_idx_edit.setToolTip("自动寻峰从该数据点之后开始，避免文件头或低TOF噪声参与寻峰")
+
+        self.peak_threshold_end_edit = QtWidgets.QDoubleSpinBox()
+        self.peak_threshold_end_edit.setRange(0, 1_000_000)
+        self.peak_threshold_end_edit.setDecimals(3)
+        self.peak_threshold_end_edit.setToolTip("向峰两侧扩展边界时，低于该强度即认为到达峰结束")
+
+        self.peak_min_intensity_edit = QtWidgets.QDoubleSpinBox()
+        self.peak_min_intensity_edit.setRange(0, 1_000_000)
+        self.peak_min_intensity_edit.setDecimals(3)
+        self.peak_min_intensity_edit.setToolTip("低于该强度的局部极大值不会作为候选峰")
+
+        self.peak_nearby_window_edit = QtWidgets.QSpinBox()
+        self.peak_nearby_window_edit.setRange(0, 100_000)
+        self.peak_nearby_window_edit.setToolTip("该半宽范围内若已有更高峰，则当前候选峰会被抑制")
+
+        self.peak_duplicate_window_edit = QtWidgets.QSpinBox()
+        self.peak_duplicate_window_edit.setRange(0, 100_000)
+        self.peak_duplicate_window_edit.setToolTip("接受一个峰后，该半宽范围内的候选点会被视为同一峰")
+
+        self.peak_boundary_padding_edit = QtWidgets.QSpinBox()
+        self.peak_boundary_padding_edit.setRange(0, 100_000)
+        self.peak_boundary_padding_edit.setToolTip("最终卡峰边界向左右额外扩展的数据点数")
+
+        self.peak_weak_tail_ratio_edit = QtWidgets.QDoubleSpinBox()
+        self.peak_weak_tail_ratio_edit.setRange(0.001, 1_000_000)
+        self.peak_weak_tail_ratio_edit.setDecimals(3)
+        self.peak_weak_tail_ratio_edit.setToolTip("弱肩峰过滤倍率；值越大，越容易保留主峰后的弱峰")
+
+        self.peak_gaussian_window_max_edit = QtWidgets.QSpinBox()
+        self.peak_gaussian_window_max_edit.setRange(3, 100_000)
+        self.peak_gaussian_window_max_edit.setToolTip("自动高斯拟合时允许使用的最大半窗口")
+
+        self.peak_gaussian_boundary_scale_edit = QtWidgets.QDoubleSpinBox()
+        self.peak_gaussian_boundary_scale_edit.setRange(0.1, 100)
+        self.peak_gaussian_boundary_scale_edit.setDecimals(3)
+        self.peak_gaussian_boundary_scale_edit.setToolTip("高斯拟合成功后，以该倍数 FWHM 重新估计卡峰边界")
+
+        row = 0
+        peak_layout.addWidget(QtWidgets.QLabel("寻峰算法:"), row, 0)
+        peak_layout.addWidget(self.peak_algorithm_combo, row, 1)
+        peak_layout.addWidget(QtWidgets.QLabel("最小 TOF 索引:"), row, 2)
+        peak_layout.addWidget(self.peak_detection_min_idx_edit, row, 3)
+
+        row += 1
+        peak_layout.addWidget(QtWidgets.QLabel("阈值(结束):"), row, 0)
+        peak_layout.addWidget(self.peak_threshold_end_edit, row, 1)
+        peak_layout.addWidget(QtWidgets.QLabel("最小强度:"), row, 2)
+        peak_layout.addWidget(self.peak_min_intensity_edit, row, 3)
+
+        row += 1
+        peak_layout.addWidget(QtWidgets.QLabel("相邻峰窗口:"), row, 0)
+        peak_layout.addWidget(self.peak_nearby_window_edit, row, 1)
+        peak_layout.addWidget(QtWidgets.QLabel("重复峰窗口:"), row, 2)
+        peak_layout.addWidget(self.peak_duplicate_window_edit, row, 3)
+
+        row += 1
+        peak_layout.addWidget(QtWidgets.QLabel("边界填充:"), row, 0)
+        peak_layout.addWidget(self.peak_boundary_padding_edit, row, 1)
+        peak_layout.addWidget(QtWidgets.QLabel("弱峰比率:"), row, 2)
+        peak_layout.addWidget(self.peak_weak_tail_ratio_edit, row, 3)
+
+        row += 1
+        peak_layout.addWidget(QtWidgets.QLabel("高斯窗口(最大):"), row, 0)
+        peak_layout.addWidget(self.peak_gaussian_window_max_edit, row, 1)
+        peak_layout.addWidget(QtWidgets.QLabel("高斯边界倍数:"), row, 2)
+        peak_layout.addWidget(self.peak_gaussian_boundary_scale_edit, row, 3)
+
+        peak_layout.setColumnStretch(1, 1)
+        peak_layout.setColumnStretch(3, 1)
+        layout.addWidget(peak_group)
+        layout.addStretch(1)
+
+        return widget
+
+    def set_project_settings(self, project_settings: ProjectSettings) -> None:
+        """设置项目级配置引用"""
+        self.project_settings = project_settings
+        self.load_from_settings()
+
+    def load_from_settings(self) -> None:
+        """从配置文件加载参数"""
+        self.peak_algorithm_combo.setCurrentText(self.peak_detection.algorithm)
+        self.peak_detection_min_idx_edit.setValue(self.peak_detection.detection_min_idx)
+        self.peak_threshold_end_edit.setValue(self.peak_detection.threshold_end)
+        self.peak_min_intensity_edit.setValue(self.peak_detection.min_intensity)
+        self.peak_nearby_window_edit.setValue(self.peak_detection.nearby_peak_window)
+        self.peak_duplicate_window_edit.setValue(self.peak_detection.duplicate_window)
+        self.peak_boundary_padding_edit.setValue(self.peak_detection.boundary_padding)
+        self.peak_weak_tail_ratio_edit.setValue(self.peak_detection.weak_tail_ratio)
+        self.peak_gaussian_window_max_edit.setValue(self.peak_detection.gaussian_window_max)
+        self.peak_gaussian_boundary_scale_edit.setValue(self.peak_detection.gaussian_boundary_scale)
+
+    def save_settings(self) -> None:
+        """保存参数到配置文件"""
+        self.peak_detection.algorithm = self.peak_algorithm_combo.currentData()
+        self.peak_detection.detection_min_idx = self.peak_detection_min_idx_edit.value()
+        self.peak_detection.threshold_end = self.peak_threshold_end_edit.value()
+        self.peak_detection.min_intensity = self.peak_min_intensity_edit.value()
+        self.peak_detection.nearby_peak_window = self.peak_nearby_window_edit.value()
+        self.peak_detection.duplicate_window = self.peak_duplicate_window_edit.value()
+        self.peak_detection.boundary_padding = self.peak_boundary_padding_edit.value()
+        self.peak_detection.weak_tail_ratio = self.peak_weak_tail_ratio_edit.value()
+        self.peak_detection.gaussian_window_max = self.peak_gaussian_window_max_edit.value()
+        self.peak_detection.gaussian_boundary_scale = self.peak_gaussian_boundary_scale_edit.value()
+
+        save_peak_detection_config(self.peak_detection)
+        self.status_label.setText("功能默认参数已保存")
+        self.settings_saved.emit()
