@@ -1169,22 +1169,16 @@ class WorkspacePagesMixin:
             self.project_tabs.setCurrentWidget(self.project_artifacts_page)
 
     def _collect_function_params_from_ui(self, ps: ProjectSettings) -> None:
-        ps.pie_recursive = self.fp_pie_recursive.isChecked()
-        ps.pie_prefer_gaussian = self.fp_pie_prefer_gaussian.isChecked()
-        ps.pie_multi_folder_mode = self.fp_pie_multi_folder.isChecked()
-        ps.pie_merge_method = self.fp_pie_merge_method.currentData()
-        ps.temp_reference_mode = self.fp_temp_reference_mode.currentData()
-        ps.temp_prefer_gaussian = self.fp_temp_prefer_gaussian.isChecked()
-        ps.temp_kr_mz = self.fp_temp_kr_mz.value()
-        ps.pics_no_mz = self.fp_pics_no_mz.value()
-        ps.pics_no_formula = self.fp_pics_no_formula.text().strip()
-        ps.pics_no_mf = self.fp_pics_no_mf.value()
-        ps.pics_new_species_mf = self.fp_pics_new_species_mf.value()
-        ps.mf_mass_disc_exponent = self.fp_mf_mass_disc_exponent.value()
-        ps.mf_parent_mz = self.fp_mf_parent_mz.value()
-        ps.mf_parent_initial_mf = self.fp_mf_parent_initial_mf.value()
-        ps.mf_photon_energy = self.fp_mf_photon_energy.value()
-        ps.mf_reference_temperature = float(self.fp_mf_reference_temperature.value())
+        """Deprecated: Use FunctionDefaultsWidget.apply_to_settings() instead.
+
+        This method was deprecated after Phase 3 UI refactoring when function
+        parameters were moved to FunctionDefaultsWidget. It's kept as a no-op
+        for backward compatibility. The actual parameter collection now happens
+        in FunctionDefaultsWidget.apply_to_settings().
+        """
+        # Parameters are now collected via FunctionDefaultsWidget.apply_to_settings()
+        # which is called automatically during save_and_apply_project_settings()
+        pass
 
     def new_project(self) -> None:
         """清空表单，准备创建新项目"""
@@ -1208,7 +1202,9 @@ class WorkspacePagesMixin:
             self.project_output_dir_edit.setText(ps.output_dir)
             ps = self._collect_project_settings_from_ui()
 
-        self._collect_function_params_from_ui(ps)
+        # Collect function parameters from FunctionDefaultsWidget
+        if hasattr(self, "project_function_defaults_widget"):
+            self.project_function_defaults_widget.apply_to_settings(ps)
 
         # Step 1: Create project directory structure
         try:
@@ -1252,7 +1248,9 @@ class WorkspacePagesMixin:
             self.project_output_dir_edit.setText(ps.output_dir)
             ps = self._collect_project_settings_from_ui()
 
-        self._collect_function_params_from_ui(ps)
+        # Collect function parameters from FunctionDefaultsWidget
+        if hasattr(self, "project_function_defaults_widget"):
+            self.project_function_defaults_widget.apply_to_settings(ps)
 
         # Create project directory structure
         try:

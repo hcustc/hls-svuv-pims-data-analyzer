@@ -186,6 +186,13 @@ def _nested_to_flat(data: dict) -> dict:
     ``calibration.a``, ``peak_detection.algorithm``), while the dataclass uses
     namespaced field names to avoid collisions. Keep this mapping explicit so a
     saved project can be loaded back without silently dropping values.
+
+    Supports dual-scope configuration:
+    - Top-level sections: project, data_sources, analysis_artifacts, calibration (flat)
+    - general_parameters scope: normalization (flat)
+    - function_defaults scope: peak_detection, pie, temperature_scan, pics, mole_fraction (nested)
+
+    Backward compatible: Also reads function_params from top level if not under scopes.
     """
     flat: dict[str, Any] = {}
 
@@ -221,47 +228,9 @@ def _nested_to_flat(data: dict) -> dict:
             "points": "calibration_points",
             "calibration_points": "calibration_points",
         },
-        "normalization": {
-            "light_source": "light_source",
-            "temperature_photon_normalize": "temperature_photon_normalize",
-            "temperature_kr_correct": "temperature_kr_correct",
-            "pie_photon_mode": "pie_photon_mode",
-            "mass_discrimination": "mass_discrimination",
-            "kr_calibration_folder": "kr_calibration_folder",
-            "kr_calibration_peak_file": "kr_calibration_peak_file",
-            "expansion_factors": "expansion_factors",
-            "selected_elements": "selected_elements",
-        },
-        "peak_detection": {
-            "algorithm": "peak_algorithm",
-            "peak_algorithm": "peak_algorithm",
-            "detection_min_idx": "detection_min_idx",
-            "threshold_end": "threshold_end",
-            "min_intensity": "min_intensity",
-            "nearby_peak_window": "nearby_peak_window",
-            "duplicate_window": "duplicate_window",
-            "weak_tail_early_window": "weak_tail_early_window",
-            "weak_tail_late_window": "weak_tail_late_window",
-            "weak_tail_ratio": "weak_tail_ratio",
-            "gaussian_window_max": "gaussian_window_max",
-            "gaussian_boundary_scale": "gaussian_boundary_scale",
-            "boundary_padding": "boundary_padding",
-            "prominence_ratio": "prominence_ratio",
-            "smoothing_window": "smoothing_window",
-            "smoothing_poly_order": "smoothing_poly_order",
-            "baseline_window": "baseline_window",
-            "baseline_percentile": "baseline_percentile",
-            "min_peak_width": "min_peak_width",
-            "max_peak_width": "max_peak_width",
-            "cwt_snr_threshold": "cwt_snr_threshold",
-            "cwt_wavelet_max_width": "cwt_wavelet_max_width",
-            "weak_tail_cutoff_idx": "weak_tail_cutoff_idx",
-            "vote_threshold": "vote_threshold",
-            "min_intensity_for_single_vote": "min_intensity_for_single_vote",
-            "mz_tolerance": "mz_tolerance",
-        },
     }
 
+    # Load top-level sections (project, data_sources, analysis_artifacts, calibration)
     for section, mapping in section_mappings.items():
         section_data = data.get(section, {})
         if not isinstance(section_data, dict):
@@ -270,15 +239,67 @@ def _nested_to_flat(data: dict) -> dict:
             if yaml_key in section_data:
                 flat[field_name] = section_data[yaml_key]
 
+    # Load legacy artifacts section
     legacy_artifacts = data.get("artifacts", {})
     if isinstance(legacy_artifacts, dict):
         for yaml_key, field_name in section_mappings["analysis_artifacts"].items():
             if yaml_key in legacy_artifacts and field_name not in flat:
                 flat[field_name] = legacy_artifacts[yaml_key]
 
-    fp = data.get("function_params", {})
-    if isinstance(fp, dict):
-        pie = fp.get("pie", {})
+    # Load from general_parameters scope (flat structure)
+    gp = data.get("general_parameters", {})
+    if isinstance(gp, dict):
+        norm = gp.get("normalization", {})
+        if isinstance(norm, dict):
+            norm_mappings = {
+                "light_source": "light_source",
+                "temperature_photon_normalize": "temperature_photon_normalize",
+                "temperature_kr_correct": "temperature_kr_correct",
+                "pie_photon_mode": "pie_photon_mode",
+                "mass_discrimination": "mass_discrimination",
+                "kr_calibration_folder": "kr_calibration_folder",
+                "kr_calibration_peak_file": "kr_calibration_peak_file",
+                "expansion_factors": "expansion_factors",
+                "selected_elements": "selected_elements",
+            }
+            for yaml_key, field_name in norm_mappings.items():
+                if yaml_key in norm:
+                    flat[field_name] = norm[yaml_key]
+
+    # Fallback: Load normalization from top-level if not under general_parameters (backward compat)
+    if "normalization" in data and "general_parameters" not in data:
+        norm = data.get("normalization", {})
+        if isinstance(norm, dict):
+            norm_mappings = {
+                "light_source": "light_source",
+                "temperature_photon_normalize": "temperature_photon_normalize",
+                "temperature_kr_correct": "temperature_kr_correct",
+                "pie_photon_mode": "pie_photon_mode",
+                "mass_discrimination": "mass_discrimination",
+                "kr_calibration_folder": "kr_calibration_folder",
+                "kr_calibration_peak_file": "kr_calibration_peak_file",
+                "expansion_factors": "expansion_factors",
+                "selected_elements": "selected_elements",
+            }
+            for yaml_key, field_name in norm_mappings.items():
+                if yaml_key in norm and field_name not in flat:
+                    flat[field_name] = norm[yaml_key]
+
+    # Load from function_defaults scope (nested structure)
+    fd = data.get("function_defaults", {})
+
+    # Fallback: If no function_defaults scope, try function_params at top level
+    if not fd and "function_params" in data:
+        fd = data.get("function_params", {})
+    elif "function_defaults" in data and isinstance(fd, dict):
+        # function_defaults scope exists, use it (preferred)
+        pass
+    elif "function_params" in data and "function_defaults" not in data:
+        # Only function_params exists at top level, use it (backward compat)
+        fd = data.get("function_params", {})
+
+    if isinstance(fd, dict):
+        pie = fd.get("pie", {})
         if isinstance(pie, dict):
             for k, kk in [("pie_energy_decimals", "energy_decimals"),
                           ("pie_recursive", "recursive"),
@@ -288,7 +309,7 @@ def _nested_to_flat(data: dict) -> dict:
                 if kk in pie:
                     flat[k] = pie[kk]
 
-        temp = fp.get("temperature_scan", {})
+        temp = fd.get("temperature_scan", {})
         if isinstance(temp, dict):
             for k, kk in [("temp_peak_source", "peak_source"),
                           ("temp_reference_mode", "reference_mode"),
@@ -297,14 +318,14 @@ def _nested_to_flat(data: dict) -> dict:
                 if kk in temp:
                     flat[k] = temp[kk]
 
-        pics = fp.get("pics", {})
+        pics = fd.get("pics", {})
         if isinstance(pics, dict):
             for k, kk in [("pics_no_mz", "no_mz"), ("pics_no_formula", "no_formula"),
                           ("pics_no_mf", "no_mf"), ("pics_new_species_mf", "new_species_mf")]:
                 if kk in pics:
                     flat[k] = pics[kk]
 
-        mf = fp.get("mole_fraction", {})
+        mf = fd.get("mole_fraction", {})
         if isinstance(mf, dict):
             for k, kk in [("mf_md_preset", "md_preset"),
                           ("mf_mass_disc_exponent", "mass_disc_exponent"),
@@ -319,6 +340,77 @@ def _nested_to_flat(data: dict) -> dict:
                 if kk in mf:
                     flat[k] = mf[kk]
 
+        # Load peak_detection from function_defaults scope
+        peak_det = fd.get("peak_detection", {})
+        if isinstance(peak_det, dict):
+            peak_mappings = {
+                "algorithm": "peak_algorithm",
+                "peak_algorithm": "peak_algorithm",
+                "detection_min_idx": "detection_min_idx",
+                "threshold_end": "threshold_end",
+                "min_intensity": "min_intensity",
+                "nearby_peak_window": "nearby_peak_window",
+                "duplicate_window": "duplicate_window",
+                "weak_tail_early_window": "weak_tail_early_window",
+                "weak_tail_late_window": "weak_tail_late_window",
+                "weak_tail_ratio": "weak_tail_ratio",
+                "gaussian_window_max": "gaussian_window_max",
+                "gaussian_boundary_scale": "gaussian_boundary_scale",
+                "boundary_padding": "boundary_padding",
+                "prominence_ratio": "prominence_ratio",
+                "smoothing_window": "smoothing_window",
+                "smoothing_poly_order": "smoothing_poly_order",
+                "baseline_window": "baseline_window",
+                "baseline_percentile": "baseline_percentile",
+                "min_peak_width": "min_peak_width",
+                "max_peak_width": "max_peak_width",
+                "cwt_snr_threshold": "cwt_snr_threshold",
+                "cwt_wavelet_max_width": "cwt_wavelet_max_width",
+                "weak_tail_cutoff_idx": "weak_tail_cutoff_idx",
+                "vote_threshold": "vote_threshold",
+                "min_intensity_for_single_vote": "min_intensity_for_single_vote",
+                "mz_tolerance": "mz_tolerance",
+            }
+            for yaml_key, field_name in peak_mappings.items():
+                if yaml_key in peak_det:
+                    flat[field_name] = peak_det[yaml_key]
+
+    # Fallback: Load peak_detection from top level if not in function_defaults (backward compat)
+    if "peak_detection" in data and ("function_defaults" not in data):
+        peak_det = data.get("peak_detection", {})
+        if isinstance(peak_det, dict):
+            peak_mappings = {
+                "algorithm": "peak_algorithm",
+                "peak_algorithm": "peak_algorithm",
+                "detection_min_idx": "detection_min_idx",
+                "threshold_end": "threshold_end",
+                "min_intensity": "min_intensity",
+                "nearby_peak_window": "nearby_peak_window",
+                "duplicate_window": "duplicate_window",
+                "weak_tail_early_window": "weak_tail_early_window",
+                "weak_tail_late_window": "weak_tail_late_window",
+                "weak_tail_ratio": "weak_tail_ratio",
+                "gaussian_window_max": "gaussian_window_max",
+                "gaussian_boundary_scale": "gaussian_boundary_scale",
+                "boundary_padding": "boundary_padding",
+                "prominence_ratio": "prominence_ratio",
+                "smoothing_window": "smoothing_window",
+                "smoothing_poly_order": "smoothing_poly_order",
+                "baseline_window": "baseline_window",
+                "baseline_percentile": "baseline_percentile",
+                "min_peak_width": "min_peak_width",
+                "max_peak_width": "max_peak_width",
+                "cwt_snr_threshold": "cwt_snr_threshold",
+                "cwt_wavelet_max_width": "cwt_wavelet_max_width",
+                "weak_tail_cutoff_idx": "weak_tail_cutoff_idx",
+                "vote_threshold": "vote_threshold",
+                "min_intensity_for_single_vote": "min_intensity_for_single_vote",
+                "mz_tolerance": "mz_tolerance",
+            }
+            for yaml_key, field_name in peak_mappings.items():
+                if yaml_key in peak_det and field_name not in flat:
+                    flat[field_name] = peak_det[yaml_key]
+
     for key in ("expansion_factors", "mf_kr_data"):
         if key in flat and isinstance(flat[key], dict):
             flat[key] = {float(k): float(v) for k, v in flat[key].items()}
@@ -326,7 +418,14 @@ def _nested_to_flat(data: dict) -> dict:
     return flat
 
 def _flat_to_nested(settings: ProjectSettings) -> dict:
-    """Convert flat ProjectSettings to nested project.yaml structure."""
+    """Convert flat ProjectSettings to nested project.yaml structure.
+
+    New dual-scope structure:
+    - general_parameters.normalization: general parameters (flat)
+    - function_defaults: function-specific parameters (nested)
+
+    Backward compatible: Still supports reading from top-level sections for old projects.
+    """
     d = asdict(settings)
 
     def _optional_float_dict(v):
@@ -359,45 +458,47 @@ def _flat_to_nested(settings: ProjectSettings) -> dict:
             "c": d["cal_c"],
             "points": d.get("calibration_points", []),
         },
-        "normalization": {
-            "light_source": d["light_source"],
-            "temperature_photon_normalize": d["temperature_photon_normalize"],
-            "temperature_kr_correct": d["temperature_kr_correct"],
-            "pie_photon_mode": d["pie_photon_mode"],
-            "mass_discrimination": d["mass_discrimination"],
-            "kr_calibration_folder": d["kr_calibration_folder"],
-            "kr_calibration_peak_file": d["kr_calibration_peak_file"],
-            "expansion_factors": _optional_float_dict(d["expansion_factors"]),
-            "selected_elements": d["selected_elements"],
+        "general_parameters": {
+            "normalization": {
+                "light_source": d["light_source"],
+                "temperature_photon_normalize": d["temperature_photon_normalize"],
+                "temperature_kr_correct": d["temperature_kr_correct"],
+                "pie_photon_mode": d["pie_photon_mode"],
+                "mass_discrimination": d["mass_discrimination"],
+                "kr_calibration_folder": d["kr_calibration_folder"],
+                "kr_calibration_peak_file": d["kr_calibration_peak_file"],
+                "expansion_factors": _optional_float_dict(d["expansion_factors"]),
+                "selected_elements": d["selected_elements"],
+            },
         },
-        "peak_detection": {
-            "algorithm": d["peak_algorithm"],
-            "detection_min_idx": d["detection_min_idx"],
-            "threshold_end": d["threshold_end"],
-            "min_intensity": d["min_intensity"],
-            "nearby_peak_window": d["nearby_peak_window"],
-            "duplicate_window": d["duplicate_window"],
-            "weak_tail_early_window": d["weak_tail_early_window"],
-            "weak_tail_late_window": d["weak_tail_late_window"],
-            "weak_tail_ratio": d["weak_tail_ratio"],
-            "gaussian_window_max": d["gaussian_window_max"],
-            "gaussian_boundary_scale": d["gaussian_boundary_scale"],
-            "boundary_padding": d["boundary_padding"],
-            "prominence_ratio": d["prominence_ratio"],
-            "smoothing_window": d["smoothing_window"],
-            "smoothing_poly_order": d["smoothing_poly_order"],
-            "baseline_window": d["baseline_window"],
-            "baseline_percentile": d["baseline_percentile"],
-            "min_peak_width": d["min_peak_width"],
-            "max_peak_width": d["max_peak_width"],
-            "cwt_snr_threshold": d["cwt_snr_threshold"],
-            "cwt_wavelet_max_width": d["cwt_wavelet_max_width"],
-            "weak_tail_cutoff_idx": d["weak_tail_cutoff_idx"],
-            "vote_threshold": d["vote_threshold"],
-            "min_intensity_for_single_vote": d["min_intensity_for_single_vote"],
-            "mz_tolerance": d["mz_tolerance"],
-        },
-        "function_params": {
+        "function_defaults": {
+            "peak_detection": {
+                "algorithm": d["peak_algorithm"],
+                "detection_min_idx": d["detection_min_idx"],
+                "threshold_end": d["threshold_end"],
+                "min_intensity": d["min_intensity"],
+                "nearby_peak_window": d["nearby_peak_window"],
+                "duplicate_window": d["duplicate_window"],
+                "weak_tail_early_window": d["weak_tail_early_window"],
+                "weak_tail_late_window": d["weak_tail_late_window"],
+                "weak_tail_ratio": d["weak_tail_ratio"],
+                "gaussian_window_max": d["gaussian_window_max"],
+                "gaussian_boundary_scale": d["gaussian_boundary_scale"],
+                "boundary_padding": d["boundary_padding"],
+                "prominence_ratio": d["prominence_ratio"],
+                "smoothing_window": d["smoothing_window"],
+                "smoothing_poly_order": d["smoothing_poly_order"],
+                "baseline_window": d["baseline_window"],
+                "baseline_percentile": d["baseline_percentile"],
+                "min_peak_width": d["min_peak_width"],
+                "max_peak_width": d["max_peak_width"],
+                "cwt_snr_threshold": d["cwt_snr_threshold"],
+                "cwt_wavelet_max_width": d["cwt_wavelet_max_width"],
+                "weak_tail_cutoff_idx": d["weak_tail_cutoff_idx"],
+                "vote_threshold": d["vote_threshold"],
+                "min_intensity_for_single_vote": d["min_intensity_for_single_vote"],
+                "mz_tolerance": d["mz_tolerance"],
+            },
             "pie": {
                 "energy_decimals": d["pie_energy_decimals"],
                 "recursive": d["pie_recursive"],
