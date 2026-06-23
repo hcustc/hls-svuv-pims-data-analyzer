@@ -383,6 +383,13 @@ class WorkspacePagesMixin:
             }
         """)
         action_layout.addWidget(self.project_new_button)
+
+        # 打开项目按钮
+        self.project_open_button = QPushButton("📂 打开项目", action_bar)
+        self.project_open_button.setObjectName("BrowseButton")
+        self.project_open_button.setToolTip("打开已有项目配置文件")
+        self.project_open_button.setFixedHeight(32)
+        action_layout.addWidget(self.project_open_button)
         action_layout.addSpacing(12)
 
         self.project_read_paths_button = QPushButton("读取工具路径", action_bar)
@@ -439,6 +446,7 @@ class WorkspacePagesMixin:
         card_layout.addLayout(form_layout)
 
         self.project_new_button.clicked.connect(self.new_project)
+        self.project_open_button.clicked.connect(self.open_project)
         self.project_read_paths_button.clicked.connect(self.read_paths_from_tools)
         self.project_initialize_button.clicked.connect(self.initialize_project_structure)
         self.project_save_and_apply_button.clicked.connect(self.save_and_apply_project_settings)
@@ -1188,6 +1196,67 @@ class WorkspacePagesMixin:
         self.project_output_dir_edit.clear()
         self.project_name_edit.setFocus()
         self.statusbar.showMessage("已清空表单，请填写项目信息并点击'保存并应用'", 3000)
+
+    def open_project(self) -> None:
+        """打开已有项目（选择项目目录或配置文件）"""
+        project_path = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            "选择项目目录或包含 config/project.yaml 的文件夹",
+            str(Path.home() / "Downloads"),
+            QtWidgets.QFileDialog.Option.ShowDirsOnly
+        )
+
+        if not project_path:
+            return
+
+        project_path = Path(project_path)
+
+        # Try to find config/project.yaml in the selected directory
+        config_file = project_path / "config" / "project.yaml"
+        if not config_file.exists():
+            QtWidgets.QMessageBox.warning(
+                self,
+                "配置文件不存在",
+                f"在 {project_path} 中找不到 config/project.yaml\n\n"
+                "请确保选择的是有效的项目目录。"
+            )
+            return
+
+        try:
+            # Load project settings from config file
+            from bl03u_masstool.core.project_settings import load_project_settings
+            ps = load_project_settings(config_file)
+
+            # Set project path for manager
+            self.project_settings_manager.set_project_path(project_path)
+
+            # Display loaded settings in UI
+            self.project_name_edit.setText(ps.project_name or "")
+            self.project_system_edit.setText(ps.system or "")
+            self.project_description_edit.setText(ps.description or "")
+            self.project_output_dir_edit.setText(ps.output_dir or "")
+
+            # Load to all parameter widgets
+            self.project_common_parameters_widget.set_project_settings(ps)
+            self.project_common_parameters_widget.load_from_settings()
+
+            if hasattr(self, "project_function_defaults_widget"):
+                self.project_function_defaults_widget.set_project_settings(ps)
+                self.project_function_defaults_widget.load_from_settings()
+
+            if hasattr(self, "project_peak_detection_widget"):
+                self.project_peak_detection_widget.set_project_settings(ps)
+                self.project_peak_detection_widget.load_from_settings()
+
+            self.statusbar.showMessage(f"✓ 已加载项目：{ps.project_name}", 3000)
+
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(
+                self,
+                "加载项目失败",
+                f"无法加载项目配置：\n{str(exc)}"
+            )
+            self.project_settings_manager.clear_project_path()
 
     def save_and_apply_project_settings(self) -> None:
         """Save project settings, create project structure, and sync to tools.
