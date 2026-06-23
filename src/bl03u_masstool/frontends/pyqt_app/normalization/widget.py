@@ -514,7 +514,7 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
         df = result
         import pandas as pd
         from bl03u_masstool.core.mole_fraction import parse_expansion_factors_from_result
-        from bl03u_masstool.core.temperature_scan import cluster_energies
+        from bl03u_masstool.core.temperature_scan import group_energies_by_tolerance
 
         # 保存原始结果用于能量选择
         self._kr_result_df = df
@@ -537,40 +537,30 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
             avg_df = pd.DataFrame(avg_data)
             self.settings.expansion_factors = parse_expansion_factors_from_result(avg_df)
 
-            # 对能量进行聚类，识别主要的能量点
+            # 按误差容忍度将能量值分组
             all_energies = sorted(df["photon_energy"].unique().tolist())
-            energy_clusters = cluster_energies(all_energies, n_clusters=5, tolerance=0.01)
+            energy_groups = group_energies_by_tolerance(all_energies, tolerance=0.01)
 
-            # 计算每个簇的平均能量（代表该簇）
-            cluster_centers = {}
-            for cluster_idx, energies in energy_clusters.items():
-                center = float(np.mean(energies))
-                cluster_centers[cluster_idx] = center
-
-            # 填充能量下拉列表（按簇的中心能量排序）
+            # 填充能量下拉列表（按能量升序）
             self.energy_combo.blockSignals(True)
             self.energy_combo.clear()
             self.energy_combo.addItem("平均结果", None)
 
-            for cluster_idx in sorted(cluster_centers.keys(), key=lambda x: cluster_centers[x]):
-                center_energy = cluster_centers[cluster_idx]
+            for center_energy in sorted(energy_groups.keys()):
                 self.energy_combo.addItem(f"E={center_energy:.4f} eV", center_energy)
 
             self.energy_combo.blockSignals(False)
             self.energy_combo.setVisible(True)
 
-            # 保存簇映射用于后续查询
-            self._energy_cluster_map = {}  # {中心能量: [该簇的所有能量]}
-            for cluster_idx, energies in energy_clusters.items():
-                center = cluster_centers[cluster_idx]
-                self._energy_cluster_map[center] = energies
+            # 保存能量组映射用于后续查询
+            self._energy_group_map = energy_groups
 
             # 显示平均结果
             self._kr_signal_data = {
                 float(row["temperature"]): float(row["kr_signal"])
                 for _, row in avg_df.iterrows()
             }
-            msg = f"已计算 {len(energy_clusters)} 个能量点 × {len(df)//len(all_energies)} 个温度点，"
+            msg = f"已计算 {len(energy_groups)} 个能量点 × {len(df)//len(all_energies)} 个温度点，"
             msg += f"显示 {len(self.settings.expansion_factors)} 个温度点的平均膨胀系数"
         else:
             # 单能量
@@ -607,18 +597,15 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
                     "expansion_lambda": avg_lambda,
                 })
         else:
-            # 显示特定能量簇的平均结果
-            # 获取该簇包含的所有能量值
-            cluster_energies = self._energy_cluster_map.get(selected_center_energy, [])
-            if not cluster_energies:
-                # 如果没有找到簇映射，使用选中的能量值
-                cluster_energies = [selected_center_energy]
+            # 显示特定能量组的结果
+            # 获取该组包含的所有能量值
+            group_energies = self._energy_group_map.get(selected_center_energy, [selected_center_energy])
 
-            # 过滤数据，仅获取该簇中的能量
-            cluster_data = df[df["photon_energy"].isin(cluster_energies)]
+            # 过滤数据，仅获取该组中的能量
+            group_data = df[df["photon_energy"].isin(group_energies)]
             result_data = []
-            for temp in sorted(cluster_data["temperature"].unique()):
-                temp_data = cluster_data[cluster_data["temperature"] == temp]
+            for temp in sorted(group_data["temperature"].unique()):
+                temp_data = group_data[group_data["temperature"] == temp]
                 avg_lambda = float(temp_data["expansion_lambda"].mean())
                 avg_signal = float(temp_data["kr_signal"].mean())
                 result_data.append({
