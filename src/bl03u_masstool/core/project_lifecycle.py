@@ -96,7 +96,7 @@ class WorkflowAnalysisResult:
 class ProjectUIState(Enum):
     """项目管理UI主操作按钮的状态枚举"""
     UNINITIALIZED = ("初始化项目", "项目信息未填或目录未初始化")
-    AWAITING_DATA_IMPORT = ("前往数据导入", "已初始化，等待导入原始数据")
+    AWAITING_DATA_IMPORT = ("配置项目数据源", "已初始化，等待导入原始数据")
     READY_TO_ANALYZE = ("前往质谱工作台", "数据已导入，至少一项分析可执行")
     ANALYSIS_IN_PROGRESS = ("查看分析进度", "分析进行中")
     ANALYSIS_COMPLETE = ("查看分析结果", "分析已完成")
