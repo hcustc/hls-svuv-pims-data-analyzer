@@ -311,19 +311,6 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
         layout.setContentsMargins(12, 8, 12, 8)
         layout.setSpacing(8)
 
-        # 全选/全不选按钮
-        button_layout = QtWidgets.QHBoxLayout()
-        select_all_btn = QtWidgets.QPushButton("全选")
-        deselect_all_btn = QtWidgets.QPushButton("全不选")
-        select_all_btn.setMaximumWidth(60)
-        deselect_all_btn.setMaximumWidth(60)
-        select_all_btn.clicked.connect(lambda: self._set_all_elements(True))
-        deselect_all_btn.clicked.connect(lambda: self._set_all_elements(False))
-        button_layout.addWidget(select_all_btn)
-        button_layout.addWidget(deselect_all_btn)
-        button_layout.addStretch(1)
-        layout.addLayout(button_layout)
-
         # 元素复选框（紧凑布局）
         elements_layout = QtWidgets.QGridLayout()
         elements_layout.setHorizontalSpacing(6)
@@ -449,14 +436,6 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
             chk.setChecked(True)
             self.element_checks[elem] = chk
             elements_layout.addWidget(chk)
-        self.select_all_elements_btn = QtWidgets.QPushButton("全选")
-        self.select_all_elements_btn.setFixedWidth(50)
-        self.select_all_elements_btn.clicked.connect(lambda: self._set_all_elements(True))
-        self.clear_elements_btn = QtWidgets.QPushButton("清空")
-        self.clear_elements_btn.setFixedWidth(50)
-        self.clear_elements_btn.clicked.connect(lambda: self._set_all_elements(False))
-        elements_layout.addWidget(self.select_all_elements_btn)
-        elements_layout.addWidget(self.clear_elements_btn)
         elements_layout.addStretch()
         layout.addWidget(elements_group)
 
@@ -587,6 +566,8 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
             combo_set_data(self.pie_photon_mode_combo, self.project_settings.pie_photon_mode)
             self.kr_folder_edit.setText(self.project_settings.kr_calibration_folder)
             self.kr_peak_file_edit.setText(self.project_settings.kr_calibration_peak_file)
+            self.settings.expansion_factors = dict(self.project_settings.expansion_factors)
+            self.settings.selected_elements = list(self.project_settings.selected_elements)
             # 根据是否有卡峰文件来设置模式
             use_manual_peak = bool(self.project_settings.kr_calibration_peak_file.strip())
             self.kr_peak_mode_manual_radio.setChecked(use_manual_peak)
@@ -608,11 +589,16 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
         # 更新卡峰文件控件的启用状态
         self.on_kr_peak_mode_changed()
 
-        # 加载校准参数（全局配置）
-        calibration = load_calibration_config()
-        self.calibration_a_edit.setValue(calibration.a)
-        self.calibration_b_edit.setValue(calibration.b)
-        self.calibration_c_edit.setValue(calibration.c)
+        # 加载校准参数；项目模式优先使用 project.yaml 中的定标值
+        if self.project_settings:
+            self.calibration_a_edit.setValue(self.project_settings.cal_a)
+            self.calibration_b_edit.setValue(self.project_settings.cal_b)
+            self.calibration_c_edit.setValue(self.project_settings.cal_c)
+        else:
+            calibration = load_calibration_config()
+            self.calibration_a_edit.setValue(calibration.a)
+            self.calibration_b_edit.setValue(calibration.b)
+            self.calibration_c_edit.setValue(calibration.c)
 
         # 加载摩尔分数参数
         if self.project_settings:
@@ -622,7 +608,7 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
             self.mf_mass_disc_exponent_edit.setValue(self.project_settings.mf_mass_disc_exponent)
         self.refresh_factor_table()
         # 加载元素筛选
-        selected = self.settings.selected_elements
+        selected = self.project_settings.selected_elements if self.project_settings else self.settings.selected_elements
         for elem, chk in self.element_checks.items():
             chk.setChecked(not selected or elem in selected)
 
@@ -665,11 +651,16 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
                 self.project_settings.kr_calibration_peak_file = self.kr_peak_file_edit.text().strip()
             else:
                 self.project_settings.kr_calibration_peak_file = ""
+            self.project_settings.cal_a = self.calibration.a
+            self.project_settings.cal_b = self.calibration.b
+            self.project_settings.cal_c = self.calibration.c
             self.project_settings.mf_md_preset = self.mf_md_preset_combo.currentText()
             self.project_settings.mf_mass_disc_exponent = self.mf_mass_disc_exponent_edit.value()
         self.settings.selected_elements = [
             elem for elem, chk in self.element_checks.items() if chk.isChecked()
         ]
+        if self.project_settings:
+            self.project_settings.selected_elements = list(self.settings.selected_elements)
 
     def _set_all_elements(self, checked: bool):
         for chk in self.element_checks.values():
@@ -706,20 +697,14 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
         # 保存ProjectSettings
         project_path = None
         if self.project_settings:
-            from bl03u_masstool.core.project_settings import ProjectSettingsManager, save_project_settings
-            ps = ProjectSettingsManager().get()
-            # 同步所有项目参数到 ProjectSettings
-            ps.light_source = self.project_settings.light_source
-            ps.temperature_photon_normalize = self.project_settings.temperature_photon_normalize
-            ps.temperature_kr_correct = self.project_settings.temperature_kr_correct
-            ps.mass_discrimination = self.project_settings.mass_discrimination
-            ps.pie_photon_mode = self.project_settings.pie_photon_mode
-            ps.kr_calibration_folder = self.project_settings.kr_calibration_folder
-            ps.kr_calibration_peak_file = self.project_settings.kr_calibration_peak_file
-            ps.mf_md_preset = self.project_settings.mf_md_preset
-            ps.mf_mass_disc_exponent = self.project_settings.mf_mass_disc_exponent
-            project_path = save_project_settings(ps)
-        self.status_label.setText(f"已保存: {normalization_path}；{calibration_path}")
+            from bl03u_masstool.core.project_settings import ProjectSettingsManager
+            manager = ProjectSettingsManager()
+            manager.set(self.project_settings)
+            project_path = manager.save()
+        saved_parts = [str(normalization_path), str(calibration_path)]
+        if project_path:
+            saved_parts.append(str(project_path))
+        self.status_label.setText("已保存: " + "；".join(saved_parts))
         self.settings_saved.emit()
 
     def compute_kr_factors(self):
@@ -853,6 +838,12 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
 
         self.refresh_factor_table()
         save_normalization_settings(self.settings)
+        if self.project_settings:
+            self.project_settings.expansion_factors = dict(self.settings.expansion_factors)
+            from bl03u_masstool.core.project_settings import ProjectSettingsManager
+            manager = ProjectSettingsManager()
+            manager.set(self.project_settings)
+            manager.save()
         self.status_label.setText(msg)
 
     def on_energy_selected(self, index: int) -> None:
