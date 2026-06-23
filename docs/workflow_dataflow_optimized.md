@@ -58,23 +58,23 @@ flowchart LR
         CAL["TOF -> m/z 标定\ncalibration.py"]
         PEAK["寻峰 / 卡峰 / 高斯拟合\nprominence | legacy | cwt\nmanual peak ranges"]
         AREA["峰面积积分与归一化\nbaseline / gaussian area\nIO 光强归一化\n空白扣除 / 质量歧视"]
-        PEAKART["谱图分析产物\n峰列表、峰边界、拟合参数\nspectrum_analysis/"]
+        PEAKART["谱图分析产物\n峰列表、峰边界、拟合参数\nanalysis/spectrum/"]
     end
 
     subgraph L2["分支分析层"]
         PIE0["PIE 扫描分析\nanalyze_pie_folder\n按 photon energy 分组\n平均谱图 + blank 扣除"]
         PIE1["m/z 级 PIE 曲线\nbuild_pie_curves\nenergy -> intensity"]
         PIE2["PIE 物种拟合\nquery species by m/z\nPICS 插值 -> NNLS/手动系数\nR² / RMSE / 残差"]
-        PIE3["物种鉴别结果\n同一 m/z 候选物种贡献\ncomponent intensities\npie_analysis/"]
+        PIE3["物种鉴别结果\n同一 m/z 候选物种贡献\ncomponent intensities\nanalysis/pie/"]
 
         TEMP0["温度扫描分析\nanalyze_temperature_folder\n按 temperature 聚合\nsum/max/manual 参考谱"]
         TEMP1["m/z 温度曲线\nbuild_temperature_curves\ntemperature -> area"]
         TEMP2["温度响应分类\nformation / consumption\nintermediate / unclassified"]
-        TEMP3["温度扫描结果\ntemperature_scan/"]
+        TEMP3["温度扫描结果\nanalysis/temperature_scan/"]
 
         MF0["摩尔分数计算\ncompute_all_mole_fractions"]
         MF1["定量浓度曲线\nX_parent(T), X_product(T)\n质量歧视 + 膨胀系数 + PICS"]
-        MF2["机理讨论输入\n物种随温度定量变化\nmole_fraction/"]
+        MF2["机理讨论输入\n物种随温度定量变化\nanalysis/mole_fraction/"]
 
         PICS0["PICS 截面计算\npics_calculator.py\nNO 比值法 / 多能量平均"]
         PICS1["新/修订截面数据\ncross_section(E)\n可用于数据库维护"]
@@ -83,8 +83,8 @@ flowchart LR
     subgraph L3["输出与项目闭环"]
         ART["分析产物登记\nproject_artifacts.py\n写回 project.yaml"]
         OUT["输出文件\nExcel / CSV / 图像 / manifest / report\noutput/exports + output/images"]
-        REPORT["综合报告与项目备份\nfinal_report/ + versions/"]
-        STATUS["项目阶段状态刷新\n数据导入 -> 标定 -> 谱图分析\n-> 温度扫描 / PIE 拟合\n-> 摩尔分数 -> 综合报告"]
+        REPORT["项目备份与版本快照\nversions/"]
+        STATUS["项目阶段状态刷新\n数据导入 -> 标定 -> 谱图分析\n-> 温度扫描 / PIE 拟合\n-> 摩尔分数"]
     end
 
     PM --> RAW
@@ -150,4 +150,4 @@ flowchart TB
 - 明确 PIE 拟合不是单纯“物种鉴别”，而是 `m/z 曲线 -> PICS 数据库候选 -> 插值设计矩阵 -> NNLS/手动系数 -> 贡献与拟合质量`。
 - 明确温度扫描输出不仅是“m/z 随温度变化”，还包含 IO/Kr 校正、膨胀系数归一化和生成/消耗/中间体分类。
 - 将摩尔分数计算放在 PIE 鉴别结果、温度曲线、PICS 数据库和配置参数的交汇处，突出它是定量机理分析的下游模块。
-- 增加产物登记闭环：各分析模块导出后写回 `project.yaml`，项目页刷新阶段状态，并进入综合报告/项目备份。
+- 增加产物登记闭环：各分析模块导出后写回 `project.yaml`，项目页刷新阶段状态，并可创建项目备份。

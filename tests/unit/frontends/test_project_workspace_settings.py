@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import pytest
 
@@ -16,6 +17,7 @@ pytestmark = pytest.mark.gui
 
 from bl03u_masstool.core.project_settings import ProjectSettings
 from bl03u_masstool.core.project_settings import ProjectSettingsManager
+from bl03u_masstool.core.project_lifecycle import project_root
 from bl03u_masstool.frontends.pyqt_app.normalization.widget import FunctionDefaultsWidget
 from bl03u_masstool.frontends.pyqt_app.spectrum.workbench import MainWindow
 
@@ -77,6 +79,21 @@ def test_save_and_apply_uses_selected_parent_directory_for_new_project(qapp, tmp
         assert project_dir.exists()
         assert (project_dir / "config" / "project.yaml").exists()
         assert window.project_output_dir_edit.text() == str(project_dir)
+    finally:
+        window.project_settings_manager.clear_project_path()
+        window.deleteLater()
+
+
+def test_normalize_project_output_dir_resolves_relative_project_directory(qapp):
+    window = MainWindow()
+    try:
+        ps = ProjectSettings(project_name="test", system="test", output_dir="test")
+
+        normalized = window._normalize_project_output_dir(ps)
+
+        expected_dir = project_root(ProjectSettings(output_dir="test"))
+        assert Path(normalized.output_dir) == expected_dir
+        assert Path(window.project_output_dir_edit.text()) == expected_dir
     finally:
         window.project_settings_manager.clear_project_path()
         window.deleteLater()

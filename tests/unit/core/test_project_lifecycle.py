@@ -30,6 +30,8 @@ def test_project_lifecycle_creates_structure_and_imports_initial_data(tmp_path):
     directories = ensure_project_structure(settings)
     assert directories["raw_data"].exists()
     assert directories["pie_analysis"].exists()
+    assert directories["pie_analysis"] == tmp_path / "Project_C6F11O2H" / "analysis" / "pie"
+    assert not (tmp_path / "Project_C6F11O2H" / "final_report").exists()
 
     results = import_initial_project_data(
         settings,
@@ -52,7 +54,7 @@ def test_project_lifecycle_creates_structure_and_imports_initial_data(tmp_path):
 
 def test_project_lifecycle_collects_registered_outputs_and_exports_archive(tmp_path):
     project_root = tmp_path / "Project_C6F11O2H"
-    temp_result = project_root / "temperature_scan" / "temperature.xlsx"
+    temp_result = project_root / "analysis" / "temperature_scan" / "temperature.xlsx"
     temp_result.parent.mkdir(parents=True)
     temp_result.write_text("temperature result", encoding="utf-8")
     external_pie = tmp_path / "external" / "pie.xlsx"
@@ -78,7 +80,7 @@ def test_project_lifecycle_collects_registered_outputs_and_exports_archive(tmp_p
     with zipfile.ZipFile(archive_path) as archive:
         names = set(archive.namelist())
     assert f"{project_root.name}/project_state.yaml" in names
-    assert f"{project_root.name}/temperature_scan/temperature.xlsx" in names
+    assert f"{project_root.name}/analysis/temperature_scan/temperature.xlsx" in names
     assert f"{project_root.name}/_registered_external/pie_identification_result_file/pie.xlsx" in names
 
     snapshot_path = create_project_snapshot(settings, "after pie")

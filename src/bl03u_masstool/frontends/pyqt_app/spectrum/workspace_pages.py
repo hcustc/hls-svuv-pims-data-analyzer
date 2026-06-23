@@ -23,7 +23,6 @@ from bl03u_masstool.core.project_lifecycle import (
     export_project_archive,
     get_data_source_validation_status,
     get_project_ui_state,
-    import_initial_project_data,
     next_project_stage,
     project_root,
     sanitize_project_slug,
@@ -47,100 +46,6 @@ from bl03u_masstool.frontends.pyqt_app.pie.dialog import PIESpeciesFitDialog
 from bl03u_masstool.frontends.pyqt_app.temperature.dialog import TemperatureScanDialog
 
 
-class ProjectImportDialog(QtWidgets.QDialog):
-    """Small import wizard for copying initial project inputs into the project tree."""
-
-    _directory_sources = {"sum_spectrum", "temperature_scan", "pie_scan"}
-    _file_filters = {
-        "single_spectrum": "质谱数据 (*.txt *.asc *.888);;所有文件 (*)",
-        "sample_info": "样品信息 (*.xlsx *.xls *.csv *.tsv *.txt);;所有文件 (*)",
-        "manual_peak": "Peak Files (*.yaml *.yml *.csv *.xlsx *.xls);;所有文件 (*)",
-    }
-
-    def __init__(self, settings: ProjectSettings, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("原始数据导入向导")
-        self.setMinimumWidth(760)
-        self.path_edits: dict[str, QLineEdit] = {}
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(10)
-
-        root_label = QtWidgets.QLabel(f"导入目标：{project_root(settings)}", self)
-        root_label.setObjectName("ProjectHint")
-        root_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
-        layout.addWidget(root_label)
-
-        hint = QtWidgets.QLabel(
-            "选择需要纳入项目生命周期管理的初始输入。导入会复制文件/目录到项目目录，并自动回填项目数据源。",
-            self,
-        )
-        hint.setObjectName("ProjectHint")
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
-
-        form = QtWidgets.QGridLayout()
-        form.setHorizontalSpacing(8)
-        form.setVerticalSpacing(6)
-        form.setColumnStretch(1, 1)
-        for row, source_key in enumerate(
-            ("single_spectrum", "sum_spectrum", "temperature_scan", "pie_scan", "sample_info", "manual_peak")
-        ):
-            spec = PROJECT_SOURCE_SPECS[source_key]
-            label = QtWidgets.QLabel(spec.label, self)
-            edit = QLineEdit(self)
-            edit.setClearButtonEnabled(True)
-            edit.setPlaceholderText("可留空")
-            browse_btn = QPushButton("选择", self)
-            browse_btn.setObjectName("BrowseButton")
-            browse_btn.clicked.connect(lambda checked=False, key=source_key: self._browse_source(key))
-            self.path_edits[source_key] = edit
-            form.addWidget(label, row, 0)
-            form.addWidget(edit, row, 1)
-            form.addWidget(browse_btn, row, 2)
-        layout.addLayout(form)
-
-        buttons = QtWidgets.QDialogButtonBox(
-            QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel,
-            self,
-        )
-        buttons.button(QtWidgets.QDialogButtonBox.StandardButton.Ok).setText("导入到项目")
-        buttons.button(QtWidgets.QDialogButtonBox.StandardButton.Cancel).setText("取消")
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-
-    def _browse_source(self, source_key: str) -> None:
-        edit = self.path_edits[source_key]
-        start_dir = self._dialog_start_dir(edit.text())
-        if source_key in self._directory_sources:
-            path = QFileDialog.getExistingDirectory(self, f"选择{PROJECT_SOURCE_SPECS[source_key].label}", start_dir)
-        else:
-            path, _ = QFileDialog.getOpenFileName(
-                self,
-                f"选择{PROJECT_SOURCE_SPECS[source_key].label}",
-                start_dir,
-                self._file_filters.get(source_key, "所有文件 (*)"),
-            )
-        if path:
-            edit.setText(path)
-
-    def _dialog_start_dir(self, current: str) -> str:
-        if current:
-            path = Path(current).expanduser()
-            if path.is_dir():
-                return str(path)
-            if path.parent.exists():
-                return str(path.parent)
-        return str(Path.home())
-
-    def selected_sources(self) -> dict[str, str]:
-        return {
-            source_key: edit.text().strip()
-            for source_key, edit in self.path_edits.items()
-            if edit.text().strip()
-        }
 
 
 class WorkspacePagesMixin:
@@ -392,19 +297,14 @@ class WorkspacePagesMixin:
         action_layout.addWidget(self.project_open_button)
         action_layout.addSpacing(12)
 
-        self.project_read_paths_button = QPushButton("读取工具路径", action_bar)
         self.project_save_and_apply_button = QPushButton("保存并应用", action_bar)
 
-        self.project_read_paths_button.setToolTip(
-            "从质谱工作台读取已选择的单谱和累计谱路径，回填到项目设置页。"
-        )
         self.project_save_and_apply_button.setToolTip(
             "保存项目设置 → 创建项目文件夹 → 同步参数到各工具页面。完整初始化和配置。"
         )
 
-        for button in (self.project_read_paths_button, self.project_save_and_apply_button):
-            button.setFixedHeight(28)
-            action_layout.addWidget(button)
+        self.project_save_and_apply_button.setFixedHeight(28)
+        action_layout.addWidget(self.project_save_and_apply_button)
 
         self.project_save_and_apply_button.setObjectName("BrowseButton")
         hero_layout.addWidget(action_bar)
@@ -442,7 +342,6 @@ class WorkspacePagesMixin:
 
         self.project_new_button.clicked.connect(self.new_project)
         self.project_open_button.clicked.connect(self.open_project)
-        self.project_read_paths_button.clicked.connect(self.read_paths_from_tools)
         self.project_save_and_apply_button.clicked.connect(self.save_and_apply_project_settings)
         self.project_output_dir_button.clicked.connect(
             lambda: self.select_project_folder(self.project_output_dir_edit, "选择输出目录")
@@ -605,22 +504,15 @@ class WorkspacePagesMixin:
         card_layout.setContentsMargins(10, 8, 10, 10)
         card_layout.setSpacing(10)
 
-        # ── 顶部操作栏：主按钮 + 状态 ──
+        # ── 顶部操作栏：状态 ──
         top_bar = QHBoxLayout()
         top_bar.setContentsMargins(0, 0, 0, 0)
         top_bar.setSpacing(10)
-
-        self.datasource_import_button = QPushButton("启动导入向导", self.datasource_card)
-        self.datasource_import_button.setObjectName("BrowseButton")
-        self.datasource_import_button.setFixedHeight(32)
-        self.datasource_import_button.setMinimumWidth(140)
-        self.datasource_import_button.clicked.connect(self.open_project_import_wizard)
 
         self.datasource_status_label = QtWidgets.QLabel("", self.datasource_card)
         self.datasource_status_label.setObjectName("ProjectHint")
         self.datasource_status_label.setWordWrap(False)
 
-        top_bar.addWidget(self.datasource_import_button)
         top_bar.addWidget(self.datasource_status_label, stretch=1)
         card_layout.addLayout(top_bar)
 
@@ -1050,9 +942,6 @@ class WorkspacePagesMixin:
         # 项目未初始化
         root_exists = project_root(ps).exists()
         if not root_exists:
-            if hasattr(self, "datasource_import_button"):
-                self.datasource_import_button.setEnabled(False)
-                self.datasource_import_button.setText("初始化项目后可导入")
             if hasattr(self, "datasource_status_label"):
                 self.datasource_status_label.setText("请先在「项目设置」页初始化项目")
             self._clear_datasource_row_statuses()
@@ -1066,7 +955,7 @@ class WorkspacePagesMixin:
             total_files = sum(r.file_count for r in valid_records)
 
             if validation_status == DataSourceValidationStatus.UNCONFIGURED:
-                status_text = "尚未导入任何数据源，点击「启动导入向导」开始"
+                status_text = "尚未配置数据源，请在项目设置中填入数据路径"
             elif validation_status == DataSourceValidationStatus.INVALID:
                 status_text = f"[警告] {len(invalid_records)} 个路径失效，请重新导入"
             elif validation_status == DataSourceValidationStatus.PARTIAL:
@@ -1074,14 +963,6 @@ class WorkspacePagesMixin:
             else:
                 status_text = f"✓ 全部就绪 — {len(valid_records)} 个数据源，共 {total_files} 个文件"
             self.datasource_status_label.setText(status_text)
-
-        # 导入按钮文字
-        if hasattr(self, "datasource_import_button"):
-            self.datasource_import_button.setEnabled(True)
-            if validation_status == DataSourceValidationStatus.COMPLETE:
-                self.datasource_import_button.setText("更新导入数据")
-            else:
-                self.datasource_import_button.setText("启动导入向导")
 
         # 每行内联状态
         record_map = {r.source_key: r for r in validation_records}
@@ -1328,17 +1209,6 @@ class WorkspacePagesMixin:
         self.update_project_ui_state(ps)
         self.statusbar.showMessage(f"✓ 项目已初始化：{project_root(ps)}", 3000)
 
-    def read_paths_from_tools(self) -> None:
-        """Read file paths from spectrum workbench and fill into project settings.
-
-        This only reads and updates UI, does not save to disk.
-        User must click 'save_and_apply_project_settings' to persist changes.
-        """
-        self.project_single_file_edit.setText(self.lineEdit.text().strip())
-        self.project_sum_folder_edit.setText(self.folder_path.text().strip())
-        self.refresh_project_lifecycle()
-        self.statusbar.showMessage('✓ 已从工具页面读取路径。点击"保存并应用"写入配置。', 4000)
-
     def apply_project_settings_to_tools(self) -> None:
         """Sync project settings to tool pages (light version, no save/init)."""
         ps = self._collect_project_settings_from_ui()
@@ -1531,6 +1401,7 @@ class WorkspacePagesMixin:
             if output_path.exists() and output_path.is_dir() and not config_file.exists() and output_path.name not in matching_names:
                 ps.output_dir = str(output_path / project_slug)
 
+        ps.output_dir = str(project_root(ps))
         self.project_output_dir_edit.setText(ps.output_dir)
         return ps
 
@@ -1544,37 +1415,6 @@ class WorkspacePagesMixin:
         self.project_settings_manager.set(ps)
         self.project_settings_manager.save()
         return ps
-
-    def open_project_import_wizard(self) -> None:
-        ps = self._collect_project_settings_from_ui()
-        ps = self._normalize_project_output_dir(ps)
-        self._collect_function_params_from_ui(ps)
-        ensure_project_structure(ps)
-        # Set project config path early (before dialog)
-        from pathlib import Path
-        self.project_settings_manager.set_project_path(Path(ps.output_dir))
-        dialog = ProjectImportDialog(ps, self)
-        if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
-            return
-        sources = dialog.selected_sources()
-        if not sources:
-            QtWidgets.QMessageBox.information(self, "导入向导", "未选择需要导入的文件或目录。")
-            return
-        try:
-            results = import_initial_project_data(ps, sources)
-        except Exception as exc:
-            QtWidgets.QMessageBox.critical(self, "导入失败", str(exc))
-            return
-        self.project_settings_manager.set(ps)
-        self.project_settings_manager.save()
-        self._read_project_settings_to_ui(ps)
-        self._sync_project_settings_to_tool_pages(ps)
-        self.refresh_project_lifecycle(ps)
-        self.refresh_project_parameter_summary()
-        self.refresh_project_datasource_page(ps)
-        self.update_project_ui_state(ps)
-        imported = "、".join(result.label for result in results)
-        self.statusbar.showMessage(f"已导入：{imported}", 5000)
 
     def start_new_project_analysis(self) -> None:
         self.apply_project_settings_to_tools()
@@ -1593,9 +1433,8 @@ class WorkspacePagesMixin:
         self.switch_workspace_page(status.nav_page)
         if status.key == "raw_data" and hasattr(self, "project_tabs"):
             self.project_tabs.setCurrentWidget(self.project_datasource_page)
-        elif status.key in {"project_setup", "final_report"} and hasattr(self, "project_tabs"):
-            target = self.project_identity_page if status.key == "project_setup" else self.project_artifacts_page
-            self.project_tabs.setCurrentWidget(target)
+        elif status.key == "project_setup" and hasattr(self, "project_tabs"):
+            self.project_tabs.setCurrentWidget(self.project_identity_page)
         self.statusbar.showMessage(status.next_action, 5000)
 
     def create_project_version_snapshot(self) -> None:
