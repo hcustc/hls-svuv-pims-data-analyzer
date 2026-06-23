@@ -613,11 +613,11 @@ class Ui_MainWindow(object):
         _translate = QtCore.QCoreApplication.translate
         MainWindow.setWindowTitle(_translate("MainWindow", "MainWindow"))
         self.label.setText(_translate("MainWindow", "文件地址："))
-        self.lineEdit.setText(_translate("MainWindow", "tests/fixtures/bl03u_sample/C6F11O2H/Temp_Scan/12.5eV/C23072508-0000.txt"))
+        self.lineEdit.setPlaceholderText(_translate("MainWindow", "选择或输入单谱文件路径"))
         self.pushButton.setText(_translate("MainWindow", "查看单谱"))
         self.tabWidget.setTabText(self.tabWidget.indexOf(self.tab_3), _translate("MainWindow", "单谱"))
         self.label_18.setText(_translate("MainWindow", "文件夹地址："))
-        self.folder_path.setText(_translate("MainWindow", "tests/fixtures/bl03u_sample/C6F11O2H/Temp_Scan/12.5eV"))
+        self.folder_path.setPlaceholderText(_translate("MainWindow", "选择或输入累计谱文件夹路径"))
         self.pushButton_plot_graph_sum.setText(_translate("MainWindow", "查看累加谱"))
         self.tabWidget.setTabText(self.tabWidget.indexOf(self.tab_4), _translate("MainWindow", "累加谱"))
         self.label_17.setText(_translate("MainWindow", "质量定标参数："))
