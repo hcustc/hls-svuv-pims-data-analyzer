@@ -162,6 +162,24 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         sep.setObjectName("NavSeparator")
         root.addWidget(sep)
 
+        # ── Temperature Scan Parameters ────────────────────────────────────
+        params_bar = QtWidgets.QWidget()
+        params_layout = QtWidgets.QHBoxLayout(params_bar)
+        params_layout.setContentsMargins(8, 4, 8, 4)
+        params_layout.setSpacing(12)
+
+        params_label = QtWidgets.QLabel("温度扫描参数：")
+        params_label.setObjectName("ReadoutLabel")
+        params_layout.addWidget(params_label)
+
+        self.temperature_photon_check = QtWidgets.QCheckBox("光强归一化")
+        self.temperature_kr_check = QtWidgets.QCheckBox("Kr膨胀校正")
+        params_layout.addWidget(self.temperature_photon_check)
+        params_layout.addWidget(self.temperature_kr_check)
+        params_layout.addStretch(1)
+
+        root.addWidget(params_bar)
+
         # ── Body: sidebar + main area ────────────────────────────────────────
         body_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
         body_splitter.setObjectName("MainSplitter")
@@ -340,6 +358,11 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.summary_project_label.setText(f"项目: {project_name}")
             self.summary_system_label.setText(f"体系: {system}")
             data_path = ps.temperature_scan_folder or "---"
+
+        # 加载温度扫描参数
+        if hasattr(self, "temperature_photon_check"):
+            self.temperature_photon_check.setChecked(ps.temperature_photon_normalize)
+            self.temperature_kr_check.setChecked(ps.temperature_kr_correct)
             self.summary_data_label.setText(f"数据源: {data_path}")
 
         if ps.temperature_scan_folder:
@@ -399,6 +422,12 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
     def run_analysis(self):
         # Get parameters from project settings (single source of truth)
         ps = self.project_settings or ProjectSettings()
+
+        # 从UI保存温度扫描参数到ProjectSettings
+        if hasattr(self, "temperature_photon_check") and ps:
+            ps.temperature_photon_normalize = self.temperature_photon_check.isChecked()
+            ps.temperature_kr_correct = self.temperature_kr_check.isChecked()
+
         folder = ps.temperature_scan_folder
         if not folder:
             self._show_inline_error("请在项目管理中配置温度扫描文件夹")
@@ -435,8 +464,8 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 return
 
         settings = self.normalization_settings
-        photon_normalize = settings.temperature_photon_normalize
-        kr_correct = settings.temperature_kr_correct
+        photon_normalize = ps.temperature_photon_normalize
+        kr_correct = ps.temperature_kr_correct
         kr_mz = ps.temp_kr_mz
         mass_discrimination = settings.mass_discrimination
         light_source = settings.light_source
