@@ -30,7 +30,6 @@ class ProjectSettings:
     sum_spectrum_folder: str = ""
     temperature_scan_folder: str = ""
     pie_scan_folder: str = ""
-    sample_info_file: str = ""
     pics_database_path: str = ""
     manual_peak_file: str = ""
 
@@ -209,7 +208,6 @@ def _nested_to_flat(data: dict) -> dict:
             "sum_spectrum_folder": "sum_spectrum_folder",
             "temperature_scan_folder": "temperature_scan_folder",
             "pie_scan_folder": "pie_scan_folder",
-            "sample_info_file": "sample_info_file",
             "pics_database_path": "pics_database_path",
             "manual_peak_file": "manual_peak_file",
         },
@@ -443,7 +441,6 @@ def _flat_to_nested(settings: ProjectSettings) -> dict:
             "sum_spectrum_folder": d["sum_spectrum_folder"],
             "temperature_scan_folder": d["temperature_scan_folder"],
             "pie_scan_folder": d["pie_scan_folder"],
-            "sample_info_file": d["sample_info_file"],
             "pics_database_path": d["pics_database_path"],
             "manual_peak_file": d["manual_peak_file"],
         },

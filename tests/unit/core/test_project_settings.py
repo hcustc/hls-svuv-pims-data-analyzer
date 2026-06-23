@@ -16,7 +16,6 @@ def test_project_settings_round_trip_preserves_nested_yaml_fields(tmp_path):
         sum_spectrum_folder="data/sum",
         temperature_scan_folder="data/temp",
         pie_scan_folder="data/pie",
-        sample_info_file="data/sample.xlsx",
         pics_database_path="database/species_database.sqlite",
         manual_peak_file="config/manual.yaml",
         temperature_scan_result_file="output/temperature.xlsx",
@@ -69,7 +68,6 @@ def test_project_settings_round_trip_preserves_nested_yaml_fields(tmp_path):
     assert loaded.sum_spectrum_folder == settings.sum_spectrum_folder
     assert loaded.temperature_scan_folder == settings.temperature_scan_folder
     assert loaded.pie_scan_folder == settings.pie_scan_folder
-    assert loaded.sample_info_file == settings.sample_info_file
     assert loaded.pics_database_path == settings.pics_database_path
     assert loaded.manual_peak_file == settings.manual_peak_file
     assert loaded.temperature_scan_result_file == settings.temperature_scan_result_file

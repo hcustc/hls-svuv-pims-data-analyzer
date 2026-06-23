@@ -253,7 +253,6 @@ PROJECT_SOURCE_SPECS: dict[str, ProjectSourceSpec] = {
         "temperature_scan", "温度扫描目录", "temperature_scan_folder", "raw_data", "temperature_scan"
     ),
     "pie_scan": ProjectSourceSpec("pie_scan", "PIE扫描目录", "pie_scan_folder", "raw_data", "pie_scan"),
-    "sample_info": ProjectSourceSpec("sample_info", "样品信息", "sample_info_file", "raw_data", "sample_info"),
     "manual_peak": ProjectSourceSpec(
         "manual_peak", "手动卡峰文件", "manual_peak_file", "spectrum_analysis", "manual_peaks"
     ),
@@ -272,9 +271,9 @@ PROJECT_STAGES: tuple[ProjectStageSpec, ...] = (
         "raw_data",
         "数据导入",
         "raw_data",
-        ("single_spectrum_file", "sum_spectrum_folder", "temperature_scan_folder", "pie_scan_folder", "sample_info_file"),
+        ("single_spectrum_file", "sum_spectrum_folder", "temperature_scan_folder", "pie_scan_folder"),
         "project",
-        "导入原始谱图与样品信息",
+        "导入原始谱图数据",
     ),
     ProjectStageSpec(
         "calibration",
@@ -557,7 +556,6 @@ def _field_label(field_name: str) -> str:
         "sum_spectrum_folder": "累计谱目录",
         "temperature_scan_folder": "温度扫描目录",
         "pie_scan_folder": "PIE扫描目录",
-        "sample_info_file": "样品信息",
         "manual_peak_file": "手动卡峰文件",
         "temperature_scan_result_file": "温度扫描结果",
         "pie_identification_result_file": "PIE鉴定结果",
@@ -629,7 +627,6 @@ def _registered_artifact_fields(settings: ProjectSettings) -> dict[str, str]:
         "sum_spectrum_folder": settings.sum_spectrum_folder,
         "temperature_scan_folder": settings.temperature_scan_folder,
         "pie_scan_folder": settings.pie_scan_folder,
-        "sample_info_file": getattr(settings, "sample_info_file", ""),
         "manual_peak_file": settings.manual_peak_file,
         "temperature_scan_result_file": settings.temperature_scan_result_file,
         "pie_identification_result_file": settings.pie_identification_result_file,
@@ -653,7 +650,6 @@ def _section_for_registered_field(field_name: str) -> ProjectDirectorySpec:
         "sum_spectrum_folder": "raw_data",
         "temperature_scan_folder": "raw_data",
         "pie_scan_folder": "raw_data",
-        "sample_info_file": "raw_data",
         "manual_peak_file": "spectrum_analysis",
         "temperature_scan_result_file": "temperature_scan",
         "pie_identification_result_file": "pie_analysis",

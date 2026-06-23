@@ -18,8 +18,6 @@ def test_project_lifecycle_creates_structure_and_imports_initial_data(tmp_path):
     single_file = tmp_path / "source" / "single.txt"
     single_file.parent.mkdir()
     single_file.write_text("tof intensity\n1 2\n", encoding="utf-8")
-    sample_file = tmp_path / "source" / "sample.csv"
-    sample_file.write_text("sample,pressure\nC6F11O2H,30 torr\n", encoding="utf-8")
 
     settings = ProjectSettings(
         project_name="C6F11O2H",
@@ -37,13 +35,11 @@ def test_project_lifecycle_creates_structure_and_imports_initial_data(tmp_path):
         settings,
         {
             "single_spectrum": single_file,
-            "sample_info": sample_file,
         },
     )
 
-    assert len(results) == 2
+    assert len(results) == 1
     assert settings.single_spectrum_file.endswith("raw_data/single_spectrum/single.txt")
-    assert settings.sample_info_file.endswith("raw_data/sample_info/sample.csv")
     assert (tmp_path / "Project_C6F11O2H" / "raw_data" / "single_spectrum" / "single.txt").exists()
 
     statuses = {status.key: status for status in build_project_stage_statuses(settings)}

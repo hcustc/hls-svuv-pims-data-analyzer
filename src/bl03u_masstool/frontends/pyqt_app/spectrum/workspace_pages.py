@@ -13,16 +13,13 @@ from bl03u_masstool.core.project_lifecycle import (
     PROJECT_SOURCE_SPECS,
     ArtifactCategory,
     DataSourceValidationStatus,
-    ProjectUIState,
     WorkflowProfile,
     analyze_workflow_capabilities,
-    build_project_stage_statuses,
     collect_project_files,
     create_project_snapshot,
     ensure_project_structure,
     export_project_archive,
     get_data_source_validation_status,
-    get_project_ui_state,
     next_project_stage,
     project_root,
     sanitize_project_slug,
@@ -154,11 +151,8 @@ class WorkspacePagesMixin:
         self.workspace_stack.setCurrentWidget(self.spectrum_page)
         self._route_common_parameter_buttons()
 
-        # Auto-pull tool page paths back to project management when edited
-        self.lineEdit.editingFinished.connect(lambda: self._pull_path_from_tool("single"))
-        self.folder_path.editingFinished.connect(lambda: self._pull_path_from_tool("sum"))
-        # Note: temperature_page and pie_page are now read-only parameter display,
-        # so no signal connections needed - parameters come from ProjectSettings
+        # ProjectSettings remains the source of truth for managed data paths.
+        # Tool-page paths are updated from project settings/imports, not pulled back implicitly.
 
     def _build_project_page(self):
         page_layout = QVBoxLayout(self.project_page)
@@ -168,27 +162,30 @@ class WorkspacePagesMixin:
         self.project_tabs = QtWidgets.QTabWidget(self.project_page)
         self.project_tabs.setObjectName("ProjectTabs")
 
-        # --- Tab 1: 项目设置 (project identity only) ---
+        # --- Tab 1: 项目设置 + 数据源 ---
         self.project_identity_page = QtWidgets.QWidget(self.project_tabs)
-        identity_layout = QVBoxLayout(self.project_identity_page)
+
+        settings_scroll = QtWidgets.QScrollArea(self.project_identity_page)
+        settings_scroll.setWidgetResizable(True)
+        settings_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        settings_scroll.setObjectName("ProjectSettingsScroll")
+
+        settings_content = QtWidgets.QWidget(settings_scroll)
+        identity_layout = QVBoxLayout(settings_content)
         identity_layout.setContentsMargins(8, 8, 8, 8)
         identity_layout.setSpacing(10)
+
         self._build_project_identity_card(self.project_identity_page)
-        self._build_lifecycle_card(self.project_identity_page)
+        self._build_datasource_card(self.project_identity_page)
         identity_layout.addWidget(self.project_identity_card)
-        identity_layout.addWidget(self.project_lifecycle_card)
-        identity_layout.addStretch(1)
+        identity_layout.addWidget(self.datasource_card)
 
-        # --- Tab 2: 数据源 ---
-        self.project_datasource_page = QtWidgets.QWidget(self.project_tabs)
-        datasource_layout = QVBoxLayout(self.project_datasource_page)
-        datasource_layout.setContentsMargins(8, 8, 8, 8)
-        datasource_layout.setSpacing(10)
-        self._build_datasource_card(self.project_datasource_page)
-        datasource_layout.addWidget(self.datasource_card)
-        datasource_layout.addStretch(1)
+        settings_scroll.setWidget(settings_content)
+        settings_page_layout = QVBoxLayout(self.project_identity_page)
+        settings_page_layout.setContentsMargins(0, 0, 0, 0)
+        settings_page_layout.addWidget(settings_scroll)
 
-        # --- Tab 3: 通用参数 ---
+        # --- Tab 2: 通用参数 ---
         self.project_common_parameters_widget = CommonParametersWidget(
             self.normalization_settings,
             self.current_calibration(),
@@ -199,14 +196,14 @@ class WorkspacePagesMixin:
         # 立即设置ProjectSettings
         self.project_common_parameters_widget.set_project_settings(ProjectSettingsManager().get())
 
-        # --- Tab 4: 功能默认参数 ---
+        # --- Tab 3: 功能默认参数 ---
         # 集成原有的 PeakDetectionWidget 和功能参数页面
         from bl03u_masstool.frontends.pyqt_app.normalization.widget import FunctionDefaultsWidget
         self.project_function_defaults_widget = FunctionDefaultsWidget(self.project_tabs)
         self.project_function_defaults_widget.settings_saved.connect(self.on_project_common_parameters_saved)
         self.project_function_defaults_widget.set_project_settings(ProjectSettingsManager().get())
 
-        # --- Tab 5: 产物管理 ---
+        # --- Tab 4: 产物管理 ---
         self.project_artifacts_page = QtWidgets.QWidget(self.project_tabs)
         artifacts_layout = QVBoxLayout(self.project_artifacts_page)
         artifacts_layout.setContentsMargins(8, 8, 8, 8)
@@ -215,7 +212,6 @@ class WorkspacePagesMixin:
         artifacts_layout.addWidget(self.artifact_manager_card, stretch=1)
 
         self.project_tabs.addTab(self.project_identity_page, "项目设置")
-        self.project_tabs.addTab(self.project_datasource_page, "数据导入")
         self.project_tabs.addTab(self.project_common_parameters_widget, "通用参数")
         self.project_tabs.addTab(self.project_function_defaults_widget, "功能默认参数")
         self.project_tabs.addTab(self.project_artifacts_page, "产物管理")
@@ -347,62 +343,6 @@ class WorkspacePagesMixin:
             lambda: self.select_project_folder(self.project_output_dir_edit, "选择输出目录")
         )
 
-    def _build_lifecycle_card(self, parent):
-        self.project_lifecycle_card = QtWidgets.QFrame(parent)
-        self.project_lifecycle_card.setObjectName("ProjectCard")
-
-        card_layout = QVBoxLayout(self.project_lifecycle_card)
-        card_layout.setContentsMargins(10, 8, 10, 10)
-        card_layout.setSpacing(8)
-
-        # Header: progress + recommended step
-        header_row = QHBoxLayout()
-        header_row.setContentsMargins(0, 0, 0, 0)
-        header = QtWidgets.QLabel("生命周期进度", self.project_lifecycle_card)
-        header.setObjectName("ProjectTitle")
-        self.project_progress_label = QtWidgets.QLabel("", self.project_lifecycle_card)
-        self.project_progress_label.setObjectName("ProjectStatus")
-        header_row.addWidget(header)
-        header_row.addWidget(self.project_progress_label, stretch=1)
-        card_layout.addLayout(header_row)
-
-        # Progress bar
-        self.project_progress_bar = QtWidgets.QProgressBar(self.project_lifecycle_card)
-        self.project_progress_bar.setMaximum(8)
-        self.project_progress_bar.setMinimumHeight(24)
-        self.project_progress_bar.setTextVisible(True)
-        card_layout.addWidget(self.project_progress_bar)
-
-        # Stage table
-        self.project_stage_table = QtWidgets.QTableWidget(0, 3, self.project_lifecycle_card)
-        self.project_stage_table.setHorizontalHeaderLabels(["阶段", "状态", "依据/操作"])
-        self.project_stage_table.verticalHeader().setVisible(False)
-        self.project_stage_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.project_stage_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
-        self.project_stage_table.setAlternatingRowColors(True)
-        self.project_stage_table.setMinimumHeight(210)
-        self.project_stage_table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
-        self.project_stage_table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
-        self.project_stage_table.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.Stretch)
-        card_layout.addWidget(self.project_stage_table)
-
-        # Action bar: only main button (dynamic)
-        action_bar = QtWidgets.QWidget(self.project_lifecycle_card)
-        action_bar.setObjectName("ProjectActionBar")
-        action_layout = QHBoxLayout(action_bar)
-        action_layout.setContentsMargins(8, 6, 8, 6)
-        action_layout.setSpacing(6)
-
-        self.project_main_action_button = QPushButton("", action_bar)
-        self.project_main_action_button.setFixedHeight(28)
-        self.project_main_action_button.setMinimumWidth(120)
-        action_layout.addWidget(self.project_main_action_button)
-        action_layout.addStretch(1)
-        card_layout.addWidget(action_bar)
-
-        # Connect main button to dynamic handler
-        self.project_main_action_button.clicked.connect(self._on_project_main_action_clicked)
-
     def _build_artifact_manager_card(self, parent):
         self.artifact_manager_card = QtWidgets.QFrame(parent)
         self.artifact_manager_card.setObjectName("ProjectCard")
@@ -494,7 +434,7 @@ class WorkspacePagesMixin:
         self.artifact_export_button.clicked.connect(self.export_project_artifacts)
         self.artifact_refresh_button.clicked.connect(self.refresh_project_artifacts_page)
 
-    # ── Tab 2: Data Sources ──────────────────────────────────────────────
+    # ── Project data sources ─────────────────────────────────────────────
 
     def _build_datasource_card(self, parent):
         self.datasource_card = QtWidgets.QFrame(parent)
@@ -504,16 +444,31 @@ class WorkspacePagesMixin:
         card_layout.setContentsMargins(10, 8, 10, 10)
         card_layout.setSpacing(10)
 
-        # ── 顶部操作栏：状态 ──
+        # ── 顶部操作栏：标题、状态与导入入口 ──
         top_bar = QHBoxLayout()
         top_bar.setContentsMargins(0, 0, 0, 0)
         top_bar.setSpacing(10)
 
+        title_column = QVBoxLayout()
+        title_column.setContentsMargins(0, 0, 0, 0)
+        title_column.setSpacing(3)
+
+        datasource_title = QtWidgets.QLabel("项目数据源", self.datasource_card)
+        datasource_title.setObjectName("ProjectTitle")
+        datasource_hint = QtWidgets.QLabel(
+            "通过导入向导把外部数据复制并登记到项目；下方路径可用于检查或微调已登记的数据源。",
+            self.datasource_card,
+        )
+        datasource_hint.setObjectName("ProjectHint")
+        datasource_hint.setWordWrap(True)
         self.datasource_status_label = QtWidgets.QLabel("", self.datasource_card)
         self.datasource_status_label.setObjectName("ProjectHint")
         self.datasource_status_label.setWordWrap(False)
 
-        top_bar.addWidget(self.datasource_status_label, stretch=1)
+        title_column.addWidget(datasource_title)
+        title_column.addWidget(datasource_hint)
+        title_column.addWidget(self.datasource_status_label)
+        top_bar.addLayout(title_column, stretch=1)
         card_layout.addLayout(top_bar)
 
         # ── 工作流能力标签行 ──
@@ -540,8 +495,6 @@ class WorkspacePagesMixin:
         self.project_temperature_folder_edit.setPlaceholderText("选择温度扫描 txt 文件目录")
         self.project_pie_folder_edit = QLineEdit(self.datasource_card)
         self.project_pie_folder_edit.setPlaceholderText("选择 PIE 扫描目录")
-        self.project_sample_info_edit = QLineEdit(self.datasource_card)
-        self.project_sample_info_edit.setPlaceholderText("选择样品信息 xlsx/csv/txt 文件")
         self.project_manual_peak_edit = QLineEdit(self.datasource_card)
         self.project_manual_peak_edit.setPlaceholderText("选择 yaml/csv/xlsx 卡峰文件")
 
@@ -582,7 +535,6 @@ class WorkspacePagesMixin:
         self.project_sum_folder_button = _browse_btn()
         self.project_temperature_folder_button = _browse_btn()
         self.project_pie_folder_button = _browse_btn()
-        self.project_sample_info_button = _browse_btn()
         self.project_manual_peak_button = _browse_btn()
 
         workbench_group, workbench_layout = _path_group("质谱工作台")
@@ -593,8 +545,7 @@ class WorkspacePagesMixin:
         analysis_group, analysis_layout = _path_group("分析模块")
         _add_path_row(analysis_layout, 0, "temperature_scan", "温度扫描目录", self.project_temperature_folder_edit, self.project_temperature_folder_button)
         _add_path_row(analysis_layout, 1, "pie_scan", "PIE扫描目录", self.project_pie_folder_edit, self.project_pie_folder_button)
-        _add_path_row(analysis_layout, 2, "sample_info", "样品信息", self.project_sample_info_edit, self.project_sample_info_button)
-        _add_path_row(analysis_layout, 3, "manual_peak", "手动卡峰文件", self.project_manual_peak_edit, self.project_manual_peak_button)
+        _add_path_row(analysis_layout, 2, "manual_peak", "手动卡峰文件", self.project_manual_peak_edit, self.project_manual_peak_button)
         card_layout.addWidget(analysis_group)
 
         # ── 参考数据库（只读）──
@@ -624,14 +575,12 @@ class WorkspacePagesMixin:
         self.project_pie_folder_button.clicked.connect(
             lambda: self.select_project_folder(self.project_pie_folder_edit, "选择PIE扫描目录")
         )
-        self.project_sample_info_button.clicked.connect(self.select_project_sample_info)
         self.project_manual_peak_button.clicked.connect(self.select_project_manual_peak)
         # Auto-save and push project paths when edited
         self.project_single_file_edit.editingFinished.connect(self._auto_save_datasource)
         self.project_sum_folder_edit.editingFinished.connect(self._auto_save_datasource)
         self.project_temperature_folder_edit.editingFinished.connect(self._auto_save_datasource)
         self.project_pie_folder_edit.editingFinished.connect(self._auto_save_datasource)
-        self.project_sample_info_edit.editingFinished.connect(self._auto_save_datasource)
         self.project_manual_peak_edit.editingFinished.connect(self._auto_save_datasource)
 
     # ── Tab 4: Function Params ───────────────────────────────────────────
@@ -827,7 +776,6 @@ class WorkspacePagesMixin:
         self.project_sum_folder_edit.setText(ps.sum_spectrum_folder)
         self.project_temperature_folder_edit.setText(ps.temperature_scan_folder)
         self.project_pie_folder_edit.setText(ps.pie_scan_folder)
-        self.project_sample_info_edit.setText(ps.sample_info_file)
         self.project_manual_peak_edit.setText(ps.manual_peak_file)
         # PICS database is read-only reference database
         if hasattr(self, "project_pics_database_display"):
@@ -844,7 +792,6 @@ class WorkspacePagesMixin:
         ps.sum_spectrum_folder = self.project_sum_folder_edit.text().strip()
         ps.temperature_scan_folder = self.project_temperature_folder_edit.text().strip()
         ps.pie_scan_folder = self.project_pie_folder_edit.text().strip()
-        ps.sample_info_file = self.project_sample_info_edit.text().strip()
         ps.manual_peak_file = self.project_manual_peak_edit.text().strip()
         # PICS database path is never modified from UI (read-only)
         return ps
@@ -896,35 +843,11 @@ class WorkspacePagesMixin:
         self.update_project_title()
         self.refresh_project_lifecycle()
         self.refresh_project_datasource_page()
-        self.update_project_ui_state(ps)
 
     def _load_function_params_to_ui(self, ps: ProjectSettings) -> None:
         """DEPRECATED: 功能参数现在在 FunctionDefaultsWidget 中管理"""
         # 保留此方法以维持向后兼容性，但内容已移到 FunctionDefaultsWidget
         pass
-
-    def update_project_ui_state(self, ps: ProjectSettings | None = None) -> None:
-        """Update main action button and progress bar based on project state"""
-        if ps is None:
-            ps = self.project_settings_manager.get()
-
-        state = get_project_ui_state(ps)
-
-        # Update main action button
-        if hasattr(self, "project_main_action_button"):
-            self.project_main_action_button.setText(state.button_text)
-            self.project_main_action_button.setToolTip(state.description)
-
-        # Update progress label and bar
-        statuses = build_project_stage_statuses(ps)
-        completed_count = sum(1 for s in statuses if s.completed)
-        total_count = len(statuses)
-
-        if hasattr(self, "project_progress_label"):
-            self.project_progress_label.setText(f"已完成 {completed_count}/{total_count} 阶段")
-
-        if hasattr(self, "project_progress_bar"):
-            self.project_progress_bar.setValue(completed_count)
 
     def refresh_project_datasource_page(self, ps: ProjectSettings | None = None) -> None:
         """Refresh data source validation status on the data import page"""
@@ -955,7 +878,7 @@ class WorkspacePagesMixin:
             total_files = sum(r.file_count for r in valid_records)
 
             if validation_status == DataSourceValidationStatus.UNCONFIGURED:
-                status_text = "尚未配置数据源，请在项目设置中填入数据路径"
+                status_text = "尚未配置数据源，请使用导入向导或在下方填入数据路径"
             elif validation_status == DataSourceValidationStatus.INVALID:
                 status_text = f"[警告] {len(invalid_records)} 个路径失效，请重新导入"
             elif validation_status == DataSourceValidationStatus.PARTIAL:
@@ -971,7 +894,6 @@ class WorkspacePagesMixin:
             "sum_spectrum": "sum_spectrum",
             "temperature_scan": "temperature_scan",
             "pie_scan": "pie_scan",
-            "sample_info": "sample_info",
             "manual_peak": "manual_peak",
         }
         if hasattr(self, "datasource_row_status_labels"):
@@ -1031,25 +953,6 @@ class WorkspacePagesMixin:
                 " padding: 1px 8px; font-size: 11px; }"
             )
             self.datasource_workflow_bar.insertWidget(i + 1, chip)
-
-    def _on_project_main_action_clicked(self) -> None:
-        """Handle main action button click based on current project state"""
-        ps = self.project_settings_manager.get()
-        state = get_project_ui_state(ps)
-
-        if state == ProjectUIState.UNINITIALIZED:
-            self.save_and_apply_project_settings()
-        elif state == ProjectUIState.AWAITING_DATA_IMPORT:
-            self.project_tabs.setCurrentWidget(self.project_datasource_page)
-        elif state == ProjectUIState.READY_TO_ANALYZE:
-            self.switch_workspace_page("spectrum")
-        elif state == ProjectUIState.ANALYSIS_IN_PROGRESS:
-            # Show next recommended step
-            next_status = next_project_stage(ps)
-            if next_status:
-                self.switch_workspace_page(next_status.nav_page)
-        elif state == ProjectUIState.ANALYSIS_COMPLETE:
-            self.project_tabs.setCurrentWidget(self.project_artifacts_page)
 
     def _collect_function_params_from_ui(self, ps: ProjectSettings) -> None:
         """Deprecated: Use FunctionDefaultsWidget.apply_to_settings() instead.
@@ -1168,7 +1071,6 @@ class WorkspacePagesMixin:
         self.update_project_title()
         self.refresh_project_lifecycle(ps)
         self.refresh_project_parameter_summary()
-        self.update_project_ui_state(ps)
         self.statusbar.showMessage("[成功] 项目已保存、初始化并应用到工具", 3000)
 
     def initialize_project_structure(self) -> None:
@@ -1206,7 +1108,6 @@ class WorkspacePagesMixin:
         self.update_project_title()
         self.refresh_project_lifecycle(ps)
         self.refresh_project_parameter_summary()
-        self.update_project_ui_state(ps)
         self.statusbar.showMessage(f"✓ 项目已初始化：{project_root(ps)}", 3000)
 
     def apply_project_settings_to_tools(self) -> None:
@@ -1308,14 +1209,6 @@ class WorkspacePagesMixin:
             if val:
                 self.folder_path.setText(val)
 
-    def _pull_path_from_tool(self, kind: str) -> None:
-        """Pull a single path from an editable tool page back to project management.
-        Note: Temperature and PIE pages are read-only, so only Spectrum tool is pulled."""
-        if kind == "single":
-            self.project_single_file_edit.setText(self.lineEdit.text().strip())
-        elif kind == "sum":
-            self.project_sum_folder_edit.setText(self.folder_path.text().strip())
-
     def select_project_single_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self,
@@ -1346,17 +1239,6 @@ class WorkspacePagesMixin:
         )
         if path:
             self.project_manual_peak_edit.setText(path)
-            self._auto_save_datasource()
-
-    def select_project_sample_info(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "选择样品信息文件",
-            self._dialog_start_dir(self.project_sample_info_edit.text()),
-            "样品信息 (*.xlsx *.xls *.csv *.tsv *.txt);;所有文件 (*)",
-        )
-        if path:
-            self.project_sample_info_edit.setText(path)
             self._auto_save_datasource()
 
     def select_project_result_file(self, target: QLineEdit, title: str, file_filter: str) -> None:
@@ -1432,7 +1314,7 @@ class WorkspacePagesMixin:
             return
         self.switch_workspace_page(status.nav_page)
         if status.key == "raw_data" and hasattr(self, "project_tabs"):
-            self.project_tabs.setCurrentWidget(self.project_datasource_page)
+            self.project_tabs.setCurrentWidget(self.project_identity_page)
         elif status.key == "project_setup" and hasattr(self, "project_tabs"):
             self.project_tabs.setCurrentWidget(self.project_identity_page)
         self.statusbar.showMessage(status.next_action, 5000)
@@ -1584,17 +1466,6 @@ class WorkspacePagesMixin:
     def refresh_project_lifecycle(self, ps: ProjectSettings | None = None) -> None:
         if ps is None:
             ps = self.project_settings_manager.get()
-        if hasattr(self, "project_stage_table"):
-            statuses = build_project_stage_statuses(ps)
-            self.project_stage_table.setRowCount(len(statuses))
-            for row, status in enumerate(statuses):
-                state_text = "需检查" if status.warning else ("完成" if status.completed else "待处理")
-                detail = status.detail
-                for col, text in enumerate((status.label, state_text, detail)):
-                    item = QtWidgets.QTableWidgetItem(text)
-                    if col == 1:
-                        item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-                    self.project_stage_table.setItem(row, col, item)
         if hasattr(self, "artifact_category_tree"):
             self.refresh_project_artifacts_page(ps)
 
@@ -1940,8 +1811,6 @@ class WorkspacePagesMixin:
         self.workspace_stack.setCurrentWidget(page)
         if page_name in self.page_buttons:
             self.page_buttons[page_name].setChecked(True)
-        if hasattr(self, "project_stage_table"):
-            self.refresh_project_lifecycle(ps)
         if hasattr(self, "project_param_summary"):
             self.refresh_project_parameter_summary()
 
