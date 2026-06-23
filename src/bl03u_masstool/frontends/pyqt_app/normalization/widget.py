@@ -514,6 +514,7 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
         df = result
         import pandas as pd
         from bl03u_masstool.core.mole_fraction import parse_expansion_factors_from_result
+        from bl03u_masstool.core.temperature_scan import cluster_energies
 
         # 保存原始结果用于能量选择
         self._kr_result_df = df
@@ -536,22 +537,40 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
             avg_df = pd.DataFrame(avg_data)
             self.settings.expansion_factors = parse_expansion_factors_from_result(avg_df)
 
-            # 填充能量下拉列表
-            energies = sorted(df["photon_energy"].unique())
+            # 对能量进行聚类，识别主要的能量点
+            all_energies = sorted(df["photon_energy"].unique().tolist())
+            energy_clusters = cluster_energies(all_energies, n_clusters=5, tolerance=0.01)
+
+            # 计算每个簇的平均能量（代表该簇）
+            cluster_centers = {}
+            for cluster_idx, energies in energy_clusters.items():
+                center = float(np.mean(energies))
+                cluster_centers[cluster_idx] = center
+
+            # 填充能量下拉列表（按簇的中心能量排序）
             self.energy_combo.blockSignals(True)
             self.energy_combo.clear()
             self.energy_combo.addItem("平均结果", None)
-            for energy in energies:
-                self.energy_combo.addItem(f"E={energy:.4f} eV", float(energy))
+
+            for cluster_idx in sorted(cluster_centers.keys(), key=lambda x: cluster_centers[x]):
+                center_energy = cluster_centers[cluster_idx]
+                self.energy_combo.addItem(f"E={center_energy:.4f} eV", center_energy)
+
             self.energy_combo.blockSignals(False)
             self.energy_combo.setVisible(True)
+
+            # 保存簇映射用于后续查询
+            self._energy_cluster_map = {}  # {中心能量: [该簇的所有能量]}
+            for cluster_idx, energies in energy_clusters.items():
+                center = cluster_centers[cluster_idx]
+                self._energy_cluster_map[center] = energies
 
             # 显示平均结果
             self._kr_signal_data = {
                 float(row["temperature"]): float(row["kr_signal"])
                 for _, row in avg_df.iterrows()
             }
-            msg = f"已计算 {len(energies)} 个能量点 × {len(df)//len(energies)} 个温度点，"
+            msg = f"已计算 {len(energy_clusters)} 个能量点 × {len(df)//len(all_energies)} 个温度点，"
             msg += f"显示 {len(self.settings.expansion_factors)} 个温度点的平均膨胀系数"
         else:
             # 单能量
@@ -572,10 +591,10 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
         if not hasattr(self, '_kr_result_df'):
             return
 
-        selected_energy = self.energy_combo.currentData()
+        selected_center_energy = self.energy_combo.currentData()
         df = self._kr_result_df
 
-        if selected_energy is None:
+        if selected_center_energy is None:
             # 显示平均结果
             result_data = []
             for temp in sorted(df["temperature"].unique()):
@@ -588,16 +607,25 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
                     "expansion_lambda": avg_lambda,
                 })
         else:
-            # 显示特定能量的结果
-            energy_data = df[df["photon_energy"] == selected_energy].sort_values("temperature")
-            result_data = [
-                {
-                    "temperature": float(row["temperature"]),
-                    "kr_signal": float(row["kr_signal"]),
-                    "expansion_lambda": float(row["expansion_lambda"]),
-                }
-                for _, row in energy_data.iterrows()
-            ]
+            # 显示特定能量簇的平均结果
+            # 获取该簇包含的所有能量值
+            cluster_energies = self._energy_cluster_map.get(selected_center_energy, [])
+            if not cluster_energies:
+                # 如果没有找到簇映射，使用选中的能量值
+                cluster_energies = [selected_center_energy]
+
+            # 过滤数据，仅获取该簇中的能量
+            cluster_data = df[df["photon_energy"].isin(cluster_energies)]
+            result_data = []
+            for temp in sorted(cluster_data["temperature"].unique()):
+                temp_data = cluster_data[cluster_data["temperature"] == temp]
+                avg_lambda = float(temp_data["expansion_lambda"].mean())
+                avg_signal = float(temp_data["kr_signal"].mean())
+                result_data.append({
+                    "temperature": float(temp),
+                    "kr_signal": avg_signal,
+                    "expansion_lambda": avg_lambda,
+                })
 
         # 更新 Kr 信号数据用于显示
         self._kr_signal_data = {
