@@ -30,7 +30,7 @@ from bl03u_masstool.core.pie_analysis import analyze_pie_folder, build_pie_curve
 from bl03u_masstool.core.pics_calculator import calc_pics_single_energy
 from bl03u_masstool.core.elements import get_all_elements_from_database, filter_species_by_elements, COMMON_ELEMENTS, parse_formula as parse_formula_elements, get_elements_from_formula
 from bl03u_masstool.core.normalization import NormalizationSettings, load_normalization_settings, save_normalization_settings
-from bl03u_masstool.core.project_settings import ProjectSettings
+from bl03u_masstool.core.project_settings import ProjectSettings, ProjectSettingsManager
 from bl03u_masstool.core.temperature_scan import (
     TEMPERATURE_CURVE_CLASS_LABELS,
     analyze_temperature_folder,
@@ -1399,11 +1399,15 @@ class FunctionDefaultsWidget(QtWidgets.QWidget):
     def set_project_settings(self, project_settings: ProjectSettings) -> None:
         """设置项目级配置引用"""
         self.project_settings = project_settings
+        self.peak_detection = project_settings.to_peak_detection_config()
         self.load_from_settings()
 
     def load_from_settings(self) -> None:
         """从配置文件加载参数"""
-        self.peak_algorithm_combo.setCurrentText(self.peak_detection.algorithm)
+        if self.project_settings:
+            self.peak_detection = self.project_settings.to_peak_detection_config()
+
+        combo_set_data(self.peak_algorithm_combo, self.peak_detection.algorithm)
         self.peak_detection_min_idx_edit.setValue(self.peak_detection.detection_min_idx)
         self.peak_threshold_end_edit.setValue(self.peak_detection.threshold_end)
         self.peak_min_intensity_edit.setValue(self.peak_detection.min_intensity)
@@ -1414,19 +1418,72 @@ class FunctionDefaultsWidget(QtWidgets.QWidget):
         self.peak_gaussian_window_max_edit.setValue(self.peak_detection.gaussian_window_max)
         self.peak_gaussian_boundary_scale_edit.setValue(self.peak_detection.gaussian_boundary_scale)
 
+    def apply_to_settings(self, project_settings: ProjectSettings | None = None) -> None:
+        """Copy current function defaults into ProjectSettings."""
+        target = project_settings or self.project_settings
+        self.peak_detection = PeakDetectionConfig(
+            algorithm=str(self.peak_algorithm_combo.currentData()),
+            detection_min_idx=self.peak_detection_min_idx_edit.value(),
+            threshold_end=self.peak_threshold_end_edit.value(),
+            min_intensity=self.peak_min_intensity_edit.value(),
+            nearby_peak_window=self.peak_nearby_window_edit.value(),
+            duplicate_window=self.peak_duplicate_window_edit.value(),
+            weak_tail_early_window=self.peak_detection.weak_tail_early_window,
+            weak_tail_late_window=self.peak_detection.weak_tail_late_window,
+            weak_tail_ratio=self.peak_weak_tail_ratio_edit.value(),
+            gaussian_window_max=self.peak_gaussian_window_max_edit.value(),
+            gaussian_boundary_scale=self.peak_gaussian_boundary_scale_edit.value(),
+            boundary_padding=self.peak_boundary_padding_edit.value(),
+            prominence_ratio=self.peak_detection.prominence_ratio,
+            smoothing_window=self.peak_detection.smoothing_window,
+            smoothing_poly_order=self.peak_detection.smoothing_poly_order,
+            baseline_window=self.peak_detection.baseline_window,
+            baseline_percentile=self.peak_detection.baseline_percentile,
+            min_peak_width=self.peak_detection.min_peak_width,
+            max_peak_width=self.peak_detection.max_peak_width,
+            cwt_snr_threshold=self.peak_detection.cwt_snr_threshold,
+            cwt_wavelet_max_width=self.peak_detection.cwt_wavelet_max_width,
+            weak_tail_cutoff_idx=self.peak_detection.weak_tail_cutoff_idx,
+            vote_threshold=self.peak_detection.vote_threshold,
+            min_intensity_for_single_vote=self.peak_detection.min_intensity_for_single_vote,
+            mz_tolerance=self.peak_detection.mz_tolerance,
+        )
+        if target is None:
+            return
+
+        target.peak_algorithm = self.peak_detection.algorithm
+        target.detection_min_idx = self.peak_detection.detection_min_idx
+        target.threshold_end = self.peak_detection.threshold_end
+        target.min_intensity = self.peak_detection.min_intensity
+        target.nearby_peak_window = self.peak_detection.nearby_peak_window
+        target.duplicate_window = self.peak_detection.duplicate_window
+        target.weak_tail_early_window = self.peak_detection.weak_tail_early_window
+        target.weak_tail_late_window = self.peak_detection.weak_tail_late_window
+        target.weak_tail_ratio = self.peak_detection.weak_tail_ratio
+        target.gaussian_window_max = self.peak_detection.gaussian_window_max
+        target.gaussian_boundary_scale = self.peak_detection.gaussian_boundary_scale
+        target.boundary_padding = self.peak_detection.boundary_padding
+        target.prominence_ratio = self.peak_detection.prominence_ratio
+        target.smoothing_window = self.peak_detection.smoothing_window
+        target.smoothing_poly_order = self.peak_detection.smoothing_poly_order
+        target.baseline_window = self.peak_detection.baseline_window
+        target.baseline_percentile = self.peak_detection.baseline_percentile
+        target.min_peak_width = self.peak_detection.min_peak_width
+        target.max_peak_width = self.peak_detection.max_peak_width
+        target.cwt_snr_threshold = self.peak_detection.cwt_snr_threshold
+        target.cwt_wavelet_max_width = self.peak_detection.cwt_wavelet_max_width
+        target.weak_tail_cutoff_idx = self.peak_detection.weak_tail_cutoff_idx
+        target.vote_threshold = self.peak_detection.vote_threshold
+        target.min_intensity_for_single_vote = self.peak_detection.min_intensity_for_single_vote
+        target.mz_tolerance = self.peak_detection.mz_tolerance
+
     def save_settings(self) -> None:
         """保存参数到配置文件"""
-        self.peak_detection.algorithm = self.peak_algorithm_combo.currentData()
-        self.peak_detection.detection_min_idx = self.peak_detection_min_idx_edit.value()
-        self.peak_detection.threshold_end = self.peak_threshold_end_edit.value()
-        self.peak_detection.min_intensity = self.peak_min_intensity_edit.value()
-        self.peak_detection.nearby_peak_window = self.peak_nearby_window_edit.value()
-        self.peak_detection.duplicate_window = self.peak_duplicate_window_edit.value()
-        self.peak_detection.boundary_padding = self.peak_boundary_padding_edit.value()
-        self.peak_detection.weak_tail_ratio = self.peak_weak_tail_ratio_edit.value()
-        self.peak_detection.gaussian_window_max = self.peak_gaussian_window_max_edit.value()
-        self.peak_detection.gaussian_boundary_scale = self.peak_gaussian_boundary_scale_edit.value()
+        self.apply_to_settings()
 
         save_peak_detection_config(self.peak_detection)
+        if self.project_settings:
+            ProjectSettingsManager().set(self.project_settings)
+            ProjectSettingsManager().save()
         self.status_label.setText("功能默认参数已保存")
         self.settings_saved.emit()
