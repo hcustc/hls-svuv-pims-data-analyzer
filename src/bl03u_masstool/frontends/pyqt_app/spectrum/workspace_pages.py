@@ -40,7 +40,7 @@ from bl03u_masstool.frontends.pyqt_app.worker import (
 from bl03u_masstool.frontends.pyqt_app.worker_manager import WorkerManager
 from bl03u_masstool.frontends.pyqt_app.mole_fraction.dialog import MoleFractionDialog
 from bl03u_masstool.frontends.pyqt_app.nist.widget import IonizationEnergyLookupWidget
-from bl03u_masstool.frontends.pyqt_app.normalization.widget import CommonParametersWidget, PeakDetectionWidget
+from bl03u_masstool.frontends.pyqt_app.normalization.widget import CommonParametersWidget
 from bl03u_masstool.frontends.pyqt_app.pics.dialog import PICSCalculatorDialog
 from bl03u_masstool.frontends.pyqt_app.pics.import_widget import PICSImportWidget
 from bl03u_masstool.frontends.pyqt_app.pie.dialog import PIESpeciesFitDialog
@@ -294,34 +294,14 @@ class WorkspacePagesMixin:
         # 立即设置ProjectSettings
         self.project_common_parameters_widget.set_project_settings(ProjectSettingsManager().get())
 
-        # --- Tab 4: 寻峰参数 ---
-        self.project_peak_detection_widget = PeakDetectionWidget(self.project_tabs)
-        self.project_peak_detection_widget.save_button.clicked.connect(self.on_project_common_parameters_saved)
-        self.project_peak_detection_widget.settings_saved.connect(self.on_project_common_parameters_saved)
-        # 立即设置ProjectSettings
-        self.project_peak_detection_widget.set_project_settings(ProjectSettingsManager().get())
+        # --- Tab 4: 功能默认参数 ---
+        # 集成原有的 PeakDetectionWidget 和功能参数页面
+        from bl03u_masstool.frontends.pyqt_app.normalization.widget import FunctionDefaultsWidget
+        self.project_function_defaults_widget = FunctionDefaultsWidget(self.project_tabs)
+        self.project_function_defaults_widget.settings_saved.connect(self.on_project_common_parameters_saved)
+        self.project_function_defaults_widget.set_project_settings(ProjectSettingsManager().get())
 
-        # --- Tab 5: 功能参数 ---
-        self.project_function_params_page = QtWidgets.QWidget(self.project_tabs)
-        function_params_layout = QVBoxLayout(self.project_function_params_page)
-        function_params_layout.setContentsMargins(8, 8, 8, 8)
-        function_params_layout.setSpacing(10)
-
-        func_section_title = QtWidgets.QLabel("功能默认参数（PIE·温度扫描·PICS·摩尔分数）")
-        func_section_title.setObjectName("ProjectTitle")
-        func_hint = QtWidgets.QLabel(
-            '以下默认值在"应用到工具"或切换工具页时自动同步；保存后写入项目配置。',
-        )
-        func_hint.setObjectName("ProjectHint")
-        func_hint.setWordWrap(True)
-        self._build_function_params_card(self.project_function_params_page)
-
-        function_params_layout.addWidget(func_section_title)
-        function_params_layout.addWidget(func_hint)
-        function_params_layout.addWidget(self.function_params_card)
-        function_params_layout.addStretch(1)
-
-        # --- Tab 6: 产物管理 ---
+        # --- Tab 5: 产物管理 ---
         self.project_artifacts_page = QtWidgets.QWidget(self.project_tabs)
         artifacts_layout = QVBoxLayout(self.project_artifacts_page)
         artifacts_layout.setContentsMargins(8, 8, 8, 8)
@@ -332,8 +312,7 @@ class WorkspacePagesMixin:
         self.project_tabs.addTab(self.project_identity_page, "项目设置")
         self.project_tabs.addTab(self.project_datasource_page, "数据导入")
         self.project_tabs.addTab(self.project_common_parameters_widget, "通用参数")
-        self.project_tabs.addTab(self.project_peak_detection_widget, "寻峰参数")
-        self.project_tabs.addTab(self.project_function_params_page, "功能参数")
+        self.project_tabs.addTab(self.project_function_defaults_widget, "功能默认参数")
         self.project_tabs.addTab(self.project_artifacts_page, "产物管理")
         page_layout.addWidget(self.project_tabs, stretch=1)
 
@@ -1011,42 +990,24 @@ class WorkspacePagesMixin:
         # Do NOT auto-fill paths here - only display what's actually saved in config
         # Users must use the import wizard to set up data sources
         self._read_project_settings_to_ui(ps)
-        self._load_function_params_to_ui(ps)
+        # NOTE: 功能参数现在在 FunctionDefaultsWidget 中管理
+        # self._load_function_params_to_ui(ps)
         # 同步ProjectSettings到参数widgets
         if hasattr(self, "project_common_parameters_widget"):
             self.project_common_parameters_widget.set_project_settings(ps)
             self.project_common_parameters_widget.load_from_settings()  # 立即加载到UI
-        if hasattr(self, "project_peak_detection_widget"):
-            self.project_peak_detection_widget.set_project_settings(ps)
-            self.project_peak_detection_widget.load_from_settings()  # 立即加载到UI
+        if hasattr(self, "project_function_defaults_widget"):
+            self.project_function_defaults_widget.set_project_settings(ps)
+            self.project_function_defaults_widget.load_from_settings()  # 立即加载到UI
         self.update_project_title()
         self.refresh_project_lifecycle()
         self.refresh_project_datasource_page()
         self.update_project_ui_state(ps)
 
     def _load_function_params_to_ui(self, ps: ProjectSettings) -> None:
-        """Populate function params tab from ProjectSettings."""
-        self.fp_pie_energy_decimals.setValue(ps.pie_energy_decimals)
-        self.fp_pie_recursive.setChecked(ps.pie_recursive)
-        self.fp_pie_prefer_gaussian.setChecked(ps.pie_prefer_gaussian)
-        self.fp_pie_multi_folder.setChecked(ps.pie_multi_folder_mode)
-        idx = self.fp_pie_merge_method.findData(ps.pie_merge_method)
-        if idx >= 0:
-            self.fp_pie_merge_method.setCurrentIndex(idx)
-        idx = self.fp_temp_reference_mode.findData(ps.temp_reference_mode)
-        if idx >= 0:
-            self.fp_temp_reference_mode.setCurrentIndex(idx)
-        self.fp_temp_prefer_gaussian.setChecked(ps.temp_prefer_gaussian)
-        self.fp_temp_kr_mz.setValue(ps.temp_kr_mz)
-        self.fp_pics_no_mz.setValue(ps.pics_no_mz)
-        self.fp_pics_no_formula.setText(ps.pics_no_formula)
-        self.fp_pics_no_mf.setValue(ps.pics_no_mf)
-        self.fp_pics_new_species_mf.setValue(ps.pics_new_species_mf)
-        self.fp_mf_mass_disc_exponent.setValue(ps.mf_mass_disc_exponent)
-        self.fp_mf_parent_mz.setValue(ps.mf_parent_mz)
-        self.fp_mf_parent_initial_mf.setValue(ps.mf_parent_initial_mf)
-        self.fp_mf_photon_energy.setValue(ps.mf_photon_energy)
-        self.fp_mf_reference_temperature.setValue(int(ps.mf_reference_temperature) if ps.mf_reference_temperature is not None else 550)
+        """DEPRECATED: 功能参数现在在 FunctionDefaultsWidget 中管理"""
+        # 保留此方法以维持向后兼容性，但内容已移到 FunctionDefaultsWidget
+        pass
 
     def update_project_ui_state(self, ps: ProjectSettings | None = None) -> None:
         """Update main action button and progress bar based on project state"""
