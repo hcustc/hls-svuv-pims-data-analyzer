@@ -201,6 +201,7 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
         self.mf_md_preset_combo = QtWidgets.QComboBox()
         for name in MASS_DISCRIMINATION_PRESETS:
             self.mf_md_preset_combo.addItem(name, name)
+        self.mf_md_preset_combo.currentTextChanged.connect(self._on_mf_md_preset_changed)
 
         # 指数n
         self.mf_mass_disc_exponent_edit = QtWidgets.QDoubleSpinBox()
@@ -603,12 +604,12 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
         """Set the project settings reference for parameter synchronization."""
         self.project_settings = project_settings
         if project_settings:
-            # 恢复预设选择
-            if project_settings.mf_md_preset:
-                combo_set_data(self.mf_md_preset_combo, project_settings.mf_md_preset)
-            self.mf_mass_disc_exponent_edit.setValue(project_settings.mf_mass_disc_exponent)
+            self.load_from_settings()
 
-    def apply_to_settings(self) -> None:
+    def apply_to_settings(self, project_settings: ProjectSettings | None = None) -> None:
+        target = project_settings or self.project_settings
+        if project_settings is not None:
+            self.project_settings = project_settings
         self.settings.light_source = self.light_source_combo.currentData()
         self.settings.mass_discrimination = self.mass_discrimination_edit.value()
         self.settings.pie_photon_mode = self.pie_photon_mode_combo.currentData()
@@ -624,26 +625,27 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
             c=self.calibration_c_edit.value(),
         )
         # 同步所有项目特定参数到 ProjectSettings
-        if self.project_settings:
-            self.project_settings.light_source = self.light_source_combo.currentData()
-            self.project_settings.mass_discrimination = self.mass_discrimination_edit.value()
-            self.project_settings.pie_photon_mode = self.pie_photon_mode_combo.currentData()
-            self.project_settings.kr_calibration_folder = self.kr_folder_edit.text().strip()
+        if target:
+            target.light_source = self.settings.light_source
+            target.mass_discrimination = self.settings.mass_discrimination
+            target.pie_photon_mode = self.settings.pie_photon_mode
+            target.kr_calibration_folder = self.settings.kr_calibration_folder
             # 根据卡峰模式决定是否保存卡峰文件路径
             if self.kr_peak_mode_manual_radio.isChecked():
-                self.project_settings.kr_calibration_peak_file = self.kr_peak_file_edit.text().strip()
+                target.kr_calibration_peak_file = self.kr_peak_file_edit.text().strip()
             else:
-                self.project_settings.kr_calibration_peak_file = ""
-            self.project_settings.cal_a = self.calibration.a
-            self.project_settings.cal_b = self.calibration.b
-            self.project_settings.cal_c = self.calibration.c
-            self.project_settings.mf_md_preset = self.mf_md_preset_combo.currentText()
-            self.project_settings.mf_mass_disc_exponent = self.mf_mass_disc_exponent_edit.value()
+                target.kr_calibration_peak_file = ""
+            target.expansion_factors = dict(self.settings.expansion_factors)
+            target.cal_a = self.calibration.a
+            target.cal_b = self.calibration.b
+            target.cal_c = self.calibration.c
+            target.mf_md_preset = self.mf_md_preset_combo.currentText()
+            target.mf_mass_disc_exponent = self.mf_mass_disc_exponent_edit.value()
         self.settings.selected_elements = [
             elem for elem, chk in self.element_checks.items() if chk.isChecked()
         ]
-        if self.project_settings:
-            self.project_settings.selected_elements = list(self.settings.selected_elements)
+        if target:
+            target.selected_elements = list(self.settings.selected_elements)
 
     def _set_all_elements(self, checked: bool):
         for chk in self.element_checks.values():
@@ -1146,7 +1148,10 @@ class PeakDetectionWidget(QtWidgets.QWidget):
         if project_settings:
             self.load_from_settings()
 
-    def apply_to_settings(self) -> None:
+    def apply_to_settings(self, project_settings: ProjectSettings | None = None) -> None:
+        target = project_settings or self.project_settings
+        if project_settings is not None:
+            self.project_settings = project_settings
         self.peak_detection = PeakDetectionConfig(
             algorithm=str(self.peak_algorithm_combo.currentData()),
             detection_min_idx=self.peak_detection_min_idx_edit.value(),
@@ -1169,23 +1174,23 @@ class PeakDetectionWidget(QtWidgets.QWidget):
             max_peak_width=max(self.peak_min_peak_width_edit.value(), self.peak_max_peak_width_edit.value()),
         )
         # 保存到ProjectSettings
-        if self.project_settings:
-            self.project_settings.peak_algorithm = self.peak_detection.algorithm
-            self.project_settings.detection_min_idx = self.peak_detection.detection_min_idx
-            self.project_settings.threshold_end = self.peak_detection.threshold_end
-            self.project_settings.min_intensity = self.peak_detection.min_intensity
-            self.project_settings.nearby_peak_window = self.peak_detection.nearby_peak_window
-            self.project_settings.duplicate_window = self.peak_detection.duplicate_window
-            self.project_settings.weak_tail_ratio = self.peak_detection.weak_tail_ratio
-            self.project_settings.gaussian_window_max = self.peak_detection.gaussian_window_max
-            self.project_settings.gaussian_boundary_scale = self.peak_detection.gaussian_boundary_scale
-            self.project_settings.boundary_padding = self.peak_detection.boundary_padding
-            self.project_settings.prominence_ratio = self.peak_detection.prominence_ratio
-            self.project_settings.smoothing_window = self.peak_detection.smoothing_window
-            self.project_settings.baseline_window = self.peak_detection.baseline_window
-            self.project_settings.baseline_percentile = self.peak_detection.baseline_percentile
-            self.project_settings.min_peak_width = self.peak_detection.min_peak_width
-            self.project_settings.max_peak_width = self.peak_detection.max_peak_width
+        if target:
+            target.peak_algorithm = self.peak_detection.algorithm
+            target.detection_min_idx = self.peak_detection.detection_min_idx
+            target.threshold_end = self.peak_detection.threshold_end
+            target.min_intensity = self.peak_detection.min_intensity
+            target.nearby_peak_window = self.peak_detection.nearby_peak_window
+            target.duplicate_window = self.peak_detection.duplicate_window
+            target.weak_tail_ratio = self.peak_detection.weak_tail_ratio
+            target.gaussian_window_max = self.peak_detection.gaussian_window_max
+            target.gaussian_boundary_scale = self.peak_detection.gaussian_boundary_scale
+            target.boundary_padding = self.peak_detection.boundary_padding
+            target.prominence_ratio = self.peak_detection.prominence_ratio
+            target.smoothing_window = self.peak_detection.smoothing_window
+            target.baseline_window = self.peak_detection.baseline_window
+            target.baseline_percentile = self.peak_detection.baseline_percentile
+            target.min_peak_width = self.peak_detection.min_peak_width
+            target.max_peak_width = self.peak_detection.max_peak_width
 
     def save_settings(self):
         self.apply_to_settings()

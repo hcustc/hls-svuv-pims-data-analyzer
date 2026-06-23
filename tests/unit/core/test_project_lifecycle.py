@@ -6,10 +6,12 @@ from bl03u_masstool.core.project_lifecycle import (
     build_project_stage_statuses,
     collect_project_files,
     create_project_snapshot,
+    DATA_SOURCE_FILE_COUNT_LIMIT,
     ensure_project_structure,
     export_project_archive,
     import_initial_project_data,
     next_project_stage,
+    validate_data_source,
 )
 from bl03u_masstool.core.project_settings import ProjectSettings
 
@@ -82,3 +84,18 @@ def test_project_lifecycle_collects_registered_outputs_and_exports_archive(tmp_p
     snapshot_path = create_project_snapshot(settings, "after pie")
     assert snapshot_path.exists()
     assert snapshot_path.parent == project_root / "versions"
+
+
+def test_data_source_validation_caps_large_directory_counts(tmp_path):
+    source_dir = tmp_path / "large_source"
+    source_dir.mkdir()
+    for index in range(DATA_SOURCE_FILE_COUNT_LIMIT + 3):
+        (source_dir / f"{index}.txt").write_text("data", encoding="utf-8")
+
+    settings = ProjectSettings(sum_spectrum_folder=str(source_dir))
+
+    record = validate_data_source(settings, "sum_spectrum")
+
+    assert record.is_valid is True
+    assert record.file_count == DATA_SOURCE_FILE_COUNT_LIMIT
+    assert record.detail == f"至少 {DATA_SOURCE_FILE_COUNT_LIMIT} 个文件"

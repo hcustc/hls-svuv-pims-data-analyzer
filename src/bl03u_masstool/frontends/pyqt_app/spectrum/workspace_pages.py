@@ -31,6 +31,7 @@ from bl03u_masstool.frontends.pyqt_app.isotope.dialog import IsotopeAbundanceDia
 from bl03u_masstool.frontends.pyqt_app.progress_dialog import ProgressDialog
 from bl03u_masstool.frontends.pyqt_app.worker import (
     ExportWorker,
+    ImportWorker,
     SnapshotWorker,
 )
 from bl03u_masstool.frontends.pyqt_app.worker_manager import WorkerManager
@@ -537,6 +538,7 @@ class WorkspacePagesMixin:
         card_layout.addWidget(analysis_group)
 
         self.project_single_file_button.clicked.connect(self.select_project_single_file)
+        self.datasource_import_button.clicked.connect(self.import_project_datasource)
         self.project_sum_folder_button.clicked.connect(
             lambda: self.select_project_folder(self.project_sum_folder_edit, "选择累计谱文件夹")
         )
@@ -764,6 +766,37 @@ class WorkspacePagesMixin:
         # PICS database path is never modified from UI (read-only)
         return ps
 
+    def _collect_all_project_parameters_from_ui(self, ps: ProjectSettings) -> ProjectSettings:
+        """Copy every project-owned parameter widget into the provided settings."""
+        if hasattr(self, "project_common_parameters_widget"):
+            self.project_common_parameters_widget.apply_to_settings(ps)
+        if hasattr(self, "project_function_defaults_widget"):
+            self.project_function_defaults_widget.apply_to_settings(ps)
+        if hasattr(self, "project_peak_detection_widget"):
+            self.project_peak_detection_widget.apply_to_settings(ps)
+        return ps
+
+    def _load_project_settings_to_parameter_widgets(self, ps: ProjectSettings) -> None:
+        if hasattr(self, "project_common_parameters_widget"):
+            self.project_common_parameters_widget.set_project_settings(ps)
+        if hasattr(self, "project_function_defaults_widget"):
+            self.project_function_defaults_widget.set_project_settings(ps)
+        if hasattr(self, "project_peak_detection_widget"):
+            self.project_peak_detection_widget.set_project_settings(ps)
+
+    def _apply_project_runtime_settings(self, ps: ProjectSettings) -> None:
+        """Make the active desktop runtime use the project file as source of truth."""
+        self.normalization_settings = ps.to_normalization_settings()
+        calibration = ps.to_calibration()
+        self.lineEdit_4.setText(f"{calibration.a:.6e}")
+        self.lineEdit_5.setText(f"{calibration.b:.6e}")
+        self.lineEdit_6.setText(f"{calibration.c:.6e}")
+        if hasattr(self, "project_common_parameters_widget"):
+            self.project_common_parameters_widget.settings = self.normalization_settings
+            self.project_common_parameters_widget.calibration = calibration
+        if hasattr(self, "p2"):
+            self.refresh_plot_axis_mode()
+
     def load_project_settings(self) -> None:
         """加载项目配置。
 
@@ -802,12 +835,8 @@ class WorkspacePagesMixin:
         # NOTE: 功能参数现在在 FunctionDefaultsWidget 中管理
         # self._load_function_params_to_ui(ps)
         # 同步ProjectSettings到参数widgets
-        if hasattr(self, "project_common_parameters_widget"):
-            self.project_common_parameters_widget.set_project_settings(ps)
-            self.project_common_parameters_widget.load_from_settings()  # 立即加载到UI
-        if hasattr(self, "project_function_defaults_widget"):
-            self.project_function_defaults_widget.set_project_settings(ps)
-            self.project_function_defaults_widget.load_from_settings()  # 立即加载到UI
+        self._load_project_settings_to_parameter_widgets(ps)
+        self._apply_project_runtime_settings(ps)
         self.update_project_title()
         self.refresh_project_lifecycle()
         self.refresh_project_datasource_page()
@@ -823,8 +852,8 @@ class WorkspacePagesMixin:
             ps = self.project_settings_manager.get()
 
         validation_records = validate_all_data_sources(ps)
-        validation_status = get_data_source_validation_status(ps)
-        workflow_result = analyze_workflow_capabilities(ps)
+        validation_status = get_data_source_validation_status(ps, validation_records)
+        workflow_result = analyze_workflow_capabilities(ps, validation_records)
 
         self.current_data_source_status = validation_status
         self.current_validation_records = validation_records
@@ -853,13 +882,13 @@ class WorkspacePagesMixin:
                     continue
                 record = record_map.get(source_key)
                 if record is None or not record.path:
-                    lbl.setText("—")
+                    lbl.setText("未登记")
                     lbl.setStyleSheet("")
                 elif not record.is_valid:
                     lbl.setText("[警告] 路径失效")
                     lbl.setStyleSheet("color: #c0392b;")
                 else:
-                    count_text = f"{record.file_count}个文件" if record.file_count > 1 else "已配置"
+                    count_text = record.detail.replace(" ", "") if record.file_count > 1 else "已配置"
                     lbl.setText(f"✓ {count_text}")
                     lbl.setStyleSheet("color: #27ae60;")
 
@@ -893,8 +922,7 @@ class WorkspacePagesMixin:
         parameters were moved to FunctionDefaultsWidget. It now delegates to the
         widget so older call sites still persist the current parameter edits.
         """
-        if hasattr(self, "project_function_defaults_widget"):
-            self.project_function_defaults_widget.apply_to_settings(ps)
+        self._collect_all_project_parameters_from_ui(ps)
 
     def new_project(self) -> None:
         """清空表单，准备创建新项目"""
@@ -930,6 +958,12 @@ class WorkspacePagesMixin:
             )
             return
 
+        self.statusbar.showMessage("正在加载项目配置与数据源状态…")
+        if hasattr(self, "project_open_button"):
+            self.project_open_button.setEnabled(False)
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.WaitCursor)
+        QtWidgets.QApplication.processEvents(QtCore.QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+
         try:
             # Load project settings from config file
             from bl03u_masstool.core.project_settings import load_project_settings
@@ -937,26 +971,28 @@ class WorkspacePagesMixin:
 
             # Set project path for manager
             self.project_settings_manager.set_project_path(project_path)
+            self.project_settings_manager.set(ps)
 
-            # Display loaded settings in UI
-            self.project_name_edit.setText(ps.project_name or "")
-            self.project_system_edit.setText(ps.system or "")
-            self.project_description_edit.setText(ps.description or "")
-            self.project_output_dir_edit.setText(ps.output_dir or "")
+            # Display loaded settings in UI, including data-source paths.
+            self._read_project_settings_to_ui(ps)
 
-            # Load to all parameter widgets
-            self.project_common_parameters_widget.set_project_settings(ps)
-            self.project_common_parameters_widget.load_from_settings()
+            # Load to all parameter widgets and desktop runtime.
+            self._load_project_settings_to_parameter_widgets(ps)
+            self._apply_project_runtime_settings(ps)
 
-            if hasattr(self, "project_function_defaults_widget"):
-                self.project_function_defaults_widget.set_project_settings(ps)
-                self.project_function_defaults_widget.load_from_settings()
+            self._apply_settings_to_tools(ps)
+            self.update_project_title()
+            self.refresh_project_lifecycle(ps)
+            self.refresh_project_parameter_summary()
+            self.refresh_project_datasource_page(ps)
 
-            if hasattr(self, "project_peak_detection_widget"):
-                self.project_peak_detection_widget.set_project_settings(ps)
-                self.project_peak_detection_widget.load_from_settings()
-
-            self.statusbar.showMessage(f"✓ 已加载项目：{ps.project_name}", 3000)
+            if getattr(self, "current_data_source_status", None) == DataSourceValidationStatus.UNCONFIGURED:
+                self.statusbar.showMessage(
+                    f"✓ 已加载项目：{ps.project_name or project_path.name}；尚未登记数据源，请点击“启动导入向导”",
+                    7000,
+                )
+            else:
+                self.statusbar.showMessage(f"✓ 已加载并应用项目：{ps.project_name or project_path.name}", 4000)
 
         except Exception as exc:
             QtWidgets.QMessageBox.critical(
@@ -965,6 +1001,10 @@ class WorkspacePagesMixin:
                 f"无法加载项目配置：\n{str(exc)}"
             )
             self.project_settings_manager.clear_project_path()
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+            if hasattr(self, "project_open_button"):
+                self.project_open_button.setEnabled(True)
 
     def save_and_apply_project_settings(self) -> None:
         """Save project settings, create project structure, and sync to tools.
@@ -973,10 +1013,7 @@ class WorkspacePagesMixin:
         """
         ps = self._collect_project_settings_from_ui()
         ps = self._normalize_project_output_dir(ps)
-
-        # Collect function parameters from FunctionDefaultsWidget
-        if hasattr(self, "project_function_defaults_widget"):
-            self.project_function_defaults_widget.apply_to_settings(ps)
+        self._collect_all_project_parameters_from_ui(ps)
 
         # Step 1: Create project directory structure
         try:
@@ -995,6 +1032,8 @@ class WorkspacePagesMixin:
 
         # Step 4: Read settings back to UI
         self._read_project_settings_to_ui(ps)
+        self._load_project_settings_to_parameter_widgets(ps)
+        self._apply_project_runtime_settings(ps)
 
         # Step 5: Sync to tools
         self._apply_settings_to_tools(ps)
@@ -1013,10 +1052,7 @@ class WorkspacePagesMixin:
         """
         ps = self._collect_project_settings_from_ui()
         ps = self._normalize_project_output_dir(ps)
-
-        # Collect function parameters from FunctionDefaultsWidget
-        if hasattr(self, "project_function_defaults_widget"):
-            self.project_function_defaults_widget.apply_to_settings(ps)
+        self._collect_all_project_parameters_from_ui(ps)
 
         # Create project directory structure
         try:
@@ -1035,6 +1071,8 @@ class WorkspacePagesMixin:
 
         # Read settings back to UI
         self._read_project_settings_to_ui(ps)
+        self._load_project_settings_to_parameter_widgets(ps)
+        self._apply_project_runtime_settings(ps)
 
         # Refresh UI (but don't sync to tools)
         self.update_project_title()
@@ -1045,12 +1083,14 @@ class WorkspacePagesMixin:
     def apply_project_settings_to_tools(self) -> None:
         """Sync project settings to tool pages (light version, no save/init)."""
         ps = self._collect_project_settings_from_ui()
-        self._collect_function_params_from_ui(ps)
+        self._collect_all_project_parameters_from_ui(ps)
+        self._apply_project_runtime_settings(ps)
         self._apply_settings_to_tools(ps)
         self.statusbar.showMessage("项目设置已应用到工具", 3000)
 
     def _apply_settings_to_tools(self, ps: ProjectSettings) -> None:
         """Internal method: sync project settings to all tool pages."""
+        self._apply_project_runtime_settings(ps)
         if ps.single_spectrum_file:
             self.lineEdit.setText(ps.single_spectrum_file)
         if ps.sum_spectrum_folder:
@@ -1141,6 +1181,106 @@ class WorkspacePagesMixin:
             if val:
                 self.folder_path.setText(val)
 
+    def import_project_datasource(self) -> None:
+        """Import a raw data source into the active project in the background."""
+        ps = self._collect_project_settings_from_ui()
+        ps = self._normalize_project_output_dir(ps)
+        try:
+            ensure_project_structure(ps)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "初始化项目失败", str(exc))
+            return
+
+        self.project_settings_manager.set_project_path(Path(ps.output_dir))
+        self.project_settings_manager.set(ps)
+        self.project_settings_manager.save()
+
+        source_items = [
+            ("单谱文件", "single_spectrum"),
+            ("累计谱目录", "sum_spectrum"),
+            ("温度扫描目录", "temperature_scan"),
+            ("PIE扫描目录", "pie_scan"),
+            ("手动卡峰文件", "manual_peak"),
+        ]
+        labels = [label for label, _source_key in source_items]
+        label, ok = QtWidgets.QInputDialog.getItem(
+            self,
+            "导入项目数据源",
+            "选择要导入的数据源类型：",
+            labels,
+            0,
+            False,
+        )
+        if not ok or not label:
+            return
+
+        source_key = dict(source_items)[label]
+        start_dir = self._dialog_start_dir(ps.output_dir)
+        if source_key in {"single_spectrum", "manual_peak"}:
+            file_filter = (
+                "质谱数据 (*.txt *.asc *.888);;所有文件 (*)"
+                if source_key == "single_spectrum"
+                else "Peak Files (*.yaml *.yml *.csv *.xlsx *.xls);;所有文件 (*)"
+            )
+            source_path, _ = QFileDialog.getOpenFileName(self, f"选择{label}", start_dir, file_filter)
+        else:
+            source_path = QFileDialog.getExistingDirectory(self, f"选择{label}", start_dir)
+        if not source_path:
+            return
+
+        if not hasattr(self, "_worker_manager"):
+            self._worker_manager = WorkerManager(self)
+
+        worker = ImportWorker(ps, source_path, source_key)
+        worker.progress.connect(self._on_import_progress)
+        worker.finished.connect(self._on_import_finished)
+        worker.error.connect(self._on_import_error)
+        worker.cancelled.connect(self._on_import_cancelled)
+
+        self._import_progress_dialog = ProgressDialog(self, "导入项目数据源")
+        self._import_progress_dialog.rejected.connect(lambda: self._worker_manager.cancel())
+        self._import_progress_dialog.show()
+
+        self.statusbar.showMessage(f"正在导入{label}…")
+        self._worker_manager.run_worker(worker)
+
+    def _on_import_progress(self, percent: int, message: str) -> None:
+        if hasattr(self, "_import_progress_dialog"):
+            self._import_progress_dialog.update(percent, message)
+
+    def _on_import_finished(self, result: dict) -> None:
+        if hasattr(self, "_import_progress_dialog"):
+            self._import_progress_dialog.close()
+
+        ps = self.project_settings_manager.get()
+        field_name = result.get("field_name", "")
+        destination = result.get("destination", "")
+        if field_name and destination:
+            setattr(ps, field_name, destination)
+        self.project_settings_manager.set(ps)
+        self.project_settings_manager.save()
+
+        self._read_project_settings_to_ui(ps)
+        self._apply_settings_to_tools(ps)
+        self.update_project_title()
+        self.refresh_project_lifecycle(ps)
+        self.refresh_project_parameter_summary()
+        self.refresh_project_datasource_page(ps)
+
+        label = result.get("label") or "数据源"
+        self.statusbar.showMessage(f"✓ {label}已导入并登记：{destination}", 5000)
+
+    def _on_import_error(self, message: str) -> None:
+        if hasattr(self, "_import_progress_dialog"):
+            self._import_progress_dialog.close()
+        QtWidgets.QMessageBox.critical(self, "导入数据源失败", message)
+        self.statusbar.showMessage("导入数据源失败", 5000)
+
+    def _on_import_cancelled(self) -> None:
+        if hasattr(self, "_import_progress_dialog"):
+            self._import_progress_dialog.close()
+        self.statusbar.showMessage("数据源导入已取消", 3000)
+
     def select_project_single_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self,
@@ -1221,13 +1361,14 @@ class WorkspacePagesMixin:
 
     def _collect_and_save_project_settings(self) -> ProjectSettings:
         ps = self._collect_project_settings_from_ui()
-        self._collect_function_params_from_ui(ps)
+        self._collect_all_project_parameters_from_ui(ps)
         # Set project config path before saving
         from pathlib import Path
         if ps.output_dir and ps.output_dir.strip() != "output":
             self.project_settings_manager.set_project_path(Path(ps.output_dir))
         self.project_settings_manager.set(ps)
         self.project_settings_manager.save()
+        self._apply_project_runtime_settings(ps)
         return ps
 
     def start_new_project_analysis(self) -> None:
@@ -1684,10 +1825,9 @@ class WorkspacePagesMixin:
         self.project_param_summary.setText(summary)
 
     def on_project_common_parameters_saved(self) -> None:
-        self.normalization_settings = load_normalization_settings()
-        self.apply_config_defaults()
-        calibration = self.current_calibration()
         ps = self.project_settings_manager.get()
+        self._apply_project_runtime_settings(ps)
+        calibration = self.current_calibration()
         if hasattr(self, "temperature_page"):
             self.temperature_page.normalization_settings = self.normalization_settings
             self.temperature_page.calibration = calibration
@@ -1725,19 +1865,27 @@ class WorkspacePagesMixin:
             return
         if page_name == "project":
             self.load_project_settings()
-        self.apply_config_defaults()
-        calibration = self.current_calibration()
         ps = self.project_settings_manager.get()
+        if self.project_settings_manager.has_project_path():
+            self._apply_project_runtime_settings(ps)
+        else:
+            self.apply_config_defaults()
+            self.normalization_settings = load_normalization_settings()
+        calibration = self.current_calibration()
         if hasattr(self, "temperature_page"):
+            self.temperature_page.normalization_settings = self.normalization_settings
             self.temperature_page.calibration = calibration
             self.temperature_page.set_project_settings(ps)
         if hasattr(self, "pie_page"):
+            self.pie_page.normalization_settings = self.normalization_settings
             self.pie_page.calibration = calibration
             self.pie_page.set_project_settings(ps)
         if hasattr(self, "mole_fraction_page"):
+            self.mole_fraction_page.normalization_settings = self.normalization_settings
             self.mole_fraction_page.calibration = calibration
             self.mole_fraction_page.set_project_settings(ps)
         if hasattr(self, "pics_page"):
+            self.pics_page.normalization_settings = self.normalization_settings
             self.pics_page.calibration = calibration
             self.pics_page.set_project_settings(ps)
         self.workspace_stack.setCurrentWidget(page)
@@ -1754,11 +1902,9 @@ class WorkspacePagesMixin:
             from bl03u_masstool.core.project_settings import ProjectSettingsManager
             ps = ProjectSettingsManager().get()
             self.project_common_parameters_widget.set_project_settings(ps)
-            self.project_common_parameters_widget.load_from_settings()
         if hasattr(self, "project_peak_detection_widget"):
             ps = ProjectSettingsManager().get()
             self.project_peak_detection_widget.set_project_settings(ps)
-            self.project_peak_detection_widget.load_from_settings()
         self.switch_workspace_page("project")
         if hasattr(self, "project_tabs"):
             self.project_tabs.setCurrentWidget(self.project_common_parameters_widget)

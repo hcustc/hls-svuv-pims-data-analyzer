@@ -226,7 +226,9 @@ class ImportWorker(ProjectWorker):
                 "success": True,
                 "source": str(result.source),
                 "destination": str(result.destination),
-                "file_count": result.file_count if hasattr(result, "file_count") else 0,
+                "field_name": result.field_name,
+                "label": result.label,
+                "source_key": self.source_key,
             }
 
             self.finished.emit(self.result)

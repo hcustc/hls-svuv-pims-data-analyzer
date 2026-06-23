@@ -14,6 +14,8 @@ import yaml
 from .config import writable_project_path
 from .project_settings import ProjectSettings
 
+DATA_SOURCE_FILE_COUNT_LIMIT = 5000
+
 
 class WorkflowProfile(Enum):
     """定义可执行的分析工作流"""
@@ -192,6 +194,22 @@ class ProjectFileRecord:
     modified_at: str
     registered: bool = False
     missing: bool = False
+
+
+def _count_files_limited(path: Path, limit: int = DATA_SOURCE_FILE_COUNT_LIMIT) -> tuple[int, bool]:
+    """Count files without walking an arbitrarily large data tree.
+
+    Project data sources can point at raw beamline folders with thousands of
+    files. Validation is used from the UI, so it should confirm readability
+    quickly instead of blocking while recursively counting every file.
+    """
+    count = 0
+    for item in path.rglob("*"):
+        if item.is_file():
+            count += 1
+            if count >= limit:
+                return count, True
+    return count, False
 
 
 class ArtifactStatus(Enum):
@@ -762,14 +780,15 @@ def validate_data_source(settings: ProjectSettings, source_key: str) -> DataSour
     try:
         if path.is_file():
             file_count = 1
+            file_count_limited = False
             is_readable = os.access(path, os.R_OK)
         elif path.is_dir():
             try:
-                files = list(path.glob("**/*"))
-                file_count = sum(1 for f in files if f.is_file())
+                file_count, file_count_limited = _count_files_limited(path)
                 is_readable = os.access(path, os.R_OK | os.X_OK)
             except (PermissionError, OSError):
                 file_count = 0
+                file_count_limited = False
                 is_readable = False
         else:
             return DataSourceValidationRecord(
@@ -799,7 +818,10 @@ def validate_data_source(settings: ProjectSettings, source_key: str) -> DataSour
     except:
         last_modified = ""
 
-    detail = f"{file_count} 个文件" if is_readable and file_count > 0 else "文件数为0"
+    if is_readable and file_count > 0:
+        detail = f"至少 {file_count} 个文件" if file_count_limited else f"{file_count} 个文件"
+    else:
+        detail = "文件数为0"
 
     return DataSourceValidationRecord(
         source_key=source_key,
@@ -821,9 +843,13 @@ def validate_all_data_sources(settings: ProjectSettings) -> list[DataSourceValid
     return records
 
 
-def get_data_source_validation_status(settings: ProjectSettings) -> DataSourceValidationStatus:
+def get_data_source_validation_status(
+    settings: ProjectSettings,
+    records: list[DataSourceValidationRecord] | None = None,
+) -> DataSourceValidationStatus:
     """获取总体数据导入状态"""
-    records = validate_all_data_sources(settings)
+    if records is None:
+        records = validate_all_data_sources(settings)
 
     # 关键数据源（必需）
     essential_sources = {"single_spectrum", "sum_spectrum", "temperature_scan", "pie_scan"}
@@ -880,15 +906,19 @@ def get_project_ui_state(settings: ProjectSettings) -> ProjectUIState:
     return ProjectUIState.ANALYSIS_IN_PROGRESS
 
 
-def analyze_workflow_capabilities(settings: ProjectSettings) -> WorkflowAnalysisResult:
+def analyze_workflow_capabilities(
+    settings: ProjectSettings,
+    validation_records: list[DataSourceValidationRecord] | None = None,
+) -> WorkflowAnalysisResult:
     """分析当前项目可执行的工作流和缺少的依赖"""
     result = WorkflowAnalysisResult()
 
     # 收集所有数据源的有效性
     data_source_status = {}
-    for source_key in PROJECT_SOURCE_SPECS.keys():
-        validation = validate_data_source(settings, source_key)
-        data_source_status[source_key] = validation.is_valid
+    if validation_records is None:
+        validation_records = validate_all_data_sources(settings)
+    for validation in validation_records:
+        data_source_status[validation.source_key] = validation.is_valid
 
     result.data_source_status = data_source_status
 
