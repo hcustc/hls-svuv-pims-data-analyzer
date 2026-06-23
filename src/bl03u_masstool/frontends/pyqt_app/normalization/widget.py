@@ -133,9 +133,6 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
         self.light_source_combo.addItem("IO 光电流", "io")
         self.light_source_combo.addItem("Beam Current 储存环束流", "beam_current")
 
-        self.temperature_photon_check = QtWidgets.QCheckBox("温度扫描光强归一化")
-        self.temperature_kr_check = QtWidgets.QCheckBox("温度扫描使用Kr膨胀校正")
-
         self.pie_photon_mode_combo = QtWidgets.QComboBox()
         self.pie_photon_mode_combo.addItem("归一化到首个光强", "first")
         self.pie_photon_mode_combo.addItem("直接除以光强", "none")
@@ -150,12 +147,10 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
         row = 0
         layout.addWidget(QtWidgets.QLabel("光强来源:"), row, 0)
         layout.addWidget(self.light_source_combo, row, 1)
-        layout.addWidget(self.temperature_photon_check, row, 2, 1, 2)
 
         row += 1
         layout.addWidget(QtWidgets.QLabel("PIE光强归一化:"), row, 0)
         layout.addWidget(self.pie_photon_mode_combo, row, 1)
-        layout.addWidget(self.temperature_kr_check, row, 2, 1, 2)
 
         row += 1
         layout.addWidget(QtWidgets.QLabel("质量歧视因子 D:"), row, 0)
@@ -379,8 +374,6 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
         self.light_source_combo = QtWidgets.QComboBox()
         self.light_source_combo.addItem("IO 光电流", "io")
         self.light_source_combo.addItem("Beam Current 储存环束流", "beam_current")
-        self.temperature_photon_check = QtWidgets.QCheckBox("温度扫描光强归一化")
-        self.temperature_kr_check = QtWidgets.QCheckBox("温度扫描使用Kr膨胀校正")
         self.pie_photon_mode_combo = QtWidgets.QComboBox()
         self.pie_photon_mode_combo.addItem("归一化到首个光强", "first")
         self.pie_photon_mode_combo.addItem("直接除以光强", "none")
@@ -392,8 +385,6 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
 
         norm_layout.addWidget(QtWidgets.QLabel("光强来源:"), 0, 0)
         norm_layout.addWidget(self.light_source_combo, 0, 1)
-        norm_layout.addWidget(self.temperature_photon_check, 0, 2)
-        norm_layout.addWidget(self.temperature_kr_check, 0, 3)
         norm_layout.addWidget(QtWidgets.QLabel("PIE光强归一化:"), 1, 0)
         norm_layout.addWidget(self.pie_photon_mode_combo, 1, 1)
         norm_layout.addWidget(QtWidgets.QLabel("质量歧视因子 D:"), 1, 2)
@@ -560,8 +551,6 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
         # 这确保项目的参数设置在项目关闭/重新打开时被保留
         if self.project_settings:
             combo_set_data(self.light_source_combo, self.project_settings.light_source)
-            self.temperature_photon_check.setChecked(self.project_settings.temperature_photon_normalize)
-            self.temperature_kr_check.setChecked(self.project_settings.temperature_kr_correct)
             self.mass_discrimination_edit.setValue(self.project_settings.mass_discrimination)
             combo_set_data(self.pie_photon_mode_combo, self.project_settings.pie_photon_mode)
             self.kr_folder_edit.setText(self.project_settings.kr_calibration_folder)
@@ -575,8 +564,6 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
         else:
             # 无项目时，从本地 NormalizationSettings 加载
             combo_set_data(self.light_source_combo, self.settings.light_source)
-            self.temperature_photon_check.setChecked(self.settings.temperature_photon_normalize)
-            self.temperature_kr_check.setChecked(self.settings.temperature_kr_correct)
             self.mass_discrimination_edit.setValue(self.settings.mass_discrimination)
             combo_set_data(self.pie_photon_mode_combo, self.settings.pie_photon_mode)
             self.kr_folder_edit.setText(self.settings.kr_calibration_folder)
@@ -623,8 +610,6 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
 
     def apply_to_settings(self) -> None:
         self.settings.light_source = self.light_source_combo.currentData()
-        self.settings.temperature_photon_normalize = self.temperature_photon_check.isChecked()
-        self.settings.temperature_kr_correct = self.temperature_kr_check.isChecked()
         self.settings.mass_discrimination = self.mass_discrimination_edit.value()
         self.settings.pie_photon_mode = self.pie_photon_mode_combo.currentData()
         self.settings.kr_calibration_folder = self.kr_folder_edit.text().strip()
@@ -641,8 +626,6 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
         # 同步所有项目特定参数到 ProjectSettings
         if self.project_settings:
             self.project_settings.light_source = self.light_source_combo.currentData()
-            self.project_settings.temperature_photon_normalize = self.temperature_photon_check.isChecked()
-            self.project_settings.temperature_kr_correct = self.temperature_kr_check.isChecked()
             self.project_settings.mass_discrimination = self.mass_discrimination_edit.value()
             self.project_settings.pie_photon_mode = self.pie_photon_mode_combo.currentData()
             self.project_settings.kr_calibration_folder = self.kr_folder_edit.text().strip()
