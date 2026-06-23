@@ -1180,13 +1180,11 @@ class WorkspacePagesMixin:
         """Deprecated: Use FunctionDefaultsWidget.apply_to_settings() instead.
 
         This method was deprecated after Phase 3 UI refactoring when function
-        parameters were moved to FunctionDefaultsWidget. It's kept as a no-op
-        for backward compatibility. The actual parameter collection now happens
-        in FunctionDefaultsWidget.apply_to_settings().
+        parameters were moved to FunctionDefaultsWidget. It now delegates to the
+        widget so older call sites still persist the current parameter edits.
         """
-        # Parameters are now collected via FunctionDefaultsWidget.apply_to_settings()
-        # which is called automatically during save_and_apply_project_settings()
-        pass
+        if hasattr(self, "project_function_defaults_widget"):
+            self.project_function_defaults_widget.apply_to_settings(ps)
 
     def new_project(self) -> None:
         """清空表单，准备创建新项目"""
@@ -1264,12 +1262,7 @@ class WorkspacePagesMixin:
         This is the complete operation: initialize + apply to all tool pages.
         """
         ps = self._collect_project_settings_from_ui()
-
-        # Auto-generate project folder if needed
-        if (not ps.output_dir.strip() or ps.output_dir.strip() == "output") and (ps.project_name or ps.system):
-            ps.output_dir = self._default_project_folder(ps)
-            self.project_output_dir_edit.setText(ps.output_dir)
-            ps = self._collect_project_settings_from_ui()
+        ps = self._normalize_project_output_dir(ps)
 
         # Collect function parameters from FunctionDefaultsWidget
         if hasattr(self, "project_function_defaults_widget"):
@@ -1310,12 +1303,7 @@ class WorkspacePagesMixin:
         Use save_and_apply_project_settings() for complete setup including tools.
         """
         ps = self._collect_project_settings_from_ui()
-
-        # Auto-generate project folder if needed
-        if (not ps.output_dir.strip() or ps.output_dir.strip() == "output") and (ps.project_name or ps.system):
-            ps.output_dir = self._default_project_folder(ps)
-            self.project_output_dir_edit.setText(ps.output_dir)
-            ps = self._collect_project_settings_from_ui()
+        ps = self._normalize_project_output_dir(ps)
 
         # Collect function parameters from FunctionDefaultsWidget
         if hasattr(self, "project_function_defaults_widget"):
@@ -1520,9 +1508,37 @@ class WorkspacePagesMixin:
     # ── Lifecycle and artifact management ──────────────────────────────
 
     def _default_project_folder(self, ps: ProjectSettings) -> str:
-        slug = sanitize_project_slug(ps.project_name or ps.system or "untitled")
-        folder_name = slug if slug.lower().startswith("project") else f"Project_{slug}"
-        return str(Path("output") / folder_name)
+        return str(Path("output") / self._project_default_folder_name(ps))
+
+    def _project_folder_name(self, ps: ProjectSettings) -> str:
+        return sanitize_project_slug(ps.project_name or ps.system or "untitled")
+
+    def _project_default_folder_name(self, ps: ProjectSettings) -> str:
+        slug = self._project_folder_name(ps)
+        return slug if slug.lower().startswith("project") else f"Project_{slug}"
+
+    def _normalize_project_output_dir(self, ps: ProjectSettings) -> ProjectSettings:
+        """Resolve the project directory before initialization.
+
+        The UI label is "项目目录", but users commonly pick an existing parent
+        folder such as ~/Downloads and expect a new child folder named after the
+        project. Existing project roots and matching explicit child paths are
+        preserved.
+        """
+        raw_output = ps.output_dir.strip() if ps.output_dir else ""
+        if (not raw_output or raw_output == "output") and (ps.project_name or ps.system):
+            ps.output_dir = self._default_project_folder(ps)
+        elif ps.project_name or ps.system:
+            output_path = Path(raw_output).expanduser()
+            config_file = output_path / "config" / "project.yaml"
+            project_slug = self._project_folder_name(ps)
+            default_name = self._project_default_folder_name(ps)
+            matching_names = {project_slug, default_name}
+            if output_path.exists() and output_path.is_dir() and not config_file.exists() and output_path.name not in matching_names:
+                ps.output_dir = str(output_path / project_slug)
+
+        self.project_output_dir_edit.setText(ps.output_dir)
+        return ps
 
     def _collect_and_save_project_settings(self) -> ProjectSettings:
         ps = self._collect_project_settings_from_ui()
@@ -1537,9 +1553,7 @@ class WorkspacePagesMixin:
 
     def open_project_import_wizard(self) -> None:
         ps = self._collect_project_settings_from_ui()
-        if (not ps.output_dir.strip() or ps.output_dir.strip() == "output") and (ps.project_name or ps.system):
-            self.project_output_dir_edit.setText(self._default_project_folder(ps))
-            ps = self._collect_project_settings_from_ui()
+        ps = self._normalize_project_output_dir(ps)
         self._collect_function_params_from_ui(ps)
         ensure_project_structure(ps)
         # Set project config path early (before dialog)
