@@ -68,7 +68,6 @@ class TestArtifactCategory:
             "pie",
             "mole_fraction",
             "pics",
-            "reports",
             "snapshots",
         }
         assert category_keys == expected_keys
@@ -223,7 +222,7 @@ class TestScanProjectArtifacts:
             ensure_project_structure(settings)
 
             # Create an unregistered file in spectrum_analysis directory
-            spectrum_dir = project_root(settings) / "spectrum_analysis"
+            spectrum_dir = project_root(settings) / "analysis" / "spectrum"
             unregistered_file = spectrum_dir / "some_result.txt"
             unregistered_file.write_text("unregistered content")
 

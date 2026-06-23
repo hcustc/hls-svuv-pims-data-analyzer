@@ -208,8 +208,7 @@ class ArtifactCategory(Enum):
     TEMPERATURE = ("temperature_scan", "温度扫描", "temperature_scan")
     PIE = ("pie", "PIE拟合", "pie_analysis")
     MOLE_FRACTION = ("mole_fraction", "摩尔分数", "mole_fraction")
-    PICS = ("pics", "PICS截面数据库", "final_report")
-    REPORTS = ("reports", "综合报告", "final_report")
+    PICS = ("pics", "PICS截面数据库", "pics")
     SNAPSHOTS = ("snapshots", "版本快照", "versions")
 
     def __init__(self, key: str, label: str, directory_key: str):
@@ -234,12 +233,12 @@ class ArtifactRecord:
 PROJECT_DIRECTORIES: tuple[ProjectDirectorySpec, ...] = (
     ProjectDirectorySpec("config", "项目配置", "config", "项目级设置（YAML）"),
     ProjectDirectorySpec("raw_data", "原始输入", "raw_data", "原始谱图、样品信息和导入记录"),
-    ProjectDirectorySpec("calibration", "标定", "calibration", "定标点、定标参数和标定结果"),
-    ProjectDirectorySpec("spectrum_analysis", "谱图分析", "spectrum_analysis", "寻峰、卡峰范围和高斯拟合产物"),
-    ProjectDirectorySpec("temperature_scan", "温度扫描", "temperature_scan", "温度扫描曲线、表格和图像"),
-    ProjectDirectorySpec("pie_analysis", "PIE拟合", "pie_analysis", "PIE 曲线、物种拟合和鉴定结果"),
-    ProjectDirectorySpec("mole_fraction", "摩尔分数", "mole_fraction", "摩尔分数计算输入、结果和图像"),
-    ProjectDirectorySpec("final_report", "综合报告", "final_report", "汇总报告、说明文档和发表用图表"),
+    ProjectDirectorySpec("calibration", "标定", "analysis/calibration", "定标点、定标参数和标定结果"),
+    ProjectDirectorySpec("spectrum_analysis", "谱图分析", "analysis/spectrum", "寻峰、卡峰范围和高斯拟合产物"),
+    ProjectDirectorySpec("temperature_scan", "温度扫描", "analysis/temperature_scan", "温度扫描曲线、表格和图像"),
+    ProjectDirectorySpec("pie_analysis", "PIE拟合", "analysis/pie", "PIE 曲线、物种拟合和鉴定结果"),
+    ProjectDirectorySpec("mole_fraction", "摩尔分数", "analysis/mole_fraction", "摩尔分数计算输入、结果和图像"),
+    ProjectDirectorySpec("pics", "PICS计算", "analysis/pics", "PICS 计算结果和导入记录"),
     ProjectDirectorySpec("versions", "版本快照", "versions", "项目级 zip 快照和备份"),
 )
 
@@ -316,14 +315,6 @@ PROJECT_STAGES: tuple[ProjectStageSpec, ...] = (
         ("mole_fraction_result_file",),
         "mole_fraction",
         "载入温度/PIE结果并计算摩尔分数",
-    ),
-    ProjectStageSpec(
-        "final_report",
-        "综合报告",
-        "final_report",
-        (),
-        "project",
-        "汇总关键表格、图像和版本快照",
     ),
 )
 
@@ -668,7 +659,7 @@ def _section_for_registered_field(field_name: str) -> ProjectDirectorySpec:
         "pie_identification_result_file": "pie_analysis",
         "mole_fraction_result_file": "mole_fraction",
     }
-    return directory_spec(mapping.get(field_name, "final_report"))
+    return directory_spec(mapping.get(field_name, "spectrum_analysis"))
 
 
 def export_project_archive(settings: ProjectSettings, destination: str | Path | None = None) -> Path:
@@ -885,8 +876,8 @@ def get_project_ui_state(settings: ProjectSettings) -> ProjectUIState:
     if not analysis_started:
         return ProjectUIState.READY_TO_ANALYZE
 
-    # 检查是否已完成所有阶段
-    final_stage = statuses[-1]  # "综合报告"阶段
+    # 检查是否已完成当前配置中的最后一个分析阶段
+    final_stage = statuses[-1]
     if final_stage.completed:
         return ProjectUIState.ANALYSIS_COMPLETE
 
@@ -1041,7 +1032,7 @@ def scan_project_artifacts(settings: ProjectSettings) -> list[ArtifactRecord]:
         "temperature_scan": "temperature_scan",
         "pie_analysis": "pie",
         "mole_fraction": "mole_fraction",
-        "final_report": "reports",
+        "pics": "pics",
     }
 
     for spec in PROJECT_DIRECTORIES:
