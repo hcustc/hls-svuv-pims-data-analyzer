@@ -67,6 +67,9 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         self._clamping_region = False
         self._updating_spectrum_y_range = False
         self._updating_peak_table = False
+        self.spectrum_source_scope = self._default_spectrum_source_scope()
+        self._custom_single_spectrum_file = self.lineEdit.text().strip()
+        self._custom_sum_spectrum_folder = self.folder_path.text().strip()
         self.apply_config_defaults()
         self.configure_runtime_ui()
         self.current_time_offset = 0.0
@@ -312,6 +315,42 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         source_title.setObjectName("ToolbarSectionTitle")
         source_layout.addWidget(source_title)
 
+        scope_panel = QtWidgets.QWidget(source_panel)
+        scope_panel.setObjectName("ModePanel")
+        scope_panel.setFixedSize(218, 30)
+        scope_layout = QHBoxLayout(scope_panel)
+        scope_layout.setContentsMargins(0, 0, 0, 0)
+        scope_layout.setSpacing(6)
+        scope_label = QtWidgets.QLabel("来源", scope_panel)
+        scope_label.setObjectName("ModeTitle")
+        scope_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter)
+        scope_layout.addWidget(scope_label)
+        scope_segment = QtWidgets.QWidget(scope_panel)
+        scope_segment.setObjectName("ModeSegment")
+        scope_segment_layout = QHBoxLayout(scope_segment)
+        scope_segment_layout.setContentsMargins(0, 0, 0, 0)
+        scope_segment_layout.setSpacing(3)
+        self.projectSourceButton = QtWidgets.QToolButton(source_panel)
+        self.projectSourceButton.setText("继承项目")
+        self.projectSourceButton.setObjectName("ModeToggle")
+        self.projectSourceButton.setCheckable(True)
+        self.projectSourceButton.setFixedSize(72, 28)
+        self.projectSourceButton.setToolTip("使用项目管理中登记的质谱工作台路径")
+        self.customSourceButton = QtWidgets.QToolButton(source_panel)
+        self.customSourceButton.setText("自选路径")
+        self.customSourceButton.setObjectName("ModeToggle")
+        self.customSourceButton.setCheckable(True)
+        self.customSourceButton.setFixedSize(64, 28)
+        self.customSourceButton.setToolTip("只在当前质谱工作台使用此路径，不写回项目配置")
+        self.sourceScopeGroup = QtWidgets.QButtonGroup(source_panel)
+        self.sourceScopeGroup.setExclusive(True)
+        self.sourceScopeGroup.addButton(self.projectSourceButton, 0)
+        self.sourceScopeGroup.addButton(self.customSourceButton, 1)
+        scope_segment_layout.addWidget(self.projectSourceButton)
+        scope_segment_layout.addWidget(self.customSourceButton)
+        scope_layout.addWidget(scope_segment)
+        source_layout.addWidget(scope_panel)
+
         mode_panel = QtWidgets.QWidget(source_panel)
         mode_panel.setObjectName("ModePanel")
         mode_panel.setFixedSize(174, 30)
@@ -387,6 +426,11 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         source_stack.setCurrentIndex(0 if self.singleModeButton.isChecked() else 1)
         self.sourceModeGroup.idClicked.connect(source_stack.setCurrentIndex)
         self.sourceModeGroup.idClicked.connect(self.tabWidget.setCurrentIndex)
+        self.sourceScopeGroup.idClicked.connect(
+            lambda button_id: self.set_spectrum_source_scope("project" if button_id == 0 else "custom")
+        )
+        self.lineEdit.textEdited.connect(self._remember_custom_spectrum_paths)
+        self.folder_path.textEdited.connect(self._remember_custom_spectrum_paths)
         source_layout.addWidget(source_stack, stretch=1)
 
         for path_edit in (self.lineEdit, self.folder_path):
@@ -404,6 +448,7 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
             button.setObjectName("PrimaryToolbarButton")
             button.setMinimumWidth(72)
             button.setFixedHeight(30)
+        self._refresh_spectrum_source_controls()
         toolbar_body_layout.addWidget(source_panel)
 
         tool_panel = QtWidgets.QWidget(toolbar_body)
@@ -487,6 +532,86 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
             button.setObjectName("ArrowButton")
             button.setFixedSize(32, 28)
         self.horizontalLayout_17.addWidget(toolbar_body, stretch=1)
+
+    def _default_spectrum_source_scope(self) -> str:
+        try:
+            from bl03u_masstool.core.project_settings import ProjectSettingsManager
+
+            manager = ProjectSettingsManager()
+            if manager.has_project_path():
+                project_settings = manager.get()
+                if project_settings.single_spectrum_file or project_settings.sum_spectrum_folder:
+                    return "project"
+        except Exception:
+            pass
+        return "custom"
+
+    def _remember_custom_spectrum_paths(self, _text: str | None = None) -> None:
+        if getattr(self, "spectrum_source_scope", "custom") != "custom":
+            return
+        self._custom_single_spectrum_file = self.lineEdit.text().strip()
+        self._custom_sum_spectrum_folder = self.folder_path.text().strip()
+
+    def set_spectrum_source_scope(self, scope: str, *, apply_project: bool = True) -> None:
+        scope = "project" if scope == "project" else "custom"
+        previous_scope = getattr(self, "spectrum_source_scope", "custom")
+        if previous_scope == "custom" and scope == "project":
+            self._remember_custom_spectrum_paths()
+        self.spectrum_source_scope = scope
+
+        if hasattr(self, "projectSourceButton"):
+            self.projectSourceButton.setChecked(scope == "project")
+        if hasattr(self, "customSourceButton"):
+            self.customSourceButton.setChecked(scope == "custom")
+
+        if scope == "project" and apply_project:
+            try:
+                from bl03u_masstool.core.project_settings import ProjectSettingsManager
+
+                self.apply_project_spectrum_paths(ProjectSettingsManager().get())
+            except Exception:
+                pass
+        elif scope == "custom" and previous_scope == "project":
+            if self._custom_single_spectrum_file:
+                self.lineEdit.setText(self._custom_single_spectrum_file)
+            if self._custom_sum_spectrum_folder:
+                self.folder_path.setText(self._custom_sum_spectrum_folder)
+
+        self._refresh_spectrum_source_controls()
+
+    def _refresh_spectrum_source_controls(self) -> None:
+        use_project = getattr(self, "spectrum_source_scope", "custom") == "project"
+        if hasattr(self, "projectSourceButton"):
+            self.projectSourceButton.setChecked(use_project)
+        if hasattr(self, "customSourceButton"):
+            self.customSourceButton.setChecked(not use_project)
+        for edit, project_placeholder, custom_placeholder in (
+            (self.lineEdit, "项目未登记单谱文件", "选择或输入单谱文件路径"),
+            (self.folder_path, "项目未登记累计谱文件夹", "选择或输入累计谱文件夹路径"),
+        ):
+            edit.setReadOnly(use_project)
+            edit.setClearButtonEnabled(not use_project)
+            edit.setPlaceholderText(project_placeholder if use_project else custom_placeholder)
+        for button in (
+            getattr(self, "singleBrowseButton", None),
+            getattr(self, "sumBrowseButton", None),
+        ):
+            if button is not None:
+                button.setEnabled(not use_project)
+
+    def apply_project_spectrum_paths(self, project_settings, *, activate: bool = False) -> None:
+        has_project_source = bool(
+            getattr(project_settings, "single_spectrum_file", "")
+            or getattr(project_settings, "sum_spectrum_folder", "")
+        )
+        if activate and has_project_source:
+            self.set_spectrum_source_scope("project", apply_project=False)
+        if getattr(self, "spectrum_source_scope", "custom") != "project":
+            self._refresh_spectrum_source_controls()
+            return
+        self.lineEdit.setText(getattr(project_settings, "single_spectrum_file", ""))
+        self.folder_path.setText(getattr(project_settings, "sum_spectrum_folder", ""))
+        self._refresh_spectrum_source_controls()
 
     def set_x_axis_mode(self):
         combo = getattr(self, "xAxisModeCombo", None)
@@ -690,6 +815,7 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         )
         if file_path:
             self.lineEdit.setText(file_path)
+            self._remember_custom_spectrum_paths()
 
     def choose_sum_folder(self):
         folder_path = QFileDialog.getExistingDirectory(
@@ -699,6 +825,7 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         )
         if folder_path:
             self.folder_path.setText(folder_path)
+            self._remember_custom_spectrum_paths()
 
     def current_calibration(self):
         return Calibration(

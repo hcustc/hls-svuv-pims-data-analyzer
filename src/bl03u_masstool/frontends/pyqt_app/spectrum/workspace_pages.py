@@ -191,8 +191,8 @@ class WorkspacePagesMixin:
             self.normalization_settings,
             self.current_calibration(),
             self.project_tabs,
+            show_actions=False,
         )
-        self.project_common_parameters_widget.save_button.clicked.connect(self.on_project_common_parameters_saved)
         self.project_common_parameters_widget.settings_saved.connect(self.on_project_common_parameters_saved)
         # 立即设置ProjectSettings
         self.project_common_parameters_widget.set_project_settings(ProjectSettingsManager().get())
@@ -1091,10 +1091,8 @@ class WorkspacePagesMixin:
     def _apply_settings_to_tools(self, ps: ProjectSettings) -> None:
         """Internal method: sync project settings to all tool pages."""
         self._apply_project_runtime_settings(ps)
-        if ps.single_spectrum_file:
-            self.lineEdit.setText(ps.single_spectrum_file)
-        if ps.sum_spectrum_folder:
-            self.folder_path.setText(ps.sum_spectrum_folder)
+        if hasattr(self, "apply_project_spectrum_paths"):
+            self.apply_project_spectrum_paths(ps, activate=True)
         # Temperature page and PIE page are now read-only parameter displays
         # No need to manually set folder_edit - parameters come from ProjectSettings
         if hasattr(self, "temperature_page"):
@@ -1152,13 +1150,8 @@ class WorkspacePagesMixin:
         ps = self._collect_project_settings_from_ui()
         self.project_settings_manager.set(ps)
         self.project_settings_manager.save()
-        # Push editable paths to Spectrum tool page
-        val = self.project_single_file_edit.text().strip()
-        if val:
-            self.lineEdit.setText(val)
-        val = self.project_sum_folder_edit.text().strip()
-        if val:
-            self.folder_path.setText(val)
+        if hasattr(self, "apply_project_spectrum_paths"):
+            self.apply_project_spectrum_paths(ps)
 
         # Phase 3 Step 2: Persist PIE configuration state after ProjectSettings save
         if hasattr(self, "pie_page"):
@@ -1172,14 +1165,8 @@ class WorkspacePagesMixin:
     def _push_path_to_tool(self, kind: str) -> None:
         """Push a single path field from project management to the corresponding editable tool page.
         Note: Temperature and PIE pages are read-only, so only Spectrum tool is updated."""
-        if kind == "single":
-            val = self.project_single_file_edit.text().strip()
-            if val:
-                self.lineEdit.setText(val)
-        elif kind == "sum":
-            val = self.project_sum_folder_edit.text().strip()
-            if val:
-                self.folder_path.setText(val)
+        if hasattr(self, "apply_project_spectrum_paths"):
+            self.apply_project_spectrum_paths(self._collect_project_settings_from_ui())
 
     def import_project_datasource(self) -> None:
         """Import a raw data source into the active project in the background."""
