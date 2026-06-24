@@ -5,19 +5,19 @@ normalization:
   pie_photon_mode: first
   mass_discrimination: 1.0
   kr_calibration_folder: /Users/huangchen/Downloads/顺-13-二甲基环己烷 30 torr/温度扫描/14.6-14.8eV/
-  kr_calibration_peak_file: ''
+  kr_calibration_peak_file: /Users/huangchen/Downloads/顺-13-二甲基环己烷 30 torr/peak_ranges-DHMC.csv
   kr_mz: 84
   expansion_factors:
     650.0: 1.0
     750.0: 1.0
     800.0: 1.0
     850.0: 1.0
-    875.0: 0.999842803004034
+    875.0: 0.9939669817319615
     900.0: 1.0
-    925.0: 1.0082859976074727
-    950.0: 1.0092146084432485
-    975.0: 1.0120791750696545
-    1000.0: 1.0005354061414384
+    925.0: 0.9107008142264335
+    950.0: 0.846872399859194
+    975.0: 0.8921933471583274
+    1000.0: 0.8484157375890782
   selected_elements:
   - H
   - C
