@@ -55,6 +55,29 @@ def test_peak_detection_detects_simple_peak():
     assert peaks[0].mz == peaks[0].time
 
 
+def test_integrate_peak_falls_back_when_gaussian_area_is_zero():
+    y = [0.0] * 100
+    y[42] = 46.0
+    y[43] = 30.0
+    y[44] = 8.0
+    y[45] = 2.0
+    peak = Peak(
+        index=50,
+        time=50.0,
+        mz=84.0,
+        intensity=0.0,
+        fwhm=21.0,
+        left_bound=40,
+        right_bound=61,
+        is_auto=False,
+    )
+
+    assert integrate_peak(y, peak, prefer_gaussian=True) == pytest.approx(
+        integrate_peak(y, peak, prefer_gaussian=False)
+    )
+    assert integrate_peak(y, peak, prefer_gaussian=True) > 0
+
+
 def test_prominence_peak_detection_handles_baseline_and_noise():
     y = [5.0] * 20 + [5.5, 8.0, 18.0, 8.0, 5.5] + [5.0] * 20
     peaks = detect_peaks_prominence(

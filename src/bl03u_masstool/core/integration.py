@@ -38,7 +38,9 @@ def integrate_peak(y_data: Iterable[float], peak: Peak, *, prefer_gaussian: bool
         window_size = max(5, min(30, int(peak.right_bound) - int(peak.left_bound) + 5))
         fit = fit_gaussian(y_data, int(round(peak.index)), window_size)
         if fit is not None:
-            return gaussian_area(fit.amplitude, fit.fwhm)
+            area = gaussian_area(fit.amplitude, fit.fwhm)
+            if area > 0:
+                return area
     return baseline_corrected_area(y_data, peak.left_bound, peak.right_bound)
 
 

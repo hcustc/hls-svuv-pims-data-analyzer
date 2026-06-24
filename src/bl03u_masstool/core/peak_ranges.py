@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import re
 from typing import Any
 
 import pandas as pd
@@ -21,8 +22,19 @@ class PeakRange:
 
 
 COLUMN_ALIASES = {
-    "mz": {"mz", "m/z", "mass", "mass_number", "质量数", "质荷比"},
-    "peak_index": {"peak", "index", "center", "center_idx", "tof", "time", "峰位", "中心", "中心点"},
+    "mz": {"mz", "m/z", "mass", "mass_number", "质量数", "质量数 (m/z)", "质量数(m/z)", "质荷比"},
+    "peak_index": {
+        "peak",
+        "index",
+        "center",
+        "center_idx",
+        "tof",
+        "time",
+        "飞行时间",
+        "峰位",
+        "中心",
+        "中心点",
+    },
     "left_bound": {"start", "left", "left_bound", "start_idx", "起点", "左边界"},
     "right_bound": {"end", "right", "right_bound", "end_idx", "终点", "右边界"},
     "label": {"formula", "species", "name", "label", "物种", "名称", "分子式"},
@@ -107,12 +119,18 @@ def _normalize_record(record: dict[str, Any]) -> dict[str, Any]:
     for key, value in record.items():
         if pd.isna(value):
             continue
-        compact_key = str(key).strip().lower()
+        compact_key = _normalize_column_key(key)
         for canonical, aliases in COLUMN_ALIASES.items():
-            if compact_key in aliases:
+            if compact_key in {_normalize_column_key(alias) for alias in aliases}:
                 normalized[canonical] = value
                 break
     return normalized
+
+
+def _normalize_column_key(key: Any) -> str:
+    text = str(key).strip().lower().lstrip("\ufeff")
+    text = text.replace("（", "(").replace("）", ")").replace("／", "/")
+    return re.sub(r"\s+", "", text)
 
 
 def _optional_float(record: dict[str, Any], key: str) -> float | None:

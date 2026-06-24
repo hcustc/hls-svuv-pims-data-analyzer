@@ -86,6 +86,24 @@ peak_integration:
     assert ranges[0].right_bound == 24
 
 
+def test_load_manual_peak_ranges_uses_mz_as_peak_identity(tmp_path):
+    path = tmp_path / "peaks.csv"
+    path.write_text(
+        "\ufeffSpecies,飞行时间,质量数 (m/z),强度,左边界,右边界\n"
+        "Kr,14251.12,84.11,853,14240,14261\n",
+        encoding="utf-8-sig",
+    )
+
+    ranges = load_peak_ranges(path, calibration=Calibration(a=0, b=999, c=0))
+
+    assert len(ranges) == 1
+    assert ranges[0].label == "Kr"
+    assert ranges[0].mz == pytest.approx(84.11)
+    assert ranges[0].peak_index == 14251
+    assert ranges[0].left_bound == 14240
+    assert ranges[0].right_bound == 14261
+
+
 def test_temperature_scan_uses_manual_peak_file_and_io_normalization(tmp_path):
     peak_file = tmp_path / "peaks.csv"
     peak_file.write_text("mz,peak,start,end\n22,22,21,23\n", encoding="utf-8")
@@ -225,6 +243,47 @@ def test_kr_expansion_allows_user_selected_low_energy_folder(tmp_path):
     )
     assert factors["temperature"].tolist() == [400.0]
     assert factors["expansion_lambda"].tolist() == [1.0]
+
+
+def test_kr_expansion_reads_first_level_energy_subfolders(tmp_path):
+    peak_file = tmp_path / "peaks.csv"
+    peak_file.write_text("mz,peak,start,end\n84,22,21,23\n", encoding="utf-8")
+    energy_dir = tmp_path / "14.6-14.8eV"
+    energy_dir.mkdir()
+
+    def write_spectrum(name: str, temperature: float, scale: float):
+        y = [0.0] * 50
+        y[21] = 1.0 * scale
+        y[22] = 10.0 * scale
+        y[23] = 1.0 * scale
+        header = [
+            "Energy:14.7 eV",
+            "IO:10 nA",
+            "Beam Current:1mA",
+            "Undulator Offset:0mm",
+            "Time:1 s",
+            "Burner Position:0 mm",
+            f"Temperature:{temperature} C",
+            "DIFF PRESSURE:1Pa",
+            "ION PRESSURE:1Pa",
+            "TOF PRESSURE:1Pa",
+        ]
+        (energy_dir / name).write_text("\n".join(header + [str(value) for value in y]), encoding="utf-8")
+
+    write_spectrum("low.txt", 400.0, 1.0)
+    write_spectrum("high.txt", 800.0, 2.0)
+
+    factors = compute_kr_expansion_factors(
+        tmp_path,
+        calibration=Calibration(a=0, b=1, c=0),
+        kr_mz=84,
+        manual_peak_path=peak_file,
+        light_source="io",
+        prefer_gaussian=False,
+    )
+
+    assert factors["temperature"].tolist() == [400.0, 800.0]
+    assert [round(value, 6) for value in factors["expansion_lambda"].tolist()] == [1.0, 2.0]
 
 
 def test_temperature_scan_sum_reference_finds_peaks_across_temperatures(tmp_path):

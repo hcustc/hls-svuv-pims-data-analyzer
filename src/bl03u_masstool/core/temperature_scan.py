@@ -129,7 +129,7 @@ def analyze_temperature_folder(
     temp_curve_class_change_threshold: float = 0.25,
     temp_curve_class_peak_fraction: float = 0.65,
 ) -> pd.DataFrame:
-    files = list_spectrum_files(folder, (".txt",))
+    files = _iter_temperature_files(folder, (".txt",))
     spectra = []
     for idx, path in enumerate(files):
         spectrum = read_spectrum(path, header_lines=10, trim_start=0)
@@ -240,6 +240,24 @@ def analyze_temperature_folder(
         relative_change_threshold=temp_curve_class_change_threshold,
         endpoint_peak_fraction=temp_curve_class_peak_fraction,
     )
+
+
+def _iter_temperature_files(folder: str | Path, suffixes: tuple[str, ...]) -> list[Path]:
+    direct_files = list_spectrum_files(folder, suffixes)
+    if direct_files:
+        return direct_files
+
+    root = Path(folder)
+    nested_files: list[Path] = []
+    for child in sorted(root.iterdir()):
+        if not child.is_dir():
+            continue
+        nested_files.extend(
+            path
+            for path in sorted(child.iterdir())
+            if path.is_file() and path.suffix.lower() in suffixes
+        )
+    return sorted(nested_files)
 
 
 def _build_reference_spectrum(spectra: list[tuple[float, Path, Spectrum, float, float]], reference_mode: str) -> tuple[float, Spectrum, str]:
