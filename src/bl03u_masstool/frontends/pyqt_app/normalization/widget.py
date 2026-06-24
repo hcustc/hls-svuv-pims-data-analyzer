@@ -194,6 +194,8 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
             edit.setMaximumWidth(180)
             # 隐藏上下箭头，允许直接修改数值
             edit.setButtonSymbols(QtWidgets.QAbstractSpinBox.ButtonSymbols.NoButtons)
+            # 获得焦点时自动全选，方便粘贴
+            edit.focusInEvent = lambda evt, e=edit: (e.selectAll(), type(e).focusInEvent(e, evt))
 
         layout.addWidget(QtWidgets.QLabel("A:"), 0, 0)
         layout.addWidget(self.calibration_a_edit, 0, 1)
@@ -450,6 +452,8 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
             edit.setSingleStep(0.000000001)
             # 隐藏上下箭头，允许直接修改数值
             edit.setButtonSymbols(QtWidgets.QAbstractSpinBox.ButtonSymbols.NoButtons)
+            # 获得焦点时自动全选，方便粘贴
+            edit.focusInEvent = lambda evt, e=edit: (e.selectAll(), type(e).focusInEvent(e, evt))
 
         cal_layout.addWidget(QtWidgets.QLabel("A:"), 0, 0)
         cal_layout.addWidget(self.calibration_a_edit, 0, 1)
