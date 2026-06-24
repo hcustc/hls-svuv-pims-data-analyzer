@@ -501,16 +501,15 @@ def compute_kr_expansion_factors(
     if kr_rows.empty:
         raise ValueError(f"Kr m/z {kr_mz} was not found in the calibration folder")
 
-    # 检测是否为多能量数据
-    unique_energies = kr_rows["photon_energy"].nunique()
-    is_multi_energy = unique_energies > 1
+    # 文件头中的 photon energy 会有小幅漂移，例如 14.6092 和 14.6103
+    # 实际属于同一个名义能量点。先按容差合并，再在每个能量组内计算 λ(T)。
+    unique_energy_values = sorted(float(energy) for energy in kr_rows["photon_energy"].dropna().unique())
+    energy_groups = group_energies_by_tolerance(unique_energy_values, tolerance=0.01)
 
-    if is_multi_energy:
-        # 多能量：保留所有能量点的单独计算结果
-        # widget层将处理平均和显示选项
+    if len(unique_energy_values) > 1:
         result_rows = []
-        for energy in sorted(kr_rows["photon_energy"].unique()):
-            energy_kr = kr_rows[kr_rows["photon_energy"] == energy]
+        for center_energy, grouped_energies in sorted(energy_groups.items()):
+            energy_kr = kr_rows[kr_rows["photon_energy"].isin(grouped_energies)]
             kr_by_temperature = energy_kr.groupby("temperature")["photon_normalized_area"].sum().sort_index()
             positive_kr = kr_by_temperature[kr_by_temperature > 0]
 
@@ -529,7 +528,7 @@ def compute_kr_expansion_factors(
                 lambda_by_temperature.astype(float).values,
             ):
                 result_rows.append({
-                    "photon_energy": float(energy),
+                    "photon_energy": float(center_energy),
                     "temperature": float(temp),
                     "kr_signal": float(signal),
                     "expansion_lambda": float(lambda_val),
@@ -539,7 +538,10 @@ def compute_kr_expansion_factors(
         if not result_rows:
             raise ValueError("No valid Kr signals found at any energy point")
 
-        return pd.DataFrame(result_rows)
+        grouped_df = pd.DataFrame(result_rows)
+        if len(energy_groups) > 1:
+            return grouped_df
+        return grouped_df.drop(columns=["photon_energy"])
     else:
         # 单能量：使用原有逻辑（向后兼容）
         kr_by_temperature = kr_rows.groupby("temperature")["photon_normalized_area"].sum().sort_index()

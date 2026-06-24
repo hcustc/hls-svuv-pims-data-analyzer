@@ -318,7 +318,7 @@ class TestImportSafety:
                 import_project_source(settings, root, "sum_spectrum")
 
     def test_import_normal_external_source_succeeds(self):
-        """Test that importing from external directory succeeds."""
+        """Test that importing from external directory links it into raw_data."""
         with TemporaryDirectory() as tmpdir:
             settings = ProjectSettings(
                 output_dir=tmpdir,
@@ -334,6 +334,28 @@ class TestImportSafety:
 
             # This should succeed
             result = import_project_source(settings, external_dir, "sum_spectrum")
+            assert result.mode == "link"
+            assert result.destination.is_symlink()
+            assert result.destination.resolve() == external_dir.resolve()
+            assert (result.destination / "test.txt").exists()
+
+    def test_copy_mode_still_copies_external_source(self):
+        """Test explicit copy mode for archival workflows."""
+        with TemporaryDirectory() as tmpdir:
+            settings = ProjectSettings(
+                output_dir=tmpdir,
+                project_name="test_project",
+                system="test_system",
+            )
+            ensure_project_structure(settings)
+
+            external_dir = Path(tmpdir) / "external_data"
+            external_dir.mkdir()
+            (external_dir / "test.txt").write_text("test data")
+
+            result = import_project_source(settings, external_dir, "sum_spectrum", mode="copy")
+            assert result.mode == "copy"
+            assert not result.destination.is_symlink()
             assert result.destination.exists()
             assert (result.destination / "test.txt").exists()
 

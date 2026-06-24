@@ -42,7 +42,11 @@ def test_project_lifecycle_creates_structure_and_imports_initial_data(tmp_path):
 
     assert len(results) == 1
     assert settings.single_spectrum_file.endswith("raw_data/single_spectrum/single.txt")
-    assert (tmp_path / "Project_C6F11O2H" / "raw_data" / "single_spectrum" / "single.txt").exists()
+    linked_file = tmp_path / "Project_C6F11O2H" / "raw_data" / "single_spectrum" / "single.txt"
+    assert linked_file.is_symlink()
+    assert linked_file.resolve() == single_file.resolve()
+    manifest = tmp_path / "Project_C6F11O2H" / "raw_data" / "_sources.yaml"
+    assert manifest.exists()
 
     statuses = {status.key: status for status in build_project_stage_statuses(settings)}
     assert statuses["project_setup"].completed is True

@@ -1149,7 +1149,8 @@ class WorkspacePagesMixin:
         self.refresh_project_datasource_page(ps)
 
         label = result.get("label") or "数据源"
-        self.statusbar.showMessage(f"✓ {label}已导入并登记：{destination}", 5000)
+        action = "链接" if result.get("mode") == "link" else "导入"
+        self.statusbar.showMessage(f"✓ {label}已{action}并登记：{destination}", 5000)
 
     def _on_import_error(self, message: str) -> None:
         if hasattr(self, "_import_progress_dialog"):

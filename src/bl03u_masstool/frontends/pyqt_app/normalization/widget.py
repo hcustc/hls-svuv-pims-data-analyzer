@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from PyQt6 import QtCore, QtWidgets
+from PyQt6 import QtCore, QtGui, QtWidgets
 
 from bl03u_masstool.core.calibration import Calibration, tof_to_mz
 from bl03u_masstool.core.config import (
@@ -31,9 +32,70 @@ from bl03u_masstool.core.output_paths import ensure_output_dir
 
 class AutoSelectDoubleSpinBox(QtWidgets.QDoubleSpinBox):
     """QDoubleSpinBox that auto-selects all text when focused"""
+
+    _FLOAT_PATTERN = re.compile(
+        r"(?<![A-Za-z0-9_])[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?(?![A-Za-z0-9_])"
+    )
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.lineEdit().installEventFilter(self)
+
     def focusInEvent(self, event):
         super().focusInEvent(event)
         self.selectAll()
+
+    def eventFilter(self, watched, event):
+        if (
+            watched is self.lineEdit()
+            and event.type() == QtCore.QEvent.Type.KeyPress
+            and self._is_paste_event(event)
+        ):
+            self._paste_clipboard_text()
+            event.accept()
+            return True
+        return super().eventFilter(watched, event)
+
+    def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:
+        if self._is_paste_event(event):
+            self._paste_clipboard_text()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def _is_paste_event(self, event: QtGui.QKeyEvent) -> bool:
+        modifiers = event.modifiers()
+        return event.matches(QtGui.QKeySequence.StandardKey.Paste) or (
+            event.key() == QtCore.Qt.Key.Key_V
+            and bool(
+                modifiers
+                & (
+                    QtCore.Qt.KeyboardModifier.ControlModifier
+                    | QtCore.Qt.KeyboardModifier.MetaModifier
+                )
+            )
+        )
+
+    def _paste_clipboard_text(self) -> None:
+        value = self._number_from_clipboard()
+        if value is not None:
+            self.setValue(value)
+            self.selectAll()
+            return
+        self.lineEdit().paste()
+        self.interpretText()
+
+    def _number_from_clipboard(self) -> float | None:
+        text = QtWidgets.QApplication.clipboard().text().strip()
+        if not text:
+            return None
+        try:
+            return float(text)
+        except ValueError:
+            match = self._FLOAT_PATTERN.search(text)
+            if match:
+                return float(match.group(0))
+        return None
 from bl03u_masstool.core.pie_analysis import analyze_pie_folder, build_pie_curves, identify_species_for_mz_with_curve, load_species_database, analyze_multiple_pie_folders, merge_pie_segments
 from bl03u_masstool.core.pics_calculator import calc_pics_single_energy
 from bl03u_masstool.core.elements import get_all_elements_from_database, filter_species_by_elements, COMMON_ELEMENTS, parse_formula as parse_formula_elements, get_elements_from_formula
@@ -841,6 +903,7 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
                 })
             avg_df = pd.DataFrame(avg_data)
             self.settings.expansion_factors = parse_expansion_factors_from_result(avg_df)
+            self._kr_display_factors = dict(self.settings.expansion_factors)
 
             # 按误差容忍度将能量值分组
             all_energies = sorted(df["photon_energy"].unique().tolist())
@@ -870,6 +933,7 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
         else:
             # 单能量
             self.settings.expansion_factors = parse_expansion_factors_from_result(df)
+            self._kr_display_factors = dict(self.settings.expansion_factors)
             self._kr_signal_data = {
                 float(row["temperature"]): float(row["kr_signal"])
                 for _, row in df.iterrows()
@@ -930,6 +994,10 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
             float(row["temperature"]): float(row["kr_signal"])
             for row in result_data
         }
+        self._kr_display_factors = {
+            float(row["temperature"]): float(row["expansion_lambda"])
+            for row in result_data
+        }
 
         self.refresh_factor_table()
 
@@ -954,22 +1022,23 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
 
     def refresh_factor_table(self) -> None:
         kr_signal = getattr(self, "_kr_signal_data", {})
+        display_factors = getattr(self, "_kr_display_factors", self.settings.expansion_factors)
         self.factor_table.setRowCount(0)
 
         # 检测膨胀系数格式（单能量或多能量）
-        if not self.settings.expansion_factors:
+        if not display_factors:
             return
 
-        first_key = next(iter(self.settings.expansion_factors.keys()), None)
+        first_key = next(iter(display_factors.keys()), None)
         if first_key is None:
             return
 
-        is_multi_energy = isinstance(self.settings.expansion_factors[first_key], dict)
+        is_multi_energy = isinstance(display_factors[first_key], dict)
 
         if is_multi_energy:
             # 多能量格式：{能量: {温度: 膨胀系数}}
-            for energy in sorted(self.settings.expansion_factors.keys()):
-                temp_factors = self.settings.expansion_factors[energy]
+            for energy in sorted(display_factors.keys()):
+                temp_factors = display_factors[energy]
                 for temp in sorted(temp_factors.keys()):
                     row = self.factor_table.rowCount()
                     self.factor_table.insertRow(row)
@@ -983,14 +1052,14 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
                     self.factor_table.setItem(row, 2, QtWidgets.QTableWidgetItem(energy_text))
         else:
             # 单能量格式：{温度: 膨胀系数}
-            for temp in sorted(self.settings.expansion_factors.keys()):
+            for temp in sorted(display_factors.keys()):
                 row = self.factor_table.rowCount()
                 self.factor_table.insertRow(row)
                 self.factor_table.setItem(row, 0, QtWidgets.QTableWidgetItem(f"{int(temp)}"))
                 signal = kr_signal.get(temp, None)
                 sig_text = f"{signal:.4f}" if signal is not None else "-"
                 self.factor_table.setItem(row, 1, QtWidgets.QTableWidgetItem(sig_text))
-                lam = self.settings.expansion_factors[temp]
+                lam = display_factors[temp]
                 self.factor_table.setItem(row, 2, QtWidgets.QTableWidgetItem(f"{lam:.6f}"))
 
 

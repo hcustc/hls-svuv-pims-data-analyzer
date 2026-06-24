@@ -238,8 +238,10 @@ class TestImportWorker:
             assert result["success"] is True
             assert result["field_name"] == "temperature_scan_folder"
             assert result["label"] == "温度扫描目录"
+            assert result["mode"] == "link"
             assert result["source_key"] == "temperature_scan"
             assert Path(result["destination"]).exists()
+            assert Path(result["destination"]).is_symlink()
 
     def test_export_worker_run_success(self, qapp):
         """Test successful project export."""
