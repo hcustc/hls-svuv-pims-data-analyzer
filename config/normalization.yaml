@@ -6,6 +6,7 @@ normalization:
   mass_discrimination: 1.0
   kr_calibration_folder: /Users/huangchen/Downloads/顺-13-二甲基环己烷 30 torr/温度扫描/14.6-14.8eV/
   kr_calibration_peak_file: ''
+  kr_mz: 84
   expansion_factors:
     650.0: 1.0
     750.0: 1.0

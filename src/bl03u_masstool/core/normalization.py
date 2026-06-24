@@ -22,6 +22,7 @@ class NormalizationSettings:
     mass_discrimination: float = 1.0
     kr_calibration_folder: str = ""
     kr_calibration_peak_file: str = ""
+    kr_mz: int = 84
     expansion_factors: dict[float, float] = field(default_factory=dict)
     selected_elements: list[str] = field(default_factory=list)
 
