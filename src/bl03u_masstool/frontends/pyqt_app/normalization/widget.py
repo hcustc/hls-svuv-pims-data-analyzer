@@ -26,6 +26,14 @@ from bl03u_masstool.core.isotope import (
 )
 from bl03u_masstool.core.nist_webbook import default_nist_webbook_client
 from bl03u_masstool.core.output_paths import ensure_output_dir
+
+
+
+class AutoSelectDoubleSpinBox(QtWidgets.QDoubleSpinBox):
+    """QDoubleSpinBox that auto-selects all text when focused"""
+    def focusInEvent(self, event):
+        super().focusInEvent(event)
+        self.selectAll()
 from bl03u_masstool.core.pie_analysis import analyze_pie_folder, build_pie_curves, identify_species_for_mz_with_curve, load_species_database, analyze_multiple_pie_folders, merge_pie_segments
 from bl03u_masstool.core.pics_calculator import calc_pics_single_energy
 from bl03u_masstool.core.elements import get_all_elements_from_database, filter_species_by_elements, COMMON_ELEMENTS, parse_formula as parse_formula_elements, get_elements_from_formula
@@ -182,9 +190,9 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
         layout.setHorizontalSpacing(12)
         layout.setVerticalSpacing(8)
 
-        self.calibration_a_edit = QtWidgets.QDoubleSpinBox()
-        self.calibration_b_edit = QtWidgets.QDoubleSpinBox()
-        self.calibration_c_edit = QtWidgets.QDoubleSpinBox()
+        self.calibration_a_edit = AutoSelectDoubleSpinBox()
+        self.calibration_b_edit = AutoSelectDoubleSpinBox()
+        self.calibration_c_edit = AutoSelectDoubleSpinBox()
 
         for edit in (self.calibration_a_edit, self.calibration_b_edit, self.calibration_c_edit):
             edit.setRange(-1_000_000, 1_000_000)
@@ -194,8 +202,6 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
             edit.setMaximumWidth(180)
             # 隐藏上下箭头，允许直接修改数值
             edit.setButtonSymbols(QtWidgets.QAbstractSpinBox.ButtonSymbols.NoButtons)
-            # 获得焦点时自动全选，方便粘贴
-            edit.focusInEvent = lambda evt, e=edit: (e.selectAll(), type(e).focusInEvent(e, evt))
 
         layout.addWidget(QtWidgets.QLabel("A:"), 0, 0)
         layout.addWidget(self.calibration_a_edit, 0, 1)
@@ -443,17 +449,15 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
         cal_layout.setHorizontalSpacing(10)
         cal_layout.setVerticalSpacing(8)
 
-        self.calibration_a_edit = QtWidgets.QDoubleSpinBox()
-        self.calibration_b_edit = QtWidgets.QDoubleSpinBox()
-        self.calibration_c_edit = QtWidgets.QDoubleSpinBox()
+        self.calibration_a_edit = AutoSelectDoubleSpinBox()
+        self.calibration_b_edit = AutoSelectDoubleSpinBox()
+        self.calibration_c_edit = AutoSelectDoubleSpinBox()
         for edit in (self.calibration_a_edit, self.calibration_b_edit, self.calibration_c_edit):
             edit.setRange(-1_000_000, 1_000_000)
             edit.setDecimals(12)
             edit.setSingleStep(0.000000001)
             # 隐藏上下箭头，允许直接修改数值
             edit.setButtonSymbols(QtWidgets.QAbstractSpinBox.ButtonSymbols.NoButtons)
-            # 获得焦点时自动全选，方便粘贴
-            edit.focusInEvent = lambda evt, e=edit: (e.selectAll(), type(e).focusInEvent(e, evt))
 
         cal_layout.addWidget(QtWidgets.QLabel("A:"), 0, 0)
         cal_layout.addWidget(self.calibration_a_edit, 0, 1)
