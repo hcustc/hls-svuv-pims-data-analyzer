@@ -279,6 +279,20 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
         kr_form.addWidget(QtWidgets.QLabel("卡峰方式:"), 1, 0)
         kr_form.addLayout(peak_mode_layout, 1, 1, 1, 2)
 
+        # Kr质量数选择
+        kr_mz_layout = QtWidgets.QHBoxLayout()
+        kr_mz_layout.setContentsMargins(0, 0, 0, 0)
+        kr_mz_layout.setSpacing(8)
+        self.kr_mz_combo = QtWidgets.QComboBox()
+        self.kr_mz_combo.addItems(["84", "86"])
+        self.kr_mz_combo.setCurrentText("84")
+        self.kr_mz_combo.setMaximumWidth(80)
+        kr_mz_layout.addWidget(QtWidgets.QLabel("Kr质量数:"), 0)
+        kr_mz_layout.addWidget(self.kr_mz_combo, 0)
+        kr_mz_layout.addStretch(1)
+        kr_form.addWidget(QtWidgets.QLabel("质量数:"), 2, 0)
+        kr_form.addLayout(kr_mz_layout, 2, 1, 1, 2)
+
         # 卡峰文件
         self.kr_peak_file_edit = QtWidgets.QLineEdit()
         self.kr_peak_file_edit.setPlaceholderText("选择Kr手动卡峰文件 (*.csv, *.yaml, *.yml)")
@@ -287,9 +301,9 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
         self.kr_peak_file_button.setFixedWidth(72)
         self.kr_peak_file_button.setEnabled(False)
         self.kr_peak_file_button.clicked.connect(self.select_kr_peak_file)
-        kr_form.addWidget(QtWidgets.QLabel("卡峰文件:"), 2, 0)
-        kr_form.addWidget(self.kr_peak_file_edit, 2, 1)
-        kr_form.addWidget(self.kr_peak_file_button, 2, 2)
+        kr_form.addWidget(QtWidgets.QLabel("卡峰文件:"), 3, 0)
+        kr_form.addWidget(self.kr_peak_file_edit, 3, 1)
+        kr_form.addWidget(self.kr_peak_file_button, 3, 2)
 
         # 计算按钮和能量选择
         compute_layout = QtWidgets.QHBoxLayout()
@@ -307,8 +321,8 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
         compute_layout.addWidget(QtWidgets.QLabel("能量选择:"), 0)
         compute_layout.addWidget(self.energy_combo, 0)
         compute_layout.addStretch(1)
-        kr_form.addWidget(QtWidgets.QLabel("计算:"), 3, 0)
-        kr_form.addLayout(compute_layout, 3, 1, 1, 2)
+        kr_form.addWidget(QtWidgets.QLabel("计算:"), 4, 0)
+        kr_form.addLayout(compute_layout, 4, 1, 1, 2)
         kr_form.setColumnStretch(1, 1)
         layout.addLayout(kr_form)
 
@@ -580,6 +594,7 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
             combo_set_data(self.pie_photon_mode_combo, self.project_settings.pie_photon_mode)
             self.kr_folder_edit.setText(self.project_settings.kr_calibration_folder)
             self.kr_peak_file_edit.setText(self.project_settings.kr_calibration_peak_file)
+            self.kr_mz_combo.setCurrentText(str(self.project_settings.kr_mz))
             self.settings.expansion_factors = dict(self.project_settings.expansion_factors)
             self.settings.selected_elements = list(self.project_settings.selected_elements)
             # 根据是否有卡峰文件来设置模式
@@ -593,6 +608,7 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
             combo_set_data(self.pie_photon_mode_combo, self.settings.pie_photon_mode)
             self.kr_folder_edit.setText(self.settings.kr_calibration_folder)
             self.kr_peak_file_edit.setText(self.settings.kr_calibration_peak_file)
+            self.kr_mz_combo.setCurrentText(str(self.settings.kr_mz))
             # 根据是否有卡峰文件来设置模式
             use_manual_peak = bool(self.settings.kr_calibration_peak_file.strip())
             self.kr_peak_mode_manual_radio.setChecked(use_manual_peak)
@@ -638,6 +654,7 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
         self.settings.mass_discrimination = self.mass_discrimination_edit.value()
         self.settings.pie_photon_mode = self.pie_photon_mode_combo.currentData()
         self.settings.kr_calibration_folder = self.kr_folder_edit.text().strip()
+        self.settings.kr_mz = int(self.kr_mz_combo.currentText())
         # 根据卡峰模式决定是否保存卡峰文件路径
         if self.kr_peak_mode_manual_radio.isChecked():
             self.settings.kr_calibration_peak_file = self.kr_peak_file_edit.text().strip()
@@ -654,6 +671,7 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
             target.mass_discrimination = self.settings.mass_discrimination
             target.pie_photon_mode = self.settings.pie_photon_mode
             target.kr_calibration_folder = self.settings.kr_calibration_folder
+            target.kr_mz = int(self.kr_mz_combo.currentText())
             # 根据卡峰模式决定是否保存卡峰文件路径
             if self.kr_peak_mode_manual_radio.isChecked():
                 target.kr_calibration_peak_file = self.kr_peak_file_edit.text().strip()
@@ -750,6 +768,7 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
             lambda: compute_kr_expansion_factors(
                 folder,
                 calibration=self.calibration,
+                kr_mz=self.settings.kr_mz,
                 manual_peak_path=self.settings.kr_calibration_peak_file or None,
                 light_source=self.settings.light_source,
                 threshold_end=peak_config.threshold_end,
@@ -905,13 +924,15 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
     def on_kr_factors_failed(self, message: str) -> None:
         # 提供更详细的错误诊断
         error_msg = message
-        if "all Kr calibration signals are zero" in error_msg:
+        if "all Kr calibration signals are zero" in error_msg or "No valid Kr signals found" in error_msg:
             error_msg += (
                 "\n\n📋 可能的原因：\n"
-                f"  1. 光强来源设置错误（当前：{self.settings.light_source}）\n"
-                f"  2. Kr定标文件夹路径错误（当前：{self.settings.kr_calibration_folder}）\n"
-                f"  3. 光谱数据质量差或没有Kr信号\n\n"
+                f"  1. Kr质量数设置错误（当前：{self.settings.kr_mz}）\n"
+                f"  2. 光强来源设置错误（当前：{self.settings.light_source}）\n"
+                f"  3. Kr定标文件夹路径错误（当前：{self.settings.kr_calibration_folder}）\n"
+                f"  4. 光谱数据质量差或没有Kr信号\n\n"
                 "💡 尝试：\n"
+                f"  • 检查\"Kr质量数\"是否正确（常用：84, 86）\n"
                 "  • 检查\"光强来源\"设置是否与光谱文件匹配\n"
                 "  • 确认文件夹路径指向包含光谱文件的目录\n"
                 "  • 使用包含足够Kr信号的能量点"
