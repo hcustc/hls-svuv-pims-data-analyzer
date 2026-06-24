@@ -201,6 +201,11 @@ def test_open_project_restores_data_sources_and_applies_to_tools(qapp, tmp_path,
         assert window.project_manual_peak_edit.text() == str(manual_peak)
         assert window.lineEdit.text() == str(single_file)
         assert window.folder_path.text() == str(sum_folder)
+        assert window.spectrum_source_scope == "project"
+        assert window.lineEdit.isReadOnly()
+        assert not window.singleBrowseButton.isEnabled()
+        assert window.project_common_parameters_widget.show_actions is False
+        assert window.project_common_parameters_widget.action_bar.isHidden()
         assert window.current_calibration().a == pytest.approx(9.1e-7)
         assert window.normalization_settings.light_source == "beam_current"
         assert window.normalization_settings.pie_photon_mode == "off"
@@ -215,6 +220,57 @@ def test_open_project_restores_data_sources_and_applies_to_tools(qapp, tmp_path,
         assert window.pie_page.normalization_settings.mass_discrimination == pytest.approx(0.55)
         assert window.mole_fraction_page.project_settings.mf_md_preset == "30 Torr (Catalysis)"
         assert window.datasource_row_status_labels["single_spectrum"].text().startswith("✓")
+    finally:
+        window.project_settings_manager.clear_project_path()
+        window.deleteLater()
+
+
+def test_spectrum_workbench_custom_source_does_not_overwrite_project_source(qapp, tmp_path):
+    project_dir = tmp_path / "Project_Source"
+    project_single = project_dir / "raw_data" / "single_spectrum" / "project.txt"
+    custom_single = tmp_path / "custom.txt"
+    project_single.parent.mkdir(parents=True)
+    project_single.write_text("tof intensity\n1 2\n", encoding="utf-8")
+    custom_single.write_text("tof intensity\n3 4\n", encoding="utf-8")
+
+    ps = ProjectSettings(
+        project_name="Source Test",
+        system="C6H6",
+        output_dir=str(project_dir),
+        single_spectrum_file=str(project_single),
+    )
+    save_project_settings(ps, project_dir / "config" / "project.yaml")
+
+    window = MainWindow()
+    try:
+        window.project_settings_manager.set_project_path(project_dir)
+        window.project_settings_manager.set(ps)
+        window._read_project_settings_to_ui(ps)
+        window._apply_settings_to_tools(ps)
+
+        assert window.spectrum_source_scope == "project"
+        assert window.lineEdit.text() == str(project_single)
+
+        window.set_spectrum_source_scope("custom")
+        window.lineEdit.setText(str(custom_single))
+        window._remember_custom_spectrum_paths()
+
+        replacement = project_dir / "raw_data" / "single_spectrum" / "replacement.txt"
+        replacement.write_text("tof intensity\n5 6\n", encoding="utf-8")
+        window.project_single_file_edit.setText(str(replacement))
+        window._auto_save_datasource()
+
+        saved = load_project_settings(project_dir / "config" / "project.yaml")
+        assert saved.single_spectrum_file == str(replacement)
+        assert window.project_single_file_edit.text() == str(replacement)
+        assert window.lineEdit.text() == str(custom_single)
+        assert window.spectrum_source_scope == "custom"
+        assert not window.lineEdit.isReadOnly()
+        assert window.singleBrowseButton.isEnabled()
+
+        window.set_spectrum_source_scope("project")
+        assert window.lineEdit.text() == str(replacement)
+        assert window.lineEdit.isReadOnly()
     finally:
         window.project_settings_manager.clear_project_path()
         window.deleteLater()

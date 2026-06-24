@@ -65,15 +65,23 @@ from bl03u_masstool.frontends.pyqt_app.common.widgets import DataFrameTableMixin
 class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
     settings_saved = QtCore.pyqtSignal()
 
-    def __init__(self, settings: NormalizationSettings, calibration: Calibration, parent=None):
+    def __init__(
+        self,
+        settings: NormalizationSettings,
+        calibration: Calibration,
+        parent=None,
+        *,
+        show_actions: bool = True,
+    ):
         super().__init__(parent)
         self.settings = settings
         self.calibration = calibration
         self.project_settings: ProjectSettings | None = None
         self.worker: WorkerThread | None = None
+        self.show_actions = show_actions
 
         root = QtWidgets.QVBoxLayout(self)
-        root.setContentsMargins(8, 8, 8, 8)
+        root.setContentsMargins(8, 8, 8, 8 if show_actions else 0)
         root.setSpacing(8)
 
         # 单一可滚动内容区域
@@ -84,22 +92,29 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
         content_widget = QtWidgets.QWidget()
         content_layout = QtWidgets.QVBoxLayout(content_widget)
         content_layout.setContentsMargins(0, 0, 0, 0)
-        content_layout.setSpacing(10)
+        content_layout.setSpacing(8)
 
-        # 构建各个section
-        content_layout.addWidget(self._build_normalization_section())
-        content_layout.addWidget(self._build_calibration_section())
-        content_layout.addWidget(self._build_mass_discrimination_section())
+        top_grid = QtWidgets.QGridLayout()
+        top_grid.setContentsMargins(0, 0, 0, 0)
+        top_grid.setHorizontalSpacing(8)
+        top_grid.setVerticalSpacing(8)
+        top_grid.addWidget(self._build_normalization_section(), 0, 0)
+        top_grid.addWidget(self._build_calibration_section(), 0, 1)
+        top_grid.addWidget(self._build_mass_discrimination_section(), 1, 0)
+        top_grid.addWidget(self._build_element_filter_section(), 1, 1)
+        top_grid.setColumnStretch(0, 1)
+        top_grid.setColumnStretch(1, 1)
+        content_layout.addLayout(top_grid)
         content_layout.addWidget(self._build_kr_expansion_section())
-        content_layout.addWidget(self._build_element_filter_section())
         content_layout.addStretch(1)
 
         scroll.setWidget(content_widget)
         root.addWidget(scroll, 1)
 
         # 底部工具栏 - 统一操作栏
-        bottom_bar = QtWidgets.QWidget()
-        bl = QtWidgets.QHBoxLayout(bottom_bar)
+        self.action_bar = QtWidgets.QWidget()
+        self.action_bar.setObjectName("ProjectActionBar")
+        bl = QtWidgets.QHBoxLayout(self.action_bar)
         bl.setContentsMargins(8, 4, 8, 4)
         bl.setSpacing(8)
 
@@ -118,7 +133,8 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
         bl.addWidget(self.status_label, 1)
         bl.addWidget(self.reset_button)
         bl.addWidget(self.save_button)
-        root.addWidget(bottom_bar)
+        self.action_bar.setVisible(show_actions)
+        root.addWidget(self.action_bar)
 
         self.load_from_settings()
 
@@ -156,8 +172,7 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
         layout.addWidget(QtWidgets.QLabel("质量歧视因子 D:"), row, 0)
         layout.addWidget(self.mass_discrimination_edit, row, 1)
 
-        layout.setColumnStretch(1, 0)
-        layout.setColumnStretch(3, 1)
+        layout.setColumnStretch(1, 1)
         return group
 
     # ── Section 2: 质量数定标 ────────────────────────────────────
@@ -175,7 +190,8 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
             edit.setRange(-1_000_000, 1_000_000)
             edit.setDecimals(12)
             edit.setSingleStep(0.000000001)
-            edit.setMaximumWidth(150)
+            edit.setMinimumWidth(120)
+            edit.setMaximumWidth(180)
 
         layout.addWidget(QtWidgets.QLabel("A:"), 0, 0)
         layout.addWidget(self.calibration_a_edit, 0, 1)
@@ -184,10 +200,8 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
         layout.addWidget(QtWidgets.QLabel("C:"), 0, 4)
         layout.addWidget(self.calibration_c_edit, 0, 5)
 
-        layout.setColumnStretch(1, 0)
-        layout.setColumnStretch(3, 0)
-        layout.setColumnStretch(5, 0)
-        layout.setColumnStretch(6, 1)
+        for col in (1, 3, 5):
+            layout.setColumnStretch(col, 1)
         return group
 
     # ── Section 3: 质量歧视校正 ────────────────────────────────────
@@ -224,45 +238,48 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
         row += 1
         layout.addWidget(formula_label, row, 0, 1, 2)
 
-        layout.setColumnStretch(2, 1)
+        layout.setColumnStretch(1, 1)
         return group
 
     # ── Section 4: Kr 膨胀校正 ────────────────────────────────────
     def _build_kr_expansion_section(self) -> QtWidgets.QGroupBox:
-        from bl03u_masstool.frontends.pyqt_app.normalization.widget import CommonParametersWidget
-        # 这里需要嵌入Kr膨胀校正的UI
-        # 由于篇幅限制，暂时使用占位符
         group = QtWidgets.QGroupBox("Kr 膨胀校正")
+        group.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
         layout = QtWidgets.QVBoxLayout(group)
         layout.setContentsMargins(12, 8, 12, 8)
         layout.setSpacing(8)
 
         # 扫描文件夹
-        kr_folder_layout = QtWidgets.QHBoxLayout()
+        kr_form = QtWidgets.QGridLayout()
+        kr_form.setHorizontalSpacing(8)
+        kr_form.setVerticalSpacing(6)
         self.kr_folder_edit = QtWidgets.QLineEdit()
         self.kr_folder_edit.setPlaceholderText("选择Kr温度扫描文件夹")
         self.kr_folder_button = QtWidgets.QPushButton("浏览…")
         self.kr_folder_button.setFixedWidth(72)
         self.kr_folder_button.clicked.connect(self.select_kr_folder)
-        kr_folder_layout.addWidget(QtWidgets.QLabel("扫描文件夹:"), 0)
-        kr_folder_layout.addWidget(self.kr_folder_edit, 1)
-        kr_folder_layout.addWidget(self.kr_folder_button, 0)
-        layout.addLayout(kr_folder_layout)
+        kr_form.addWidget(QtWidgets.QLabel("扫描文件夹:"), 0, 0)
+        kr_form.addWidget(self.kr_folder_edit, 0, 1)
+        kr_form.addWidget(self.kr_folder_button, 0, 2)
 
         # 卡峰模式
         peak_mode_layout = QtWidgets.QHBoxLayout()
+        peak_mode_layout.setContentsMargins(0, 0, 0, 0)
+        peak_mode_layout.setSpacing(12)
         self.kr_peak_mode_auto_radio = QtWidgets.QRadioButton("自动卡峰")
         self.kr_peak_mode_manual_radio = QtWidgets.QRadioButton("手动卡峰文件")
         self.kr_peak_mode_auto_radio.setChecked(True)
         self.kr_peak_mode_auto_radio.toggled.connect(self.on_kr_peak_mode_changed)
-        peak_mode_layout.addWidget(QtWidgets.QLabel("卡峰方式:"), 0)
         peak_mode_layout.addWidget(self.kr_peak_mode_auto_radio, 0)
         peak_mode_layout.addWidget(self.kr_peak_mode_manual_radio, 0)
         peak_mode_layout.addStretch(1)
-        layout.addLayout(peak_mode_layout)
+        kr_form.addWidget(QtWidgets.QLabel("卡峰方式:"), 1, 0)
+        kr_form.addLayout(peak_mode_layout, 1, 1, 1, 2)
 
         # 卡峰文件
-        kr_file_layout = QtWidgets.QHBoxLayout()
         self.kr_peak_file_edit = QtWidgets.QLineEdit()
         self.kr_peak_file_edit.setPlaceholderText("选择Kr手动卡峰文件 (*.csv, *.yaml, *.yml)")
         self.kr_peak_file_edit.setEnabled(False)
@@ -270,31 +287,38 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
         self.kr_peak_file_button.setFixedWidth(72)
         self.kr_peak_file_button.setEnabled(False)
         self.kr_peak_file_button.clicked.connect(self.select_kr_peak_file)
-        kr_file_layout.addWidget(QtWidgets.QLabel("卡峰文件:"), 0)
-        kr_file_layout.addWidget(self.kr_peak_file_edit, 1)
-        kr_file_layout.addWidget(self.kr_peak_file_button, 0)
-        layout.addLayout(kr_file_layout)
+        kr_form.addWidget(QtWidgets.QLabel("卡峰文件:"), 2, 0)
+        kr_form.addWidget(self.kr_peak_file_edit, 2, 1)
+        kr_form.addWidget(self.kr_peak_file_button, 2, 2)
 
         # 计算按钮和能量选择
         compute_layout = QtWidgets.QHBoxLayout()
+        compute_layout.setContentsMargins(0, 0, 0, 0)
+        compute_layout.setSpacing(8)
         self.compute_kr_button = QtWidgets.QPushButton("▶  计算 λ(T)")
+        self.compute_kr_button.setFixedWidth(160)
         self.compute_kr_button.clicked.connect(self.compute_kr_factors)
         self.energy_combo = QtWidgets.QComboBox()
+        self.energy_combo.setMinimumWidth(160)
+        self.energy_combo.setMaximumWidth(240)
         self.energy_combo.setVisible(False)
         self.energy_combo.currentIndexChanged.connect(self.on_energy_selected)
         compute_layout.addWidget(self.compute_kr_button, 0)
         compute_layout.addWidget(QtWidgets.QLabel("能量选择:"), 0)
-        compute_layout.addWidget(self.energy_combo, 1)
-        layout.addLayout(compute_layout)
+        compute_layout.addWidget(self.energy_combo, 0)
+        compute_layout.addStretch(1)
+        kr_form.addWidget(QtWidgets.QLabel("计算:"), 3, 0)
+        kr_form.addLayout(compute_layout, 3, 1, 1, 2)
+        kr_form.setColumnStretch(1, 1)
+        layout.addLayout(kr_form)
 
-        # 结果表格（紧凑高度）
         self.factor_table = QtWidgets.QTableWidget()
         self.factor_table.setColumnCount(3)
         self.factor_table.setHorizontalHeaderLabels(["温度 (°C)", "Kr 信号积分", "λ(T)"])
         self.factor_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
         self.factor_table.setAlternatingRowColors(True)
-        self.factor_table.setMaximumHeight(200)  # 限制高度
-        layout.addWidget(self.factor_table)
+        self.factor_table.setMinimumHeight(180)
+        layout.addWidget(self.factor_table, 1)
 
         return group
 
