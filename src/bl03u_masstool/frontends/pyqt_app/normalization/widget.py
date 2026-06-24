@@ -192,6 +192,8 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
             edit.setSingleStep(0.000000001)
             edit.setMinimumWidth(120)
             edit.setMaximumWidth(180)
+            # 隐藏上下箭头，允许直接修改数值
+            edit.setButtonSymbols(QtWidgets.QAbstractSpinBox.ButtonSymbols.NoButtons)
 
         layout.addWidget(QtWidgets.QLabel("A:"), 0, 0)
         layout.addWidget(self.calibration_a_edit, 0, 1)
@@ -446,6 +448,8 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
             edit.setRange(-1_000_000, 1_000_000)
             edit.setDecimals(12)
             edit.setSingleStep(0.000000001)
+            # 隐藏上下箭头，允许直接修改数值
+            edit.setButtonSymbols(QtWidgets.QAbstractSpinBox.ButtonSymbols.NoButtons)
 
         cal_layout.addWidget(QtWidgets.QLabel("A:"), 0, 0)
         cal_layout.addWidget(self.calibration_a_edit, 0, 1)
