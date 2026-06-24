@@ -257,7 +257,7 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
         kr_form.setHorizontalSpacing(8)
         kr_form.setVerticalSpacing(6)
         self.kr_folder_edit = QtWidgets.QLineEdit()
-        self.kr_folder_edit.setPlaceholderText("选择Kr温度扫描文件夹")
+        self.kr_folder_edit.setPlaceholderText("包含温度扫描光谱文件的目录 (*.txt)")
         self.kr_folder_button = QtWidgets.QPushButton("浏览…")
         self.kr_folder_button.setFixedWidth(72)
         self.kr_folder_button.clicked.connect(self.select_kr_folder)
@@ -296,7 +296,7 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
 
         # 卡峰文件
         self.kr_peak_file_edit = QtWidgets.QLineEdit()
-        self.kr_peak_file_edit.setPlaceholderText("选择Kr手动卡峰文件 (*.csv, *.yaml, *.yml)")
+        self.kr_peak_file_edit.setPlaceholderText("可选：卡峰结果文件 (peak_ranges-*.csv, *.yaml, *.yml)")
         self.kr_peak_file_edit.setEnabled(False)
         self.kr_peak_file_button = QtWidgets.QPushButton("选择…")
         self.kr_peak_file_button.setFixedWidth(72)
