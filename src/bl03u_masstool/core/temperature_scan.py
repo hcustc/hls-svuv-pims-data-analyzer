@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 import re
 
@@ -10,8 +11,11 @@ from .calibration import Calibration
 from .integration import integrate_peak
 from .normalization import extract_light_intensity
 from .peak_ranges import load_peak_ranges, peak_ranges_to_peaks
-from .peak_detection import detect_peaks_in_range, detect_peaks_by_algorithm
+from .peak_detection import detect_peaks_by_algorithm
 from .spectrum_io import Spectrum, list_spectrum_files, read_spectrum
+
+
+logger = logging.getLogger(__name__)
 
 
 TEMPERATURE_CURVE_CLASS_LABELS = {
@@ -291,7 +295,7 @@ def _apply_temperature_normalization(
     kr_correct: bool,
     kr_mz: int,
     mass_discrimination: float,
-    expansion_factors: dict[float, float] | None = None,
+    expansion_factors: dict | None = None,
 ) -> pd.DataFrame:
     if result.empty:
         return result
@@ -300,7 +304,12 @@ def _apply_temperature_normalization(
 
     if kr_correct:
         if expansion_factors:
-            result["expansion_lambda"] = _map_expansion_factors(result["temperature"], expansion_factors)
+            energies = result["photon_energy"] if "photon_energy" in result.columns else None
+            result["expansion_lambda"] = _map_expansion_factors(
+                result["temperature"],
+                expansion_factors,
+                energies=energies,
+            )
         else:
             kr_rows = result[result["mz_rounded"].astype(int) == int(kr_mz)]
             if kr_rows.empty:
@@ -328,14 +337,74 @@ def _apply_temperature_normalization(
     return result
 
 
-def _map_expansion_factors(temperatures: pd.Series, expansion_factors: dict[float, float]) -> pd.Series:
-    factor_temperatures = np.array(sorted(float(key) for key in expansion_factors), dtype=float)
-    factor_values = np.array([float(expansion_factors[temperature]) for temperature in factor_temperatures], dtype=float)
-    mapped = []
-    for temperature in temperatures.astype(float):
-        nearest = int(np.argmin(np.abs(factor_temperatures - temperature)))
-        mapped.append(factor_values[nearest])
-    return pd.Series(mapped, index=temperatures.index, dtype=float)
+def _map_expansion_factors(
+    temperatures: pd.Series,
+    expansion_factors: dict,
+    *,
+    energies: pd.Series | None = None,
+) -> pd.Series:
+    factors = _coerce_expansion_factor_map(expansion_factors)
+    if not factors:
+        return pd.Series([1.0] * len(temperatures), index=temperatures.index, dtype=float)
+
+    multi_energy_factors = {
+        float(key): value
+        for key, value in factors.items()
+        if isinstance(value, dict)
+    }
+    if multi_energy_factors:
+        energy_keys = np.array(sorted(float(key) for key in multi_energy_factors), dtype=float)
+        energy_values = (
+            pd.Series([np.nan] * len(temperatures), index=temperatures.index, dtype=float)
+            if energies is None
+            else pd.to_numeric(energies, errors="coerce")
+        )
+        mapped = []
+        for index, temperature in temperatures.astype(float).items():
+            energy = (
+                float(energy_values.loc[index])
+                if index in energy_values.index and pd.notna(energy_values.loc[index])
+                else np.nan
+            )
+            if np.isfinite(energy):
+                nearest_energy = float(energy_keys[int(np.argmin(np.abs(energy_keys - energy)))])
+            else:
+                nearest_energy = float(energy_keys[0])
+            mapped.append(
+                _nearest_temperature_factor(
+                    float(temperature),
+                    multi_energy_factors.get(nearest_energy, {}),
+                )
+            )
+        return pd.Series(mapped, index=temperatures.index, dtype=float)
+
+    return pd.Series(
+        [_nearest_temperature_factor(float(temperature), factors) for temperature in temperatures.astype(float)],
+        index=temperatures.index,
+        dtype=float,
+    )
+
+
+def _coerce_expansion_factor_map(expansion_factors: dict) -> dict:
+    coerced: dict[float, float | dict[float, float]] = {}
+    for key, value in (expansion_factors or {}).items():
+        float_key = float(key)
+        if isinstance(value, dict):
+            nested = {float(temp): float(lam) for temp, lam in value.items()}
+            if nested:
+                coerced[float_key] = nested
+        else:
+            coerced[float_key] = float(value)
+    return coerced
+
+
+def _nearest_temperature_factor(temperature: float, factors: dict[float, float]) -> float:
+    if not factors:
+        return 1.0
+    factor_temperatures = np.array(sorted(float(key) for key in factors), dtype=float)
+    factor_values = np.array([float(factors[temperature]) for temperature in factor_temperatures], dtype=float)
+    nearest = int(np.argmin(np.abs(factor_temperatures - float(temperature))))
+    return float(factor_values[nearest])
 
 
 def classify_temperature_curve(
@@ -463,17 +532,12 @@ def compute_kr_expansion_factors(
     gaussian_window_max: int = 30,
     gaussian_boundary_scale: float = 1.5,
     boundary_padding: int = 2,
+    use_highest_energy: bool = False,
 ) -> pd.DataFrame:
     """计算Kr膨胀系数，自动处理多能量温度扫描数据。
 
-    单能量数据：返回标准格式 (temperature, kr_signal, expansion_lambda)
-
-    多能量数据：
-    1. 分别对每个能量点计算膨胀系数
-    2. 按温度对所有能量的膨胀系数取平均值
-    3. 返回平均后的单能量形式 (temperature, avg_kr_signal, avg_expansion_lambda)
-
-    这样可以利用多个能量点的数据来提高膨胀系数的鲁棒性，同时保持输出格式的一致性。
+    Args:
+        use_highest_energy: 是否只返回最高能量组数据。默认 False，会按能量分别计算 λ(T)。
     """
     result = analyze_temperature_folder(
         folder,
@@ -497,70 +561,90 @@ def compute_kr_expansion_factors(
         kr_mz=kr_mz,
         light_source=light_source,
     )
-    kr_rows = result[result["mz_rounded"].astype(int) == int(kr_mz)]
+    kr_rows = result[result["mz_rounded"].astype(int) == int(kr_mz)].copy()
     if kr_rows.empty:
         raise ValueError(f"Kr m/z {kr_mz} was not found in the calibration folder")
 
-    # 文件头中的 photon energy 会有小幅漂移，例如 14.6092 和 14.6103
-    # 实际属于同一个名义能量点。先按容差合并，再在每个能量组内计算 λ(T)。
-    unique_energy_values = sorted(float(energy) for energy in kr_rows["photon_energy"].dropna().unique())
-    energy_groups = group_energies_by_tolerance(unique_energy_values, tolerance=0.01)
+    return _build_kr_expansion_factor_table(kr_rows, use_highest_energy=use_highest_energy)
 
-    if len(unique_energy_values) > 1:
-        result_rows = []
-        for center_energy, grouped_energies in sorted(energy_groups.items()):
-            energy_kr = kr_rows[kr_rows["photon_energy"].isin(grouped_energies)]
-            kr_by_temperature = energy_kr.groupby("temperature")["photon_normalized_area"].sum().sort_index()
-            positive_kr = kr_by_temperature[kr_by_temperature > 0]
 
-            if positive_kr.empty:
-                continue
+def _build_kr_expansion_factor_table(kr_rows: pd.DataFrame, *, use_highest_energy: bool = False) -> pd.DataFrame:
+    kr_rows = kr_rows.copy()
+    kr_rows["temperature"] = pd.to_numeric(kr_rows["temperature"], errors="coerce")
+    kr_rows["photon_normalized_area"] = pd.to_numeric(kr_rows["photon_normalized_area"], errors="coerce")
+    kr_rows = kr_rows.dropna(subset=["temperature", "photon_normalized_area"])
 
-            t0 = float(positive_kr.index.min())
-            kr_ref = float(kr_by_temperature.loc[t0])
-            if kr_ref <= 0:
-                continue
+    if kr_rows.empty:
+        raise ValueError("all Kr calibration signals are zero")
 
-            lambda_by_temperature = kr_by_temperature / kr_ref
-            for temp, signal, lambda_val in zip(
-                kr_by_temperature.index.astype(float),
-                kr_by_temperature.astype(float).values,
-                lambda_by_temperature.astype(float).values,
-            ):
-                result_rows.append({
-                    "photon_energy": float(center_energy),
-                    "temperature": float(temp),
-                    "kr_signal": float(signal),
-                    "expansion_lambda": float(lambda_val),
-                    "reference_temperature": t0,
-                })
-
-        if not result_rows:
-            raise ValueError("No valid Kr signals found at any energy point")
-
-        grouped_df = pd.DataFrame(result_rows)
-        if len(energy_groups) > 1:
-            return grouped_df
-        return grouped_df.drop(columns=["photon_energy"])
+    if "photon_energy" in kr_rows.columns:
+        energy_values = pd.to_numeric(kr_rows["photon_energy"], errors="coerce")
+        valid_energy_values = sorted(set(float(value) for value in energy_values.dropna() if float(value) > 0))
     else:
-        # 单能量：使用原有逻辑（向后兼容）
-        kr_by_temperature = kr_rows.groupby("temperature")["photon_normalized_area"].sum().sort_index()
-        positive_kr = kr_by_temperature[kr_by_temperature > 0]
-        if positive_kr.empty:
+        valid_energy_values = []
+
+    if valid_energy_values:
+        energy_groups = group_energies_by_tolerance(valid_energy_values, tolerance=0.01)
+        kr_rows["photon_energy"] = [
+            _nearest_energy_group(float(value), energy_groups)
+            if pd.notna(value) and float(value) > 0
+            else np.nan
+            for value in pd.to_numeric(kr_rows["photon_energy"], errors="coerce")
+        ]
+        kr_rows = kr_rows.dropna(subset=["photon_energy"])
+        if kr_rows.empty:
             raise ValueError("all Kr calibration signals are zero")
-        t0 = float(positive_kr.index.min())
-        kr_ref = float(kr_by_temperature.loc[t0])
-        if kr_ref <= 0:
-            raise ValueError("Kr reference signal is zero; cannot compute expansion correction")
-        lambda_by_temperature = kr_by_temperature / kr_ref
-        return pd.DataFrame(
-            {
-                "temperature": kr_by_temperature.index.astype(float),
-                "kr_signal": kr_by_temperature.astype(float).values,
-                "expansion_lambda": lambda_by_temperature.astype(float).values,
-                "reference_temperature": t0,
-            }
+        if use_highest_energy:
+            kr_rows = kr_rows[kr_rows["photon_energy"] == float(max(energy_groups.keys()))]
+
+        grouped = (
+            kr_rows.groupby(["photon_energy", "temperature"], as_index=False)["photon_normalized_area"]
+            .sum()
+            .sort_values(["photon_energy", "temperature"])
         )
+        rows = []
+        for energy, energy_group in grouped.groupby("photon_energy", sort=True):
+            kr_by_temperature = energy_group.set_index("temperature")["photon_normalized_area"].sort_index()
+            rows.extend(_kr_expansion_rows_for_signal_series(kr_by_temperature, photon_energy=float(energy)))
+        return pd.DataFrame(rows)
+
+    kr_by_temperature = kr_rows.groupby("temperature")["photon_normalized_area"].sum().sort_index()
+    return pd.DataFrame(_kr_expansion_rows_for_signal_series(kr_by_temperature))
+
+
+def _nearest_energy_group(energy: float, energy_groups: dict[float, list[float]]) -> float:
+    energy_centers = np.array(sorted(float(key) for key in energy_groups), dtype=float)
+    return float(energy_centers[int(np.argmin(np.abs(energy_centers - float(energy))))])
+
+
+def _kr_expansion_rows_for_signal_series(
+    kr_by_temperature: pd.Series,
+    *,
+    photon_energy: float | None = None,
+) -> list[dict]:
+    kr_by_temperature = kr_by_temperature.astype(float).sort_index()
+    positive_kr = kr_by_temperature[kr_by_temperature > 0]
+    if positive_kr.empty:
+        raise ValueError("all Kr calibration signals are zero")
+
+    reference_temperature = float(positive_kr.index.min())
+    reference_signal = float(kr_by_temperature.loc[reference_temperature])
+    if reference_signal <= 0:
+        raise ValueError("Kr reference signal is zero; cannot compute expansion correction")
+
+    rows = []
+    for temperature, signal in kr_by_temperature.items():
+        row = {
+            "temperature": float(temperature),
+            "kr_signal": float(signal),
+            "expansion_lambda": float(signal) / reference_signal,
+            "reference_temperature": reference_temperature,
+        }
+        if photon_energy is not None:
+            row["photon_energy"] = float(photon_energy)
+            row["reference_energy"] = float(photon_energy)
+        rows.append(row)
+    return rows
 
 
 

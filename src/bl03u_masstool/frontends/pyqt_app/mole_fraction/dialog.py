@@ -44,10 +44,9 @@ from bl03u_masstool.core.mole_fraction import (
     calc_isomeric_separation,
     calc_mass_discrimination,
     calc_parent_mole_fraction,
-    calc_product_mole_fraction,
     compute_all_mole_fractions,
     extract_signal_from_temperature_curves,
-    get_expansion_coefficient,
+    get_expansion_coefficient_for_energy,
     load_mole_fraction_settings,
     save_mole_fraction_settings,
     select_calc_energy,
@@ -81,6 +80,9 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.available_energies: list[float] = []
         self.all_species_mf: dict[tuple, dict[float, float]] = {}
         self.peak_ranges: dict[int, tuple[int, int]] = {}
+        self._loaded_database_path: str | None = None
+        self._project_data_restore_key: tuple | None = None
+        self._restoring_project_data = False
         self._init_ui()
         self._auto_load_database()
 
@@ -127,6 +129,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             db_path = species_database_path()
             if db_path.exists():
                 self.database, self.mz_index = load_species_database(str(db_path))
+                self._loaded_database_path = str(db_path)
                 if hasattr(self, "_update_parent_species_list"):
                     self._update_parent_species_list()
                 if hasattr(self, "energy_parent_table"):
@@ -139,11 +142,45 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         """统一读取质量歧视因子指数：优先使用项目设置，回退到legacy设置。"""
         if self.project_settings is not None:
             return self.project_settings.mf_mass_disc_exponent
-        return self._mass_disc_exponent
+        return self.settings.mass_disc_exponent
+
+    def _expansion_coefficients_for_energy(self, energy: float | None) -> dict[float, float]:
+        """Return the Kr expansion curve for one calculation energy."""
+        factors = self.expansion_coefficients or {}
+        if not factors:
+            return {}
+        first_value = next(iter(factors.values()), None)
+        if not isinstance(first_value, dict):
+            return {float(temp): float(value) for temp, value in factors.items()}
+
+        energy_groups: list[tuple[float, dict]] = []
+        for raw_energy, raw_curve in factors.items():
+            if not isinstance(raw_curve, dict):
+                continue
+            try:
+                energy_groups.append((float(raw_energy), raw_curve))
+            except (TypeError, ValueError):
+                continue
+        if not energy_groups:
+            return {}
+        _, selected_curve = (
+            energy_groups[0]
+            if energy is None
+            else min(energy_groups, key=lambda item: abs(item[0] - float(energy)))
+        )
+        return {float(temp): float(value) for temp, value in selected_curve.items()}
+
+    def _expansion_coefficient(self, temperature: float, energy: float | None) -> float:
+        return get_expansion_coefficient_for_energy(
+            float(temperature),
+            None if energy is None else float(energy),
+            self.expansion_coefficients,
+        )
 
     def set_project_settings(self, ps: ProjectSettings) -> None:
         """Apply ProjectSettings defaults to MoleFractionDialog controls."""
         self.project_settings = ps
+        self._load_project_database_from_settings()
         # 卡峰范围由项目管理统一维护，在此自动加载
         self._load_peak_ranges_from_project()
         if hasattr(self, "spin_parent_mz"):
@@ -187,6 +224,188 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.lbl_pie_project_artifact.setText(
                 Path(ps.pie_identification_result_file).name if has_pie_result else "项目未登记PIE结果"
             )
+        self._restore_project_managed_data(ps)
+
+    def _path_restore_signature(self, value: str | Path | None) -> tuple:
+        path_text = str(value or "").strip()
+        if not path_text:
+            return ("", False, None, None, None)
+        path = Path(path_text)
+        try:
+            stat = path.stat()
+        except OSError:
+            return (path_text, False, None, None, None)
+        kind = "dir" if path.is_dir() else "file" if path.is_file() else "other"
+        size = stat.st_size if path.is_file() else None
+        return (path_text, True, kind, stat.st_mtime_ns, size)
+
+    def _project_data_restore_signature(self, ps: ProjectSettings) -> tuple:
+        return (
+            self._path_restore_signature(ps.temperature_scan_result_file),
+            self._path_restore_signature(ps.temperature_scan_folder),
+            self._path_restore_signature(ps.pie_identification_result_file),
+            self._path_restore_signature(ps.manual_peak_file),
+        )
+
+    def _restore_project_managed_data(self, ps: ProjectSettings) -> None:
+        """Restore project-owned calculation inputs without prompting the user."""
+        if self._restoring_project_data:
+            return
+        restore_key = self._project_data_restore_signature(ps)
+        if restore_key == self._project_data_restore_key:
+            return
+
+        restored: list[str] = []
+        self._restoring_project_data = True
+        try:
+            ts_message = self._restore_project_temperature_data(ps)
+            if ts_message:
+                restored.append(ts_message)
+            pie_message = self._restore_project_pie_data(ps)
+            if pie_message:
+                restored.append(pie_message)
+            if self._clear_stale_legacy_parent_mz():
+                restored.append("母体 m/z 待设置")
+        finally:
+            self._project_data_restore_key = restore_key
+            self._restoring_project_data = False
+
+        if restored and hasattr(self, "status_label"):
+            self.status_label.setText("已从项目自动恢复: " + "；".join(restored))
+
+    def _loaded_data_has_mz(self, mz: int) -> bool:
+        if mz <= 0:
+            return False
+        for species in self.pie_species_data:
+            try:
+                species_mz = int(species.get("mz"))
+            except (TypeError, ValueError):
+                species_mz = -1
+            if species_mz == mz:
+                return True
+        for energy_data in self.temperature_scan_data.values():
+            for info in energy_data.values():
+                precomputed = info.get("precomputed_signals", {}) or {}
+                if mz in precomputed:
+                    return True
+                for peak in info.get("peaks_info", []) or []:
+                    try:
+                        peak_mz = int(peak.get("mz_rounded"))
+                    except (TypeError, ValueError):
+                        peak_mz = -1
+                    if peak_mz == mz:
+                        return True
+        return False
+
+    def _clear_stale_legacy_parent_mz(self) -> bool:
+        if not hasattr(self, "spin_parent_mz"):
+            return False
+        current_mz = int(self.spin_parent_mz.value())
+        if current_mz != 128:
+            return False
+        if self._loaded_data_has_mz(current_mz):
+            return False
+        if not self.temperature_scan_data and not self.pie_species_data:
+            return False
+        self.spin_parent_mz.setValue(0)
+        return True
+
+    def _restore_project_temperature_data(self, ps: ProjectSettings) -> str | None:
+        result_path_text = str(ps.temperature_scan_result_file or "").strip()
+        if result_path_text:
+            result_path = Path(result_path_text)
+            if result_path.exists() and result_path.is_file():
+                self._load_temperature_result_file(result_path, show_message=False, register_artifact=False)
+                if self.available_energies:
+                    return f"温度扫描结果 {len(self.available_energies)} 个能量"
+            return None
+
+        folder_text = str(ps.temperature_scan_folder or "").strip()
+        if not folder_text:
+            return None
+        root = Path(folder_text)
+        if not root.exists() or not root.is_dir():
+            return None
+        folders = self._discover_energy_folders(root)
+        if not folders:
+            return None
+        self._load_peak_ranges_from_project()
+        added = self._load_energy_folders(
+            folders,
+            source_label=f"项目原始目录: {root.name}",
+            show_message=False,
+            confirm_overwrite=False,
+            replace_all=True,
+        )
+        if added > 0:
+            return f"温度扫描原始目录 {len(self.available_energies)} 个能量"
+        return None
+
+    def _restore_project_pie_data(self, ps: ProjectSettings) -> str | None:
+        file_text = str(ps.pie_identification_result_file or "").strip()
+        if not file_text:
+            return None
+        file_path = Path(file_text)
+        if not file_path.exists() or not file_path.is_file():
+            return None
+        self._load_pie_results(file_path, show_message=False, register_artifact=False)
+        if self.pie_species_data:
+            return f"PIE结果 {len(self.pie_species_data)} 条"
+        return None
+
+    def _load_project_database_from_settings(self) -> None:
+        """Load the project-owned PICS database when project settings provide one."""
+        ps = self.project_settings
+        db_value = str(getattr(ps, "pics_database_path", "") or "").strip() if ps is not None else ""
+        if not db_value:
+            return
+        db_path = Path(db_value)
+        if not db_path.exists() or not db_path.is_file():
+            return
+        resolved = str(db_path)
+        if self._loaded_database_path == resolved:
+            return
+        try:
+            project_database, _ = load_species_database(resolved)
+            self._merge_species_database(project_database)
+            self._loaded_database_path = resolved
+            if hasattr(self, "_update_parent_species_list"):
+                self._update_parent_species_list()
+            if hasattr(self, "energy_parent_table"):
+                self._refresh_energy_parent_table()
+            if hasattr(self, "status_label"):
+                self.status_label.setText(f"已加载项目PICS数据库: {db_path.name}")
+        except Exception as exc:
+            if hasattr(self, "status_label"):
+                self.status_label.setText(f"项目PICS数据库加载失败: {exc}")
+
+    def _merge_species_database(self, records: list[dict]) -> None:
+        """Merge project PICS records over the bundled database without losing fallbacks."""
+        merged: list[dict] = []
+        positions: dict[tuple[int, str], int] = {}
+        for record in list(self.database) + list(records):
+            try:
+                mz = int(record.get("mz"))
+            except Exception:
+                continue
+            name = str(record.get("species") or record.get("name") or "").strip()
+            if not name:
+                continue
+            key = (mz, name)
+            if key in positions:
+                merged[positions[key]] = record
+            else:
+                positions[key] = len(merged)
+                merged.append(record)
+        mz_index: dict[int, list[int]] = {}
+        for idx, record in enumerate(merged):
+            try:
+                mz = int(record.get("mz"))
+            except Exception:
+                continue
+            mz_index.setdefault(mz, []).append(idx)
+        self.database = merged
+        self.mz_index = mz_index
 
     def _open_project_settings(self):
         """跳转到项目管理页面。"""
@@ -368,7 +587,8 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         cfg_layout.addWidget(QtWidgets.QLabel("母体质量数 m/z:"), 0, 0)
         self.spin_parent_mz = QtWidgets.QSpinBox()
         self.spin_parent_mz.setToolTip("母体物种（反应物）的质量数")
-        self.spin_parent_mz.setRange(1, 500)
+        self.spin_parent_mz.setRange(0, 500)
+        self.spin_parent_mz.setSpecialValueText("未设置")
         self.spin_parent_mz.setValue(self.settings.parent_mz)
         self.spin_parent_mz.valueChanged.connect(self._on_parent_mz_changed)
         cfg_layout.addWidget(self.spin_parent_mz, 0, 1)
@@ -420,7 +640,11 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         return widget
 
     def _available_parent_mz_values(self) -> list[int]:
-        mz_values = {int(self.spin_parent_mz.value())} if hasattr(self, "spin_parent_mz") else set()
+        mz_values: set[int] = set()
+        if hasattr(self, "spin_parent_mz"):
+            current_mz = int(self.spin_parent_mz.value())
+            if current_mz > 0:
+                mz_values.add(current_mz)
 
         for energy_data in self.temperature_scan_data.values():
             for info in energy_data.values():
@@ -504,6 +728,10 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
     def _on_parent_species_changed(self):
         selected = self._selected_parent_species_name()
         mz = self.spin_parent_mz.value()
+        if mz <= 0:
+            self.lbl_parent_info.setText("请在项目管理或本页设置母体 m/z")
+            self._refresh_energy_parent_table()
+            return
         options = self._species_options_for_mz(mz)
         if selected:
             ie = next((item_ie for name, item_ie in options if name == selected), None)
@@ -892,6 +1120,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             return
         try:
             self.database, self.mz_index = load_species_database(file_path)
+            self._loaded_database_path = str(Path(file_path))
             self._update_parent_species_list()
             self._refresh_energy_parent_table()
         except Exception as e:
@@ -923,7 +1152,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         if not Path(file_path).exists():
             QtWidgets.QMessageBox.warning(self, "提示", f"项目登记的温度扫描结果文件不存在:\n{file_path}")
             return
-        self._load_temperature_result_file(file_path, show_message=False)
+        self._load_temperature_result_file(file_path, show_message=False, register_artifact=False)
 
     def _load_project_temperature_scan_folder(self):
         folder = self._project_artifact_path("temperature_scan_folder")
@@ -954,7 +1183,13 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             replace_all=True,
         )
 
-    def _load_temperature_result_file(self, file_path: str | Path | None = None, *, show_message: bool = True):
+    def _load_temperature_result_file(
+        self,
+        file_path: str | Path | None = None,
+        *,
+        show_message: bool = True,
+        register_artifact: bool = True,
+    ):
         if isinstance(file_path, bool):
             file_path = None
         if file_path is None:
@@ -1096,12 +1331,13 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self._update_ts_table_with_species()
             self._refresh_ts_table()
             self._refresh_energy_parent_table()
-            record_project_artifact(
-                self,
-                "temperature_scan_result_file",
-                file_path,
-                message="温度扫描结果已登记到项目管理",
-            )
+            if register_artifact:
+                record_project_artifact(
+                    self,
+                    "temperature_scan_result_file",
+                    file_path,
+                    message="温度扫描结果已登记到项目管理",
+                )
             self.status_label.setText(f"已加载温度扫描结果: {len(df) - skipped} 行")
             if show_message:
                 QtWidgets.QMessageBox.information(
@@ -1121,9 +1357,15 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         if not Path(file_path).exists():
             QtWidgets.QMessageBox.warning(self, "提示", f"项目登记的PIE鉴定结果文件不存在:\n{file_path}")
             return
-        self._load_pie_results(file_path, show_message=False)
+        self._load_pie_results(file_path, show_message=False, register_artifact=False)
 
-    def _load_pie_results(self, file_path: str | Path | None = None, *, show_message: bool = True):
+    def _load_pie_results(
+        self,
+        file_path: str | Path | None = None,
+        *,
+        show_message: bool = True,
+        register_artifact: bool = True,
+    ):
         if isinstance(file_path, bool):
             file_path = None
         if file_path is None:
@@ -1185,12 +1427,13 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self._update_ts_table_with_species()
             self._update_parent_species_list()
             self._refresh_energy_parent_table()
-            record_project_artifact(
-                self,
-                "pie_identification_result_file",
-                file_path,
-                message="PIE鉴定结果已登记到项目管理",
-            )
+            if register_artifact:
+                record_project_artifact(
+                    self,
+                    "pie_identification_result_file",
+                    file_path,
+                    message="PIE鉴定结果已登记到项目管理",
+                )
             self.status_label.setText(f"已加载PIE鉴定结果: {unique_mz} 个质量数")
 
             if show_message:
@@ -1235,15 +1478,18 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
     def _discover_energy_folders(self, root: Path) -> list[Path]:
         folders: list[Path] = []
-        if self._energy_from_folder_name(root) is not None and any(root.glob("*.txt")):
-            folders.append(root)
-        for child in sorted(root.iterdir()):
-            if not child.is_dir():
+        candidates = [root] + sorted(path for path in root.rglob("*") if path.is_dir())
+        seen: set[Path] = set()
+        for folder in candidates:
+            if self._energy_from_folder_name(folder) is None:
                 continue
-            if self._energy_from_folder_name(child) is None:
+            if not any(folder.glob("*.txt")):
                 continue
-            if any(child.glob("*.txt")):
-                folders.append(child)
+            resolved = folder.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            folders.append(folder)
         return folders
 
     def _refresh_loaded_temperature_scan_state(self, source_label: str) -> None:
@@ -1278,6 +1524,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
         added_count = 0
         skipped_count = 0
+        added_energies: set[float] = set()
 
         for folder_value in folders:
             folder = Path(folder_value)
@@ -1376,23 +1623,25 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
                     skipped_count += 1
                     continue
 
-                self.temperature_scan_data[energy] = {}
+                energy_data = self.temperature_scan_data.setdefault(float(energy), {})
                 for temp, repeats in temp_groups.items():
-                    n = len(repeats)
-                    max_len = max(len(r["data"]) for r in repeats)
+                    existing_repeats = list(energy_data.get(temp, {}).get("repeats", []))
+                    merged_repeats = existing_repeats + list(repeats)
+                    n = len(merged_repeats)
+                    max_len = max(len(r["data"]) for r in merged_repeats)
                     avg_data = np.zeros(max_len)
                     count_arr = np.zeros(max_len)
-                    for r in repeats:
+                    for r in merged_repeats:
                         d = np.array(r["data"])
                         avg_data[: len(d)] += d
                         count_arr[: len(d)] += 1
                     count_arr[count_arr == 0] = 1
                     avg_data = avg_data / count_arr
-                    avg_io = float(np.mean([r["io"] for r in repeats]))
-                    filenames = ", ".join(r["filename"] for r in repeats)
+                    avg_io = float(np.mean([r["io"] for r in merged_repeats]))
+                    filenames = ", ".join(r["filename"] for r in merged_repeats)
 
-                    self.temperature_scan_data[energy][temp] = {
-                        "repeats": repeats,
+                    energy_data[temp] = {
+                        "repeats": merged_repeats,
                         "avg_data": avg_data.tolist(),
                         "avg_io": avg_io,
                         "filenames": filenames,
@@ -1400,13 +1649,13 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
                         "peaks_info": None,
                     }
 
-                temps_list = sorted(temp_groups.keys())
+                temps_list = sorted(energy_data.keys())
                 if temps_list:
                     best_peak_count = -1
                     best_peaks_info = None
                     peak_ranges = self.peak_ranges or None
                     for t in temps_list:
-                        t_data = self.temperature_scan_data[energy][t]["avg_data"]
+                        t_data = energy_data[t]["avg_data"]
                         t_peaks = self._detect_and_integrate_peaks(t_data, peak_ranges)
                         t_count = len(t_peaks)
                         if t_count > best_peak_count:
@@ -1414,10 +1663,11 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
                             best_peaks_info = t_peaks
                     peaks_info = best_peaks_info if best_peaks_info is not None else []
 
-                    for temp in self.temperature_scan_data[energy]:
-                        self.temperature_scan_data[energy][temp]["peaks_info"] = peaks_info
+                    for temp in energy_data:
+                        energy_data[temp]["peaks_info"] = peaks_info
 
                 added_count += 1
+                added_energies.add(float(energy))
 
             except Exception as e:
                 if show_message:
@@ -1429,8 +1679,14 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
         if added_count > 0:
             if show_message:
-                QtWidgets.QMessageBox.information(self, "成功", f"成功添加 {added_count} 个能量点的数据")
-            self.status_label.setText(f"已加载温度扫描原始数据: {added_count} 个能量点")
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "成功",
+                    f"成功读取 {added_count} 个能量文件夹，合并为 {len(added_energies)} 个能量点的数据",
+                )
+            self.status_label.setText(
+                f"已加载温度扫描原始数据: {added_count} 个文件夹 / {len(added_energies)} 个能量点"
+            )
         if skipped_count > 0:
             if show_message:
                 QtWidgets.QMessageBox.information(self, "提示", f"跳过了 {skipped_count} 个文件夹")
@@ -1842,7 +2098,10 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 "species_name": species_name,
             }
 
-    def _reference_parent_for_energy(self, energy: float) -> tuple[int, float, float, dict[float, float], float, str | None] | None:
+    def _reference_parent_for_energy(
+        self,
+        energy: float,
+    ) -> tuple[int, float, float, dict[float, float], float, str | None] | None:
         if self.energy_parent_config and not self.parent_mf_by_energy:
             self._recalculate_parent_mf_by_energy()
 
@@ -2003,6 +2262,9 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             T0 = self.spin_parent_t0.value()
             X0 = self.spin_parent_mf0.value()
             energy = self.spin_parent_energy.value()
+            if mz <= 0:
+                QtWidgets.QMessageBox.warning(self, "提示", "请先设置母体质量数 m/z")
+                return
 
             if energy not in self.temperature_scan_data:
                 QtWidgets.QMessageBox.warning(
@@ -2021,7 +2283,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 signal_data,
                 reference_temperature=float(T0),
                 parent_initial_mf=X0,
-                expansion_coefficients=self.expansion_coefficients,
+                expansion_coefficients=self._expansion_coefficients_for_energy(energy),
             )
 
             self.parent_result_table.setRowCount(0)
@@ -2030,7 +2292,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 self.parent_result_table.insertRow(row)
                 self.parent_result_table.setItem(row, 0, QtWidgets.QTableWidgetItem(f"{int(temp)}"))
                 self.parent_result_table.setItem(row, 1, QtWidgets.QTableWidgetItem(f"{signal_data.get(temp, 0):.6f}"))
-                self.parent_result_table.setItem(row, 2, QtWidgets.QTableWidgetItem(f"{get_expansion_coefficient(temp, self.expansion_coefficients):.6f}"))
+                self.parent_result_table.setItem(row, 2, QtWidgets.QTableWidgetItem(f"{self._expansion_coefficient(temp, energy):.6f}"))
                 self.parent_result_table.setItem(row, 3, QtWidgets.QTableWidgetItem(f"{self.parent_mf_results[temp]:.6f}"))
 
             self._recalculate_parent_mf_by_energy()
@@ -2210,6 +2472,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
         species_obj = self._find_species_record(mz, species_name)
 
+        ref_species_name = ref_species_name or species.get("ref_species") or species.get("ref_name")
         ref_obj = self._find_species_record(ref_mz, ref_species_name)
 
         if species_obj is None or ref_obj is None:
@@ -2220,24 +2483,20 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         if energies_arr is not None and cross_sections_arr is not None:
             sigma_i = _interpolate_cross_section(energies_arr, cross_sections_arr, best_energy)
         else:
-            sigma_i = 0.0
-
-        ref_species_name = ref_species_name or species.get("ref_species") or species.get("ref_name")
-        if ref_species_name:
-            ref_obj = self._find_species_record(ref_mz, ref_species_name) or ref_obj
+            return None
 
         ref_energies = ref_obj.get("energies")
         ref_cross = ref_obj.get("cross_sections")
         if ref_energies is not None and ref_cross is not None:
             sigma_A = _interpolate_cross_section(ref_energies, ref_cross, ref_energy)
         else:
-            sigma_A = 0.0
+            return None
 
         if sigma_i == 0 or sigma_A == 0:
             return None
 
-        D_i = calc_mass_discrimination(mz, self._mass_disc_exponent)
-        D_A = calc_mass_discrimination(ref_mw, self._mass_disc_exponent)
+        D_i = calc_mass_discrimination(float(species.get("mw") or mz), self._mass_disc_exponent)
+        D_A = calc_mass_discrimination(float(ref_mw), self._mass_disc_exponent)
 
         T_M = float(self.spin_parent_t0.value())
         if T_M not in ref_signal_data:
@@ -2249,11 +2508,10 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         if S_A_TM == 0:
             return None
 
-        lambda_TM = get_expansion_coefficient(T_M, self.expansion_coefficients)
-
+        lambda_TM = self._expansion_coefficient(T_M, ref_energy)
         results: dict[float, float] = {}
         for T, S_i in signal_data.items():
-            lambda_T = get_expansion_coefficient(T, self.expansion_coefficients)
+            lambda_T = self._expansion_coefficient(T, best_energy)
             X_i = (
                 ref_mf_at_tm
                 * (S_i / S_A_TM)
@@ -2261,8 +2519,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 * (D_A / D_i)
                 * (lambda_TM / lambda_T)
             )
-            results[T] = max(0.0, X_i)
-
+            results[T] = max(0.0, float(X_i))
         return results
 
     def _calc_multi_species_mf_auto(self, mz, species_list, energies,
@@ -2452,8 +2709,9 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         species_name = species["species"]
 
         species_obj = self._find_species_record(mz, species_name)
-        ref_obj = self._find_species_record(ref_mz, ref_species_name)
 
+        ref_species_name = ref_species_name or species.get("ref_species") or species.get("ref_name")
+        ref_obj = self._find_species_record(ref_mz, ref_species_name)
         if species_obj is None or ref_obj is None:
             return None
 
@@ -2462,20 +2720,20 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         if energies_arr is not None and cross_sections_arr is not None:
             sigma_i = _interpolate_cross_section(energies_arr, cross_sections_arr, energy)
         else:
-            sigma_i = 0.0
+            return None
 
         ref_energies = ref_obj.get("energies")
         ref_cross = ref_obj.get("cross_sections")
         if ref_energies is not None and ref_cross is not None:
             sigma_A = _interpolate_cross_section(ref_energies, ref_cross, ref_energy)
         else:
-            sigma_A = 0.0
+            return None
 
         if sigma_i == 0 or sigma_A == 0:
             return None
 
-        D_i = calc_mass_discrimination(mz, self._mass_disc_exponent)
-        D_A = calc_mass_discrimination(ref_mw, self._mass_disc_exponent)
+        D_i = calc_mass_discrimination(float(species.get("mw") or mz), self._mass_disc_exponent)
+        D_A = calc_mass_discrimination(float(ref_mw), self._mass_disc_exponent)
 
         T_M = float(self.spin_parent_t0.value())
         if T_M not in ref_signal_data:
@@ -2487,14 +2745,13 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         if S_A_TM == 0:
             return None
 
-        lambda_TM = get_expansion_coefficient(T_M, self.expansion_coefficients)
-
+        lambda_TM = self._expansion_coefficient(T_M, ref_energy)
         results: dict[float, float] = {}
         for T, S_i in signal_data.items():
             if S_i <= 0:
                 results[T] = 0.0
                 continue
-            lambda_T = get_expansion_coefficient(T, self.expansion_coefficients)
+            lambda_T = self._expansion_coefficient(T, energy)
             X_i = (
                 ref_mf_at_tm
                 * (S_i / S_A_TM)
@@ -2502,8 +2759,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 * (D_A / D_i)
                 * (lambda_TM / lambda_T)
             )
-            results[T] = max(0.0, X_i)
-
+            results[T] = max(0.0, float(X_i))
         return results
 
     def _is_parent_auto_result_key(self, key: tuple[int, str, float]) -> bool:
@@ -2686,36 +2942,67 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
     def _collect_all_results(self) -> dict[str, dict[float, float]]:
         return {series["label"]: series["values"] for series in self._collect_result_series()}
 
+    def _add_result_series(
+        self,
+        series: list[dict[str, object]],
+        seen_labels: set[str],
+        result_type: str,
+        label: str,
+        values: dict[float, float],
+        mz: int | None = None,
+        species: str | None = None,
+        energy: float | None = None,
+    ) -> None:
+        if not values or label in seen_labels:
+            return
+        seen_labels.add(label)
+        series.append(
+            {
+                "type": result_type,
+                "label": label,
+                "values": values,
+                "mz": mz,
+                "species": species or label,
+                "energy": energy,
+            }
+        )
+
+    def _collect_auto_result_series(
+        self,
+        series: list[dict[str, object]],
+        seen_labels: set[str],
+    ) -> None:
+        for mz, species, energy in self._auto_plot_keys_for_scope():
+            mf = self.all_species_mf.get((mz, species, energy))
+            if not mf:
+                continue
+            result_type = "母体参考" if self._is_parent_auto_result_key((mz, species, energy)) else "产物"
+            name = f"{species}(m/z={mz},E={energy:.2f}eV)"
+            self._add_result_series(
+                series,
+                seen_labels,
+                result_type,
+                name,
+                mf,
+                mz=mz,
+                species=species,
+                energy=energy,
+            )
+
     def _collect_result_series(self) -> list[dict[str, object]]:
         series: list[dict[str, object]] = []
         seen_labels: set[str] = set()
 
-        def add_series(
-            result_type: str,
-            label: str,
-            values: dict[float, float],
-            mz: int | None = None,
-            species: str | None = None,
-            energy: float | None = None,
-        ) -> None:
-            if not values or label in seen_labels:
-                return
-            seen_labels.add(label)
-            series.append(
-                {
-                    "type": result_type,
-                    "label": label,
-                    "values": values,
-                    "mz": mz,
-                    "species": species or label,
-                    "energy": energy,
-                }
-            )
+        if hasattr(self, "all_species_mf") and self.all_species_mf:
+            self._collect_auto_result_series(series, seen_labels)
+            return series
 
         if self.parent_mf_results:
             mz = self.spin_parent_mz.value()
             species_name = self._selected_parent_species_name() or "母体"
-            add_series(
+            self._add_result_series(
+                series,
+                seen_labels,
                 "母体",
                 self._parent_result_label(mz, self._selected_parent_species_name()),
                 self.parent_mf_results,
@@ -2728,7 +3015,9 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 cfg = self.parent_config_by_energy.get(energy, self._get_parent_config_for_energy(energy))
                 mz = int(cfg["mz"])
                 species_name = cfg.get("species_name") or "参考物种"
-                add_series(
+                self._add_result_series(
+                    series,
+                    seen_labels,
                     "母体参考",
                     self._parent_result_label(mz, cfg.get("species_name"), energy),
                     mf,
@@ -2738,23 +3027,19 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 )
 
         for label, values in self.product_mf_results.items():
-            add_series("产物", label, values, species=label)
+            self._add_result_series(series, seen_labels, "产物", label, values, species=label)
 
         for mz, species_data in self.isomeric_results.items():
             for species_name, mf_data in species_data.items():
-                add_series(
+                self._add_result_series(
+                    series,
+                    seen_labels,
                     "同分异构",
                     f"{species_name}(m/z={mz})",
                     mf_data,
                     mz=mz,
                     species=species_name,
                 )
-
-        if hasattr(self, "all_species_mf") and self.all_species_mf:
-            for (mz, species, energy), mf in self.all_species_mf.items():
-                name = f"{species}(m/z={mz},E={energy:.2f}eV)"
-                result_type = "母体" if self._is_parent_auto_result_key((mz, species, energy)) else "产物"
-                add_series(result_type, name, mf, mz=mz, species=species, energy=energy)
 
         return series
 
@@ -2853,7 +3138,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 self.mf_series_list.addItem(item)
 
         if all_temps and all_mfs:
-            self.mf_plot_widget.apply_data_limits(x_ranges, y_ranges, x_pad_min=50.0, y_pad_min=0.1)
+            self.mf_plot_widget.apply_data_limits(x_ranges, y_ranges, x_pad_min=50.0, y_pad_min=1e-9)
         self.mf_plot_widget.finish()
 
     def _export_results(self):
@@ -2887,7 +3172,8 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             QtWidgets.QMessageBox.critical(self, "错误", f"导出失败: {e}")
 
     def _export_plot(self):
-        if self.auto_mf_plot_widget is None or self.auto_mf_plot_widget.figure is None:
+        plot_widget = self.mf_plot_widget or self.auto_mf_plot_widget
+        if plot_widget is None or plot_widget.figure is None:
             QtWidgets.QMessageBox.warning(self, "提示", "没有可导出的图表")
             return
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
@@ -2898,7 +3184,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         )
         if not path:
             return
-        if self.auto_mf_plot_widget.save_plot(path):
+        if plot_widget.save_plot(path):
             QtWidgets.QMessageBox.information(self, "成功", f"曲线图已导出：{path}")
         else:
             QtWidgets.QMessageBox.warning(self, "错误", "导出图表失败")
@@ -2911,5 +3197,6 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             path = species_database_path()
         try:
             self.database, self.mz_index = load_species_database(path)
+            self._loaded_database_path = str(Path(path))
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "错误", f"加载数据库失败: {e}")

@@ -30,10 +30,26 @@ MASS_DISCRIMINATION_PRESETS = {
 }
 
 
+def _optional_float_dict(value):
+    if not value:
+        return {}
+    result = {}
+    for key, item in value.items():
+        float_key = float(key)
+        if isinstance(item, dict):
+            result[float_key] = {
+                float(nested_key): float(nested_value)
+                for nested_key, nested_value in item.items()
+            }
+        else:
+            result[float_key] = float(item)
+    return result
+
+
 @dataclass
 class MoleFractionSettings:
     mass_disc_exponent: float = 0.77897
-    parent_mz: int = 128
+    parent_mz: int = 0
     parent_initial_mf: float = 0.002
     reference_temperature: float | None = None
     reference_species_mz: int | None = None
@@ -59,16 +75,10 @@ def load_mole_fraction_settings(
         raise ValueError("mole fraction config must be a mapping")
     if "expansion_factors" in settings_data:
         settings_data = settings_data.copy()
-        settings_data["expansion_factors"] = {
-            float(key): float(value)
-            for key, value in (settings_data.get("expansion_factors") or {}).items()
-        }
+        settings_data["expansion_factors"] = _optional_float_dict(settings_data.get("expansion_factors"))
     if "kr_data" in settings_data:
         settings_data = settings_data.copy()
-        settings_data["kr_data"] = {
-            float(key): float(value)
-            for key, value in (settings_data.get("kr_data") or {}).items()
-        }
+        settings_data["kr_data"] = _optional_float_dict(settings_data.get("kr_data"))
     return MoleFractionSettings(
         **{
             key: value
@@ -85,12 +95,8 @@ def save_mole_fraction_settings(
     config_path = writable_project_path(path)
     config_path.parent.mkdir(parents=True, exist_ok=True)
     data: dict[str, Any] = asdict(settings)
-    data["expansion_factors"] = {
-        float(key): float(value) for key, value in settings.expansion_factors.items()
-    }
-    data["kr_data"] = {
-        float(key): float(value) for key, value in settings.kr_data.items()
-    }
+    data["expansion_factors"] = _optional_float_dict(settings.expansion_factors)
+    data["kr_data"] = _optional_float_dict(settings.kr_data)
     with config_path.open("w", encoding="utf-8") as handle:
         yaml.safe_dump(
             {"mole_fraction": data}, handle, allow_unicode=True, sort_keys=False
@@ -118,6 +124,14 @@ def get_expansion_coefficient(
     temperature: float,
     expansion_coefficients: dict[float, float],
 ) -> float:
+    if not expansion_coefficients:
+        return 1.0
+
+    # 检测是否为多能量格式 {energy: {temp: coeff}}，自动退化为第一个可用能量
+    first_val = next(iter(expansion_coefficients.values()), None)
+    if isinstance(first_val, dict):
+        return get_expansion_coefficient(temperature, first_val)
+
     if temperature in expansion_coefficients:
         return expansion_coefficients[temperature]
     temps = sorted(expansion_coefficients.keys())
@@ -137,8 +151,8 @@ def parse_expansion_factors_from_result(result_df) -> dict:
     if result_df.empty:
         return {}
 
-    # 检查是否包含能量列（多能量）
-    if "photon_energy" in result_df.columns:
+    # 检查是否包含多个能量（多能量）
+    if "photon_energy" in result_df.columns and result_df["photon_energy"].nunique(dropna=True) > 1:
         # 多能量格式
         result = {}
         for energy in result_df["photon_energy"].unique():
@@ -487,6 +501,8 @@ def calc_product_mole_fraction(
     T_M = reference_temperature
     if T_M is None:
         T_M = max(signal_data.keys())
+    if T_M is None:
+        return {}
     lambda_TM = get_expansion_coefficient(T_M, expansion_coefficients)
 
     if ref_signal_data is not None and ref_signal_data:
@@ -838,10 +854,7 @@ class MoleFractionCalculator:
         T0 = self.reference_temperature
 
         if T0 not in signal_data:
-            available_temps = sorted(signal_data.keys())
-            closest_temp = min(available_temps, key=lambda t: abs(t - T0))
-            self.reference_temperature = closest_temp
-            T0 = closest_temp
+            return {}
 
         X_T0 = self.parent_initial_mf
         S_T0 = signal_data.get(T0, 0)

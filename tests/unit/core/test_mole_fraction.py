@@ -17,6 +17,7 @@ from bl03u_masstool.core.mole_fraction import (
     calc_product_mole_fraction,
     compute_all_mole_fractions,
     get_expansion_coefficient,
+    get_expansion_coefficient_for_energy,
     load_mole_fraction_settings,
     separate_coexisting_species_signals,
 )
@@ -73,6 +74,14 @@ class TestGetExpansionCoefficient:
     def test_single_coefficient(self):
         assert get_expansion_coefficient(100.0, {200.0: 0.5}) == 1.0
 
+    def test_multi_energy_uses_closest_energy_group(self):
+        coeffs = {
+            14.6: {650.0: 1.0, 750.0: 2.0},
+            14.8: {650.0: 10.0, 750.0: 20.0},
+        }
+
+        assert get_expansion_coefficient_for_energy(750.0, 14.79, coeffs) == pytest.approx(20.0)
+
 
 class TestCalcParentMoleFraction:
     def test_basic_calculation(self):
@@ -105,6 +114,15 @@ class TestCalcParentMoleFraction:
         result = calc_parent_mole_fraction({100.0: 0.0, 200.0: 500.0})
         assert result == {}
 
+    def test_missing_reference_temperature_returns_empty(self):
+        result = calc_parent_mole_fraction(
+            {650.0: 1000.0, 750.0: 500.0},
+            reference_temperature=550.0,
+            parent_initial_mf=0.02,
+        )
+
+        assert result == {}
+
 
 class TestCalcIsomericSeparation:
     def test_basic_separation(self):
@@ -132,7 +150,7 @@ class TestMoleFractionSettings:
     def test_default_values(self):
         settings = MoleFractionSettings()
         assert settings.mass_disc_exponent == 0.77897
-        assert settings.parent_mz == 128
+        assert settings.parent_mz == 0
         assert settings.parent_initial_mf == 0.002
 
     def test_load_save_roundtrip(self, tmp_path):
@@ -183,6 +201,58 @@ def test_compute_all_mole_fractions_accepts_pie_species_field_and_formula_mass()
     )
 
     assert result["Water"].tolist() == pytest.approx([0.001, 0.0016])
+
+
+def test_product_mole_fraction_uses_max_signal_temperature_when_reference_unset():
+    database = [
+        {"mz": 18, "species": "Water", "energies": np.array([12.0]), "cross_sections": np.array([2.0])},
+        {"mz": 30, "species": "NO", "energies": np.array([12.0]), "cross_sections": np.array([4.0])},
+    ]
+
+    result = calc_product_mole_fraction(
+        {650.0: 50.0, 750.0: 80.0},
+        species_mw=18.0,
+        species_mz=18,
+        species_name="Water",
+        ref_mw=30.0,
+        ref_mz=30,
+        ref_species_name="NO",
+        ref_mf_at_tm=0.01,
+        ref_signal_data={650.0: 1000.0, 750.0: 800.0},
+        energy=12.0,
+        mass_disc_exponent=0.0,
+        database=database,
+        mz_index={18: [0], 30: [1]},
+    )
+
+    assert result[650.0] == pytest.approx(0.00125)
+    assert result[750.0] == pytest.approx(0.002)
+
+
+def test_product_mole_fraction_returns_empty_when_reference_temperature_missing():
+    database = [
+        {"mz": 18, "species": "Water", "energies": np.array([12.0]), "cross_sections": np.array([2.0])},
+        {"mz": 30, "species": "NO", "energies": np.array([12.0]), "cross_sections": np.array([4.0])},
+    ]
+
+    result = calc_product_mole_fraction(
+        {650.0: 50.0, 750.0: 80.0},
+        species_mw=18.0,
+        species_mz=18,
+        species_name="Water",
+        ref_mw=30.0,
+        ref_mz=30,
+        ref_species_name="NO",
+        ref_mf_at_tm=0.01,
+        ref_signal_data={650.0: 1000.0, 750.0: 800.0},
+        energy=12.0,
+        reference_temperature=550.0,
+        mass_disc_exponent=0.0,
+        database=database,
+        mz_index={18: [0], 30: [1]},
+    )
+
+    assert result == {}
 
 
 def test_auto_mole_fractions_uses_parent_result_temperature_when_reference_is_unset():

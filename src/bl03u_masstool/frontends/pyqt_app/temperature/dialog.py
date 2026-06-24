@@ -49,6 +49,7 @@ from bl03u_masstool.core.mole_fraction import (
     extract_signal_from_temperature_curves,
     get_expansion_coefficient,
     load_mole_fraction_settings,
+    parse_expansion_factors_from_result,
     save_mole_fraction_settings,
 )
 from bl03u_masstool.frontends.pyqt_app.workers import WorkerThread
@@ -580,13 +581,33 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
     def on_kr_compute_complete(self, result: pd.DataFrame) -> None:
         settings = self.normalization_settings
-        expansion_factors = {float(t): float(lam) for t, lam in zip(result["temperature"], result["expansion_lambda"])}
+        expansion_factors = parse_expansion_factors_from_result(result)
         settings.expansion_factors = expansion_factors
         settings.temperature_kr_correct = True
         save_normalization_settings(settings)
+        if self.project_settings is not None:
+            self.project_settings.expansion_factors = dict(expansion_factors)
+            self.project_settings.temperature_kr_correct = True
+            from bl03u_masstool.core.project_settings import ProjectSettingsManager
+            manager = ProjectSettingsManager()
+            manager.set(self.project_settings)
+            manager.save()
+        if hasattr(self, "temperature_kr_check"):
+            self.temperature_kr_check.setChecked(True)
+
+        if "photon_energy" in result.columns and result["photon_energy"].nunique(dropna=True) > 1:
+            point_text = (
+                f"{result['photon_energy'].nunique(dropna=True)} 个能量 × "
+                f"{result['temperature'].nunique()} 个温度点"
+            )
+        else:
+            point_text = f"{len(expansion_factors)} 个温度点"
         QtWidgets.QMessageBox.information(
             self, "完成",
-            f"成功计算 Kr 膨胀系数！\n参考温度: {result['reference_temperature'].iloc[0]:.1f}°C\n共 {len(result)} 个温度点\n\n已启用 Kr 校正，将自动重新分析温度扫描数据",
+            "成功计算 Kr 膨胀系数！\n"
+            f"参考温度: {result['reference_temperature'].iloc[0]:.1f}°C\n"
+            f"共 {point_text}\n\n"
+            "已启用 Kr 校正，将自动重新分析温度扫描数据",
         )
         if self.worker is not None:
             try:
@@ -961,4 +982,3 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         if not hasattr(self, '_preview_windows'):
             self._preview_windows = []
         self._preview_windows.append(preview_win)
-

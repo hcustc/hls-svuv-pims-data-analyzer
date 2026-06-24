@@ -5,6 +5,10 @@ import yaml
 from bl03u_masstool.core.project_settings import ProjectSettings, load_project_settings, save_project_settings
 
 
+def test_project_settings_default_parent_mz_is_unset():
+    assert ProjectSettings().mf_parent_mz == 0
+
+
 def test_project_settings_round_trip_preserves_nested_yaml_fields(tmp_path):
     path = tmp_path / "project.yaml"
     settings = ProjectSettings(
@@ -32,7 +36,7 @@ def test_project_settings_round_trip_preserves_nested_yaml_fields(tmp_path):
         mass_discrimination=0.9,
         kr_calibration_folder="data/kr",
         kr_calibration_peak_file="config/peak.yaml",
-        expansion_factors={550.0: 1.0, 600.0: 1.1},
+        expansion_factors={14.6: {550.0: 1.0, 600.0: 1.1}, 14.7: {550.0: 1.0, 600.0: 1.2}},
         selected_elements=["C", "H", "O"],
         peak_algorithm="cwt",
         detection_min_idx=123,

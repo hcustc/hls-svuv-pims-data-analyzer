@@ -16,6 +16,7 @@ except ImportError as e:
 pytestmark = pytest.mark.gui
 
 from bl03u_masstool.core.calibration import Calibration
+from bl03u_masstool.core.pie_analysis import save_species_database_sqlite
 from bl03u_masstool.core.project_settings import ProjectSettings
 from bl03u_masstool.frontends.pyqt_app.mole_fraction.dialog import MoleFractionDialog
 
@@ -42,6 +43,44 @@ def test_manual_peak_ranges_integrate_fixed_bounds(qapp):
         assert peaks[0]["left_idx"] == 5
         assert peaks[0]["right_idx"] == 7
         assert peaks[0]["integral"] == pytest.approx(15.0)
+    finally:
+        dialog.deleteLater()
+
+
+def test_mass_discrimination_exponent_falls_back_to_legacy_settings(qapp):
+    dialog = MoleFractionDialog(Calibration(a=0.0, b=1.0, c=0.0), None)
+    try:
+        dialog.project_settings = None
+        dialog.settings.mass_disc_exponent = 0.42
+
+        assert dialog._mass_disc_exponent == pytest.approx(0.42)
+    finally:
+        dialog.deleteLater()
+
+
+def test_project_settings_loads_project_pics_database(qapp, tmp_path):
+    dialog = MoleFractionDialog(Calibration(a=0.0, b=1.0, c=0.0), None)
+    try:
+        db_path = tmp_path / "project_species.sqlite"
+        save_species_database_sqlite(
+            [
+                {
+                    "mz": 15,
+                    "species": "ProjectSpecies",
+                    "ie": 9.8,
+                    "smiles": "",
+                    "energies": np.array([10.0]),
+                    "cross_sections": np.array([1.5]),
+                }
+            ],
+            db_path,
+        )
+
+        dialog.set_project_settings(ProjectSettings(pics_database_path=str(db_path), mf_parent_mz=15))
+
+        assert dialog._loaded_database_path == str(db_path)
+        assert any(record["species"] == "ProjectSpecies" for record in dialog.database)
+        assert 15 in dialog.mz_index
     finally:
         dialog.deleteLater()
 
@@ -101,6 +140,8 @@ def test_project_temperature_scan_folder_loads_energy_subfolders(qapp, tmp_path,
         dialog.set_project_settings(ProjectSettings(temperature_scan_folder=str(root)))
 
         assert dialog.btn_load_project_ts_folder.isEnabled()
+        assert dialog.available_energies == [8.0, 9.5]
+        assert "项目原始目录" in dialog.lbl_ts_folder.text()
 
         dialog._load_project_temperature_scan_folder()
 
@@ -110,6 +151,81 @@ def test_project_temperature_scan_folder_loads_energy_subfolders(qapp, tmp_path,
         assert dialog.combo_energy_select.count() == 3
         assert dialog.lbl_energy_count.text() == "共 2 个能量点"
         assert "项目原始目录" in dialog.lbl_ts_folder.text()
+    finally:
+        dialog.deleteLater()
+
+
+def test_project_settings_auto_restores_mole_fraction_inputs(qapp, tmp_path):
+    dialog = MoleFractionDialog(Calibration(a=0.0, b=1.0, c=0.0), None)
+    try:
+        temperature_result = tmp_path / "temperature_result.csv"
+        temperature_result.write_text(
+            "\n".join(
+                [
+                    "temperature,mz,area,photon_energy,file,io,left_bound,right_bound",
+                    "650,15,10.0,10.0,sample_650.txt,50,19,21",
+                    "750,15,20.0,10.0,sample_750.txt,60,19,21",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        pie_result = tmp_path / "pie_result.csv"
+        pie_result.write_text(
+            "\n".join(
+                [
+                    "质量数,物种名称,电离能(eV),贡献比例(%),R²",
+                    "15,Methyl radical,9.84,92.5,0.998",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        dialog.set_project_settings(
+            ProjectSettings(
+                temperature_scan_result_file=str(temperature_result),
+                pie_identification_result_file=str(pie_result),
+                mf_parent_mz=15,
+                mf_photon_energy=10.0,
+                mf_reference_temperature=650,
+            )
+        )
+
+        assert dialog.available_energies == [10.0]
+        assert sorted(dialog.temperature_scan_data[10.0]) == [650.0, 750.0]
+        assert dialog.temperature_scan_data[10.0][650.0]["precomputed_signals"][15] == pytest.approx(10.0)
+        assert dialog.pie_species_data == [
+            {
+                "mz": 15,
+                "species": "Methyl radical",
+                "ie": pytest.approx(9.84),
+                "contribution": pytest.approx(92.5),
+                "r_squared": pytest.approx(0.998),
+            }
+        ]
+        assert dialog.pie_species_table.rowCount() == 1
+        assert "已从项目自动恢复" in dialog.status_label.text()
+        assert "温度扫描结果 1 个能量" in dialog.status_label.text()
+        assert "PIE结果 1 条" in dialog.status_label.text()
+    finally:
+        dialog.deleteLater()
+
+
+def test_stale_legacy_parent_mz_128_is_cleared_when_data_lacks_128(qapp):
+    dialog = MoleFractionDialog(Calibration(a=0.0, b=1.0, c=0.0), None)
+    try:
+        dialog.spin_parent_mz.setValue(128)
+        dialog.temperature_scan_data = {
+            10.0: {
+                650.0: {
+                    "precomputed_signals": {112: 100.0},
+                    "peaks_info": [{"mz_rounded": 112}],
+                }
+            }
+        }
+        dialog.pie_species_data = [{"mz": 112, "species": "Parent"}]
+
+        assert dialog._clear_stale_legacy_parent_mz()
+        assert dialog.spin_parent_mz.value() == 0
     finally:
         dialog.deleteLater()
 
@@ -241,6 +357,65 @@ def test_low_energy_reference_cache_is_derived_from_main_parent(qapp, monkeypatc
         dialog.deleteLater()
 
 
+def test_low_energy_reference_cache_uses_configured_energy_signal(qapp, monkeypatch):
+    dialog = MoleFractionDialog(Calibration(a=0.0, b=1.0, c=0.0), None)
+    try:
+        dialog.spin_parent_mz.setValue(112)
+        dialog.spin_parent_energy.setValue(10.0)
+        dialog.spin_parent_t0.setValue(650)
+        dialog.parent_mf_results = {650.0: 0.02}
+        dialog.available_energies = [8.0, 10.0]
+        dialog.temperature_scan_data = {
+            8.0: {
+                650.0: {
+                    "precomputed_signals": {92: 8.0},
+                    "peaks_info": [],
+                    "avg_data": [],
+                    "avg_io": 1.0,
+                    "filenames": "8eV.txt",
+                    "repeat_count": 1,
+                }
+            },
+            10.0: {
+                650.0: {
+                    "precomputed_signals": {92: 10.0, 112: 100.0},
+                    "peaks_info": [],
+                    "avg_data": [],
+                    "avg_io": 1.0,
+                    "filenames": "10eV.txt",
+                    "repeat_count": 1,
+                }
+            },
+        }
+        dialog.energy_parent_config = {8.0: {"mz": 92, "species_name": "LowRef"}}
+        captured = {}
+
+        def fake_product_mf(
+            mz,
+            species,
+            ref_mz,
+            ref_mw,
+            ref_energy,
+            ref_signal_data,
+            ref_mf_at_tm,
+            signal_data,
+            calc_energy=None,
+            ref_species_name=None,
+        ):
+            captured["signal_data"] = signal_data
+            captured["calc_energy"] = calc_energy
+            return {650.0: 0.003}
+
+        monkeypatch.setattr(dialog, "_calc_product_mf_auto", fake_product_mf)
+
+        dialog._recalculate_parent_mf_by_energy()
+
+        assert captured["signal_data"] == {650.0: 8.0}
+        assert captured["calc_energy"] == pytest.approx(8.0)
+    finally:
+        dialog.deleteLater()
+
+
 def test_signal_extraction_prefers_raw_scan_over_precomputed_result(qapp):
     dialog = MoleFractionDialog(Calibration(a=0.0, b=1.0, c=0.0), None)
     try:
@@ -304,6 +479,72 @@ def test_reference_parent_for_species_prefers_closest_ionized_low_energy_referen
         dialog.deleteLater()
 
 
+def test_dialog_product_mf_uses_max_reference_signal_temperature_when_t0_missing(qapp):
+    dialog = MoleFractionDialog(Calibration(a=0.0, b=1.0, c=0.0), None)
+    try:
+        dialog.project_settings = ProjectSettings(mf_mass_disc_exponent=0.0)
+        dialog.spin_parent_t0.setValue(550)
+        dialog.expansion_coefficients = {650.0: 1.0, 750.0: 1.0}
+        dialog.database = [
+            {"mz": 18, "species": "Water", "energies": np.array([12.0]), "cross_sections": np.array([2.0])},
+            {"mz": 30, "species": "NO", "energies": np.array([12.0]), "cross_sections": np.array([4.0])},
+        ]
+        dialog.mz_index = {18: [0], 30: [1]}
+
+        mf = dialog._calc_product_mf_from_signal(
+            18,
+            {"mz": 18, "species": "Water", "ie": 11.0},
+            12.0,
+            {650.0: 50.0, 750.0: 80.0},
+            30,
+            30.0,
+            12.0,
+            {650.0: 1000.0, 750.0: 800.0},
+            0.01,
+            ref_species_name="NO",
+        )
+
+        assert mf is not None
+        assert mf[650.0] == pytest.approx(0.00125)
+        assert mf[750.0] == pytest.approx(0.002)
+    finally:
+        dialog.deleteLater()
+
+
+def test_dialog_product_mf_uses_energy_specific_expansion_coefficients(qapp):
+    dialog = MoleFractionDialog(Calibration(a=0.0, b=1.0, c=0.0), None)
+    try:
+        dialog.project_settings = ProjectSettings(mf_mass_disc_exponent=0.0)
+        dialog.spin_parent_t0.setValue(650)
+        dialog.expansion_coefficients = {
+            14.6: {650.0: 2.0, 750.0: 2.0},
+            14.8: {650.0: 10.0, 750.0: 5.0},
+        }
+        dialog.database = [
+            {"mz": 18, "species": "Water", "energies": np.array([14.8]), "cross_sections": np.array([2.0])},
+            {"mz": 30, "species": "NO", "energies": np.array([14.6]), "cross_sections": np.array([4.0])},
+        ]
+        dialog.mz_index = {18: [0], 30: [1]}
+
+        mf = dialog._calc_product_mf_from_signal(
+            18,
+            {"mz": 18, "species": "Water", "ie": 12.0},
+            14.8,
+            {750.0: 100.0},
+            30,
+            30.0,
+            14.6,
+            {650.0: 1000.0},
+            0.01,
+            ref_species_name="NO",
+        )
+
+        assert mf is not None
+        assert mf[750.0] == pytest.approx(0.0008)
+    finally:
+        dialog.deleteLater()
+
+
 def test_auto_mf_table_marks_parent_references_after_products(qapp):
     dialog = MoleFractionDialog(Calibration(a=0.0, b=1.0, c=0.0), None)
     try:
@@ -350,6 +591,56 @@ def test_results_summary_table_uses_readable_long_format(qapp):
         ] == ["类型", "m/z", "物种/结果", "光子能量(eV)", "温度(°C)", "摩尔分数"]
         assert dialog.results_table.item(0, 2).text().startswith("Species")
         assert "11 条结果" in dialog.lbl_results_status.text()
+    finally:
+        dialog.deleteLater()
+
+
+def test_results_summary_uses_auto_product_results_only(qapp):
+    dialog = MoleFractionDialog(Calibration(a=0.0, b=1.0, c=0.0), None)
+    try:
+        dialog.spin_parent_mz.setValue(112)
+        dialog.spin_parent_energy.setValue(8.0)
+        dialog.parent_mf_results = {650.0: 0.02}
+        dialog.parent_mf_by_energy = {8.0: {650.0: 0.02}}
+        dialog.parent_config_by_energy = {
+            8.0: {"mz": 112, "species_name": "1,1-dimethyl cyclohexane"},
+        }
+        dialog.all_species_mf = {
+            (112, "1,1-dimethyl cyclohexane", 8.0): {650.0: 0.02},
+            (15, "Methyl radical", 9.5): {650.0: 0.001, 700.0: 0.0015},
+        }
+
+        dialog._update_results_table()
+
+        assert dialog.results_table.rowCount() == 2
+        assert dialog.results_table.item(0, 0).text() == "产物"
+        assert dialog.results_table.item(0, 1).text() == "15"
+        assert dialog.results_table.item(0, 2).text() == "Methyl radical"
+        assert "1 条结果" in dialog.lbl_results_status.text()
+    finally:
+        dialog.deleteLater()
+
+
+def test_results_summary_follows_auto_plot_scope(qapp):
+    dialog = MoleFractionDialog(Calibration(a=0.0, b=1.0, c=0.0), None)
+    try:
+        dialog.spin_parent_mz.setValue(112)
+        dialog.spin_parent_energy.setValue(8.0)
+        dialog.parent_config_by_energy = {
+            8.0: {"mz": 112, "species_name": "1,1-dimethyl cyclohexane"},
+        }
+        dialog.all_species_mf = {
+            (112, "1,1-dimethyl cyclohexane", 8.0): {650.0: 0.02},
+            (15, "Methyl radical", 9.5): {650.0: 0.001},
+        }
+        dialog._set_combo_current_data(dialog.combo_auto_plot_scope, "all")
+
+        dialog._update_results_table()
+
+        assert dialog.results_table.rowCount() == 2
+        assert dialog.results_table.item(0, 0).text() == "母体参考"
+        assert dialog.results_table.item(1, 0).text() == "产物"
+        assert "2 条结果" in dialog.lbl_results_status.text()
     finally:
         dialog.deleteLater()
 

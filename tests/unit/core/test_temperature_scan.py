@@ -334,6 +334,59 @@ def test_kr_expansion_groups_jittered_energies_before_lambda_calculation(tmp_pat
     assert by_energy_temp.loc[800.0].tolist() == [2.0, 2.0]
 
 
+def test_temperature_scan_maps_kr_expansion_by_energy_and_temperature(tmp_path):
+    peak_file = tmp_path / "peaks.csv"
+    peak_file.write_text("mz,peak,start,end\n84,84,83,85\n", encoding="utf-8")
+
+    def write_spectrum(name: str, energy: float, temperature: float, scale: float):
+        y = [0.0] * 100
+        y[83] = 1.0 * scale
+        y[84] = 10.0 * scale
+        y[85] = 1.0 * scale
+        header = [
+            f"Energy:{energy} eV",
+            "IO:1 nA",
+            "Beam Current:1mA",
+            "Undulator Offset:0mm",
+            "Time:1 s",
+            "Burner Position:0 mm",
+            f"Temperature:{temperature} C",
+            "DIFF PRESSURE:1Pa",
+            "ION PRESSURE:1Pa",
+            "TOF PRESSURE:1Pa",
+        ]
+        (tmp_path / name).write_text("\n".join(header + [str(value) for value in y]), encoding="utf-8")
+
+    write_spectrum("e146-low.txt", 14.6, 400.0, 1.0)
+    write_spectrum("e146-high.txt", 14.6, 800.0, 2.0)
+    write_spectrum("e147-low.txt", 14.7, 400.0, 1.0)
+    write_spectrum("e147-high.txt", 14.7, 800.0, 4.0)
+
+    result = analyze_temperature_folder(
+        tmp_path,
+        calibration=Calibration(a=0, b=1, c=0),
+        manual_peak_path=peak_file,
+        photon_normalize=True,
+        prefer_gaussian=False,
+        kr_correct=True,
+        expansion_factors={
+            14.6: {400.0: 1.0, 800.0: 2.0},
+            14.7: {400.0: 1.0, 800.0: 4.0},
+        },
+    )
+
+    by_energy_temp = result.pivot_table(
+        index="temperature",
+        columns="photon_energy",
+        values=["expansion_lambda", "area"],
+        aggfunc="first",
+    )
+    assert by_energy_temp[("expansion_lambda", 14.6)].loc[800.0] == pytest.approx(2.0)
+    assert by_energy_temp[("expansion_lambda", 14.7)].loc[800.0] == pytest.approx(4.0)
+    assert by_energy_temp[("area", 14.6)].loc[800.0] == pytest.approx(9.0)
+    assert by_energy_temp[("area", 14.7)].loc[800.0] == pytest.approx(9.0)
+
+
 def test_temperature_scan_sum_reference_finds_peaks_across_temperatures(tmp_path):
     def write_spectrum(name: str, temperature: float, peak_index: int):
         y = [0.0] * 50

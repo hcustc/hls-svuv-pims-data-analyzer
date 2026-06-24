@@ -89,7 +89,7 @@ function_defaults:
   mole_fraction:
     md_preset: 光电离
     mass_disc_exponent: 0.77897
-    parent_mz: 128
+    parent_mz: 0
     parent_initial_mf: 0.002
     reference_temperature: null
     reference_species_mz: null
