@@ -827,7 +827,7 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
             )
             return
 
-        spectrum_files = list(folder_path.glob("*.txt")) + list(folder_path.glob("*.asc"))
+        spectrum_files = list(folder_path.rglob("*.txt")) + list(folder_path.rglob("*.asc"))
         if not spectrum_files:
             QtWidgets.QMessageBox.warning(
                 self,
@@ -902,8 +902,9 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
                     "expansion_lambda": avg_lambda,
                 })
             avg_df = pd.DataFrame(avg_data)
-            self.settings.expansion_factors = parse_expansion_factors_from_result(avg_df)
-            self._kr_display_factors = dict(self.settings.expansion_factors)
+            self.settings.expansion_factors = parse_expansion_factors_from_result(df)
+            avg_display_factors = parse_expansion_factors_from_result(avg_df)
+            self._kr_display_factors = dict(avg_display_factors)
 
             # 按误差容忍度将能量值分组
             all_energies = sorted(df["photon_energy"].unique().tolist())
@@ -929,7 +930,7 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
                 for _, row in avg_df.iterrows()
             }
             msg = f"已计算 {len(energy_groups)} 个能量点 × {len(df)//len(all_energies)} 个温度点，"
-            msg += f"显示 {len(self.settings.expansion_factors)} 个温度点的平均膨胀系数"
+            msg += f"显示 {len(avg_display_factors)} 个温度点的平均膨胀系数"
         else:
             # 单能量
             self.settings.expansion_factors = parse_expansion_factors_from_result(df)

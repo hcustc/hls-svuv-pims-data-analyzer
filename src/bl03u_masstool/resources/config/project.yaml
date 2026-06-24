@@ -86,7 +86,7 @@ function_params:
     new_species_mf: 0.002
   mole_fraction:
     mass_disc_exponent: 0.77897
-    parent_mz: 128
+    parent_mz: 0
     parent_initial_mf: 0.002
     reference_temperature: null
     reference_species_mz: null

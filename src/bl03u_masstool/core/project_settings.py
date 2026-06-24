@@ -15,6 +15,22 @@ from .mole_fraction import MoleFractionSettings, load_mole_fraction_settings
 DEFAULT_PROJECT_CONFIG = Path("config/project.yaml")
 
 
+def _optional_float_dict(value):
+    if not value:
+        return {}
+    result = {}
+    for key, item in value.items():
+        float_key = float(key)
+        if isinstance(item, dict):
+            result[float_key] = {
+                float(nested_key): float(nested_value)
+                for nested_key, nested_value in item.items()
+            }
+        else:
+            result[float_key] = float(item)
+    return result
+
+
 @dataclass
 class ProjectSettings:
     """Unified project settings replacing scattered config files."""
@@ -107,7 +123,7 @@ class ProjectSettings:
     # === Mole Fraction Defaults ===
     mf_mass_disc_exponent: float = 0.77897
     mf_md_preset: str = "光电离"  # 实验条件预设名称
-    mf_parent_mz: int = 128
+    mf_parent_mz: int = 0
     mf_parent_initial_mf: float = 0.002
     mf_reference_temperature: float | None = None
     mf_reference_species_mz: int | None = None
@@ -414,7 +430,7 @@ def _nested_to_flat(data: dict) -> dict:
 
     for key in ("expansion_factors", "mf_kr_data"):
         if key in flat and isinstance(flat[key], dict):
-            flat[key] = {float(k): float(v) for k, v in flat[key].items()}
+            flat[key] = _optional_float_dict(flat[key])
 
     return flat
 
@@ -428,9 +444,6 @@ def _flat_to_nested(settings: ProjectSettings) -> dict:
     Backward compatible: Still supports reading from top-level sections for old projects.
     """
     d = asdict(settings)
-
-    def _optional_float_dict(v):
-        return {float(k): float(v) for k, v in (v or {}).items()} if v else {}
 
     return {
         "project": {

@@ -106,7 +106,8 @@ def test_kr_energy_selection_updates_displayed_lambda_values(qapp, monkeypatch):
 
         assert widget.factor_table.item(1, 2).text() == "2.000000"
         assert widget.factor_table.item(1, 1).text() == "20.0000"
-        assert widget.settings.expansion_factors[800.0] == pytest.approx(3.0)
+        assert widget.settings.expansion_factors[14.6][800.0] == pytest.approx(2.0)
+        assert widget.settings.expansion_factors[14.7][800.0] == pytest.approx(4.0)
     finally:
         widget.deleteLater()
 
