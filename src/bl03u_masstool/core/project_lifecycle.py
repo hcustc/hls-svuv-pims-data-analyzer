@@ -182,6 +182,7 @@ class ProjectImportResult:
     destination: Path
     field_name: str
     label: str
+    mode: str = "link"
 
 
 @dataclass(frozen=True)
@@ -421,16 +422,24 @@ def _unique_destination(path: Path) -> Path:
     raise FileExistsError(f"Could not choose a unique destination for {path}")
 
 
-def import_project_source(settings: ProjectSettings, source_path: str | Path, source_key: str) -> ProjectImportResult:
+def import_project_source(
+    settings: ProjectSettings,
+    source_path: str | Path,
+    source_key: str,
+    *,
+    mode: str = "link",
+) -> ProjectImportResult:
     spec = PROJECT_SOURCE_SPECS[source_key]
     source = Path(source_path).expanduser().resolve()
     if not source.exists():
         raise FileNotFoundError(source)
+    if mode not in {"link", "copy"}:
+        raise ValueError("mode must be 'link' or 'copy'")
 
     ensure_project_structure(settings)
     root = project_root(settings).resolve()
 
-    # Safety check: prevent copying directory into itself or its subdirectories
+    # Safety check: prevent copying/linking directory into itself or its subdirectories.
     try:
         # Check if destination would be inside source
         target_dir = project_directory(settings, spec.directory_key) / spec.subdirectory
@@ -473,7 +482,9 @@ def import_project_source(settings: ProjectSettings, source_path: str | Path, so
     destination = _unique_destination(target_dir / source.name)
 
     try:
-        if source.is_dir():
+        if mode == "link":
+            destination.symlink_to(source, target_is_directory=source.is_dir())
+        elif source.is_dir():
             shutil.copytree(source, destination)
         else:
             shutil.copy2(source, destination)
@@ -481,7 +492,38 @@ def import_project_source(settings: ProjectSettings, source_path: str | Path, so
         raise RuntimeError(f"Failed to import '{source.name}': {str(e)}")
 
     setattr(settings, spec.field_name, str(destination))
-    return ProjectImportResult(source=source, destination=destination, field_name=spec.field_name, label=spec.label)
+    _write_raw_data_link_manifest(settings, source_key, source, destination, mode)
+    return ProjectImportResult(
+        source=source,
+        destination=destination,
+        field_name=spec.field_name,
+        label=spec.label,
+        mode=mode,
+    )
+
+
+def _write_raw_data_link_manifest(
+    settings: ProjectSettings,
+    source_key: str,
+    source: Path,
+    destination: Path,
+    mode: str,
+) -> Path:
+    manifest_path = project_directory(settings, "raw_data") / "_sources.yaml"
+    data: dict = {}
+    if manifest_path.exists():
+        loaded = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
+        if isinstance(loaded, dict):
+            data = loaded
+    sources = data.setdefault("sources", {})
+    sources[source_key] = {
+        "mode": mode,
+        "source": str(source),
+        "project_path": str(destination),
+        "updated_at": utc_now_iso(),
+    }
+    manifest_path.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    return manifest_path
 
 
 def import_initial_project_data(
@@ -695,6 +737,8 @@ def export_project_archive(settings: ProjectSettings, destination: str | Path | 
             yaml.safe_dump(asdict(settings), allow_unicode=True, sort_keys=False),
         )
         for path in sorted(root.rglob("*")):
+            if path.is_symlink():
+                continue
             if not path.is_file() or path.resolve() == destination_path.resolve():
                 continue
             # Exclude existing snapshots to prevent recursive packaging

@@ -286,6 +286,54 @@ def test_kr_expansion_reads_first_level_energy_subfolders(tmp_path):
     assert [round(value, 6) for value in factors["expansion_lambda"].tolist()] == [1.0, 2.0]
 
 
+def test_kr_expansion_groups_jittered_energies_before_lambda_calculation(tmp_path):
+    peak_file = tmp_path / "peaks.csv"
+    peak_file.write_text("mz,peak,start,end\n84,22,21,23\n", encoding="utf-8")
+
+    def write_spectrum(name: str, energy: float, temperature: float, scale: float):
+        y = [0.0] * 50
+        y[21] = 1.0 * scale
+        y[22] = 10.0 * scale
+        y[23] = 1.0 * scale
+        header = [
+            f"Energy:{energy} eV",
+            "IO:10 nA",
+            "Beam Current:1mA",
+            "Undulator Offset:0mm",
+            "Time:1 s",
+            "Burner Position:0 mm",
+            f"Temperature:{temperature} C",
+            "DIFF PRESSURE:1Pa",
+            "ION PRESSURE:1Pa",
+            "TOF PRESSURE:1Pa",
+        ]
+        (tmp_path / name).write_text("\n".join(header + [str(value) for value in y]), encoding="utf-8")
+
+    write_spectrum("e146-low.txt", 14.6092, 400.0, 1.0)
+    write_spectrum("e146-high.txt", 14.6104, 800.0, 2.0)
+    write_spectrum("e147-low.txt", 14.7092, 400.0, 3.0)
+    write_spectrum("e147-high.txt", 14.7101, 800.0, 6.0)
+
+    factors = compute_kr_expansion_factors(
+        tmp_path,
+        calibration=Calibration(a=0, b=1, c=0),
+        kr_mz=84,
+        manual_peak_path=peak_file,
+        light_source="io",
+        prefer_gaussian=False,
+    )
+
+    assert factors["photon_energy"].nunique() == 2
+    by_energy_temp = factors.pivot_table(
+        index="temperature",
+        columns="photon_energy",
+        values="expansion_lambda",
+        aggfunc="first",
+    )
+    assert by_energy_temp.loc[400.0].tolist() == [1.0, 1.0]
+    assert by_energy_temp.loc[800.0].tolist() == [2.0, 2.0]
+
+
 def test_temperature_scan_sum_reference_finds_peaks_across_temperatures(tmp_path):
     def write_spectrum(name: str, temperature: float, peak_index: int):
         y = [0.0] * 50

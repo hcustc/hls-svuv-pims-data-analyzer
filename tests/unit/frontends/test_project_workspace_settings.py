@@ -3,13 +3,14 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 pytest.importorskip("PyQt6")
 try:
-    from PyQt6 import QtWidgets
+    from PyQt6 import QtCore, QtGui, QtWidgets
 except ImportError as e:
     pytest.skip(f"PyQt6 display libraries not available: {e}", allow_module_level=True)
 
@@ -40,6 +41,74 @@ def qapp():
     if app is None:
         app = QtWidgets.QApplication([])
     return app
+
+
+def test_calibration_spinboxes_accept_command_v_paste(qapp):
+    from bl03u_masstool.core.calibration import Calibration
+    from bl03u_masstool.core.normalization import NormalizationSettings
+    from bl03u_masstool.frontends.pyqt_app.normalization.widget import CommonParametersWidget
+
+    widget = CommonParametersWidget(NormalizationSettings(), Calibration(), None)
+    try:
+        widget.show()
+        qapp.processEvents()
+
+        cases = [
+            (widget.calibration_a_edit, "3.66334E-07", 3.66334e-7),
+            (widget.calibration_b_edit, "0.000637719", 0.000637719),
+            (widget.calibration_c_edit, "0.272489072", 0.272489072),
+        ]
+        for spin, pasted_text, expected in cases:
+            spin.setValue(999.0)
+            spin.setFocus()
+            spin.lineEdit().setFocus()
+            spin.lineEdit().setCursorPosition(len(spin.lineEdit().text()))
+            qapp.processEvents()
+            QtWidgets.QApplication.clipboard().setText(pasted_text)
+            event = QtGui.QKeyEvent(
+                QtCore.QEvent.Type.KeyPress,
+                QtCore.Qt.Key.Key_V,
+                QtCore.Qt.KeyboardModifier.MetaModifier,
+                "v",
+            )
+            QtWidgets.QApplication.sendEvent(spin.lineEdit(), event)
+
+            assert event.isAccepted()
+            assert spin.value() == pytest.approx(expected)
+    finally:
+        widget.deleteLater()
+
+
+def test_kr_energy_selection_updates_displayed_lambda_values(qapp, monkeypatch):
+    from bl03u_masstool.core.calibration import Calibration
+    from bl03u_masstool.core.normalization import NormalizationSettings
+    from bl03u_masstool.frontends.pyqt_app.normalization.widget import CommonParametersWidget
+    import bl03u_masstool.frontends.pyqt_app.normalization.widget as normalization_widget
+
+    widget = CommonParametersWidget(NormalizationSettings(), Calibration(), None)
+    try:
+        monkeypatch.setattr(normalization_widget, "save_normalization_settings", lambda settings: Path("/tmp/normalization.yaml"))
+        df = pd.DataFrame(
+            [
+                {"photon_energy": 14.6, "temperature": 400.0, "kr_signal": 10.0, "expansion_lambda": 1.0},
+                {"photon_energy": 14.6, "temperature": 800.0, "kr_signal": 20.0, "expansion_lambda": 2.0},
+                {"photon_energy": 14.7, "temperature": 400.0, "kr_signal": 10.0, "expansion_lambda": 1.0},
+                {"photon_energy": 14.7, "temperature": 800.0, "kr_signal": 40.0, "expansion_lambda": 4.0},
+            ]
+        )
+
+        widget.on_kr_factors_ready(df)
+        assert widget.factor_table.item(1, 2).text() == "3.000000"
+
+        energy_index = widget.energy_combo.findData(14.6)
+        assert energy_index >= 0
+        widget.energy_combo.setCurrentIndex(energy_index)
+
+        assert widget.factor_table.item(1, 2).text() == "2.000000"
+        assert widget.factor_table.item(1, 1).text() == "20.0000"
+        assert widget.settings.expansion_factors[800.0] == pytest.approx(3.0)
+    finally:
+        widget.deleteLater()
 
 
 def test_function_defaults_apply_to_project_settings(qapp):

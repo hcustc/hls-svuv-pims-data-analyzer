@@ -228,6 +228,7 @@ class ImportWorker(ProjectWorker):
                 "destination": str(result.destination),
                 "field_name": result.field_name,
                 "label": result.label,
+                "mode": result.mode,
                 "source_key": self.source_key,
             }
 
