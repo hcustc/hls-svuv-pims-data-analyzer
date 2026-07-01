@@ -185,17 +185,17 @@ def test_pics_session_upload_returns_searchable_library_id():
         with server.PICS_LIBRARIES_LOCK:
             library = server.PICS_LIBRARIES.pop(library_id, None)
         if library is not None:
-            # Windows may hold a brief lock on the SQLite file after the
-            # search request above. Give it a moment and retry once.
-            db_path = Path(library.database_path)
-            for attempt in (1, 2):
+            # Windows may hold a transient OS-level lock on the SQLite file
+            # even after sqlite3 closes its handle. Give it a moment, then
+            # accept that the temp file may linger (OS will clean it up).
+            try:
+                Path(library.database_path).unlink(missing_ok=True)
+            except PermissionError:
+                time.sleep(0.5)
                 try:
-                    db_path.unlink(missing_ok=True)
+                    Path(library.database_path).unlink(missing_ok=True)
                 except PermissionError:
-                    if attempt == 1:
-                        time.sleep(0.5)
-                    else:
-                        raise
+                    pass  # temp file – OS will remove it eventually
 
 
 def test_upload_pie_curve_uses_allowed_database_root(tmp_path, monkeypatch):
