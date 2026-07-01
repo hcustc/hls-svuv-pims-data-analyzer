@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import zipfile
+from pathlib import Path
 
 from bl03u_masstool.core.project_lifecycle import (
     build_project_stage_statuses,
@@ -41,8 +42,8 @@ def test_project_lifecycle_creates_structure_and_imports_initial_data(tmp_path):
     )
 
     assert len(results) == 1
-    assert settings.single_spectrum_file.endswith("raw_data/single_spectrum/single.txt")
     linked_file = tmp_path / "Project_C6F11O2H" / "raw_data" / "single_spectrum" / "single.txt"
+    assert Path(settings.single_spectrum_file) == linked_file
     assert linked_file.is_symlink()
     assert linked_file.resolve() == single_file.resolve()
     manifest = tmp_path / "Project_C6F11O2H" / "raw_data" / "_sources.yaml"
