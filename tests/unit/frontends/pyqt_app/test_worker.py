@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import MagicMock, patch
@@ -454,23 +455,30 @@ class TestWorkerSignals:
 
     def test_worker_error_signal(self, qapp):
         """Test error signal is emitted on failure."""
-        settings = ProjectSettings(
-            output_dir="/nonexistent",
-            project_name="test",
-            system="test",
-        )
+        # Use a path inside a regular file as output_dir – creating subdirs
+        # under a file always fails on all platforms.
+        with tempfile.NamedTemporaryFile(delete=False) as tf:
+            pass  # keep the file as a blocker
+        try:
+            settings = ProjectSettings(
+                output_dir=os.path.join(tf.name, "subdir"),
+                project_name="test",
+                system="test",
+            )
 
-        worker = SnapshotWorker(settings, "test")
-        error_called = []
+            worker = SnapshotWorker(settings, "test")
+            error_called = []
 
-        def on_error(message):
-            error_called.append(message)
+            def on_error(message):
+                error_called.append(message)
 
-        worker.error.connect(on_error)
-        worker.run()
+            worker.error.connect(on_error)
+            worker.run()
 
-        assert len(error_called) == 1
-        assert "failed" in error_called[0].lower() or "error" in error_called[0].lower()
+            assert len(error_called) == 1
+            assert "fail" in error_called[0].lower() or "error" in error_called[0].lower()
+        finally:
+            os.unlink(tf.name)
 
     def test_worker_progress_signal(self, qapp):
         """Test progress signal is emitted during execution."""
@@ -522,16 +530,23 @@ class TestWorkerErrorHandling:
 
     def test_worker_emits_error_on_exception(self, qapp):
         """Test worker emits error signal on unexpected exception."""
-        settings = ProjectSettings(
-            output_dir="/nonexistent/path",
-            project_name="test",
-            system="test",
-        )
+        # Use a path inside a regular file as output_dir – creating subdirs
+        # under a file always fails on all platforms.
+        with tempfile.NamedTemporaryFile(delete=False) as tf:
+            pass  # keep the file as a blocker
+        try:
+            settings = ProjectSettings(
+                output_dir=os.path.join(tf.name, "subdir"),
+                project_name="test",
+                system="test",
+            )
 
-        worker = SnapshotWorker(settings, "test")
-        error_messages = []
-        worker.error.connect(lambda msg: error_messages.append(msg))
+            worker = SnapshotWorker(settings, "test")
+            error_messages = []
+            worker.error.connect(lambda msg: error_messages.append(msg))
 
-        worker.run()
+            worker.run()
 
-        assert len(error_messages) == 1
+            assert len(error_messages) == 1
+        finally:
+            os.unlink(tf.name)

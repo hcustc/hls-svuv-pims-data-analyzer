@@ -530,16 +530,22 @@ class TestDirtyFlagManagement:
         self, pie_dialog, project_settings, sample_curves, sample_database
     ):
         """Test persist_per_mz_config_state() returns error on failure."""
-        # Set invalid project_dir to simulate save failure
-        pie_dialog.project_dir = "/nonexistent/path/that/does/not/exist"
-        pie_dialog.curves = sample_curves
-        pie_dialog.database = sample_database
+        # Use a path inside a regular file as project_dir – creating
+        # subdirs under a file always fails on all platforms.
+        with tempfile.NamedTemporaryFile(delete=False) as tf:
+            pass  # keep the file as a blocker
+        try:
+            pie_dialog.project_dir = os.path.join(tf.name, "subdir")
+            pie_dialog.curves = sample_curves
+            pie_dialog.database = sample_database
 
-        success, error = pie_dialog.persist_per_mz_config_state()
-        assert success is False
-        assert error is not None
-        # Dirty flag should remain on failure
-        assert pie_dialog.pie_state_dirty is True
+            success, error = pie_dialog.persist_per_mz_config_state()
+            assert success is False
+            assert error is not None
+            # Dirty flag should remain on failure
+            assert pie_dialog.pie_state_dirty is True
+        finally:
+            os.unlink(tf.name)
 
 
 class TestProjectSwitchingCleansState:

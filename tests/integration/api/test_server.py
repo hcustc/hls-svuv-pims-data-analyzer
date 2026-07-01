@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 import sqlite3
-import time
 from types import SimpleNamespace
 
 import numpy as np
@@ -185,7 +185,17 @@ def test_pics_session_upload_returns_searchable_library_id():
         with server.PICS_LIBRARIES_LOCK:
             library = server.PICS_LIBRARIES.pop(library_id, None)
         if library is not None:
-            Path(library.database_path).unlink(missing_ok=True)
+            # Windows may hold a brief lock on the SQLite file after the
+            # search request above. Give it a moment and retry once.
+            db_path = Path(library.database_path)
+            for attempt in (1, 2):
+                try:
+                    db_path.unlink(missing_ok=True)
+                except PermissionError:
+                    if attempt == 1:
+                        time.sleep(0.5)
+                    else:
+                        raise
 
 
 def test_upload_pie_curve_uses_allowed_database_root(tmp_path, monkeypatch):
