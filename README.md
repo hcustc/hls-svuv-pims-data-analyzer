@@ -1,6 +1,6 @@
 # BL03U MassSpectrumTool
 
-基于 PyQt6 的同步辐射质谱数据分析工具，用于处理上海光源（SSRF）BL03U 线站的光电离质谱实验数据。
+基于 PyQt6 的同步辐射质谱数据分析工具，用于处理合肥光源（NSRL）BL03U 燃烧光束线站的光电离质谱实验数据。
 
 ## 功能
 
@@ -84,7 +84,7 @@ python -m pytest
 
 ## 工程状态
 
-当前 Python/依赖锁定、CI、PyQt 拆分和日志策略见 [`docs/engineering_maturity.md`](docs/engineering_maturity.md)。`docs/completion/` 下的文件是寻峰算法专项历史记录，不作为当前全项目完成状态声明。
+当前 Python/依赖锁定、CI、PyQt 拆分和日志策略见 [`docs/engineering_maturity.md`](docs/engineering_maturity.md)。`docs/archive/completion/` 下的文件是历史里程碑记录，不作为当前全项目完成状态声明。
 
 ## 默认 PICS 数据库
 
