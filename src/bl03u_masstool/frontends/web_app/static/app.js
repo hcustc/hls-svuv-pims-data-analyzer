@@ -93,7 +93,7 @@ function defaultWebProjectSettings() {
       output_dir: "output",
     },
     data_sources: {
-      pie_scan_folder: "tests/fixtures/bl03u_sample/C6F11O2H/PIE_Scan/1050",
+      pie_scan_folder: "",
       pics_database_path: "",
       manual_peak_file: "config/peak_integration.yaml",
     },

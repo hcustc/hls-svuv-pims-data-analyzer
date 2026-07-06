@@ -41,6 +41,7 @@ uploads. Optional limits:
 - `BL03U_PICS_LIBRARY_TTL_HOURS`: temporary PICS library lifetime, default `24`.
 - `BL03U_ALLOWED_DATA_ROOTS`: additional server-side directories that API
   folder/database path parameters may read, separated by the platform path
-  separator. The project root is always allowed.
+  separator. The project root is always allowed. Set this when the Web UI should
+  read local sample data from outside the project root.
 - `BL03U_PIE_JOB_TTL_HOURS`: completed or failed PIE job lifetime, default `6`.
 - `BL03U_MAX_PIE_JOBS`: maximum in-memory PIE jobs retained, default `100`.

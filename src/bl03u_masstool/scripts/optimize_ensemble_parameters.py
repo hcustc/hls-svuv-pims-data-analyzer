@@ -6,11 +6,13 @@ and outputs the best parameters for production use.
 """
 
 import json
+import os
 import sys
 from pathlib import Path
 
 # Add src directory to path when this file is executed directly.
 SRC_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
@@ -21,6 +23,15 @@ from bl03u_masstool.core.ensemble_optimization import (
     extract_ensemble_parameters,
 )
 
+REAL_DATA_ENV_VAR = "BL03U_REAL_DATA_DIR"
+
+
+def real_data_dir() -> Path:
+    configured = os.environ.get(REAL_DATA_ENV_VAR, "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    return PROJECT_ROOT / "tests" / "fixtures" / "bl03u_sample"
+
 
 def main():
     """Run optimization and save results."""
@@ -28,10 +39,11 @@ def main():
 
     # Load calibration and synthetic benchmark
     calibration = Calibration()
-    background_path = Path("tests/fixtures/bl03u_sample/C6F11O2H/PIE_Scan/400/12.9eV-60s-400C-空白谱.asc")
+    background_path = real_data_dir() / "C6F11O2H" / "PIE_Scan" / "400" / "12.9eV-60s-400C-空白谱.asc"
 
     if not background_path.exists():
         print(f"❌ Background file not found: {background_path}")
+        print(f"   Set {REAL_DATA_ENV_VAR} or keep a local copy at tests/fixtures/bl03u_sample.")
         sys.exit(1)
 
     print(f"📊 Loading background from {background_path}")

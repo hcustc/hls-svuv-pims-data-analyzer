@@ -38,6 +38,9 @@ database/DATA_CLEANING_*.md
 *.rar
 *.7z
 
+# Local-only real-data regression fixtures
+tests/fixtures/bl03u_sample/
+
 output/*
 !output/.gitkeep
 # Generated result files
