@@ -445,7 +445,7 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 return
             folder = selected
 
-        peak_config = load_peak_detection_config()
+        peak_config = ps.to_peak_detection_config() if self.project_settings else load_peak_detection_config()
         threshold_end = peak_config.threshold_end
         min_intensity = peak_config.min_intensity
         reference_mode = ps.temp_reference_mode
@@ -528,7 +528,7 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
             QtWidgets.QMessageBox.warning(self, "提示", "请在项目管理中配置温度扫描文件夹")
             return
 
-        peak_config = load_peak_detection_config()
+        peak_config = ps.to_peak_detection_config() if self.project_settings else load_peak_detection_config()
         threshold_end = peak_config.threshold_end
         min_intensity = peak_config.min_intensity
         reference_mode = ps.temp_reference_mode
@@ -881,7 +881,11 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         temp_curve_class_change_threshold: float = 0.25,
         temp_curve_class_peak_fraction: float = 0.65,
     ) -> pd.DataFrame:
-        peak_config = load_peak_detection_config()
+        peak_config = (
+            self.project_settings.to_peak_detection_config()
+            if self.project_settings
+            else load_peak_detection_config()
+        )
         return analyze_temperature_folder(
             folder,
             calibration=self.calibration,
