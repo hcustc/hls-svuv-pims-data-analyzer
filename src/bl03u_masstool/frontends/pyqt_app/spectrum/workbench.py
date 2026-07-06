@@ -56,6 +56,7 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         self.current_plot_axis_x = np.array([], dtype=float)
         self.current_plot_y = np.array([], dtype=float)
         self.current_plot_title = "质谱图"
+        self.current_plot_calibration: Calibration | None = None
         self.plot_x_min: float | None = None
         self.plot_x_max: float | None = None
         self.p1 = None
@@ -84,7 +85,11 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         self.addPeak.clicked.connect(self.add_peak)
         self.pushButton_4.clicked.connect(self.auto_find_peaks)  # 自动寻峰按钮
 
-        
+        # 同步定标参数到 ProjectSettingsManager，防止切换页面后丢失修改
+        self.lineEdit_4.editingFinished.connect(self._sync_calibration_to_project_settings)
+        self.lineEdit_5.editingFinished.connect(self._sync_calibration_to_project_settings)
+        self.lineEdit_6.editingFinished.connect(self._sync_calibration_to_project_settings)
+
         # 加载并显示图片
         self.original_pixmap = QPixmap(str(resource_path("icons/bjt.png")))
         if not self.original_pixmap.isNull():
@@ -142,6 +147,7 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
 
     def apply_config_defaults(self):
         try:
+            previous_plot_calibration = self.current_plot_calibration
             calibration_points = None
             try:
                 from bl03u_masstool.core.project_settings import ProjectSettingsManager
@@ -172,7 +178,9 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
                 for row, (tof, mz) in enumerate(points):
                     self.region.setItem(row, 0, QTableWidgetItem(f"{tof:g}"))
                     self.region.setItem(row, 1, QTableWidgetItem(f"{mz:g}"))
-            if hasattr(self, "p2"):
+            if self.current_plot_x.size:
+                self.refresh_current_plot_calibration(previous_plot_calibration)
+            elif hasattr(self, "p2"):
                 self.refresh_plot_axis_mode()
         except Exception as exc:
             logger.warning("Failed to load YAML configuration; using UI defaults", exc_info=True)
@@ -834,6 +842,153 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
             c=float(self.lineEdit_6.text()),
         )
 
+    @staticmethod
+    def _calibration_close(left: Calibration | None, right: Calibration | None) -> bool:
+        if left is None or right is None:
+            return left is right
+        return bool(
+            np.allclose(
+                [left.a, left.b, left.c],
+                [right.a, right.b, right.c],
+                rtol=1e-12,
+                atol=1e-18,
+            )
+        )
+
+    def _axis_x_to_tof_with_calibration(
+        self,
+        axis_x: float,
+        calibration: Calibration,
+        mode: str | None = None,
+    ) -> float:
+        axis_mode = self.x_axis_mode if mode is None else mode
+        if axis_mode == "mz":
+            return calibration.mz_to_tof(float(axis_x))
+        return float(axis_x)
+
+    def _axis_range_to_tof_with_calibration(
+        self,
+        left: float,
+        right: float,
+        calibration: Calibration,
+        mode: str | None = None,
+    ) -> tuple[float, float]:
+        left_tof = self._axis_x_to_tof_with_calibration(left, calibration, mode)
+        right_tof = self._axis_x_to_tof_with_calibration(right, calibration, mode)
+        if right_tof < left_tof:
+            left_tof, right_tof = right_tof, left_tof
+        return left_tof, right_tof
+
+    def _recalibrate_peak_table_mz(self) -> None:
+        calibration = self.current_calibration()
+        self._updating_peak_table = True
+        try:
+            for row in range(self.peakData.rowCount()):
+                time = self._table_float(row, 1)
+                if time is None or not np.isfinite(time):
+                    continue
+                self.peakData.setItem(
+                    row,
+                    2,
+                    QTableWidgetItem(f"{float(calibration.tof_to_mz(time)):.2f}"),
+                )
+        finally:
+            self._updating_peak_table = False
+
+    def refresh_current_plot_calibration(self, previous_calibration: Calibration | None = None) -> None:
+        """Re-project the loaded spectrum after calibration coefficients change."""
+        new_calibration = self.current_calibration()
+        old_calibration = previous_calibration or self.current_plot_calibration
+        self.current_plot_calibration = new_calibration
+        self.refresh_plot_axis_mode()
+
+        if self.current_plot_x.size == 0 or self.current_plot_y.size == 0:
+            return
+
+        view_tof = None
+        region_tof = None
+        if old_calibration is not None:
+            try:
+                if self.selection_region is not None:
+                    region_tof = self._axis_range_to_tof_with_calibration(
+                        *self.selection_region.getRegion(),
+                        old_calibration,
+                    )
+                if self.p2 is not None:
+                    view_tof = self._axis_range_to_tof_with_calibration(
+                        *self.p2.viewRange()[0],
+                        old_calibration,
+                    )
+            except Exception:
+                region_tof = None
+                view_tof = None
+
+        axis_x_values = self._current_axis_x_values()
+        if axis_x_values.size == 0 or not np.any(np.isfinite(axis_x_values)):
+            return
+        self.current_plot_axis_x = axis_x_values
+        self.plot_x_min = float(np.nanmin(axis_x_values))
+        self.plot_x_max = float(np.nanmax(axis_x_values))
+
+        if self.spectrum_plot is not None:
+            self.spectrum_plot.setData(axis_x_values, self.current_plot_y)
+
+        y_min = float(np.nanmin(self.current_plot_y))
+        y_max = float(np.nanmax(self.current_plot_y))
+        y_padding = max(1.0, (y_max - y_min) * 0.08)
+        x_range = max(1e-9, self.plot_x_max - self.plot_x_min)
+        if self.p2 is not None:
+            self._apply_plot_limits(self.p2, y_min - y_padding, y_max + y_padding, x_range)
+        if self.p1 is not None:
+            self._apply_plot_limits(self.p1, y_min - y_padding, y_max + y_padding, x_range)
+
+        if self.selection_region is not None:
+            self.selection_region.setBounds((self.plot_x_min, self.plot_x_max))
+            if region_tof is not None:
+                self.selection_region.setRegion(self._tof_range_to_axis_range(*region_tof))
+            else:
+                self.selection_region.setRegion(
+                    self._clamp_region_values(*self.selection_region.getRegion())
+                )
+
+        if self.p2 is not None and view_tof is not None:
+            left, right = self._tof_range_to_axis_range(*view_tof)
+            left, right = self._clamp_region_values(left, right)
+            if right > left:
+                self.p2.setXRange(left, right, padding=0)
+                self.update_spectrum_y_range_for_visible_x((left, right))
+
+        if not self._calibration_close(old_calibration, new_calibration):
+            self._recalibrate_peak_table_mz()
+        self.update_plot()
+        self.update_region_readout()
+        if self.p1 is not None and self.checkBox_show_gaussian.isChecked():
+            self.update_gaussian_fit()
+
+    def _sync_calibration_to_project_settings(self):
+        """将当前 UI 中的定标参数同步写到 ProjectSettingsManager。
+
+        防止用户直接在质谱工作台修改 lineEdit_4/5/6 或通过 calculate()
+        拟合新参数后，切换页面时被 _apply_project_runtime_settings 覆盖。
+        """
+        try:
+            from bl03u_masstool.core.project_settings import ProjectSettingsManager
+            from bl03u_masstool.core.config import save_calibration_config
+
+            calibration = self.current_calibration()
+            save_calibration_config(calibration)
+
+            manager = ProjectSettingsManager()
+            if manager.has_project_path():
+                ps = manager.get()
+                ps.cal_a = calibration.a
+                ps.cal_b = calibration.b
+                ps.cal_c = calibration.c
+                manager.save()
+            self.refresh_current_plot_calibration()
+        except Exception:
+            logger.debug("Calibration sync skipped", exc_info=True)
+
     def load_image(self, image_path):
         pixmap = QPixmap(str(resource_path(image_path)))
 
@@ -879,6 +1034,7 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         self.current_plot_x = np.array([], dtype=float)
         self.current_plot_axis_x = np.array([], dtype=float)
         self.current_plot_y = np.array([], dtype=float)
+        self.current_plot_calibration = None
         self.current_plot_title = "质谱图"
         self.plot_x_min = None
         self.plot_x_max = None
@@ -920,6 +1076,7 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         self.current_plot_axis_x = axis_x_values
         self.current_plot_y = y_values
         self.current_plot_title = title
+        self.current_plot_calibration = self.current_calibration()
         self.plot_x_min = float(np.nanmin(axis_x_values))
         self.plot_x_max = float(np.nanmax(axis_x_values))
         x_range = max(1e-9, self.plot_x_max - self.plot_x_min)
@@ -1655,6 +1812,9 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
                 save_calibration_points(points)
             except Exception:
                 logger.exception("Failed to save calibration configuration")
+
+            # 同步到 ProjectSettingsManager，防止切换页面后参数被覆盖
+            self._sync_calibration_to_project_settings()
             
             # 显示成功消息
             QMessageBox.information(self, "成功", f"定标完成！\nR² = {r2:.6f}")
