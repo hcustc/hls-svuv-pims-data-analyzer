@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -16,6 +17,7 @@ except ImportError as e:
 
 pytestmark = pytest.mark.gui
 
+from bl03u_masstool.core.config import PeakDetectionConfig
 from bl03u_masstool.core.project_settings import ProjectSettings
 from bl03u_masstool.core.project_settings import ProjectSettingsManager
 from bl03u_masstool.core.project_settings import load_project_settings
@@ -26,7 +28,26 @@ from bl03u_masstool.frontends.pyqt_app.spectrum.workbench import MainWindow
 
 
 @pytest.fixture(autouse=True)
-def isolated_project_settings(tmp_path):
+def isolated_project_settings(tmp_path, monkeypatch):
+    import bl03u_masstool.core.config as core_config
+    import bl03u_masstool.frontends.pyqt_app.normalization.widget as normalization_widget
+    import bl03u_masstool.frontends.pyqt_app.spectrum.workspace_pages as workspace_pages
+
+    config_dir = tmp_path / "runtime_config"
+    config_dir.mkdir()
+
+    def fake_save_calibration_config(calibration, path=None):
+        return config_dir / "calibration.yaml"
+
+    def fake_save_peak_detection_config(config, path=None):
+        return config_dir / "peak_detection.yaml"
+
+    monkeypatch.setattr(core_config, "save_calibration_config", fake_save_calibration_config)
+    monkeypatch.setattr(core_config, "save_peak_detection_config", fake_save_peak_detection_config)
+    monkeypatch.setattr(normalization_widget, "save_calibration_config", fake_save_calibration_config)
+    monkeypatch.setattr(normalization_widget, "save_peak_detection_config", fake_save_peak_detection_config)
+    monkeypatch.setattr(workspace_pages, "save_peak_detection_config", fake_save_peak_detection_config)
+
     manager = ProjectSettingsManager()
     manager.set_project_path(tmp_path / "active_project")
     try:
@@ -384,6 +405,183 @@ def test_save_and_apply_persists_common_parameters_to_project_file(qapp, tmp_pat
         assert saved.mf_mass_disc_exponent == pytest.approx(0.76155)
         assert window.normalization_settings.mass_discrimination == pytest.approx(0.33)
         assert window.current_calibration().a == pytest.approx(4.56e-7)
+    finally:
+        window.project_settings_manager.clear_project_path()
+        window.deleteLater()
+
+
+def test_calibration_sync_persists_through_multiple_round_trips(qapp, tmp_path):
+    """用户场景：修改项目管理参数→切到质谱→切回→再次修改→切到质谱，确保参数不丢失"""
+    project_dir = tmp_path / "Calibration_Sync_Test"
+    project_dir.mkdir(parents=True)
+    (project_dir / "raw_data").mkdir()
+
+    ps = ProjectSettings(
+        project_name="Cal Sync Test",
+        system="Test",
+        output_dir=str(project_dir),
+        cal_a=1.1e-7,
+        cal_b=2.2e-4,
+        cal_c=3.3,
+    )
+    save_project_settings(ps, project_dir / "config" / "project.yaml")
+
+    window = MainWindow()
+    try:
+        # 模拟打开项目
+        window.project_settings_manager.set_project_path(project_dir)
+        window.project_settings_manager.set(ps)
+        window._read_project_settings_to_ui(ps)
+
+        # Round 0: 初始状态 — 验证加载的定标参数
+        window._apply_project_runtime_settings(ps)
+        cal0 = window.current_calibration()
+        assert cal0.a == pytest.approx(1.1e-7)
+        assert cal0.b == pytest.approx(2.2e-4)
+        assert cal0.c == pytest.approx(3.3)
+
+        # Round 1: 模拟用户在项目管理页面修改定标参数
+        widget = window.project_common_parameters_widget
+        widget.calibration_a_edit.setValue(9.9e-7)
+        widget.calibration_b_edit.setValue(8.8e-4)
+        widget.calibration_c_edit.setValue(7.7)
+
+        # 触发 editingFinished (模拟 spinbox 失去焦点)
+        widget.calibration_a_edit.editingFinished.emit()
+        widget.calibration_b_edit.editingFinished.emit()
+        widget.calibration_c_edit.editingFinished.emit()
+
+        # 模拟切到质谱页面
+        window.switch_workspace_page("spectrum")
+        cal1 = window.current_calibration()
+        assert cal1.a == pytest.approx(9.9e-7), f"Round 1: expected a=9.9e-7, got {cal1.a}"
+        assert cal1.b == pytest.approx(8.8e-4), f"Round 1: expected b=8.8e-4, got {cal1.b}"
+        assert cal1.c == pytest.approx(7.7), f"Round 1: expected c=7.7, got {cal1.c}"
+
+        # 验证 project.yaml 已更新
+        saved = load_project_settings(project_dir / "config" / "project.yaml")
+        assert saved.cal_a == pytest.approx(9.9e-7)
+        assert saved.cal_b == pytest.approx(8.8e-4)
+        assert saved.cal_c == pytest.approx(7.7)
+
+        # Round 2: 切回项目管理页面
+        window.switch_workspace_page("project")
+        cal2 = window.current_calibration()
+        assert cal2.a == pytest.approx(9.9e-7), f"Round 2: expected a=9.9e-7, got {cal2.a}"
+        assert cal2.b == pytest.approx(8.8e-4), f"Round 2: expected b=8.8e-4, got {cal2.b}"
+        assert cal2.c == pytest.approx(7.7), f"Round 2: expected c=7.7, got {cal2.c}"
+
+        # 再次修改定标参数
+        widget.calibration_a_edit.setValue(5.5e-7)
+        widget.calibration_b_edit.setValue(4.4e-4)
+        widget.calibration_c_edit.setValue(3.3)
+
+        # 触发 editingFinished
+        widget.calibration_a_edit.editingFinished.emit()
+        widget.calibration_b_edit.editingFinished.emit()
+        widget.calibration_c_edit.editingFinished.emit()
+
+        # 切到质谱页面
+        window.switch_workspace_page("spectrum")
+        cal3 = window.current_calibration()
+        assert cal3.a == pytest.approx(5.5e-7), f"Round 3: expected a=5.5e-7, got {cal3.a}"
+        assert cal3.b == pytest.approx(4.4e-4), f"Round 3: expected b=4.4e-4, got {cal3.b}"
+        assert cal3.c == pytest.approx(3.3), f"Round 3: expected c=3.3, got {cal3.c}"
+
+        # 验证 project.yaml 再次更新
+        saved2 = load_project_settings(project_dir / "config" / "project.yaml")
+        assert saved2.cal_a == pytest.approx(5.5e-7)
+        assert saved2.cal_b == pytest.approx(4.4e-4)
+        assert saved2.cal_c == pytest.approx(3.3)
+
+        # 切回项目管理页面验证 UI 不被覆盖
+        window.switch_workspace_page("project")
+        assert widget.calibration_a_edit.value() == pytest.approx(5.5e-7)
+        assert widget.calibration_b_edit.value() == pytest.approx(4.4e-4)
+        assert widget.calibration_c_edit.value() == pytest.approx(3.3)
+    finally:
+        window.project_settings_manager.clear_project_path()
+        window.deleteLater()
+
+
+def test_loaded_spectrum_is_reprojected_after_second_project_calibration_edit(qapp, tmp_path, monkeypatch):
+    """Regression: loaded spectrum coordinates must follow the second project calibration edit."""
+    import bl03u_masstool.frontends.pyqt_app.spectrum.workbench as workbench_module
+
+    project_dir = tmp_path / "Calibration_Reproject_Test"
+    project_dir.mkdir(parents=True)
+
+    ps = ProjectSettings(
+        project_name="Cal Reproject Test",
+        system="Test",
+        output_dir=str(project_dir),
+        cal_a=0.0,
+        cal_b=1.0,
+        cal_c=0.0,
+        peak_algorithm="legacy",
+        detection_min_idx=0,
+        threshold_end=0.5,
+        min_intensity=1.0,
+        nearby_peak_window=3,
+        duplicate_window=3,
+    )
+    save_project_settings(ps, project_dir / "config" / "project.yaml")
+
+    peak_config = PeakDetectionConfig(
+        algorithm="legacy",
+        detection_min_idx=0,
+        threshold_end=0.5,
+        min_intensity=1.0,
+        nearby_peak_window=3,
+        duplicate_window=3,
+        gaussian_window_max=8,
+        boundary_padding=0,
+    )
+    monkeypatch.setattr(workbench_module, "load_peak_detection_config", lambda: peak_config)
+
+    def fail_warning(*args, **kwargs):
+        pytest.fail(f"Unexpected warning dialog: {args[2] if len(args) > 2 else args}")
+
+    monkeypatch.setattr(QtWidgets.QMessageBox, "warning", fail_warning)
+
+    window = MainWindow()
+    try:
+        window.project_settings_manager.set_project_path(project_dir)
+        window.project_settings_manager.set(ps)
+        window._read_project_settings_to_ui(ps)
+        window._load_project_settings_to_parameter_widgets(ps)
+        window._apply_project_runtime_settings(ps)
+
+        tof = np.arange(100.0, 220.0)
+        peak_index = 35
+        peak_time = tof[peak_index]
+        intensity = np.exp(-0.5 * ((np.arange(tof.size) - peak_index) / 2.0) ** 2) * 100.0
+        window.current_time_offset = float(tof[0])
+        window.setup_plots(tof, intensity)
+
+        window.auto_find_peaks()
+        assert window.peakData.rowCount() == 1
+        assert float(window.peakData.item(0, 1).text()) == pytest.approx(peak_time, abs=0.02)
+        assert float(window.peakData.item(0, 2).text()) == pytest.approx(peak_time, abs=0.02)
+        assert window.current_plot_axis_x[peak_index] == pytest.approx(peak_time)
+
+        window.switch_workspace_page("project")
+        widget = window.project_common_parameters_widget
+        widget.calibration_a_edit.setValue(0.0)
+        widget.calibration_b_edit.setValue(2.0)
+        widget.calibration_c_edit.setValue(5.0)
+        widget.calibration_a_edit.editingFinished.emit()
+        widget.calibration_b_edit.editingFinished.emit()
+        widget.calibration_c_edit.editingFinished.emit()
+
+        window.switch_workspace_page("spectrum")
+        expected_mz = peak_time * 2.0 + 5.0
+        assert window.current_plot_axis_x[peak_index] == pytest.approx(expected_mz)
+
+        window.auto_find_peaks()
+        assert window.peakData.rowCount() == 1
+        assert float(window.peakData.item(0, 1).text()) == pytest.approx(peak_time, abs=0.02)
+        assert float(window.peakData.item(0, 2).text()) == pytest.approx(expected_mz, abs=0.02)
     finally:
         window.project_settings_manager.clear_project_path()
         window.deleteLater()

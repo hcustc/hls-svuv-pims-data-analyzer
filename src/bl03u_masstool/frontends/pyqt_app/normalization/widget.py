@@ -265,6 +265,12 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
             # 隐藏上下箭头，允许直接修改数值
             edit.setButtonSymbols(QtWidgets.QAbstractSpinBox.ButtonSymbols.NoButtons)
 
+        # 修改定标参数后自动同步到 ProjectSettingsManager，
+        # 防止切换页面时 _apply_project_runtime_settings 用旧值覆盖
+        self.calibration_a_edit.editingFinished.connect(self._sync_calibration_to_project_settings)
+        self.calibration_b_edit.editingFinished.connect(self._sync_calibration_to_project_settings)
+        self.calibration_c_edit.editingFinished.connect(self._sync_calibration_to_project_settings)
+
         layout.addWidget(QtWidgets.QLabel("A:"), 0, 0)
         layout.addWidget(self.calibration_a_edit, 0, 1)
         layout.addWidget(QtWidgets.QLabel("B:"), 0, 2)
@@ -763,6 +769,34 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
         ]
         if target:
             target.selected_elements = list(self.settings.selected_elements)
+
+    def _sync_calibration_to_project_settings(self) -> None:
+        """将定标参数 spinbox 值同步到 ProjectSettingsManager。
+
+        与 workbench._sync_calibration_to_project_settings 功能相同，
+        防止在项目页面"通用参数"中修改定标后，切换页面时被覆盖。
+
+        editingFinished 在 spinbox 失去焦点时（用户点击导航按钮之前）触发，
+        因此能在 switch_workspace_page() 之前完成同步。
+        """
+        try:
+            calibration = Calibration(
+                a=self.calibration_a_edit.value(),
+                b=self.calibration_b_edit.value(),
+                c=self.calibration_c_edit.value(),
+            )
+            self.calibration = calibration
+            save_calibration_config(calibration)
+
+            manager = ProjectSettingsManager()
+            if manager.has_project_path():
+                ps = manager.get()
+                ps.cal_a = calibration.a
+                ps.cal_b = calibration.b
+                ps.cal_c = calibration.c
+                manager.save()
+        except Exception:
+            pass
 
     def _set_all_elements(self, checked: bool):
         for chk in self.element_checks.values():
