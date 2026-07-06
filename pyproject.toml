@@ -69,6 +69,7 @@ pythonpath = ["src"]
 addopts = "-ra"
 markers = [
     "gui: marks tests as GUI tests that require display (skip in CI)",
+    "real_data: marks tests that require optional local BL03U real-data fixtures",
 ]
 
 [tool.ruff]

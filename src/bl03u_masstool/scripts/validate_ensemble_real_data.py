@@ -5,6 +5,7 @@ Generate comparison report with performance metrics.
 """
 
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,15 @@ from bl03u_masstool.core.config import load_peak_detection_config
 from bl03u_masstool.core.peak_detection import detect_peaks_by_algorithm, detect_peaks_ensemble
 from bl03u_masstool.core.pie_analysis import analyze_pie_folder, build_pie_curves
 from bl03u_masstool.core.temperature_scan import analyze_temperature_folder, build_temperature_curves
+
+REAL_DATA_ENV_VAR = "BL03U_REAL_DATA_DIR"
+
+
+def real_data_dir() -> Path:
+    configured = os.environ.get(REAL_DATA_ENV_VAR, "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    return PROJECT_ROOT / "tests" / "fixtures" / "bl03u_sample"
 
 
 def load_ensemble_parameters() -> dict[str, Any]:
@@ -241,9 +251,10 @@ def main():
     print("🚀 Real-data validation for ensemble peak detection\n")
 
     results = []
+    data_dir = real_data_dir()
 
     # PIE validation
-    pie_folder = Path("tests/fixtures/bl03u_sample/C6F11O2H/PIE_Scan/400")
+    pie_folder = data_dir / "C6F11O2H" / "PIE_Scan" / "400"
     if pie_folder.exists():
         try:
             pie_result = validate_pie_ensemble(pie_folder)
@@ -255,10 +266,14 @@ def main():
         except Exception as e:
             print(f"❌ PIE validation failed: {e}\n")
     else:
-        print(f"⏭️  Skipping PIE validation (fixture not found)\n")
+        print(f"⏭️  Skipping PIE validation (fixture not found: {pie_folder})\n")
 
     # Temperature validation
-    temp_folder = Path("tests/fixtures/bl03u_sample/C6F11O2H/Temperature_Scan")
+    temp_candidates = [
+        data_dir / "C6F11O2H" / "Temp_Scan",
+        data_dir / "C6F11O2H" / "Temperature_Scan",
+    ]
+    temp_folder = next((path for path in temp_candidates if path.exists()), temp_candidates[0])
     if temp_folder.exists():
         try:
             temp_result = validate_temperature_ensemble(temp_folder)
@@ -270,7 +285,7 @@ def main():
         except Exception as e:
             print(f"❌ Temperature validation failed: {e}\n")
     else:
-        print(f"⏭️  Skipping Temperature validation (fixture not found)\n")
+        print(f"⏭️  Skipping Temperature validation (fixture not found: {temp_folder})\n")
 
     # Save results
     if results:
@@ -280,6 +295,7 @@ def main():
         print(f"💾 Results saved to {output_file}")
     else:
         print("⚠️  No datasets found for validation")
+        print(f"   Set {REAL_DATA_ENV_VAR} or keep a local copy at tests/fixtures/bl03u_sample.")
 
 
 if __name__ == "__main__":

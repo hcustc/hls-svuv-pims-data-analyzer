@@ -1,5 +1,5 @@
 peak_detection:
-  algorithm: prominence
+  algorithm: ensemble
   detection_min_idx: 3000
   threshold_end: 2.0
   min_intensity: 3.0
@@ -18,3 +18,9 @@ peak_detection:
   baseline_percentile: 5.0
   min_peak_width: 1
   max_peak_width: 80
+  cwt_snr_threshold: 0.02
+  cwt_wavelet_max_width: 30
+  weak_tail_cutoff_idx: 15000
+  vote_threshold: 0.667
+  min_intensity_for_single_vote: 5.0
+  mz_tolerance: 0.2

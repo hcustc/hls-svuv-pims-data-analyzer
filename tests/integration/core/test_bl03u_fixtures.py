@@ -42,9 +42,16 @@ from bl03u_masstool.core.temperature_scan import (
 )
 
 
-def test_real_temperature_fixture_builds_grouped_curves():
+pytestmark = pytest.mark.real_data
+
+
+def test_real_temperature_fixture_builds_grouped_curves(bl03u_real_data_dir):
+    folder = bl03u_real_data_dir / "顺-13-二甲基环己烷 30 torr" / "温度扫描" / "11.5eV"
+    if not folder.is_dir():
+        pytest.skip(f"real temperature fixture not found: {folder}")
+
     df = analyze_temperature_folder(
-        "tests/fixtures/bl03u_sample/顺-13-二甲基环己烷 30 torr/温度扫描/11.5eV",
+        folder,
         calibration=Calibration(),
         detection_min_idx=0,
         threshold_end=2,
@@ -58,9 +65,13 @@ def test_real_temperature_fixture_builds_grouped_curves():
     assert len(curves) > 0
 
 
-def test_real_pie_fixture_builds_expected_energy_grid():
+def test_real_pie_fixture_builds_expected_energy_grid(bl03u_real_data_dir):
+    folder = bl03u_real_data_dir / "C6F11O2H" / "PIE_Scan" / "400"
+    if not folder.is_dir():
+        pytest.skip(f"real PIE fixture not found: {folder}")
+
     df = analyze_pie_folder(
-        "tests/fixtures/bl03u_sample/C6F11O2H/PIE_Scan/400",
+        folder,
         calibration=Calibration(),
         recursive=False,
         detection_min_idx=0,
