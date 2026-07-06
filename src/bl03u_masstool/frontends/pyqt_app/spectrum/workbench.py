@@ -1901,7 +1901,7 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
                 QMessageBox.warning(self, "提示", "请先加载谱图数据。")
                 return
             y_data = self.spectrum_plot.yData
-            peak_config = load_peak_detection_config()
+            peak_config = self.current_peak_detection_config()
             peaks = self.detect_peaks_for_config(y_data, peak_config)
 
             # 在表格中显示检测到的峰值
@@ -1912,6 +1912,17 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
 
         except Exception as e:
             QMessageBox.warning(self, 'Error', f'自动寻峰失败: {str(e)}')
+
+    def current_peak_detection_config(self):
+        try:
+            from bl03u_masstool.core.project_settings import ProjectSettingsManager
+
+            manager = ProjectSettingsManager()
+            if manager.has_project_path():
+                return manager.get().to_peak_detection_config()
+        except Exception:
+            pass
+        return load_peak_detection_config()
 
     def detect_peaks_for_config(self, y_data, peak_config):
         peak_kwargs = peak_config.to_peak_kwargs()

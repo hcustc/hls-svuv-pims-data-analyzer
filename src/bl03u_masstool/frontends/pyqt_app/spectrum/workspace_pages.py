@@ -205,6 +205,7 @@ class WorkspacePagesMixin:
         self.project_tabs.addTab(self.project_identity_page, "项目设置")
         self.project_tabs.addTab(self.project_common_parameters_widget, "通用参数")
         self.project_tabs.addTab(self.project_function_defaults_widget, "功能默认参数")
+        self.project_tabs.currentChanged.connect(self._on_project_tab_changed)
         page_layout.addWidget(self.project_tabs, stretch=1)
 
         self.load_project_settings()
@@ -675,13 +676,41 @@ class WorkspacePagesMixin:
             self.project_peak_detection_widget.apply_to_settings(ps)
         return ps
 
+    def _sync_project_page_edits_to_runtime(
+        self,
+        *,
+        save_project: bool = True,
+        sync_tools: bool = True,
+    ) -> ProjectSettings:
+        """Collect current project-page edits before another tool consumes settings."""
+        ps = self._collect_project_settings_from_ui()
+        self._collect_all_project_parameters_from_ui(ps)
+        self.project_settings_manager.set(ps)
+        self._sync_peak_detection_to_global_config(ps)
+        if save_project and self.project_settings_manager.has_project_path():
+            try:
+                self.project_settings_manager.save()
+            except Exception:
+                pass
+        self._apply_project_runtime_settings(ps)
+        if sync_tools:
+            self._sync_project_settings_to_tool_pages(ps)
+        return ps
+
+    def _on_project_tab_changed(self, _index: int) -> None:
+        if not hasattr(self, "project_common_parameters_widget") or not hasattr(self, "project_function_defaults_widget"):
+            return
+        ps = self._sync_project_page_edits_to_runtime(save_project=True, sync_tools=True)
+        self.refresh_project_parameter_summary()
+        self.refresh_project_datasource_page(ps)
+
     @staticmethod
     def _sync_peak_detection_to_global_config(ps: ProjectSettings) -> None:
         """Write ProjectSettings peak detection values to the global config file.
 
-        auto_find_peaks() reads from config/peak_detection.yaml, NOT from
-        ProjectSettings.  Without this sync, project-level peak detection
-        parameter changes would be ignored by automatic peak finding.
+        Project-scoped tools consume ProjectSettings directly. Keep the legacy
+        global YAML in step so non-project consumers and older helper paths do
+        not keep stale peak-detection defaults.
         """
         try:
             peak_config = PeakDetectionConfig(
@@ -1026,9 +1055,7 @@ class WorkspacePagesMixin:
 
     def apply_project_settings_to_tools(self) -> None:
         """Sync project settings to tool pages (light version, no save/init)."""
-        ps = self._collect_project_settings_from_ui()
-        self._collect_all_project_parameters_from_ui(ps)
-        self._apply_project_runtime_settings(ps)
+        ps = self._sync_project_page_edits_to_runtime(save_project=False, sync_tools=False)
         self._apply_settings_to_tools(ps)
         self.statusbar.showMessage("项目设置已应用到工具", 3000)
 
@@ -1577,9 +1604,14 @@ class WorkspacePagesMixin:
         page = page_map.get(page_name)
         if page is None:
             return
-        if page_name == "project":
+        current_page = self.workspace_stack.currentWidget() if hasattr(self, "workspace_stack") else None
+        if current_page is getattr(self, "project_page", None):
+            ps = self._sync_project_page_edits_to_runtime(save_project=True, sync_tools=True)
+        elif page_name == "project":
             self.load_project_settings()
-        ps = self.project_settings_manager.get()
+            ps = self.project_settings_manager.get()
+        else:
+            ps = self.project_settings_manager.get()
         if self.project_settings_manager.has_project_path():
             self._apply_project_runtime_settings(ps)
         else:

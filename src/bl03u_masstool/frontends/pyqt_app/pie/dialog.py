@@ -1749,7 +1749,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         recursive = ps.pie_recursive
         prefer_gaussian = ps.pie_prefer_gaussian
         manual_peak_path = ps.manual_peak_file or None
-        peak_config = load_peak_detection_config()
+        peak_config = ps.to_peak_detection_config() if self.project_settings else load_peak_detection_config()
         threshold_end = peak_config.threshold_end
         min_intensity = peak_config.min_intensity
         settings = self.normalization_settings

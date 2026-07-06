@@ -870,8 +870,11 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
             )
             return
 
-        # 使用默认peak detection配置
-        peak_config = load_peak_detection_config()
+        peak_config = (
+            self.project_settings.to_peak_detection_config()
+            if self.project_settings
+            else load_peak_detection_config()
+        )
         self.set_busy(True, "正在计算Kr膨胀系数...")
         self.worker = WorkerThread(
             lambda: compute_kr_expansion_factors(
@@ -1418,11 +1421,10 @@ class FunctionDefaultsWidget(QtWidgets.QWidget):
         # 使用标签页组织功能参数
         self.tabs = QtWidgets.QTabWidget()
         self.tabs.addTab(self._build_peak_detection_tab(), "寻峰积分")
-        # TODO: 后续添加其他功能标签页
-        # self.tabs.addTab(self._build_temperature_scan_tab(), "温度扫描")
-        # self.tabs.addTab(self._build_pie_fitting_tab(), "PIE 拟合")
-        # self.tabs.addTab(self._build_pics_tab(), "PICS 计算")
-        # self.tabs.addTab(self._build_mole_fraction_tab(), "摩尔分数")
+        self.tabs.addTab(self._build_temperature_scan_tab(), "温度扫描")
+        self.tabs.addTab(self._build_pie_fitting_tab(), "PIE 拟合")
+        self.tabs.addTab(self._build_pics_tab(), "PICS 计算")
+        self.tabs.addTab(self._build_mole_fraction_tab(), "摩尔分数")
         root.addWidget(self.tabs, 1)
 
         # 底部工具栏
@@ -1537,6 +1539,201 @@ class FunctionDefaultsWidget(QtWidgets.QWidget):
 
         return widget
 
+    def _build_temperature_scan_tab(self) -> QtWidgets.QWidget:
+        widget = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(widget)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        group = QtWidgets.QGroupBox("温度扫描默认参数")
+        form = QtWidgets.QGridLayout(group)
+        form.setHorizontalSpacing(8)
+        form.setVerticalSpacing(8)
+
+        self.temp_peak_source_combo = QtWidgets.QComboBox()
+        self.temp_peak_source_combo.addItem("自动寻峰", "auto")
+        self.temp_peak_source_combo.addItem("手动卡峰文件", "manual")
+        self.temp_peak_source_combo.setToolTip("自动模式使用寻峰参数；手动模式读取项目管理中的手动卡峰文件")
+
+        self.temp_reference_mode_combo = QtWidgets.QComboBox()
+        self.temp_reference_mode_combo.addItem("Sum 谱参考", "sum")
+        self.temp_reference_mode_combo.addItem("独立参考", "individual")
+        self.temp_reference_mode_combo.setToolTip("温度扫描自动寻峰时的参考谱来源")
+
+        self.temp_prefer_gaussian_check = QtWidgets.QCheckBox("高斯积分")
+        self.temp_prefer_gaussian_check.setToolTip("使用高斯峰面积而非简单峰值强度作为积分信号")
+
+        self.temp_kr_mz_edit = QtWidgets.QSpinBox()
+        self.temp_kr_mz_edit.setRange(1, 1000)
+        self.temp_kr_mz_edit.setToolTip("Kr 膨胀校正使用的质量数")
+
+        self.temp_curve_class_change_threshold_edit = QtWidgets.QDoubleSpinBox()
+        self.temp_curve_class_change_threshold_edit.setRange(0.0, 1.0)
+        self.temp_curve_class_change_threshold_edit.setDecimals(3)
+        self.temp_curve_class_change_threshold_edit.setSingleStep(0.01)
+        self.temp_curve_class_change_threshold_edit.setToolTip("判定生成/消耗曲线所需的相对变化阈值")
+
+        self.temp_curve_class_peak_fraction_edit = QtWidgets.QDoubleSpinBox()
+        self.temp_curve_class_peak_fraction_edit.setRange(0.0, 1.0)
+        self.temp_curve_class_peak_fraction_edit.setDecimals(3)
+        self.temp_curve_class_peak_fraction_edit.setSingleStep(0.01)
+        self.temp_curve_class_peak_fraction_edit.setToolTip("端点信号占最大值的比例阈值")
+
+        form.addWidget(QtWidgets.QLabel("峰来源"), 0, 0)
+        form.addWidget(self.temp_peak_source_combo, 0, 1)
+        form.addWidget(QtWidgets.QLabel("参考模式"), 0, 2)
+        form.addWidget(self.temp_reference_mode_combo, 0, 3)
+        form.addWidget(self.temp_prefer_gaussian_check, 0, 4)
+        form.addWidget(QtWidgets.QLabel("Kr m/z"), 1, 0)
+        form.addWidget(self.temp_kr_mz_edit, 1, 1)
+        form.addWidget(QtWidgets.QLabel("分类变化阈值"), 1, 2)
+        form.addWidget(self.temp_curve_class_change_threshold_edit, 1, 3)
+        form.addWidget(QtWidgets.QLabel("端点峰值比例"), 1, 4)
+        form.addWidget(self.temp_curve_class_peak_fraction_edit, 1, 5)
+        for col in (1, 3, 5):
+            form.setColumnStretch(col, 1)
+
+        layout.addWidget(group)
+        layout.addStretch(1)
+        return widget
+
+    def _build_pie_fitting_tab(self) -> QtWidgets.QWidget:
+        widget = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(widget)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        group = QtWidgets.QGroupBox("PIE 拟合默认参数")
+        form = QtWidgets.QGridLayout(group)
+        form.setHorizontalSpacing(8)
+        form.setVerticalSpacing(8)
+
+        self.pie_energy_decimals_edit = QtWidgets.QSpinBox()
+        self.pie_energy_decimals_edit.setRange(0, 6)
+        self.pie_energy_decimals_edit.setToolTip("光子能量分组时保留的小数位数")
+
+        self.pie_recursive_check = QtWidgets.QCheckBox("递归拟合")
+        self.pie_recursive_check.setToolTip("先拟合高能段，再逐步扩展到低能区")
+
+        self.pie_prefer_gaussian_check = QtWidgets.QCheckBox("高斯积分")
+        self.pie_prefer_gaussian_check.setToolTip("使用高斯峰面积作为 PIE 信号")
+
+        self.pie_multi_folder_check = QtWidgets.QCheckBox("多文件夹模式")
+        self.pie_multi_folder_check.setToolTip("允许从多个 PIE 扫描目录合并能段")
+
+        self.pie_merge_method_combo = QtWidgets.QComboBox()
+        self.pie_merge_method_combo.addItem("低能段为主", "low_energy_dominant")
+        self.pie_merge_method_combo.addItem("第一组为主", "first_segment_dominant")
+        self.pie_merge_method_combo.addItem("简单拼接", "mean")
+        self.pie_merge_method_combo.setToolTip("多文件夹 PIE 数据的合并方式")
+
+        form.addWidget(QtWidgets.QLabel("能量小数位"), 0, 0)
+        form.addWidget(self.pie_energy_decimals_edit, 0, 1)
+        form.addWidget(self.pie_recursive_check, 0, 2)
+        form.addWidget(self.pie_prefer_gaussian_check, 0, 3)
+        form.addWidget(QtWidgets.QLabel("合并方法"), 1, 0)
+        form.addWidget(self.pie_merge_method_combo, 1, 1)
+        form.addWidget(self.pie_multi_folder_check, 1, 2)
+        for col in (1, 3):
+            form.setColumnStretch(col, 1)
+
+        layout.addWidget(group)
+        layout.addStretch(1)
+        return widget
+
+    def _build_pics_tab(self) -> QtWidgets.QWidget:
+        widget = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(widget)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        group = QtWidgets.QGroupBox("PICS 计算默认参数")
+        form = QtWidgets.QGridLayout(group)
+        form.setHorizontalSpacing(8)
+        form.setVerticalSpacing(8)
+
+        self.pics_no_mz_edit = QtWidgets.QSpinBox()
+        self.pics_no_mz_edit.setRange(1, 1000)
+        self.pics_no_mz_edit.setToolTip("参考物种 NO 的质量数")
+
+        self.pics_no_formula_edit = QtWidgets.QLineEdit()
+        self.pics_no_formula_edit.setToolTip("参考物种分子式，用于匹配截面数据库")
+
+        self.pics_no_mf_edit = QtWidgets.QDoubleSpinBox()
+        self.pics_no_mf_edit.setRange(0.0, 1.0)
+        self.pics_no_mf_edit.setDecimals(6)
+        self.pics_no_mf_edit.setSingleStep(0.001)
+        self.pics_no_mf_edit.setToolTip("参考物种 NO 的摩尔分数")
+
+        self.pics_new_species_mf_edit = QtWidgets.QDoubleSpinBox()
+        self.pics_new_species_mf_edit.setRange(0.0, 1.0)
+        self.pics_new_species_mf_edit.setDecimals(6)
+        self.pics_new_species_mf_edit.setSingleStep(0.001)
+        self.pics_new_species_mf_edit.setToolTip("新物种默认摩尔分数")
+
+        form.addWidget(QtWidgets.QLabel("NO m/z"), 0, 0)
+        form.addWidget(self.pics_no_mz_edit, 0, 1)
+        form.addWidget(QtWidgets.QLabel("NO 分子式"), 0, 2)
+        form.addWidget(self.pics_no_formula_edit, 0, 3)
+        form.addWidget(QtWidgets.QLabel("NO 摩尔分数"), 1, 0)
+        form.addWidget(self.pics_no_mf_edit, 1, 1)
+        form.addWidget(QtWidgets.QLabel("新物种摩尔分数"), 1, 2)
+        form.addWidget(self.pics_new_species_mf_edit, 1, 3)
+        for col in (1, 3):
+            form.setColumnStretch(col, 1)
+
+        layout.addWidget(group)
+        layout.addStretch(1)
+        return widget
+
+    def _build_mole_fraction_tab(self) -> QtWidgets.QWidget:
+        widget = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(widget)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        group = QtWidgets.QGroupBox("摩尔分数默认参数")
+        form = QtWidgets.QGridLayout(group)
+        form.setHorizontalSpacing(8)
+        form.setVerticalSpacing(8)
+
+        self.mf_parent_mz_edit = QtWidgets.QSpinBox()
+        self.mf_parent_mz_edit.setRange(0, 1000)
+        self.mf_parent_mz_edit.setSpecialValueText("未设置")
+        self.mf_parent_mz_edit.setToolTip("母体物种质量数")
+
+        self.mf_parent_initial_mf_edit = QtWidgets.QDoubleSpinBox()
+        self.mf_parent_initial_mf_edit.setRange(0.0, 1.0)
+        self.mf_parent_initial_mf_edit.setDecimals(6)
+        self.mf_parent_initial_mf_edit.setSingleStep(0.001)
+        self.mf_parent_initial_mf_edit.setToolTip("母体物种在参考温度处的初始摩尔分数")
+
+        self.mf_photon_energy_edit = QtWidgets.QDoubleSpinBox()
+        self.mf_photon_energy_edit.setRange(0.0, 100.0)
+        self.mf_photon_energy_edit.setDecimals(4)
+        self.mf_photon_energy_edit.setSingleStep(0.1)
+        self.mf_photon_energy_edit.setToolTip("默认光子能量")
+
+        self.mf_reference_temperature_edit = QtWidgets.QSpinBox()
+        self.mf_reference_temperature_edit.setRange(0, 2000)
+        self.mf_reference_temperature_edit.setSpecialValueText("未设置")
+        self.mf_reference_temperature_edit.setToolTip("母体初始摩尔分数对应的参考温度")
+
+        form.addWidget(QtWidgets.QLabel("母体 m/z"), 0, 0)
+        form.addWidget(self.mf_parent_mz_edit, 0, 1)
+        form.addWidget(QtWidgets.QLabel("母体初始摩尔分数"), 0, 2)
+        form.addWidget(self.mf_parent_initial_mf_edit, 0, 3)
+        form.addWidget(QtWidgets.QLabel("光子能量 (eV)"), 1, 0)
+        form.addWidget(self.mf_photon_energy_edit, 1, 1)
+        form.addWidget(QtWidgets.QLabel("参考温度"), 1, 2)
+        form.addWidget(self.mf_reference_temperature_edit, 1, 3)
+        for col in (1, 3):
+            form.setColumnStretch(col, 1)
+
+        layout.addWidget(group)
+        layout.addStretch(1)
+        return widget
+
     def set_project_settings(self, project_settings: ProjectSettings) -> None:
         """设置项目级配置引用"""
         self.project_settings = project_settings
@@ -1547,6 +1744,7 @@ class FunctionDefaultsWidget(QtWidgets.QWidget):
         """从配置文件加载参数"""
         if self.project_settings:
             self.peak_detection = self.project_settings.to_peak_detection_config()
+        ps = self.project_settings or ProjectSettings()
 
         combo_set_data(self.peak_algorithm_combo, self.peak_detection.algorithm)
         self.peak_detection_min_idx_edit.setValue(self.peak_detection.detection_min_idx)
@@ -1558,10 +1756,33 @@ class FunctionDefaultsWidget(QtWidgets.QWidget):
         self.peak_weak_tail_ratio_edit.setValue(self.peak_detection.weak_tail_ratio)
         self.peak_gaussian_window_max_edit.setValue(self.peak_detection.gaussian_window_max)
         self.peak_gaussian_boundary_scale_edit.setValue(self.peak_detection.gaussian_boundary_scale)
+        combo_set_data(self.temp_peak_source_combo, ps.temp_peak_source)
+        combo_set_data(self.temp_reference_mode_combo, ps.temp_reference_mode)
+        self.temp_prefer_gaussian_check.setChecked(ps.temp_prefer_gaussian)
+        self.temp_kr_mz_edit.setValue(ps.temp_kr_mz)
+        self.temp_curve_class_change_threshold_edit.setValue(ps.temp_curve_class_change_threshold)
+        self.temp_curve_class_peak_fraction_edit.setValue(ps.temp_curve_class_peak_fraction)
+        self.pie_energy_decimals_edit.setValue(ps.pie_energy_decimals)
+        self.pie_recursive_check.setChecked(ps.pie_recursive)
+        self.pie_prefer_gaussian_check.setChecked(ps.pie_prefer_gaussian)
+        self.pie_multi_folder_check.setChecked(ps.pie_multi_folder_mode)
+        combo_set_data(self.pie_merge_method_combo, ps.pie_merge_method)
+        self.pics_no_mz_edit.setValue(ps.pics_no_mz)
+        self.pics_no_formula_edit.setText(ps.pics_no_formula)
+        self.pics_no_mf_edit.setValue(ps.pics_no_mf)
+        self.pics_new_species_mf_edit.setValue(ps.pics_new_species_mf)
+        self.mf_parent_mz_edit.setValue(ps.mf_parent_mz)
+        self.mf_parent_initial_mf_edit.setValue(ps.mf_parent_initial_mf)
+        self.mf_photon_energy_edit.setValue(ps.mf_photon_energy)
+        self.mf_reference_temperature_edit.setValue(
+            0 if ps.mf_reference_temperature is None else int(ps.mf_reference_temperature)
+        )
 
     def apply_to_settings(self, project_settings: ProjectSettings | None = None) -> None:
         """Copy current function defaults into ProjectSettings."""
         target = project_settings or self.project_settings
+        if project_settings is not None:
+            self.project_settings = project_settings
         self.peak_detection = PeakDetectionConfig(
             algorithm=str(self.peak_algorithm_combo.currentData()),
             detection_min_idx=self.peak_detection_min_idx_edit.value(),
@@ -1617,6 +1838,26 @@ class FunctionDefaultsWidget(QtWidgets.QWidget):
         target.vote_threshold = self.peak_detection.vote_threshold
         target.min_intensity_for_single_vote = self.peak_detection.min_intensity_for_single_vote
         target.mz_tolerance = self.peak_detection.mz_tolerance
+        target.temp_peak_source = str(self.temp_peak_source_combo.currentData())
+        target.temp_reference_mode = str(self.temp_reference_mode_combo.currentData())
+        target.temp_prefer_gaussian = self.temp_prefer_gaussian_check.isChecked()
+        target.temp_kr_mz = self.temp_kr_mz_edit.value()
+        target.temp_curve_class_change_threshold = self.temp_curve_class_change_threshold_edit.value()
+        target.temp_curve_class_peak_fraction = self.temp_curve_class_peak_fraction_edit.value()
+        target.pie_energy_decimals = self.pie_energy_decimals_edit.value()
+        target.pie_recursive = self.pie_recursive_check.isChecked()
+        target.pie_prefer_gaussian = self.pie_prefer_gaussian_check.isChecked()
+        target.pie_multi_folder_mode = self.pie_multi_folder_check.isChecked()
+        target.pie_merge_method = str(self.pie_merge_method_combo.currentData())
+        target.pics_no_mz = self.pics_no_mz_edit.value()
+        target.pics_no_formula = self.pics_no_formula_edit.text().strip() or "NO"
+        target.pics_no_mf = self.pics_no_mf_edit.value()
+        target.pics_new_species_mf = self.pics_new_species_mf_edit.value()
+        target.mf_parent_mz = self.mf_parent_mz_edit.value()
+        target.mf_parent_initial_mf = self.mf_parent_initial_mf_edit.value()
+        target.mf_photon_energy = self.mf_photon_energy_edit.value()
+        reference_temperature = self.mf_reference_temperature_edit.value()
+        target.mf_reference_temperature = None if reference_temperature == 0 else float(reference_temperature)
 
     def save_settings(self) -> None:
         """保存参数到配置文件"""
