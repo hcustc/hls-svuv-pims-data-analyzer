@@ -6,7 +6,11 @@ from pathlib import Path
 from PyQt6 import QtCore, QtGui, QtWidgets
 from PyQt6.QtWidgets import QFileDialog, QHBoxLayout, QLineEdit, QPushButton, QVBoxLayout
 
-from bl03u_masstool.core.config import species_database_path
+from bl03u_masstool.core.config import (
+    PeakDetectionConfig,
+    save_peak_detection_config,
+    species_database_path,
+)
 from bl03u_masstool.core.normalization import load_normalization_settings
 from bl03u_masstool.core.project_lifecycle import (
     PROJECT_DIRECTORIES,
@@ -201,6 +205,7 @@ class WorkspacePagesMixin:
         self.project_tabs.addTab(self.project_identity_page, "项目设置")
         self.project_tabs.addTab(self.project_common_parameters_widget, "通用参数")
         self.project_tabs.addTab(self.project_function_defaults_widget, "功能默认参数")
+        self.project_tabs.currentChanged.connect(self._on_project_tab_changed)
         page_layout.addWidget(self.project_tabs, stretch=1)
 
         self.load_project_settings()
@@ -671,6 +676,74 @@ class WorkspacePagesMixin:
             self.project_peak_detection_widget.apply_to_settings(ps)
         return ps
 
+    def _sync_project_page_edits_to_runtime(
+        self,
+        *,
+        save_project: bool = True,
+        sync_tools: bool = True,
+    ) -> ProjectSettings:
+        """Collect current project-page edits before another tool consumes settings."""
+        ps = self._collect_project_settings_from_ui()
+        self._collect_all_project_parameters_from_ui(ps)
+        self.project_settings_manager.set(ps)
+        self._sync_peak_detection_to_global_config(ps)
+        if save_project and self.project_settings_manager.has_project_path():
+            try:
+                self.project_settings_manager.save()
+            except Exception:
+                pass
+        self._apply_project_runtime_settings(ps)
+        if sync_tools:
+            self._sync_project_settings_to_tool_pages(ps)
+        return ps
+
+    def _on_project_tab_changed(self, _index: int) -> None:
+        if not hasattr(self, "project_common_parameters_widget") or not hasattr(self, "project_function_defaults_widget"):
+            return
+        ps = self._sync_project_page_edits_to_runtime(save_project=True, sync_tools=True)
+        self.refresh_project_parameter_summary()
+        self.refresh_project_datasource_page(ps)
+
+    @staticmethod
+    def _sync_peak_detection_to_global_config(ps: ProjectSettings) -> None:
+        """Write ProjectSettings peak detection values to the global config file.
+
+        Project-scoped tools consume ProjectSettings directly. Keep the legacy
+        global YAML in step so non-project consumers and older helper paths do
+        not keep stale peak-detection defaults.
+        """
+        try:
+            peak_config = PeakDetectionConfig(
+                algorithm=str(ps.peak_algorithm),
+                detection_min_idx=int(ps.detection_min_idx),
+                threshold_end=float(ps.threshold_end),
+                min_intensity=float(ps.min_intensity),
+                nearby_peak_window=int(ps.nearby_peak_window),
+                duplicate_window=int(ps.duplicate_window),
+                weak_tail_early_window=int(ps.weak_tail_early_window),
+                weak_tail_late_window=int(ps.weak_tail_late_window),
+                weak_tail_ratio=float(ps.weak_tail_ratio),
+                gaussian_window_max=int(ps.gaussian_window_max),
+                gaussian_boundary_scale=float(ps.gaussian_boundary_scale),
+                boundary_padding=int(ps.boundary_padding),
+                prominence_ratio=float(ps.prominence_ratio),
+                smoothing_window=int(ps.smoothing_window),
+                smoothing_poly_order=int(ps.smoothing_poly_order),
+                baseline_window=int(ps.baseline_window),
+                baseline_percentile=float(ps.baseline_percentile),
+                min_peak_width=int(ps.min_peak_width),
+                max_peak_width=int(ps.max_peak_width),
+                cwt_snr_threshold=float(ps.cwt_snr_threshold),
+                cwt_wavelet_max_width=int(ps.cwt_wavelet_max_width),
+                weak_tail_cutoff_idx=int(ps.weak_tail_cutoff_idx),
+                vote_threshold=float(ps.vote_threshold),
+                min_intensity_for_single_vote=float(ps.min_intensity_for_single_vote),
+                mz_tolerance=float(ps.mz_tolerance),
+            )
+            save_peak_detection_config(peak_config)
+        except Exception:
+            pass
+
     def _load_project_settings_to_parameter_widgets(self, ps: ProjectSettings) -> None:
         if hasattr(self, "project_common_parameters_widget"):
             self.project_common_parameters_widget.set_project_settings(ps)
@@ -683,13 +756,16 @@ class WorkspacePagesMixin:
         """Make the active desktop runtime use the project file as source of truth."""
         self.normalization_settings = ps.to_normalization_settings()
         calibration = ps.to_calibration()
+        previous_plot_calibration = getattr(self, "current_plot_calibration", None)
         self.lineEdit_4.setText(f"{calibration.a:.6e}")
         self.lineEdit_5.setText(f"{calibration.b:.6e}")
         self.lineEdit_6.setText(f"{calibration.c:.6e}")
         if hasattr(self, "project_common_parameters_widget"):
             self.project_common_parameters_widget.settings = self.normalization_settings
             self.project_common_parameters_widget.calibration = calibration
-        if hasattr(self, "p2"):
+        if getattr(self, "current_plot_x", None) is not None and self.current_plot_x.size:
+            self.refresh_current_plot_calibration(previous_plot_calibration)
+        elif hasattr(self, "p2"):
             self.refresh_plot_axis_mode()
 
     def load_project_settings(self) -> None:
@@ -909,6 +985,7 @@ class WorkspacePagesMixin:
         ps = self._collect_project_settings_from_ui()
         ps = self._normalize_project_output_dir(ps)
         self._collect_all_project_parameters_from_ui(ps)
+        self._sync_peak_detection_to_global_config(ps)
 
         # Step 1: Create project directory structure
         try:
@@ -948,6 +1025,7 @@ class WorkspacePagesMixin:
         ps = self._collect_project_settings_from_ui()
         ps = self._normalize_project_output_dir(ps)
         self._collect_all_project_parameters_from_ui(ps)
+        self._sync_peak_detection_to_global_config(ps)
 
         # Create project directory structure
         try:
@@ -977,9 +1055,7 @@ class WorkspacePagesMixin:
 
     def apply_project_settings_to_tools(self) -> None:
         """Sync project settings to tool pages (light version, no save/init)."""
-        ps = self._collect_project_settings_from_ui()
-        self._collect_all_project_parameters_from_ui(ps)
-        self._apply_project_runtime_settings(ps)
+        ps = self._sync_project_page_edits_to_runtime(save_project=False, sync_tools=False)
         self._apply_settings_to_tools(ps)
         self.statusbar.showMessage("项目设置已应用到工具", 3000)
 
@@ -1528,9 +1604,14 @@ class WorkspacePagesMixin:
         page = page_map.get(page_name)
         if page is None:
             return
-        if page_name == "project":
+        current_page = self.workspace_stack.currentWidget() if hasattr(self, "workspace_stack") else None
+        if current_page is getattr(self, "project_page", None):
+            ps = self._sync_project_page_edits_to_runtime(save_project=True, sync_tools=True)
+        elif page_name == "project":
             self.load_project_settings()
-        ps = self.project_settings_manager.get()
+            ps = self.project_settings_manager.get()
+        else:
+            ps = self.project_settings_manager.get()
         if self.project_settings_manager.has_project_path():
             self._apply_project_runtime_settings(ps)
         else:

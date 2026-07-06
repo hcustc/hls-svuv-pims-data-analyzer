@@ -82,6 +82,13 @@ bl03u --help
 python -m pytest
 ```
 
+真实仪器数据回归测试使用本地可选数据目录，不随 Git 上传。默认查找
+`tests/fixtures/bl03u_sample/`；也可以指定：
+
+```bash
+BL03U_REAL_DATA_DIR=/path/to/bl03u_sample python -m pytest -m real_data
+```
+
 ## 工程状态
 
 当前 Python/依赖锁定、CI、PyQt 拆分和日志策略见 [`docs/engineering_maturity.md`](docs/engineering_maturity.md)。`docs/archive/completion/` 下的文件是历史里程碑记录，不作为当前全项目完成状态声明。
