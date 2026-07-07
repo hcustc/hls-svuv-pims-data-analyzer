@@ -1,309 +1,113 @@
-"""Test workflow capability analysis and flexible data source requirements."""
+"""Test workflow capability analysis for project-owned raw scan folders."""
 from __future__ import annotations
 
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-import pytest
-
 from bl03u_masstool.core.project_lifecycle import (
+    DataSourceValidationStatus,
     ProjectSettings,
     WorkflowProfile,
     analyze_workflow_capabilities,
     ensure_project_structure,
+    get_data_source_validation_status,
+    validate_all_data_sources,
 )
 
 
+def _folder(path: Path) -> Path:
+    path.mkdir(parents=True)
+    (path / "file.txt").write_text("data", encoding="utf-8")
+    return path
+
+
 class TestWorkflowCapabilityAnalysis:
-    """Test workflow capability analysis system."""
-
-    def test_spectrum_only_requires_single_or_sum(self):
-        """Test that SPECTRUM_ONLY requires either single or sum spectrum."""
+    def test_spectrum_only_still_reflects_workbench_single_or_sum_source(self):
         with TemporaryDirectory() as tmpdir:
-            settings = ProjectSettings(
-                output_dir=tmpdir,
-                project_name="test",
-                system="test",
-            )
+            settings = ProjectSettings(output_dir=tmpdir, project_name="test", system="test")
             ensure_project_structure(settings)
 
-            # Initially no spectrum data
             result = analyze_workflow_capabilities(settings)
             assert WorkflowProfile.SPECTRUM_ONLY not in result.available_workflows
 
-            # Add single spectrum
             single_file = Path(tmpdir) / "single.ms"
-            single_file.write_text("data")
+            single_file.write_text("data", encoding="utf-8")
             settings.single_spectrum_file = str(single_file)
 
             result = analyze_workflow_capabilities(settings)
             assert WorkflowProfile.SPECTRUM_ONLY in result.available_workflows
 
-    def test_temperature_requires_spectrum_and_temp_data(self):
-        """Test that TEMPERATURE_SCAN requires spectrum + temperature folder."""
+    def test_temperature_scan_requires_only_temperature_scan_folder(self):
         with TemporaryDirectory() as tmpdir:
-            settings = ProjectSettings(
-                output_dir=tmpdir,
-                project_name="test",
-                system="test",
-            )
+            settings = ProjectSettings(output_dir=tmpdir, project_name="test", system="test")
             ensure_project_structure(settings)
-
-            # Only spectrum - temperature should not be available
-            single_file = Path(tmpdir) / "single.ms"
-            single_file.write_text("data")
-            settings.single_spectrum_file = str(single_file)
 
             result = analyze_workflow_capabilities(settings)
             assert WorkflowProfile.TEMPERATURE_SCAN not in result.available_workflows
 
-            # Add temperature folder
-            temp_dir = Path(tmpdir) / "temp_scan"
-            temp_dir.mkdir()
-            (temp_dir / "file.txt").write_text("data")
-            settings.temperature_scan_folder = str(temp_dir)
+            settings.temperature_scan_folder = str(_folder(Path(tmpdir) / "temp_scan"))
 
             result = analyze_workflow_capabilities(settings)
             assert WorkflowProfile.TEMPERATURE_SCAN in result.available_workflows
+            assert WorkflowProfile.FULL_ANALYSIS in result.available_workflows
 
-    def test_pie_requires_spectrum_and_pie_data(self):
-        """Test that PIE_ANALYSIS requires spectrum + PIE folder."""
+    def test_pie_analysis_requires_only_pie_scan_folder(self):
         with TemporaryDirectory() as tmpdir:
-            settings = ProjectSettings(
-                output_dir=tmpdir,
-                project_name="test",
-                system="test",
-            )
+            settings = ProjectSettings(output_dir=tmpdir, project_name="test", system="test")
             ensure_project_structure(settings)
-
-            # Only spectrum - PIE should not be available
-            single_file = Path(tmpdir) / "single.ms"
-            single_file.write_text("data")
-            settings.single_spectrum_file = str(single_file)
 
             result = analyze_workflow_capabilities(settings)
             assert WorkflowProfile.PIE_ANALYSIS not in result.available_workflows
 
-            # Add PIE folder
-            pie_dir = Path(tmpdir) / "pie_scan"
-            pie_dir.mkdir()
-            (pie_dir / "file.txt").write_text("data")
-            settings.pie_scan_folder = str(pie_dir)
+            settings.pie_scan_folder = str(_folder(Path(tmpdir) / "pie_scan"))
 
             result = analyze_workflow_capabilities(settings)
             assert WorkflowProfile.PIE_ANALYSIS in result.available_workflows
+            assert WorkflowProfile.FULL_ANALYSIS in result.available_workflows
 
-    def test_sum_spectrum_alternative_to_single(self):
-        """Test that sum spectrum can replace single spectrum."""
+    def test_temperature_and_pie_are_project_raw_sources_independent_of_workbench_source(self):
         with TemporaryDirectory() as tmpdir:
-            settings = ProjectSettings(
-                output_dir=tmpdir,
-                project_name="test",
-                system="test",
-            )
+            settings = ProjectSettings(output_dir=tmpdir, project_name="test", system="test")
             ensure_project_structure(settings)
-
-            # Use sum spectrum instead of single
-            sum_dir = Path(tmpdir) / "sum_spectra"
-            sum_dir.mkdir()
-            (sum_dir / "sum.ms").write_text("data")
-            settings.sum_spectrum_folder = str(sum_dir)
-
-            # Temperature folder
-            temp_dir = Path(tmpdir) / "temp_scan"
-            temp_dir.mkdir()
-            (temp_dir / "file.txt").write_text("data")
-            settings.temperature_scan_folder = str(temp_dir)
+            settings.temperature_scan_folder = str(_folder(Path(tmpdir) / "temp_scan"))
+            settings.pie_scan_folder = str(_folder(Path(tmpdir) / "pie_scan"))
 
             result = analyze_workflow_capabilities(settings)
-            assert WorkflowProfile.TEMPERATURE_SCAN in result.available_workflows
 
-    def test_no_spectrum_blocks_all_workflows(self):
-        """Test that missing spectrum blocks all workflows."""
-        with TemporaryDirectory() as tmpdir:
-            settings = ProjectSettings(
-                output_dir=tmpdir,
-                project_name="test",
-                system="test",
-            )
-            ensure_project_structure(settings)
-
-            # Add temperature and PIE but no spectrum
-            temp_dir = Path(tmpdir) / "temp_scan"
-            temp_dir.mkdir()
-            (temp_dir / "file.txt").write_text("data")
-            settings.temperature_scan_folder = str(temp_dir)
-
-            pie_dir = Path(tmpdir) / "pie_scan"
-            pie_dir.mkdir()
-            (pie_dir / "file.txt").write_text("data")
-            settings.pie_scan_folder = str(pie_dir)
-
-            result = analyze_workflow_capabilities(settings)
-            assert len(result.available_workflows) == 0
             assert WorkflowProfile.SPECTRUM_ONLY not in result.available_workflows
-            assert WorkflowProfile.TEMPERATURE_SCAN not in result.available_workflows
-            assert WorkflowProfile.PIE_ANALYSIS not in result.available_workflows
-
-    def test_full_analysis_requires_spectrum_and_at_least_one_analysis(self):
-        """Test that FULL_ANALYSIS allows either temperature or PIE."""
-        with TemporaryDirectory() as tmpdir:
-            settings = ProjectSettings(
-                output_dir=tmpdir,
-                project_name="test",
-                system="test",
-            )
-            ensure_project_structure(settings)
-
-            # Only spectrum
-            single_file = Path(tmpdir) / "single.ms"
-            single_file.write_text("data")
-            settings.single_spectrum_file = str(single_file)
-
-            result = analyze_workflow_capabilities(settings)
-            assert WorkflowProfile.FULL_ANALYSIS not in result.available_workflows
-
-            # Add temperature only
-            temp_dir = Path(tmpdir) / "temp_scan"
-            temp_dir.mkdir()
-            (temp_dir / "file.txt").write_text("data")
-            settings.temperature_scan_folder = str(temp_dir)
-
-            result = analyze_workflow_capabilities(settings)
+            assert WorkflowProfile.TEMPERATURE_SCAN in result.available_workflows
+            assert WorkflowProfile.PIE_ANALYSIS in result.available_workflows
             assert WorkflowProfile.FULL_ANALYSIS in result.available_workflows
 
-            # Replace temperature with PIE
-            settings.temperature_scan_folder = ""
-            pie_dir = Path(tmpdir) / "pie_scan"
-            pie_dir.mkdir()
-            (pie_dir / "file.txt").write_text("data")
-            settings.pie_scan_folder = str(pie_dir)
-
-            result = analyze_workflow_capabilities(settings)
-            assert WorkflowProfile.FULL_ANALYSIS in result.available_workflows
-
-            # Both temperature and PIE
-            settings.temperature_scan_folder = str(temp_dir)
-            result = analyze_workflow_capabilities(settings)
-            assert WorkflowProfile.FULL_ANALYSIS in result.available_workflows
-
-    def test_missing_sources_are_reported(self):
-        """Test that missing sources are reported in unavailable workflows."""
+    def test_recommended_next_step_prioritizes_raw_scan_folders(self):
         with TemporaryDirectory() as tmpdir:
-            settings = ProjectSettings(
-                output_dir=tmpdir,
-                project_name="test",
-                system="test",
-            )
+            settings = ProjectSettings(output_dir=tmpdir, project_name="test", system="test")
             ensure_project_structure(settings)
 
             result = analyze_workflow_capabilities(settings)
 
-            # All workflows should be unavailable
-            assert len(result.unavailable_workflows) > 0
+            assert result.recommended_next_step
+            assert "温度扫描" in result.recommended_next_step or "PIE" in result.recommended_next_step
 
-            # Check that missing sources are reported
-            for workflow, missing_str in result.unavailable_workflows.items():
-                assert len(missing_str) > 0
-
-    def test_recommended_next_step_provided(self):
-        """Test that recommended next step is provided."""
+    def test_data_source_status_keeps_workbench_sources_but_project_status_uses_scan_folders(self):
         with TemporaryDirectory() as tmpdir:
-            settings = ProjectSettings(
-                output_dir=tmpdir,
-                project_name="test",
-                system="test",
-            )
+            settings = ProjectSettings(output_dir=tmpdir, project_name="test", system="test")
             ensure_project_structure(settings)
-
-            result = analyze_workflow_capabilities(settings)
-            assert len(result.recommended_next_step) > 0
-
-            # When workflows available
             single_file = Path(tmpdir) / "single.ms"
-            single_file.write_text("data")
+            single_file.write_text("data", encoding="utf-8")
             settings.single_spectrum_file = str(single_file)
 
-            result = analyze_workflow_capabilities(settings)
-            assert "可执行" in result.recommended_next_step or "工作流" in result.recommended_next_step
+            records = validate_all_data_sources(settings)
+            result = analyze_workflow_capabilities(settings, records)
 
-    def test_data_source_status_collected(self):
-        """Test that individual data source status is collected."""
-        with TemporaryDirectory() as tmpdir:
-            settings = ProjectSettings(
-                output_dir=tmpdir,
-                project_name="test",
-                system="test",
-            )
-            ensure_project_structure(settings)
-
-            # Add some sources
-            single_file = Path(tmpdir) / "single.ms"
-            single_file.write_text("data")
-            settings.single_spectrum_file = str(single_file)
-
-            result = analyze_workflow_capabilities(settings)
-
-            # Check status collected
-            assert "single_spectrum" in result.data_source_status
             assert result.data_source_status["single_spectrum"] is True
-            assert result.data_source_status.get("sum_spectrum") is False
+            assert result.data_source_status["temperature_scan"] is False
+            assert get_data_source_validation_status(settings, records) == DataSourceValidationStatus.UNCONFIGURED
 
-    def test_multiple_workflows_available_simultaneously(self):
-        """Test that multiple workflows can be available at the same time."""
-        with TemporaryDirectory() as tmpdir:
-            settings = ProjectSettings(
-                output_dir=tmpdir,
-                project_name="test",
-                system="test",
-            )
-            ensure_project_structure(settings)
+            settings.temperature_scan_folder = str(_folder(Path(tmpdir) / "temp_scan"))
+            records = validate_all_data_sources(settings)
+            assert get_data_source_validation_status(settings, records) == DataSourceValidationStatus.PARTIAL
 
-            # Add spectrum + both temperature and PIE
-            single_file = Path(tmpdir) / "single.ms"
-            single_file.write_text("data")
-            settings.single_spectrum_file = str(single_file)
-
-            temp_dir = Path(tmpdir) / "temp_scan"
-            temp_dir.mkdir()
-            (temp_dir / "file.txt").write_text("data")
-            settings.temperature_scan_folder = str(temp_dir)
-
-            pie_dir = Path(tmpdir) / "pie_scan"
-            pie_dir.mkdir()
-            (pie_dir / "file.txt").write_text("data")
-            settings.pie_scan_folder = str(pie_dir)
-
-            result = analyze_workflow_capabilities(settings)
-
-            # All four workflows should be available
-            assert WorkflowProfile.SPECTRUM_ONLY in result.available_workflows
-            assert WorkflowProfile.TEMPERATURE_SCAN in result.available_workflows
-            assert WorkflowProfile.PIE_ANALYSIS in result.available_workflows
-            assert WorkflowProfile.FULL_ANALYSIS in result.available_workflows
-            assert len(result.available_workflows) == 4
-
-    def test_missing_both_spectrum_sources(self):
-        """Test workflow status when both single and sum spectrum are missing."""
-        with TemporaryDirectory() as tmpdir:
-            settings = ProjectSettings(
-                output_dir=tmpdir,
-                project_name="test",
-                system="test",
-            )
-            ensure_project_structure(settings)
-
-            # Add analysis data but no spectrum
-            temp_dir = Path(tmpdir) / "temp_scan"
-            temp_dir.mkdir()
-            (temp_dir / "file.txt").write_text("data")
-            settings.temperature_scan_folder = str(temp_dir)
-
-            result = analyze_workflow_capabilities(settings)
-
-            # All workflows should be unavailable
-            assert len(result.available_workflows) == 0
-
-            # Check that both spectrum sources are mentioned as missing
-            all_missing = " ".join(str(v) for v in result.unavailable_workflows.values())
-            assert "单谱" in all_missing or "累计" in all_missing or "谱" in all_missing
+            settings.pie_scan_folder = str(_folder(Path(tmpdir) / "pie_scan"))
+            records = validate_all_data_sources(settings)
+            assert get_data_source_validation_status(settings, records) == DataSourceValidationStatus.COMPLETE

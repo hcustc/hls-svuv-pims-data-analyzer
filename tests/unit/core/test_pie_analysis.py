@@ -178,6 +178,66 @@ peaks:
     assert df.iloc[0]["raw_area"] == 10.0
 
 
+def test_pie_blank_subtraction_rejects_mismatched_x_axis(tmp_path):
+    peak_file = tmp_path / "peaks.yaml"
+    peak_file.write_text(
+        """
+peaks:
+  - mz: 22
+    peak: 22
+    start: 21
+    end: 23
+""",
+        encoding="utf-8",
+    )
+
+    header = [
+        "Energy:12.0 eV",
+        "IO:10 nA",
+        "Beam Current:1mA",
+        "Undulator Offset:0mm",
+        "Time:1 s",
+        "Burner Position:0 mm",
+        "Temperature:300 C",
+        "DIFF PRESSURE:1Pa",
+        "ION PRESSURE:1Pa",
+        "TOF PRESSURE:1Pa",
+    ]
+    sample_rows = [f"{index} {10.0 if index == 22 else 0.0}" for index in range(1, 51)]
+    blank_rows = [f"{index + 0.5} {5.0 if index == 22 else 0.0}" for index in range(1, 51)]
+    (tmp_path / "12.0eV-sample.txt").write_text("\n".join(header + sample_rows), encoding="utf-8")
+    (tmp_path / "12.0eV-blank.txt").write_text("\n".join(header + blank_rows), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="mismatched x axes"):
+        analyze_pie_folder(
+            tmp_path,
+            calibration=Calibration(a=0, b=1, c=0),
+            recursive=False,
+            manual_peak_path=peak_file,
+            prefer_gaussian=False,
+            photon_normalize=False,
+        )
+
+
+def test_pie_skips_files_without_parseable_energy(tmp_path, caplog):
+    y = [0.0] * 20 + [1.0, 5.0, 12.0, 5.0, 1.0] + [0.0] * 20
+    (tmp_path / "sample_without_energy.asc").write_text("\n".join(str(value) for value in y), encoding="utf-8")
+
+    with caplog.at_level("WARNING"):
+        df = analyze_pie_folder(
+            tmp_path,
+            calibration=Calibration(a=0, b=1, c=0),
+            recursive=False,
+            detection_min_idx=0,
+            threshold_end=0.5,
+            min_intensity=3,
+            prefer_gaussian=False,
+        )
+
+    assert df.empty
+    assert "no photon energy" in caplog.text
+
+
 def test_analyze_pie_folder_uses_asc_files_by_default(tmp_path):
     for energy, scale in [(11.0, 1.0), (12.0, 2.0)]:
         y = [0.0] * 20 + [1.0 * scale, 5.0 * scale, 12.0 * scale, 5.0 * scale, 1.0 * scale] + [0.0] * 20

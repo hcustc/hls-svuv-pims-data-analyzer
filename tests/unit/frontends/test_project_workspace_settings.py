@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
+import yaml
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -272,6 +273,148 @@ def test_save_and_apply_uses_selected_parent_directory_for_new_project(qapp, tmp
         window.deleteLater()
 
 
+def test_project_storage_field_explains_parent_and_root_semantics(qapp):
+    window = MainWindow()
+    try:
+        placeholder = window.project_output_dir_edit.placeholderText()
+
+        assert "父目录" in placeholder
+        assert "项目根目录" in placeholder
+    finally:
+        window.project_settings_manager.clear_project_path()
+        window.deleteLater()
+
+
+def test_new_project_uses_parent_directory_even_if_parent_contains_old_project_files(qapp, tmp_path, monkeypatch):
+    downloads_dir = tmp_path / "Downloads"
+    (downloads_dir / "config").mkdir(parents=True)
+    (downloads_dir / "config" / "project.yaml").write_text("project:\n  name: old\n", encoding="utf-8")
+    (downloads_dir / "analysis").mkdir()
+
+    window = MainWindow()
+    monkeypatch.setattr(QtWidgets.QMessageBox, "critical", lambda *args, **kwargs: None)
+    try:
+        window.new_project()
+        window.project_name_edit.setText("hhh")
+        window.project_system_edit.setText("hhh")
+        window.project_description_edit.setText("hhh")
+        window.project_output_dir_edit.setText(str(downloads_dir))
+
+        window.save_and_apply_project_settings()
+
+        project_dir = downloads_dir / "hhh"
+        assert project_dir.exists()
+        assert (project_dir / "analysis").exists()
+        assert (project_dir / "config" / "project.yaml").exists()
+        assert window.project_output_dir_edit.text() == str(project_dir)
+    finally:
+        window.project_settings_manager.clear_project_path()
+        window.deleteLater()
+
+
+def test_save_new_project_ignores_stale_opened_parent_project_root(qapp, tmp_path, monkeypatch):
+    downloads_dir = tmp_path / "Downloads"
+    (downloads_dir / "config").mkdir(parents=True)
+    save_project_settings(
+        ProjectSettings(project_name="old", system="old", output_dir=str(downloads_dir)),
+        downloads_dir / "config" / "project.yaml",
+    )
+    (downloads_dir / ".bl03u_project").write_text("old\n", encoding="utf-8")
+
+    window = MainWindow()
+    monkeypatch.setattr(QtWidgets.QMessageBox, "critical", lambda *args, **kwargs: pytest.fail(str(args)))
+    try:
+        # Simulate the real failure mode: a previous bad save made Downloads the
+        # active project root, then the user creates project "aaa" using Downloads
+        # as the storage location.
+        window.project_settings_manager.set_project_path(downloads_dir)
+        window.new_project()
+        window.project_name_edit.setText("aaa")
+        window.project_system_edit.setText("aaa")
+        window.project_description_edit.setText("aaa")
+        window.project_output_dir_edit.setText(str(downloads_dir))
+
+        window.save_and_apply_project_settings()
+
+        project_dir = downloads_dir / "aaa"
+        assert (project_dir / "config" / "project.yaml").exists()
+        assert (project_dir / "analysis").exists()
+        assert window.project_output_dir_edit.text() == str(project_dir)
+
+        saved = load_project_settings(project_dir / "config" / "project.yaml")
+        assert saved.output_dir == str(project_dir)
+        assert window.project_settings_manager.get_project_config_path() == project_dir / "config" / "project.yaml"
+    finally:
+        window.project_settings_manager.clear_project_path()
+        window.deleteLater()
+
+
+def test_save_project_name_into_active_stale_parent_creates_child_project(qapp, tmp_path, monkeypatch):
+    downloads_dir = tmp_path / "Downloads"
+    (downloads_dir / "config").mkdir(parents=True)
+    save_project_settings(
+        ProjectSettings(project_name="old", system="old", output_dir=str(downloads_dir)),
+        downloads_dir / "config" / "project.yaml",
+    )
+
+    window = MainWindow()
+    monkeypatch.setattr(QtWidgets.QMessageBox, "critical", lambda *args, **kwargs: pytest.fail(str(args)))
+    try:
+        window.project_settings_manager.set_project_path(downloads_dir)
+        window.project_name_edit.setText("aaa")
+        window.project_system_edit.setText("aaa")
+        window.project_description_edit.setText("aaa")
+        window.project_output_dir_edit.setText(str(downloads_dir))
+
+        window.save_and_apply_project_settings()
+
+        project_dir = downloads_dir / "aaa"
+        assert (project_dir / "analysis").exists()
+        assert (project_dir / "config" / "project.yaml").exists()
+        assert window.project_output_dir_edit.text() == str(project_dir)
+    finally:
+        window.project_settings_manager.clear_project_path()
+        window.deleteLater()
+
+
+def test_save_and_apply_materializes_project_data_sources(qapp, tmp_path, monkeypatch):
+    downloads_dir = tmp_path / "Downloads"
+    downloads_dir.mkdir()
+    temp_source = tmp_path / "external" / "温度扫描"
+    pie_source = tmp_path / "external" / "PIE"
+    (temp_source / "8.0eV").mkdir(parents=True)
+    pie_source.mkdir(parents=True)
+    (temp_source / "8.0eV" / "650K.txt").write_text("temp", encoding="utf-8")
+    (pie_source / "8.0eV.txt").write_text("pie", encoding="utf-8")
+
+    window = MainWindow()
+    monkeypatch.setattr(QtWidgets.QMessageBox, "critical", lambda *args, **kwargs: pytest.fail(str(args)))
+    try:
+        window.project_name_edit.setText("managed")
+        window.project_system_edit.setText("C6H6")
+        window.project_output_dir_edit.setText(str(downloads_dir))
+        window.project_temperature_folder_edit.setText(str(temp_source))
+        window.project_pie_folder_edit.setText(str(pie_source))
+
+        window.save_and_apply_project_settings()
+
+        project_dir = downloads_dir / "managed"
+        managed_temp = project_dir / "raw_data" / "temperature_scan" / "温度扫描"
+        managed_pie = project_dir / "raw_data" / "pie_scan" / "PIE"
+        saved = load_project_settings(project_dir / "config" / "project.yaml")
+
+        assert Path(saved.temperature_scan_folder) == managed_temp
+        assert Path(saved.pie_scan_folder) == managed_pie
+        assert window.project_temperature_folder_edit.text() == str(managed_temp)
+        assert window.project_pie_folder_edit.text() == str(managed_pie)
+        assert not managed_temp.is_symlink()
+        assert (managed_temp / "8.0eV" / "650K.txt").read_text(encoding="utf-8") == "temp"
+        assert (managed_pie / "8.0eV.txt").read_text(encoding="utf-8") == "pie"
+    finally:
+        window.project_settings_manager.clear_project_path()
+        window.deleteLater()
+
+
 def test_normalize_project_output_dir_resolves_relative_project_directory(qapp):
     window = MainWindow()
     try:
@@ -329,16 +472,12 @@ def test_open_project_restores_data_sources_and_applies_to_tools(qapp, tmp_path,
     try:
         window.open_project()
 
-        assert window.project_single_file_edit.text() == str(single_file)
-        assert window.project_sum_folder_edit.text() == str(sum_folder)
         assert window.project_temperature_folder_edit.text() == str(temperature_folder)
         assert window.project_pie_folder_edit.text() == str(pie_folder)
         assert window.project_manual_peak_edit.text() == str(manual_peak)
-        assert window.lineEdit.text() == str(single_file)
-        assert window.folder_path.text() == str(sum_folder)
-        assert window.spectrum_source_scope == "project"
-        assert window.lineEdit.isReadOnly()
-        assert not window.singleBrowseButton.isEnabled()
+        assert window.spectrum_source_scope == "custom"
+        assert not window.lineEdit.isReadOnly()
+        assert window.singleBrowseButton.isEnabled()
         assert window.project_common_parameters_widget.show_actions is False
         assert window.project_common_parameters_widget.action_bar.isHidden()
         assert window.current_calibration().a == pytest.approx(9.1e-7)
@@ -354,13 +493,14 @@ def test_open_project_restores_data_sources_and_applies_to_tools(qapp, tmp_path,
         assert window.pie_page.project_settings.pie_scan_folder == str(pie_folder)
         assert window.pie_page.normalization_settings.mass_discrimination == pytest.approx(0.55)
         assert window.mole_fraction_page.project_settings.mf_md_preset == "30 Torr (Catalysis)"
-        assert window.datasource_row_status_labels["single_spectrum"].text().startswith("✓")
+        assert window.datasource_row_status_labels["temperature_scan"].text().startswith("✓")
+        assert window.datasource_row_status_labels["pie_scan"].text().startswith("✓")
     finally:
         window.project_settings_manager.clear_project_path()
         window.deleteLater()
 
 
-def test_spectrum_workbench_custom_source_does_not_overwrite_project_source(qapp, tmp_path):
+def test_spectrum_workbench_custom_source_does_not_overwrite_legacy_project_source_fields(qapp, tmp_path):
     project_dir = tmp_path / "Project_Source"
     project_single = project_dir / "raw_data" / "single_spectrum" / "project.txt"
     custom_single = tmp_path / "custom.txt"
@@ -383,28 +523,56 @@ def test_spectrum_workbench_custom_source_does_not_overwrite_project_source(qapp
         window._read_project_settings_to_ui(ps)
         window._apply_settings_to_tools(ps)
 
-        assert window.spectrum_source_scope == "project"
-        assert window.lineEdit.text() == str(project_single)
-
-        window.set_spectrum_source_scope("custom")
+        assert window.spectrum_source_scope == "custom"
         window.lineEdit.setText(str(custom_single))
         window._remember_custom_spectrum_paths()
 
-        replacement = project_dir / "raw_data" / "single_spectrum" / "replacement.txt"
-        replacement.write_text("tof intensity\n5 6\n", encoding="utf-8")
-        window.project_single_file_edit.setText(str(replacement))
         window._auto_save_datasource()
 
         saved = load_project_settings(project_dir / "config" / "project.yaml")
-        assert saved.single_spectrum_file == str(replacement)
-        assert window.project_single_file_edit.text() == str(replacement)
+        assert saved.single_spectrum_file == str(project_single)
         assert window.lineEdit.text() == str(custom_single)
         assert window.spectrum_source_scope == "custom"
         assert not window.lineEdit.isReadOnly()
         assert window.singleBrowseButton.isEnabled()
+    finally:
+        window.project_settings_manager.clear_project_path()
+        window.deleteLater()
+
+
+def test_spectrum_workbench_project_source_can_select_from_project_scan_folder(qapp, tmp_path, monkeypatch):
+    project_dir = tmp_path / "Project_Source_Select"
+    temp_dir = project_dir / "raw_data" / "temperature_scan" / "temp"
+    source_file = temp_dir / "650K.txt"
+    temp_dir.mkdir(parents=True)
+    source_file.write_text("tof intensity\n1 2\n", encoding="utf-8")
+
+    ps = ProjectSettings(
+        project_name="Source Select",
+        system="C6H6",
+        output_dir=str(project_dir),
+        temperature_scan_folder=str(temp_dir),
+    )
+    save_project_settings(ps, project_dir / "config" / "project.yaml")
+
+    window = MainWindow()
+    try:
+        window.project_settings_manager.set_project_path(project_dir)
+        window.project_settings_manager.set(ps)
+        monkeypatch.setattr(
+            QtWidgets.QFileDialog,
+            "getOpenFileName",
+            lambda *args, **kwargs: (str(source_file), ""),
+        )
 
         window.set_spectrum_source_scope("project")
-        assert window.lineEdit.text() == str(replacement)
+        assert window.singleBrowseButton.isEnabled()
+
+        window.choose_single_source()
+
+        saved = load_project_settings(project_dir / "config" / "project.yaml")
+        assert window.lineEdit.text() == str(source_file)
+        assert saved.single_spectrum_file == str(source_file)
         assert window.lineEdit.isReadOnly()
     finally:
         window.project_settings_manager.clear_project_path()
@@ -719,6 +887,412 @@ def test_project_page_edits_sync_when_switching_to_tools(qapp, tmp_path, monkeyp
         window.deleteLater()
 
 
+def test_workbench_peak_detection_preset_is_temporary(qapp, tmp_path):
+    project_dir = tmp_path / "Project_Peak_Preset"
+    project_dir.mkdir(parents=True)
+
+    ps = ProjectSettings(
+        project_name="Peak Preset",
+        system="C6H6",
+        output_dir=str(project_dir),
+        peak_algorithm="ensemble",
+        min_intensity=3.0,
+        prominence_ratio=0.005,
+        vote_threshold=0.667,
+        min_intensity_for_single_vote=5.0,
+    )
+    save_project_settings(ps, project_dir / "config" / "project.yaml")
+
+    window = MainWindow()
+    try:
+        window.project_settings_manager.set_project_path(project_dir)
+        window.project_settings_manager.set(ps)
+
+        preset_index = window.peakDetectionPreset.findData("less_noise")
+        assert preset_index >= 0
+        window.peakDetectionPreset.setCurrentIndex(preset_index)
+
+        original = window.current_peak_detection_config()
+        adjusted = window._apply_peak_detection_preset(original)
+
+        assert adjusted is not original
+        assert adjusted.min_intensity_for_single_vote == pytest.approx(50.0)
+        assert adjusted.prominence_ratio == pytest.approx(0.01)
+        assert window.project_settings_manager.get().min_intensity_for_single_vote == pytest.approx(5.0)
+        assert window.project_settings_manager.get().prominence_ratio == pytest.approx(0.005)
+
+        saved = load_project_settings(project_dir / "config" / "project.yaml")
+        assert saved.min_intensity_for_single_vote == pytest.approx(5.0)
+        assert saved.prominence_ratio == pytest.approx(0.005)
+    finally:
+        window.project_settings_manager.clear_project_path()
+        window.deleteLater()
+
+
+def test_workbench_delete_selected_peaks_removes_multiple_rows(qapp, monkeypatch):
+    window = MainWindow()
+    try:
+        rows = [
+            ["A", "100.0", "10.0", "50.0", "98.0", "102.0"],
+            ["B", "200.0", "20.0", "60.0", "198.0", "202.0"],
+            ["C", "300.0", "30.0", "70.0", "298.0", "302.0"],
+        ]
+        window.peakData.setRowCount(len(rows))
+        for row, values in enumerate(rows):
+            for column, value in enumerate(values):
+                window.peakData.setItem(row, column, QtWidgets.QTableWidgetItem(value))
+
+        window.update_plot = lambda: None
+        monkeypatch.setattr(
+            QtWidgets.QMessageBox,
+            "question",
+            lambda *args, **kwargs: QtWidgets.QMessageBox.StandardButton.Yes,
+        )
+
+        window.peakData.clearSelection()
+        selection_model = window.peakData.selectionModel()
+        for row in (0, 2):
+            index = window.peakData.model().index(row, 0)
+            selection_model.select(
+                index,
+                QtCore.QItemSelectionModel.SelectionFlag.Select
+                | QtCore.QItemSelectionModel.SelectionFlag.Rows,
+            )
+        assert window._selected_peak_rows() == [0, 2]
+
+        window.delete_selected_peaks()
+
+        assert window.peakData.rowCount() == 1
+        assert window.peakData.item(0, 0).text() == "B"
+    finally:
+        window.project_settings_manager.clear_project_path()
+        window.deleteLater()
+
+
+def test_workbench_publish_peak_ranges_registers_project_manual_file(qapp, tmp_path, monkeypatch):
+    project_dir = tmp_path / "Project_Publish_Peaks"
+    project_dir.mkdir(parents=True)
+    ps = ProjectSettings(
+        project_name="Publish Peaks",
+        system="C6H6",
+        output_dir=str(project_dir),
+        temp_peak_source="auto",
+    )
+    save_project_settings(ps, project_dir / "config" / "project.yaml")
+
+    window = MainWindow()
+    try:
+        window.project_settings_manager.set_project_path(project_dir)
+        window.project_settings_manager.set(ps)
+        monkeypatch.setattr(
+            QtWidgets.QMessageBox,
+            "question",
+            lambda *args, **kwargs: QtWidgets.QMessageBox.StandardButton.Yes,
+        )
+        monkeypatch.setattr(QtWidgets.QMessageBox, "information", lambda *args, **kwargs: None)
+
+        source_file = project_dir / "raw_data" / "single.txt"
+        source_file.parent.mkdir(parents=True)
+        source_file.write_text("tof intensity\n96 1\n100 20\n104 1\n196 1\n200 15\n204 1\n", encoding="utf-8")
+        window.tabWidget.setCurrentIndex(0)
+        window.lineEdit.setText(str(source_file))
+        window.x_axis_mode = "tof"
+        window.current_time_offset = 0.0
+        window.setup_plots(np.array([96.0, 100.0, 104.0, 196.0, 200.0, 204.0]), np.array([1.0, 20.0, 1.0, 1.0, 15.0, 1.0]))
+
+        rows = [
+            ["CH4", "100.2", "16.03", "1200.0", "96.0", "104.0"],
+            ["C2H4", "200.4", "28.05", "900.0", "196.0", "204.0"],
+        ]
+        window.peakData.setRowCount(len(rows))
+        for row, values in enumerate(rows):
+            for column, value in enumerate(values):
+                window.peakData.setItem(row, column, QtWidgets.QTableWidgetItem(value))
+
+        window.publish_peak_ranges_to_project()
+
+        saved = load_project_settings(project_dir / "config" / "project.yaml")
+        saved_path = Path(saved.manual_peak_file)
+        manifest_path = saved_path.with_suffix(".manifest.yaml")
+        assert saved.temp_peak_source == "manual"
+        assert saved_path == project_dir / "analysis" / "spectrum" / "manual_peaks" / "manual_peak_ranges.csv"
+        assert saved_path.exists()
+        assert manifest_path.exists()
+
+        df = pd.read_csv(saved_path)
+        assert list(df.columns) == ["label", "peak_index", "mz", "left_bound", "right_bound"]
+        assert df.loc[0, "label"] == "CH4"
+        assert df.loc[0, "peak_index"] == 100
+        assert df.loc[0, "left_bound"] == 96
+        manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+        assert manifest["peak_file"] == "manual_peak_ranges.csv"
+        assert manifest["source"]["mode"] == "single"
+        assert manifest["source"]["path"] == str(source_file)
+        assert window.project_manual_peak_edit.text() == str(saved_path)
+        assert window._peak_table_dirty is False
+    finally:
+        window.project_settings_manager.clear_project_path()
+        window.deleteLater()
+
+
+def test_workbench_auto_find_does_not_overwrite_project_peak_file(qapp, tmp_path, monkeypatch):
+    import bl03u_masstool.frontends.pyqt_app.spectrum.workbench as workbench_module
+
+    project_dir = tmp_path / "Project_Auto_Does_Not_Overwrite"
+    manual_peak_file = project_dir / "analysis" / "spectrum" / "manual_peaks" / "manual_peak_ranges.csv"
+    manual_peak_file.parent.mkdir(parents=True)
+    manual_peak_file.write_text("label,peak_index,mz,left_bound,right_bound\nOld,10,10,8,12\n", encoding="utf-8")
+
+    ps = ProjectSettings(
+        project_name="Auto Preserve",
+        system="C6H6",
+        output_dir=str(project_dir),
+        manual_peak_file=str(manual_peak_file),
+        temp_peak_source="manual",
+        peak_algorithm="legacy",
+        detection_min_idx=0,
+        min_intensity=1.0,
+    )
+    save_project_settings(ps, project_dir / "config" / "project.yaml")
+
+    window = MainWindow()
+    try:
+        window.project_settings_manager.set_project_path(project_dir)
+        window.project_settings_manager.set(ps)
+        monkeypatch.setattr(
+            QtWidgets.QMessageBox,
+            "question",
+            lambda *args, **kwargs: QtWidgets.QMessageBox.StandardButton.Yes,
+        )
+        monkeypatch.setattr(
+            workbench_module,
+            "detect_peaks_by_algorithm",
+            lambda *args, **kwargs: [],
+        )
+
+        tof = np.arange(20.0)
+        intensity = np.ones_like(tof)
+        window.current_time_offset = 0.0
+        window.setup_plots(tof, intensity)
+        window.auto_find_peaks()
+
+        assert manual_peak_file.read_text(encoding="utf-8") == "label,peak_index,mz,left_bound,right_bound\nOld,10,10,8,12\n"
+        saved = load_project_settings(project_dir / "config" / "project.yaml")
+        assert saved.manual_peak_file == str(manual_peak_file)
+        assert saved.temp_peak_source == "manual"
+        assert window.peakData.rowCount() == 0
+        assert window._peak_table_dirty is True
+    finally:
+        window.project_settings_manager.clear_project_path()
+        window.deleteLater()
+
+
+def test_workbench_publish_peak_ranges_requires_reopenable_spectrum_source(qapp, tmp_path, monkeypatch):
+    project_dir = tmp_path / "Project_Publish_Requires_Source"
+    project_dir.mkdir(parents=True)
+    ps = ProjectSettings(
+        project_name="Publish Requires Source",
+        system="C6H6",
+        output_dir=str(project_dir),
+    )
+    save_project_settings(ps, project_dir / "config" / "project.yaml")
+
+    warnings: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox,
+        "warning",
+        lambda *args, **kwargs: warnings.append((args[1], args[2])),
+    )
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox,
+        "question",
+        lambda *args, **kwargs: pytest.fail("保存前置条件不满足时不应出现覆盖确认"),
+    )
+
+    window = MainWindow()
+    try:
+        window.project_settings_manager.set_project_path(project_dir)
+        window.project_settings_manager.set(ps)
+        window.peakData.setRowCount(1)
+        for column, value in enumerate(["Peak", "101.0", "28.0", "42.0", "99.0", "103.0"]):
+            window.peakData.setItem(0, column, QtWidgets.QTableWidgetItem(value))
+
+        window.publish_peak_ranges_to_project()
+
+        saved = load_project_settings(project_dir / "config" / "project.yaml")
+        assert saved.manual_peak_file == ""
+        assert not (project_dir / "analysis" / "spectrum" / "manual_peaks" / "manual_peak_ranges.csv").exists()
+        assert warnings
+        assert "请先打开原始谱图" in warnings[0][1]
+    finally:
+        window.project_settings_manager.clear_project_path()
+        window.deleteLater()
+
+
+def test_workbench_open_project_peak_ranges_rejects_incomplete_project_artifact(qapp, tmp_path, monkeypatch):
+    project_dir = tmp_path / "Project_Incomplete_Peaks"
+    project_dir.mkdir(parents=True)
+    peak_file = project_dir / "peak_ranges.csv"
+    peak_file.write_text(
+        "\ufeffSpecies,飞行时间,质量数 (m/z),强度,左边界,右边界\n"
+        "Unknown,101.0,28.0,42.0,99.0,103.0\n",
+        encoding="utf-8",
+    )
+    ps = ProjectSettings(
+        project_name="Incomplete Peaks",
+        system="C6H6",
+        output_dir=str(project_dir),
+        manual_peak_file=str(peak_file),
+        temp_peak_source="manual",
+    )
+    save_project_settings(ps, project_dir / "config" / "project.yaml")
+
+    warnings: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox,
+        "warning",
+        lambda *args, **kwargs: warnings.append((args[1], args[2])),
+    )
+
+    window = MainWindow()
+    try:
+        window.project_settings_manager.set_project_path(project_dir)
+        window.project_settings_manager.set(ps)
+
+        window.open_project_peak_ranges()
+
+        assert window._valid_peak_rows() == []
+        assert warnings
+        assert warnings[0][0] == "项目卡峰不完整"
+        assert "manifest 未写入" in warnings[0][1]
+    finally:
+        window.project_settings_manager.clear_project_path()
+        window.deleteLater()
+
+
+def test_workbench_open_project_peak_ranges_restores_manifest_source(qapp, tmp_path, monkeypatch):
+    project_dir = tmp_path / "Project_Reopen_Peaks"
+    source_dir = project_dir / "raw_data" / "sum_spectrum"
+    source_dir.mkdir(parents=True)
+    spectrum_lines_a = ["header\n"] * 10 + [f"{idx} {1.0 + (idx == 4101) * 4.0}\n" for idx in range(1, 4104)]
+    spectrum_lines_b = ["header\n"] * 10 + [f"{idx} {2.0 + (idx == 4101) * 5.0}\n" for idx in range(1, 4104)]
+    (source_dir / "a.txt").write_text("".join(spectrum_lines_a), encoding="utf-8")
+    (source_dir / "b.txt").write_text("".join(spectrum_lines_b), encoding="utf-8")
+
+    ps = ProjectSettings(
+        project_name="Reopen Peaks",
+        system="C6H6",
+        output_dir=str(project_dir),
+        sum_spectrum_folder=str(source_dir),
+        temp_peak_source="auto",
+    )
+    save_project_settings(ps, project_dir / "config" / "project.yaml")
+
+    window = MainWindow()
+    try:
+        window.project_settings_manager.set_project_path(project_dir)
+        window.project_settings_manager.set(ps)
+        monkeypatch.setattr(
+            QtWidgets.QMessageBox,
+            "question",
+            lambda *args, **kwargs: QtWidgets.QMessageBox.StandardButton.Yes,
+        )
+        monkeypatch.setattr(QtWidgets.QMessageBox, "information", lambda *args, **kwargs: None)
+        monkeypatch.setattr(QtWidgets.QMessageBox, "warning", lambda *args, **kwargs: None)
+
+        window.tabWidget.setCurrentIndex(1)
+        window.folder_path.setText(str(source_dir))
+        window.x_axis_mode = "tof"
+        window.current_time_offset = 4001.0
+        window.setup_plots(np.array([4001.0, 4002.0, 4003.0]), np.array([3.0, 12.0, 3.0]), title="累加质谱图")
+        window.peakData.setRowCount(1)
+        for column, value in enumerate(["Peak", "4002.0", "4002.0", "12.0", "4001.0", "4003.0"]):
+            window.peakData.setItem(0, column, QtWidgets.QTableWidgetItem(value))
+
+        window.publish_peak_ranges_to_project()
+        saved = load_project_settings(project_dir / "config" / "project.yaml")
+
+        window.clear_peak_data()
+        window.folder_path.clear()
+        window.open_project_peak_ranges()
+
+        assert window.folder_path.text() == str(source_dir)
+        assert window.peakData.rowCount() == 1
+        assert window.peakData.item(0, 0).text() == "Peak"
+        assert window.peakData.item(0, 4).text() == "4001.00"
+        assert Path(saved.manual_peak_file).with_suffix(".manifest.yaml").exists()
+        assert window._peak_table_dirty is False
+    finally:
+        window.project_settings_manager.clear_project_path()
+        window.deleteLater()
+
+
+def test_workbench_next_peak_does_not_modify_existing_bounds(qapp):
+    window = MainWindow()
+    try:
+        window.x_axis_mode = "tof"
+        tof = np.arange(7001.0, 24163.0)
+        intensity = np.zeros_like(tof)
+        intensity[7159] = 970.0
+        intensity[8505] = 52.0
+        window.current_time_offset = 0.0
+        window.setup_plots(tof, intensity)
+
+        rows = [
+            ["Unknown", "14160.00", "83.11", "970.00", "14149.00", "14170.00"],
+            ["Unknown", "15505.80", "98.64", "52.00", "7001.00", "24162.00"],
+        ]
+        window.peakData.setRowCount(len(rows))
+        for row, values in enumerate(rows):
+            for column, value in enumerate(values):
+                window.peakData.setItem(row, column, QtWidgets.QTableWidgetItem(value))
+
+        window._select_peak_row(0)
+        window.select_next_peak()
+
+        selected_left, selected_right = window.selection_region.getRegion()
+        assert window.peakData.currentRow() == 1
+        assert selected_left == pytest.approx(7001.0)
+        assert selected_right == pytest.approx(24162.0)
+        assert window.peakData.item(1, 4).text() == "7001.00"
+        assert window.peakData.item(1, 5).text() == "24162.00"
+    finally:
+        window.project_settings_manager.clear_project_path()
+        window.deleteLater()
+
+
+def test_workbench_peak_navigation_y_scale_prioritizes_selected_peak(qapp):
+    window = MainWindow()
+    try:
+        window.x_axis_mode = "tof"
+        tof = np.arange(1000.0, 1301.0)
+        intensity = np.full_like(tof, 5.0)
+        intensity[50] = 5000.0
+        intensity[150] = 100.0
+        window.current_time_offset = 0.0
+        window.setup_plots(tof, intensity)
+
+        rows = [
+            ["Unknown", "1050.00", "1050.00", "5000.00", "1048.00", "1052.00"],
+            ["Unknown", "1150.00", "1150.00", "100.00", "1148.00", "1152.00"],
+        ]
+        window.peakData.setRowCount(len(rows))
+        for row, values in enumerate(rows):
+            for column, value in enumerate(values):
+                window.peakData.setItem(row, column, QtWidgets.QTableWidgetItem(value))
+
+        window._select_peak_row(0)
+        window.select_next_peak()
+
+        _, y_range = window.p2.viewRange()
+        assert window.peakData.currentRow() == 1
+        assert y_range[1] < 1000.0
+        assert y_range[1] > 100.0
+    finally:
+        window.project_settings_manager.clear_project_path()
+        window.deleteLater()
+
+
 def test_function_default_edits_sync_when_switching_to_tools(qapp, tmp_path):
     project_dir = tmp_path / "Project_Function_Default_Sync"
     project_dir.mkdir(parents=True)
@@ -869,6 +1443,75 @@ def test_import_finished_registers_data_source_and_refreshes_tools(qapp, tmp_pat
         assert window.project_temperature_folder_edit.text() == str(imported_dir)
         assert window.temperature_page.project_settings.temperature_scan_folder == str(imported_dir)
         assert window.datasource_row_status_labels["temperature_scan"].text().startswith("✓")
+    finally:
+        window.project_settings_manager.clear_project_path()
+        window.deleteLater()
+
+
+def test_import_finished_registers_manual_peak_file(qapp, tmp_path):
+    project_dir = tmp_path / "Project_Manual_Import"
+    imported_peak = project_dir / "analysis" / "spectrum" / "manual_peaks" / "peaks.csv"
+    imported_peak.parent.mkdir(parents=True)
+    imported_peak.write_text("mz,start,end\n28,10,12\n", encoding="utf-8")
+
+    ps = ProjectSettings(project_name="Manual Import", system="C6H6", output_dir=str(project_dir))
+    save_project_settings(ps, project_dir / "config" / "project.yaml")
+
+    window = MainWindow()
+    try:
+        window.project_settings_manager.set_project_path(project_dir)
+        window.project_settings_manager.set(ps)
+        window._read_project_settings_to_ui(ps)
+
+        window._on_import_finished(
+            {
+                "success": True,
+                "field_name": "manual_peak_file",
+                "destination": str(imported_peak),
+                "label": "手动卡峰文件",
+                "source_key": "manual_peak",
+                "mode": "copy",
+            }
+        )
+
+        saved = load_project_settings(project_dir / "config" / "project.yaml")
+        assert saved.manual_peak_file == str(imported_peak)
+        assert window.project_manual_peak_edit.text() == str(imported_peak)
+        assert window.datasource_row_status_labels["manual_peak"].text().startswith("✓")
+    finally:
+        window.project_settings_manager.clear_project_path()
+        window.deleteLater()
+
+
+def test_project_manual_peak_button_imports_legacy_file(qapp, tmp_path, monkeypatch):
+    project_dir = tmp_path / "Project_Manual_Button"
+    legacy_peak = tmp_path / "legacy" / "old_peak_ranges.csv"
+    legacy_peak.parent.mkdir(parents=True)
+    legacy_peak.write_text("label,peak_index,mz,left_bound,right_bound\nA,100,28,98,102\n", encoding="utf-8")
+
+    ps = ProjectSettings(project_name="Manual Button", system="C6H6", output_dir=str(project_dir))
+    save_project_settings(ps, project_dir / "config" / "project.yaml")
+
+    window = MainWindow()
+    monkeypatch.setattr(
+        QtWidgets.QFileDialog,
+        "getOpenFileName",
+        lambda *args, **kwargs: (str(legacy_peak), ""),
+    )
+    monkeypatch.setattr(QtWidgets.QMessageBox, "critical", lambda *args, **kwargs: pytest.fail(str(args)))
+    try:
+        window.project_settings_manager.set_project_path(project_dir)
+        window.project_settings_manager.set(ps)
+        window._read_project_settings_to_ui(ps)
+
+        window.import_project_manual_peak_file()
+
+        saved = load_project_settings(project_dir / "config" / "project.yaml")
+        imported = project_dir / "analysis" / "spectrum" / "manual_peaks" / legacy_peak.name
+        assert Path(saved.manual_peak_file) == imported
+        assert imported.read_text(encoding="utf-8") == legacy_peak.read_text(encoding="utf-8")
+        assert window.project_manual_peak_edit.text() == str(imported)
+        assert window.datasource_row_status_labels["manual_peak"].text().startswith("✓")
     finally:
         window.project_settings_manager.clear_project_path()
         window.deleteLater()

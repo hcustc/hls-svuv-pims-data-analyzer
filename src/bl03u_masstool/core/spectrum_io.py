@@ -31,8 +31,20 @@ class Spectrum:
 
 
 def _read_lines(path: str | Path) -> list[str]:
-    with open(path, "r", encoding="utf-8", errors="ignore") as handle:
-        return handle.readlines()
+    last_error: UnicodeDecodeError | None = None
+    for encoding in ("utf-8", "utf-8-sig", "gb18030"):
+        try:
+            with open(path, "r", encoding=encoding) as handle:
+                return handle.readlines()
+        except UnicodeDecodeError as exc:
+            last_error = exc
+    raise UnicodeDecodeError(
+        last_error.encoding if last_error else "utf-8",
+        last_error.object if last_error else b"",
+        last_error.start if last_error else 0,
+        last_error.end if last_error else 1,
+        f"unable to decode spectrum file as utf-8/utf-8-sig/gb18030: {path}",
+    )
 
 
 def parse_numeric_rows(lines: Iterable[str]) -> tuple[list[str], np.ndarray]:
@@ -151,4 +163,3 @@ def extract_header_numbers(path: str | Path, max_lines: int = 10) -> list[float]
 def extract_first_number(line: str) -> float | None:
     match = FLOAT_RE.search(line)
     return float(match.group(0)) if match else None
-

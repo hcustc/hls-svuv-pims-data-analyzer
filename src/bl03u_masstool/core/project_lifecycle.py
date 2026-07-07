@@ -56,21 +56,18 @@ WORKFLOW_REQUIREMENTS = {
     WorkflowProfile.TEMPERATURE_SCAN: WorkflowRequirement(
         profile=WorkflowProfile.TEMPERATURE_SCAN,
         required_sources=(
-            DependencyRule(DependencyOperator.ANY_OF, ("single_spectrum", "sum_spectrum")),
             DependencyRule(DependencyOperator.ALL_OF, ("temperature_scan",)),
         ),
     ),
     WorkflowProfile.PIE_ANALYSIS: WorkflowRequirement(
         profile=WorkflowProfile.PIE_ANALYSIS,
         required_sources=(
-            DependencyRule(DependencyOperator.ANY_OF, ("single_spectrum", "sum_spectrum")),
             DependencyRule(DependencyOperator.ALL_OF, ("pie_scan",)),
         ),
     ),
     WorkflowProfile.FULL_ANALYSIS: WorkflowRequirement(
         profile=WorkflowProfile.FULL_ANALYSIS,
         required_sources=(
-            DependencyRule(DependencyOperator.ANY_OF, ("single_spectrum", "sum_spectrum")),
             DependencyRule(DependencyOperator.ANY_OF, ("temperature_scan", "pie_scan")),
         ),
     ),
@@ -290,9 +287,9 @@ PROJECT_STAGES: tuple[ProjectStageSpec, ...] = (
         "raw_data",
         "数据导入",
         "raw_data",
-        ("single_spectrum_file", "sum_spectrum_folder", "temperature_scan_folder", "pie_scan_folder"),
+        ("temperature_scan_folder", "pie_scan_folder"),
         "project",
-        "导入原始谱图数据",
+        "导入温度扫描或 PIE 原始目录",
     ),
     ProjectStageSpec(
         "calibration",
@@ -529,12 +526,59 @@ def _write_raw_data_link_manifest(
 def import_initial_project_data(
     settings: ProjectSettings,
     sources: dict[str, str | Path | None],
+    *,
+    mode: str = "link",
 ) -> list[ProjectImportResult]:
     results: list[ProjectImportResult] = []
     for source_key, source_path in sources.items():
         if not source_path:
             continue
-        results.append(import_project_source(settings, source_path, source_key))
+        results.append(import_project_source(settings, source_path, source_key, mode=mode))
+    return results
+
+
+RAW_PROJECT_SOURCE_KEYS: tuple[str, ...] = (
+    "temperature_scan",
+    "pie_scan",
+)
+
+
+def materialize_project_data_sources(
+    settings: ProjectSettings,
+    *,
+    source_keys: tuple[str, ...] = RAW_PROJECT_SOURCE_KEYS,
+    mode: str = "copy",
+) -> list[ProjectImportResult]:
+    """Copy/link registered raw data sources into the managed project folder.
+
+    This keeps experiment-specific directory structures intact. For example,
+    a temperature-scan folder is copied as a whole under
+    ``raw_data/temperature_scan/<folder name>`` instead of being normalized into
+    a fixed child layout.
+    """
+    ensure_project_structure(settings)
+    root = project_root(settings).resolve()
+    results: list[ProjectImportResult] = []
+
+    for source_key in source_keys:
+        spec = PROJECT_SOURCE_SPECS[source_key]
+        raw_value = str(getattr(settings, spec.field_name, "") or "").strip()
+        if not raw_value:
+            continue
+
+        source = Path(raw_value).expanduser()
+        if not source.exists():
+            raise FileNotFoundError(f"{spec.label}不存在：{source}")
+
+        try:
+            source.resolve().relative_to(root)
+        except ValueError:
+            pass
+        else:
+            continue
+
+        results.append(import_project_source(settings, source, source_key, mode=mode))
+
     return results
 
 
@@ -718,7 +762,12 @@ def _section_for_registered_field(field_name: str) -> ProjectDirectorySpec:
     return directory_spec(mapping.get(field_name, "spectrum_analysis"))
 
 
-def export_project_archive(settings: ProjectSettings, destination: str | Path | None = None) -> Path:
+def export_project_archive(
+    settings: ProjectSettings,
+    destination: str | Path | None = None,
+    *,
+    include_metadata: bool = True,
+) -> Path:
     ensure_project_structure(settings)
     root = project_root(settings)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -732,10 +781,11 @@ def export_project_archive(settings: ProjectSettings, destination: str | Path | 
     destination_path.parent.mkdir(parents=True, exist_ok=True)
 
     with zipfile.ZipFile(destination_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr(
-            f"{root.name}/project_state.yaml",
-            yaml.safe_dump(asdict(settings), allow_unicode=True, sort_keys=False),
-        )
+        if include_metadata:
+            archive.writestr(
+                f"{root.name}/project_state.yaml",
+                yaml.safe_dump(asdict(settings), allow_unicode=True, sort_keys=False),
+            )
         for path in sorted(root.rglob("*")):
             if path.is_symlink():
                 continue
@@ -895,8 +945,9 @@ def get_data_source_validation_status(
     if records is None:
         records = validate_all_data_sources(settings)
 
-    # 关键数据源（必需）
-    essential_sources = {"single_spectrum", "sum_spectrum", "temperature_scan", "pie_scan"}
+    # 关键数据源（必需）。单谱/累计谱是质谱工作台来源，可由温度/PIE目录派生，
+    # 不作为项目级原始数据源完整性的判据。
+    essential_sources = set(RAW_PROJECT_SOURCE_KEYS)
     essential_records = [r for r in records if r.source_key in essential_sources]
 
     valid_count = sum(1 for r in essential_records if r.is_valid)
@@ -983,7 +1034,7 @@ def analyze_workflow_capabilities(
         # 找出最关键缺少的数据源
         missing_by_frequency = {}
         for workflow, reasons in result.unavailable_workflows.items():
-            for source_key in PROJECT_SOURCE_SPECS.keys():
+            for source_key in RAW_PROJECT_SOURCE_KEYS:
                 if not data_source_status.get(source_key):
                     missing_by_frequency[source_key] = missing_by_frequency.get(source_key, 0) + 1
 
