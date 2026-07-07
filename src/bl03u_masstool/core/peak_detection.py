@@ -96,6 +96,44 @@ def _rolling_percentile_baseline(data: np.ndarray, window_size: int, percentile:
     return percentile_filter(data, percentile=percentile, size=window_size, mode="nearest")
 
 
+def _sanitize_peak_bounds(
+    left: int,
+    right: int,
+    center_idx: int,
+    lower_idx: int,
+    upper_idx: int,
+    *,
+    max_width: int,
+    fallback_half_width: int,
+) -> tuple[int, int]:
+    """Keep peak bounds local when an absolute threshold never reaches baseline.
+
+    BL03U spectra can have a positive baseline across the whole acquisition.
+    In that case expanding left/right until ``y < threshold_end`` may walk to
+    the entire detection interval for a tiny local maximum. Such a full-span
+    bound is not a valid integration window for a single mass peak.
+    """
+    right_limit = max(int(lower_idx), int(upper_idx) - 1)
+    center = max(int(lower_idx), min(int(center_idx), right_limit))
+    left = int(left)
+    right = int(right)
+    if right < left:
+        left, right = right, left
+
+    left = max(int(lower_idx), min(left, right_limit))
+    right = max(int(lower_idx), min(right, right_limit))
+    max_width = max(1, int(max_width))
+    if left <= center <= right and 0 < right - left <= max_width:
+        return left, right
+
+    half_width = max(1, int(fallback_half_width))
+    left = max(int(lower_idx), center - half_width)
+    right = min(right_limit, center + half_width)
+    left = min(left, center)
+    right = max(right, center)
+    return left, right
+
+
 def detect_peaks_prominence(
     y_data: Iterable[float],
     *,
@@ -166,6 +204,12 @@ def detect_peaks_prominence(
         max_idx = int(peak_idx) + detection_start
         left = int(np.floor(left_ip)) + detection_start
         right = int(np.ceil(right_ip)) + detection_start
+        fallback_half_width = max(min_peak_width, min(max_peak_width, int(np.ceil(width)) + boundary_padding))
+        max_boundary_width = max(
+            max_peak_width * 4,
+            gaussian_window_max * 8,
+            fallback_half_width * 4,
+        )
 
         left_local = int(peak_idx)
         while left_local > 0 and corrected[left_local] >= threshold_end:
@@ -192,6 +236,15 @@ def detect_peaks_prominence(
         right = min(end_idx - 1, right + boundary_padding)
         left = min(left, max_idx)
         right = max(right, max_idx)
+        left, right = _sanitize_peak_bounds(
+            left,
+            right,
+            max_idx,
+            detection_start,
+            end_idx,
+            max_width=max_boundary_width,
+            fallback_half_width=fallback_half_width,
+        )
         peak_time = float(tof_time + time_offset)
         peaks.append(
             Peak(
@@ -313,6 +366,22 @@ def detect_peaks_in_range(
         right = min(end_idx - 1, right + boundary_padding)
         left = min(left, max_idx)
         right = max(right, max_idx)
+        max_boundary_width = max(
+            nearby_peak_window * 4,
+            duplicate_window * 4,
+            gaussian_window_max * 8,
+            25,
+        )
+        fallback_half_width = max(3, duplicate_window, gaussian_window_max)
+        left, right = _sanitize_peak_bounds(
+            left,
+            right,
+            max_idx,
+            detection_start,
+            end_idx,
+            max_width=max_boundary_width,
+            fallback_half_width=fallback_half_width,
+        )
         peaks.append(
             Peak(
                 index=int(round(tof_time)),
@@ -520,7 +589,7 @@ def _cluster_peaks_by_mz(
     current_cluster = [sorted_peaks[0]]
 
     for peak in sorted_peaks[1:]:
-        if peak.mz - current_cluster[0].mz <= tolerance:
+        if peak.mz - current_cluster[-1].mz <= tolerance:
             current_cluster.append(peak)
         else:
             clusters.append(current_cluster)
@@ -545,7 +614,7 @@ def _cluster_algorithm_peaks_by_mz(
     current_cluster = [sorted_peaks[0]]
 
     for item in sorted_peaks[1:]:
-        if item[1].mz - current_cluster[0][1].mz <= tolerance:
+        if item[1].mz - current_cluster[-1][1].mz <= tolerance:
             current_cluster.append(item)
         else:
             clusters.append(current_cluster)
@@ -743,8 +812,10 @@ def detect_peaks_ensemble(
     # 按m/z聚类
     clusters = _cluster_algorithm_peaks_by_mz(all_peaks, tolerance=mz_tolerance)
 
-    # 投票规则应用
-    vote_threshold_count = max(1, int(np.ceil(enabled_algorithms * vote_threshold)))
+    # 投票规则应用。Treat UI/default values like 0.667 and 0.334 as rounded
+    # representations of 2/3 and 1/3 instead of requiring an impossible extra vote.
+    vote_threshold_value = max(0.0, min(float(vote_threshold), 1.0))
+    vote_threshold_tolerance = 1e-3
     final_peaks: list[Peak] = []
 
     for cluster in clusters:
@@ -752,7 +823,7 @@ def detect_peaks_ensemble(
         vote_count = len({algorithm_name for algorithm_name, _peak in cluster})
 
         # 规则1：足够的投票 → 保留
-        if vote_count >= vote_threshold_count:
+        if (vote_count / enabled_algorithms) + vote_threshold_tolerance >= vote_threshold_value:
             merged = _merge_cluster_peaks(cluster_peaks)
             final_peaks.append(merged)
         # 规则2：单个算法检出但强度足够 → 保留

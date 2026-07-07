@@ -55,6 +55,53 @@ def test_peak_detection_detects_simple_peak():
     assert peaks[0].mz == peaks[0].time
 
 
+def test_legacy_peak_bounds_do_not_expand_to_full_positive_baseline():
+    y = np.full(200, 10.0)
+    y[97:104] += [1.0, 3.0, 8.0, 25.0, 8.0, 3.0, 1.0]
+
+    peaks = detect_peaks_in_range(
+        y,
+        calibration=Calibration(a=0, b=1, c=0),
+        detection_min_idx=0,
+        min_intensity=20,
+        threshold_end=2,
+        nearby_peak_window=30,
+        duplicate_window=20,
+        gaussian_window_max=30,
+        boundary_padding=2,
+    )
+
+    assert len(peaks) == 1
+    assert peaks[0].left_bound <= peaks[0].index <= peaks[0].right_bound
+    assert peaks[0].right_bound - peaks[0].left_bound < 160
+    assert peaks[0].left_bound > 0
+    assert peaks[0].right_bound < len(y) - 1
+
+
+def test_prominence_peak_bounds_do_not_expand_to_full_positive_baseline():
+    y = np.full(200, 10.0)
+    y[97:104] += [1.0, 3.0, 8.0, 25.0, 8.0, 3.0, 1.0]
+
+    peaks = detect_peaks_prominence(
+        y,
+        calibration=Calibration(a=0, b=1, c=0),
+        detection_min_idx=0,
+        min_intensity=5,
+        threshold_end=2,
+        prominence_ratio=0.05,
+        min_peak_width=1,
+        max_peak_width=30,
+        baseline_window=21,
+        smoothing_window=3,
+    )
+
+    assert len(peaks) == 1
+    assert peaks[0].left_bound <= peaks[0].index <= peaks[0].right_bound
+    assert peaks[0].right_bound - peaks[0].left_bound < 160
+    assert peaks[0].left_bound > 0
+    assert peaks[0].right_bound < len(y) - 1
+
+
 def test_integrate_peak_falls_back_when_gaussian_area_is_zero():
     y = [0.0] * 100
     y[42] = 46.0
@@ -119,6 +166,33 @@ def test_ensemble_votes_count_distinct_algorithms(monkeypatch):
     )
 
     assert peaks == []
+
+
+def test_ensemble_default_vote_threshold_means_two_of_three(monkeypatch):
+    shared_peak = Peak(index=22, time=22.0, mz=22.0, intensity=10.0, fwhm=2.0, left_bound=21, right_bound=23)
+
+    monkeypatch.setattr(peak_detection_module, "detect_peaks_in_range", lambda *args, **kwargs: [])
+    monkeypatch.setattr(peak_detection_module, "detect_peaks_prominence", lambda *args, **kwargs: [shared_peak])
+    monkeypatch.setattr(
+        peak_detection_module,
+        "detect_peaks_by_algorithm",
+        lambda *args, **kwargs: [shared_peak] if kwargs.get("algorithm") == "cwt" else [],
+    )
+
+    peaks = detect_peaks_ensemble(
+        [1.0] * 50,
+        calibration=Calibration(a=0, b=1, c=0),
+        detection_min_idx=0,
+        use_legacy=True,
+        use_prominence=True,
+        use_cwt=True,
+        vote_threshold=0.667,
+        min_intensity_for_single_vote=100.0,
+        mz_tolerance=0.2,
+    )
+
+    assert len(peaks) == 1
+    assert peaks[0].mz == pytest.approx(22.0)
 
 
 def test_cwt_peak_detection_handles_multiscale_peaks():

@@ -177,8 +177,28 @@ def _iter_pie_files(folder: str | Path, suffixes: tuple[str, ...], recursive: bo
 
 
 def _is_blank_spectrum_path(path: Path) -> bool:
-    text = " ".join((*path.parts[-3:], path.stem)).lower()
-    return "blank" in text or "background" in text or "空白" in text
+    stem = path.stem.lower()
+    if "blank" in stem or "background" in stem or "空白" in stem:
+        return True
+    blank_dir_names = {"blank", "blanks", "background", "backgrounds", "空白"}
+    return any(part.lower() in blank_dir_names for part in path.parts[-3:-1])
+
+
+def _aligned_x_values(items: list[tuple[Path, Spectrum, float, float]], min_len: int) -> np.ndarray:
+    if not items:
+        return np.arange(1, min_len + 1, dtype=float)
+    reference_path, reference_spectrum, *_ = items[0]
+    reference_x = np.asarray(reference_spectrum.x[:min_len], dtype=float)
+    if reference_x.size != min_len:
+        raise ValueError(f"spectrum x axis is shorter than y data: {reference_path}")
+    for path, spectrum, *_ in items[1:]:
+        x_values = np.asarray(spectrum.x[:min_len], dtype=float)
+        if x_values.size != min_len or not np.allclose(x_values, reference_x, rtol=1e-7, atol=1e-9, equal_nan=True):
+            raise ValueError(
+                "PIE spectra in the same energy group have mismatched x axes: "
+                f"{reference_path.name} vs {path.name}"
+            )
+    return reference_x
 
 
 def _group_spectra_by_energy(
@@ -192,11 +212,15 @@ def _group_spectra_by_energy(
     grouped: dict[float, list[tuple[Path, Spectrum, float, float]]] = {}
     blank_grouped: dict[float, list[tuple[Path, Spectrum, float, float]]] = {}
     files = _iter_pie_files(folder, suffixes, recursive)
-    for idx, path in enumerate(files):
+    for path in files:
         spectrum = read_spectrum(path, header_lines=10 if path.suffix.lower() == ".txt" else None, trim_start=0)
         if len(spectrum.y) == 0:
             continue
-        energy = extract_photon_energy(spectrum.metadata_lines, path, fallback=float(idx))
+        try:
+            energy = extract_photon_energy(spectrum.metadata_lines, path)
+        except ValueError:
+            logger.warning("Skipping PIE spectrum with no photon energy: %s", path)
+            continue
         energy_key = round(energy, energy_decimals)
         io_current = extract_light_intensity(spectrum.metadata_lines, light_source)
         target = blank_grouped if _is_blank_spectrum_path(path) else grouped
@@ -208,13 +232,12 @@ def _group_spectra_by_energy(
             [len(item[1].y) for item in items]
             + [len(item[1].y) for item in blank_items]
         )
+        x_values = _aligned_x_values(items + blank_items, min_len)
         y_mean = np.mean([item[1].y[:min_len] for item in items], axis=0)
         blank_file_count = len(blank_items)
         if blank_items:
             blank_mean = np.mean([item[1].y[:min_len] for item in blank_items], axis=0)
             y_mean = y_mean - blank_mean
-        first_x = items[0][1].x
-        x_values = first_x[:min_len] if len(first_x) >= min_len else np.arange(1, min_len + 1, dtype=float)
         groups.append({
             "energy": float(np.mean([item[2] for item in items])),
             "energy_key": energy_key,

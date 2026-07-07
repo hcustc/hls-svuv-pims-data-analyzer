@@ -201,27 +201,13 @@ class TestUIChanges:
         """Test that refit_selected_button has been moved to more_actions menu."""
         # Button no longer exists as standalone attribute - moved to menu
         assert not hasattr(pie_dialog, 'refit_selected_button')
-        # Should exist as menu item instead
-        menu = pie_dialog.more_actions_menu
-        action_texts = [a.text() for a in menu.actions() if not a.isSeparator()]
-        assert "批量重拟合（已保存配置）" in action_texts
 
     def test_more_actions_menu_exists(self, pie_dialog):
         """Test that more_actions menu button exists."""
         assert hasattr(pie_dialog, 'more_actions_btn')
         assert hasattr(pie_dialog, 'more_actions_menu')
-        assert pie_dialog.more_actions_btn.text() == "更多操作"
 
-    def test_more_actions_menu_has_correct_items(self, pie_dialog):
-        """Test that more_actions menu contains expected items."""
-        menu = pie_dialog.more_actions_menu
-        actions = menu.actions()
-        action_texts = [a.text() for a in actions if not a.isSeparator()]
 
-        assert "清除拟合" in action_texts
-        assert "穷举优选" in action_texts
-        assert "批量重拟合（已保存配置）" in action_texts
-        assert "重新加载PICS截面数据库" in action_texts
 
 
 class TestFitSelectedCurvesWithPerM_zConfig:

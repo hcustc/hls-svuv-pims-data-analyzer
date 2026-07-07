@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import zipfile
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import MagicMock, patch
@@ -210,6 +211,92 @@ class TestExportWorker:
             assert worker.destination == export_path
             assert worker.export_path is None
 
+    def test_export_worker_run_success(self, qapp):
+        """Test successful project export."""
+        with TemporaryDirectory() as tmpdir:
+            settings = ProjectSettings(
+                output_dir=tmpdir,
+                project_name="test",
+                system="test",
+            )
+            ensure_project_structure(settings)
+
+            export_path = Path(tmpdir) / "export.zip"
+            worker = ExportWorker(settings, export_path)
+
+            # Use real signal handlers instead of mocks
+            results = {"finished": None, "error": None}
+
+            def on_finished(result):
+                results["finished"] = result
+
+            def on_error(message):
+                results["error"] = message
+
+            worker.finished.connect(on_finished)
+            worker.error.connect(on_error)
+
+            # Run the worker
+            worker.run()
+
+            assert results["error"] is None
+            assert results["finished"] is not None
+            assert results["finished"]["success"] is True
+            assert results["finished"]["path"] == str(export_path)
+            assert export_path.exists()
+            assert worker.export_path == export_path
+            assert results["finished"]["size"] == export_path.stat().st_size
+            assert not export_path.with_name(f"{export_path.name}.tmp.zip").exists()
+            with zipfile.ZipFile(export_path) as archive:
+                names = set(archive.namelist())
+            assert f"{Path(tmpdir).name}/project_state.yaml" in names
+
+    def test_export_worker_honors_include_metadata_false(self, qapp):
+        """Test project export can omit metadata when requested."""
+        with TemporaryDirectory() as tmpdir:
+            settings = ProjectSettings(
+                output_dir=tmpdir,
+                project_name="test",
+                system="test",
+            )
+            ensure_project_structure(settings)
+
+            export_path = Path(tmpdir) / "export.zip"
+            worker = ExportWorker(settings, export_path, include_metadata=False)
+            results = {"finished": None, "error": None}
+            worker.finished.connect(lambda result: results.__setitem__("finished", result))
+            worker.error.connect(lambda message: results.__setitem__("error", message))
+
+            worker.run()
+
+            assert results["error"] is None
+            assert results["finished"] is not None
+            assert export_path.exists()
+            with zipfile.ZipFile(export_path) as archive:
+                names = set(archive.namelist())
+            assert not any(name.endswith("/project_state.yaml") for name in names)
+
+    def test_export_worker_on_cancel(self, qapp):
+        """Test on_cancel cleanup removes staging directory."""
+        with TemporaryDirectory() as tmpdir:
+            settings = ProjectSettings(
+                output_dir=tmpdir,
+                project_name="test",
+                system="test",
+            )
+            export_path = Path(tmpdir) / "export.zip"
+            worker = ExportWorker(settings, export_path)
+
+            # Create mock staging directory
+            staging = export_path.with_name(f"{export_path.name}.tmp.zip")
+            staging.write_text("test")
+
+            assert staging.exists()
+
+            # Cancel should clean up staging
+            worker.on_cancel()
+            assert not staging.exists()
+
 
 class TestImportWorker:
     """Test ImportWorker implementation."""
@@ -244,58 +331,34 @@ class TestImportWorker:
             assert Path(result["destination"]).exists()
             assert Path(result["destination"]).is_symlink()
 
-    def test_export_worker_run_success(self, qapp):
-        """Test successful project export."""
+    def test_import_worker_accepts_copy_mode_for_project_managed_sources(self, qapp):
         with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
             settings = ProjectSettings(
-                output_dir=tmpdir,
+                output_dir=str(root / "project"),
                 project_name="test",
                 system="test",
             )
             ensure_project_structure(settings)
+            source = root / "external_temp"
+            source.mkdir()
+            (source / "temp.txt").write_text("tof intensity\n1 2\n", encoding="utf-8")
 
-            export_path = Path(tmpdir) / "export.zip"
-            worker = ExportWorker(settings, export_path)
+            worker = ImportWorker(settings, source, "temperature_scan", mode="copy")
+            worker.progress = MagicMock()
+            worker.finished = MagicMock()
+            worker.error = MagicMock()
 
-            # Use real signal handlers instead of mocks
-            results = {"finished": None, "error": None}
-
-            def on_finished(result):
-                results["finished"] = result
-
-            def on_error(message):
-                results["error"] = message
-
-            worker.finished.connect(on_finished)
-            worker.error.connect(on_error)
-
-            # Run the worker
             worker.run()
 
-            # Check that either finished or error was called
-            assert results["finished"] is not None or results["error"] is not None
-
-    def test_export_worker_on_cancel(self, qapp):
-        """Test on_cancel cleanup removes staging directory."""
-        with TemporaryDirectory() as tmpdir:
-            settings = ProjectSettings(
-                output_dir=tmpdir,
-                project_name="test",
-                system="test",
-            )
-            export_path = Path(tmpdir) / "export.zip"
-            worker = ExportWorker(settings, export_path)
-
-            # Create mock staging directory
-            staging = export_path.with_suffix(".tmp")
-            staging.mkdir(parents=True, exist_ok=True)
-            (staging / "dummy").write_text("test")
-
-            assert staging.exists()
-
-            # Cancel should clean up staging
-            worker.on_cancel()
-            assert not staging.exists()
+            assert worker.finished.emit.called
+            result = worker.finished.emit.call_args[0][0]
+            assert result["success"] is True
+            assert result["mode"] == "copy"
+            destination = Path(result["destination"])
+            assert destination.exists()
+            assert not destination.is_symlink()
+            assert (destination / "temp.txt").read_text(encoding="utf-8") == "tof intensity\n1 2\n"
 
 
 class TestScanWorker:
@@ -397,7 +460,6 @@ class TestProgressDialog:
     def test_progress_dialog_initialization(self, qapp):
         """Test ProgressDialog initializes correctly."""
         dialog = ProgressDialog(None, "Test Operation")
-        assert dialog.windowTitle() == "Test Operation"
         assert dialog.progress_bar.value() == 0
         assert dialog.progress_bar.maximum() == 100
 

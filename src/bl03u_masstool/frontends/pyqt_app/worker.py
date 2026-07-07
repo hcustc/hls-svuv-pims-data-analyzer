@@ -146,7 +146,7 @@ class ExportWorker(ProjectWorker):
 
     def run(self):
         """Export project and emit signals."""
-        staging = self.destination.with_suffix(".tmp")
+        staging = self.destination.with_name(f"{self.destination.name}.tmp.zip")
         try:
             self.progress.emit(5, "Validating export destination...")
             self._check_cancelled()
@@ -155,7 +155,7 @@ class ExportWorker(ProjectWorker):
             self._check_cancelled()
 
             # Export to temporary location first (safe atomic write)
-            export_path = export_project_archive(
+            staging_path = export_project_archive(
                 self.settings,
                 staging,
                 include_metadata=self.include_metadata,
@@ -168,17 +168,17 @@ class ExportWorker(ProjectWorker):
             # Atomic replace
             if self.destination.exists():
                 self.destination.unlink()
-            staging.replace(export_path)
+            staging_path.replace(self.destination)
 
             self._check_cancelled()
 
-            self.export_path = export_path
-            size = export_path.stat().st_size if export_path.exists() else 0
+            self.export_path = self.destination
+            size = self.destination.stat().st_size if self.destination.exists() else 0
 
             self.finished.emit(
                 {
                     "success": True,
-                    "path": str(export_path),
+                    "path": str(self.destination),
                     "size": size,
                 }
             )
@@ -191,18 +191,20 @@ class ExportWorker(ProjectWorker):
 
     def on_cancel(self):
         """Clean up staging directory on cancellation."""
-        staging = self.destination.with_suffix(".tmp")
+        staging = self.destination.with_name(f"{self.destination.name}.tmp.zip")
         shutil.rmtree(staging, ignore_errors=True)
+        staging.unlink(missing_ok=True)
 
 
 class ImportWorker(ProjectWorker):
     """Imports data source to project in background."""
 
-    def __init__(self, settings: ProjectSettings, source: str | Path, source_key: str):
+    def __init__(self, settings: ProjectSettings, source: str | Path, source_key: str, *, mode: str = "link"):
         super().__init__()
         self.settings = settings
         self.source = Path(source)
         self.source_key = source_key
+        self.mode = mode
         self.result: dict[str, Any] | None = None
 
     def run(self):
@@ -215,7 +217,7 @@ class ImportWorker(ProjectWorker):
             self._check_cancelled()
 
             # Import using core function
-            result = import_project_source(self.settings, self.source, self.source_key)
+            result = import_project_source(self.settings, self.source, self.source_key, mode=self.mode)
 
             self._check_cancelled()
 

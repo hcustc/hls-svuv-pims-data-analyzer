@@ -21,6 +21,8 @@ from bl03u_masstool.core.project_lifecycle import (
     collect_project_files,
     ensure_project_structure,
     get_data_source_validation_status,
+    import_project_source,
+    materialize_project_data_sources,
     next_project_stage,
     project_root,
     sanitize_project_slug,
@@ -254,7 +256,7 @@ class WorkspacePagesMixin:
         action_layout.setSpacing(6)
 
         # 新建项目按钮（突出显示）
-        self.project_new_button = QPushButton("➕ 新建项目", action_bar)
+        self.project_new_button = QPushButton("新建项目", action_bar)
         self.project_new_button.setObjectName("PrimaryButton")
         self.project_new_button.setToolTip("清空当前表单，开始创建新项目")
         self.project_new_button.setFixedHeight(32)
@@ -277,7 +279,7 @@ class WorkspacePagesMixin:
         action_layout.addWidget(self.project_new_button)
 
         # 打开项目按钮
-        self.project_open_button = QPushButton("📂 打开项目", action_bar)
+        self.project_open_button = QPushButton("打开项目", action_bar)
         self.project_open_button.setObjectName("BrowseButton")
         self.project_open_button.setToolTip("打开已有项目配置文件")
         self.project_open_button.setFixedHeight(32)
@@ -309,7 +311,9 @@ class WorkspacePagesMixin:
         self.project_description_edit = QLineEdit(self.project_identity_card)
         self.project_description_edit.setPlaceholderText("简要说明样品、批次或实验条件")
         self.project_output_dir_edit = QLineEdit(self.project_identity_card)
-        self.project_output_dir_edit.setPlaceholderText("默认 output/Project_<项目名>")
+        self.project_output_dir_edit.setPlaceholderText(
+            "新建时选择父目录；保存后显示项目根目录"
+        )
 
         output_row = QtWidgets.QWidget(self.project_identity_card)
         output_layout = QHBoxLayout(output_row)
@@ -324,14 +328,14 @@ class WorkspacePagesMixin:
         form_layout.addRow("项目名", self.project_name_edit)
         form_layout.addRow("实验体系", self.project_system_edit)
         form_layout.addRow("描述", self.project_description_edit)
-        form_layout.addRow("项目目录", output_row)
+        form_layout.addRow("项目存放位置", output_row)
         card_layout.addLayout(form_layout)
 
         self.project_new_button.clicked.connect(self.new_project)
         self.project_open_button.clicked.connect(self.open_project)
         self.project_save_and_apply_button.clicked.connect(self.save_and_apply_project_settings)
         self.project_output_dir_button.clicked.connect(
-            lambda: self.select_project_folder(self.project_output_dir_edit, "选择输出目录")
+            self.select_project_output_parent_folder
         )
 
     # ── Project data sources ─────────────────────────────────────────────
@@ -355,8 +359,15 @@ class WorkspacePagesMixin:
 
         datasource_title = QtWidgets.QLabel("项目数据源", self.datasource_card)
         datasource_title.setObjectName("ProjectTitle")
+        datasource_hint = QtWidgets.QLabel(
+            "原始实验目录由项目管理接管；单谱/累计谱是质谱工作台从项目内数据中选择的查看来源。",
+            self.datasource_card,
+        )
+        datasource_hint.setObjectName("ProjectHint")
+        datasource_hint.setWordWrap(True)
 
         title_column.addWidget(datasource_title)
+        title_column.addWidget(datasource_hint)
         top_bar.addLayout(title_column, stretch=1)
 
         self.datasource_import_button = QPushButton("启动导入向导", self.datasource_card)
@@ -375,16 +386,13 @@ class WorkspacePagesMixin:
         # ── 路径配置区：每行含内联状态 ──
         self.datasource_row_status_labels: dict[str, QtWidgets.QLabel] = {}
 
-        self.project_single_file_edit = QLineEdit(self.datasource_card)
-        self.project_single_file_edit.setPlaceholderText("选择 .txt/.asc/.888 单谱文件")
-        self.project_sum_folder_edit = QLineEdit(self.datasource_card)
-        self.project_sum_folder_edit.setPlaceholderText("选择累计谱数据目录")
         self.project_temperature_folder_edit = QLineEdit(self.datasource_card)
         self.project_temperature_folder_edit.setPlaceholderText("选择温度扫描 txt 文件目录")
         self.project_pie_folder_edit = QLineEdit(self.datasource_card)
         self.project_pie_folder_edit.setPlaceholderText("选择 PIE 扫描目录")
         self.project_manual_peak_edit = QLineEdit(self.datasource_card)
-        self.project_manual_peak_edit.setPlaceholderText("选择 yaml/csv/xlsx 卡峰文件")
+        self.project_manual_peak_edit.setPlaceholderText("可导入旧卡峰文件，或由质谱工作台“保存到项目”生成")
+        self.project_manual_peak_edit.setReadOnly(True)
 
         def _browse_btn():
             b = QPushButton("选择", self.datasource_card)
@@ -409,51 +417,42 @@ class WorkspacePagesMixin:
             layout.setColumnStretch(1, 1)  # path edit stretches
             return group, layout
 
-        def _add_path_row(layout, row: int, source_key: str, label: str, edit: QLineEdit, button: QPushButton):
+        def _add_path_row(layout, row: int, source_key: str, label: str, edit: QLineEdit, button: QPushButton | None):
             lbl = QtWidgets.QLabel(label, self.datasource_card)
             lbl.setFixedWidth(88)
             status_lbl = _status_label()
             self.datasource_row_status_labels[source_key] = status_lbl
             layout.addWidget(lbl, row, 0)
             layout.addWidget(edit, row, 1)
-            layout.addWidget(button, row, 2)
+            if button is not None:
+                layout.addWidget(button, row, 2)
             layout.addWidget(status_lbl, row, 3)
 
-        self.project_single_file_button = _browse_btn()
-        self.project_sum_folder_button = _browse_btn()
         self.project_temperature_folder_button = _browse_btn()
         self.project_pie_folder_button = _browse_btn()
-        self.project_manual_peak_button = _browse_btn()
 
-        workbench_group, workbench_layout = _path_group("质谱工作台")
-        _add_path_row(workbench_layout, 0, "single_spectrum", "单谱文件", self.project_single_file_edit, self.project_single_file_button)
-        _add_path_row(workbench_layout, 1, "sum_spectrum", "累计谱文件夹", self.project_sum_folder_edit, self.project_sum_folder_button)
-        card_layout.addWidget(workbench_group)
-
-        analysis_group, analysis_layout = _path_group("分析模块")
+        analysis_group, analysis_layout = _path_group("原始扫描目录")
         _add_path_row(analysis_layout, 0, "temperature_scan", "温度扫描目录", self.project_temperature_folder_edit, self.project_temperature_folder_button)
         _add_path_row(analysis_layout, 1, "pie_scan", "PIE扫描目录", self.project_pie_folder_edit, self.project_pie_folder_button)
-        _add_path_row(analysis_layout, 2, "manual_peak", "手动卡峰文件", self.project_manual_peak_edit, self.project_manual_peak_button)
         card_layout.addWidget(analysis_group)
 
-        self.project_single_file_button.clicked.connect(self.select_project_single_file)
+        artifact_group, artifact_layout = _path_group("项目产物")
+        self.project_manual_peak_button = _browse_btn()
+        self.project_manual_peak_button.setText("导入")
+        _add_path_row(artifact_layout, 0, "manual_peak", "手动卡峰文件", self.project_manual_peak_edit, self.project_manual_peak_button)
+        card_layout.addWidget(artifact_group)
+
         self.datasource_import_button.clicked.connect(self.import_project_datasource)
-        self.project_sum_folder_button.clicked.connect(
-            lambda: self.select_project_folder(self.project_sum_folder_edit, "选择累计谱文件夹")
-        )
         self.project_temperature_folder_button.clicked.connect(
             lambda: self.select_project_folder(self.project_temperature_folder_edit, "选择温度扫描目录")
         )
         self.project_pie_folder_button.clicked.connect(
             lambda: self.select_project_folder(self.project_pie_folder_edit, "选择PIE扫描目录")
         )
-        self.project_manual_peak_button.clicked.connect(self.select_project_manual_peak)
+        self.project_manual_peak_button.clicked.connect(self.import_project_manual_peak_file)
         # Auto-save and push project paths when edited
-        self.project_single_file_edit.editingFinished.connect(self._auto_save_datasource)
-        self.project_sum_folder_edit.editingFinished.connect(self._auto_save_datasource)
         self.project_temperature_folder_edit.editingFinished.connect(self._auto_save_datasource)
         self.project_pie_folder_edit.editingFinished.connect(self._auto_save_datasource)
-        self.project_manual_peak_edit.editingFinished.connect(self._auto_save_datasource)
 
     # ── Tab 4: Function Params ───────────────────────────────────────────
 
@@ -645,8 +644,6 @@ class WorkspacePagesMixin:
         self.project_system_edit.setText(ps.system)
         self.project_description_edit.setText(ps.description)
         self.project_output_dir_edit.setText(ps.output_dir)
-        self.project_single_file_edit.setText(ps.single_spectrum_file)
-        self.project_sum_folder_edit.setText(ps.sum_spectrum_folder)
         self.project_temperature_folder_edit.setText(ps.temperature_scan_folder)
         self.project_pie_folder_edit.setText(ps.pie_scan_folder)
         self.project_manual_peak_edit.setText(ps.manual_peak_file)
@@ -658,11 +655,8 @@ class WorkspacePagesMixin:
         ps.system = self.project_system_edit.text().strip()
         ps.description = self.project_description_edit.text().strip()
         ps.output_dir = self.project_output_dir_edit.text().strip() or "output"
-        ps.single_spectrum_file = self.project_single_file_edit.text().strip()
-        ps.sum_spectrum_folder = self.project_sum_folder_edit.text().strip()
         ps.temperature_scan_folder = self.project_temperature_folder_edit.text().strip()
         ps.pie_scan_folder = self.project_pie_folder_edit.text().strip()
-        ps.manual_peak_file = self.project_manual_peak_edit.text().strip()
         # PICS database path is never modified from UI (read-only)
         return ps
 
@@ -772,14 +766,14 @@ class WorkspacePagesMixin:
         """加载项目配置。
 
         流程：
-        1. 检查当前项目的输出目录（从UI或ProjectSettings）
+        1. 检查当前项目路径（从 UI 或 ProjectSettings）
         2. 如果项目配置存在，自动设置项目路径
         3. 加载项目级或全局配置
         4. 同步到所有UI元素
         """
         from pathlib import Path
 
-        # Step 1: 获取当前项目的输出目录
+        # Step 1: 获取当前项目路径
         current_output_dir = self.project_output_dir_edit.text().strip()
 
         # 如果UI中没有项目路径，尝试从manager获取
@@ -840,8 +834,6 @@ class WorkspacePagesMixin:
         # 每行内联状态
         record_map = {r.source_key: r for r in validation_records}
         key_map = {
-            "single_spectrum": "single_spectrum",
-            "sum_spectrum": "sum_spectrum",
             "temperature_scan": "temperature_scan",
             "pie_scan": "pie_scan",
             "manual_peak": "manual_peak",
@@ -897,6 +889,9 @@ class WorkspacePagesMixin:
 
     def new_project(self) -> None:
         """清空表单，准备创建新项目"""
+        self._creating_new_project = True
+        self._opened_project_root = None
+        self.project_settings_manager.clear_project_path()
         self.project_name_edit.clear()
         self.project_system_edit.clear()
         self.project_description_edit.clear()
@@ -905,10 +900,10 @@ class WorkspacePagesMixin:
         self.statusbar.showMessage("已清空表单，请填写项目信息并点击'保存并应用'", 3000)
 
     def open_project(self) -> None:
-        """打开已有项目（选择项目目录或配置文件）"""
+        """打开已有项目（选择项目根目录或配置文件）"""
         project_path = QtWidgets.QFileDialog.getExistingDirectory(
             self,
-            "选择项目目录或包含 config/project.yaml 的文件夹",
+            "选择项目根目录或包含 config/project.yaml 的文件夹",
             str(Path.home() / "Downloads"),
             QtWidgets.QFileDialog.Option.ShowDirsOnly
         )
@@ -925,7 +920,7 @@ class WorkspacePagesMixin:
                 self,
                 "配置文件不存在",
                 f"在 {project_path} 中找不到 config/project.yaml\n\n"
-                "请确保选择的是有效的项目目录。"
+                "请确保选择的是有效的项目根目录。"
             )
             return
 
@@ -939,6 +934,8 @@ class WorkspacePagesMixin:
             # Load project settings from config file
             from bl03u_masstool.core.project_settings import load_project_settings
             ps = load_project_settings(config_file)
+            self._creating_new_project = False
+            self._opened_project_root = project_path.resolve()
 
             # Set project path for manager
             self.project_settings_manager.set_project_path(project_path)
@@ -994,23 +991,32 @@ class WorkspacePagesMixin:
             QtWidgets.QMessageBox.critical(self, "初始化项目失败", str(exc))
             return
 
-        # Step 2: Set project config path (before saving)
+        # Step 2: Bring registered raw data sources under the managed project folder.
+        try:
+            materialize_project_data_sources(ps, mode="copy")
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "导入项目数据源失败", str(exc))
+            return
+
+        # Step 3: Set project config path (before saving)
         from pathlib import Path
         self.project_settings_manager.set_project_path(Path(ps.output_dir))
 
-        # Step 3: Save configuration to project-specific location
+        # Step 4: Save configuration to project-specific location
         self.project_settings_manager.set(ps)
         self.project_settings_manager.save()
+        self._creating_new_project = False
+        self._opened_project_root = Path(ps.output_dir).resolve()
 
-        # Step 4: Read settings back to UI
+        # Step 5: Read settings back to UI
         self._read_project_settings_to_ui(ps)
         self._load_project_settings_to_parameter_widgets(ps)
         self._apply_project_runtime_settings(ps)
 
-        # Step 5: Sync to tools
+        # Step 6: Sync to tools
         self._apply_settings_to_tools(ps)
 
-        # Step 6: Refresh UI
+        # Step 7: Refresh UI
         self.update_project_title()
         self.refresh_project_lifecycle(ps)
         self.refresh_project_parameter_summary()
@@ -1034,6 +1040,12 @@ class WorkspacePagesMixin:
             QtWidgets.QMessageBox.critical(self, "初始化项目失败", str(exc))
             return
 
+        try:
+            materialize_project_data_sources(ps, mode="copy")
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "导入项目数据源失败", str(exc))
+            return
+
         # Set project config path (before saving)
         from pathlib import Path
         self.project_settings_manager.set_project_path(Path(ps.output_dir))
@@ -1041,6 +1053,8 @@ class WorkspacePagesMixin:
         # Save configuration to project-specific location
         self.project_settings_manager.set(ps)
         self.project_settings_manager.save()
+        self._creating_new_project = False
+        self._opened_project_root = Path(ps.output_dir).resolve()
 
         # Read settings back to UI
         self._read_project_settings_to_ui(ps)
@@ -1154,8 +1168,6 @@ class WorkspacePagesMixin:
         self.project_settings_manager.save()
 
         source_items = [
-            ("单谱文件", "single_spectrum"),
-            ("累计谱目录", "sum_spectrum"),
             ("温度扫描目录", "temperature_scan"),
             ("PIE扫描目录", "pie_scan"),
             ("手动卡峰文件", "manual_peak"),
@@ -1174,13 +1186,13 @@ class WorkspacePagesMixin:
 
         source_key = dict(source_items)[label]
         start_dir = self._dialog_start_dir(ps.output_dir)
-        if source_key in {"single_spectrum", "manual_peak"}:
-            file_filter = (
-                "质谱数据 (*.txt *.asc *.888);;所有文件 (*)"
-                if source_key == "single_spectrum"
-                else "Peak Files (*.yaml *.yml *.csv *.xlsx *.xls);;所有文件 (*)"
+        if source_key == "manual_peak":
+            source_path, _ = QFileDialog.getOpenFileName(
+                self,
+                f"选择{label}",
+                start_dir,
+                "Peak Files (*.yaml *.yml *.csv *.xlsx *.xls);;所有文件 (*)",
             )
-            source_path, _ = QFileDialog.getOpenFileName(self, f"选择{label}", start_dir, file_filter)
         else:
             source_path = QFileDialog.getExistingDirectory(self, f"选择{label}", start_dir)
         if not source_path:
@@ -1189,7 +1201,7 @@ class WorkspacePagesMixin:
         if not hasattr(self, "_worker_manager"):
             self._worker_manager = WorkerManager(self)
 
-        worker = ImportWorker(ps, source_path, source_key)
+        worker = ImportWorker(ps, source_path, source_key, mode="copy")
         worker.progress.connect(self._on_import_progress)
         worker.finished.connect(self._on_import_finished)
         worker.error.connect(self._on_import_error)
@@ -1261,6 +1273,52 @@ class WorkspacePagesMixin:
             target.setText(folder)
             self._auto_save_datasource()
 
+    def select_project_output_parent_folder(self) -> None:
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "选择项目父目录",
+            self._dialog_start_dir(self.project_output_dir_edit.text()),
+        )
+        if folder:
+            self._creating_new_project = True
+            self.project_output_dir_edit.setText(folder)
+
+    def import_project_manual_peak_file(self) -> None:
+        ps = self._collect_project_settings_from_ui()
+        ps = self._normalize_project_output_dir(ps)
+        try:
+            ensure_project_structure(ps)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "初始化项目失败", str(exc))
+            return
+
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "导入手动卡峰文件",
+            self._dialog_start_dir(self.project_manual_peak_edit.text() or ps.output_dir),
+            "Peak Files (*.yaml *.yml *.csv *.xlsx *.xls);;所有文件 (*)",
+        )
+        if not path:
+            return
+
+        try:
+            result = import_project_source(ps, path, "manual_peak", mode="copy")
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "导入手动卡峰文件失败", str(exc))
+            return
+
+        self.project_settings_manager.set_project_path(Path(ps.output_dir))
+        self.project_settings_manager.set(ps)
+        self.project_settings_manager.save()
+
+        self._read_project_settings_to_ui(ps)
+        self._apply_settings_to_tools(ps)
+        self.update_project_title()
+        self.refresh_project_lifecycle(ps)
+        self.refresh_project_parameter_summary()
+        self.refresh_project_datasource_page(ps)
+        self.statusbar.showMessage(f"✓ 手动卡峰文件已导入并登记：{result.destination}", 5000)
+
     def select_project_manual_peak(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self,
@@ -1295,23 +1353,34 @@ class WorkspacePagesMixin:
         return slug if slug.lower().startswith("project") else f"Project_{slug}"
 
     def _normalize_project_output_dir(self, ps: ProjectSettings) -> ProjectSettings:
-        """Resolve the project directory before initialization.
+        """Resolve the project root before initialization.
 
-        The UI label is "项目目录", but users commonly pick an existing parent
-        folder such as ~/Downloads and expect a new child folder named after the
-        project. Existing project roots and matching explicit child paths are
-        preserved.
+        In new-project mode the UI field is a storage parent folder; saving
+        creates <parent>/<project name>. Existing project roots are preserved
+        only after open_project(); stale project markers in a parent folder
+        must not make a new project write analysis/config directly there.
         """
         raw_output = ps.output_dir.strip() if ps.output_dir else ""
         if (not raw_output or raw_output == "output") and (ps.project_name or ps.system):
             ps.output_dir = self._default_project_folder(ps)
         elif ps.project_name or ps.system:
             output_path = Path(raw_output).expanduser()
-            config_file = output_path / "config" / "project.yaml"
             project_slug = self._project_folder_name(ps)
             default_name = self._project_default_folder_name(ps)
             matching_names = {project_slug, default_name}
-            if output_path.exists() and output_path.is_dir() and not config_file.exists() and output_path.name not in matching_names:
+            opened_root = getattr(self, "_opened_project_root", None)
+            explicit_opened_root = False
+            if opened_root is not None:
+                try:
+                    explicit_opened_root = output_path.resolve() == Path(opened_root).resolve()
+                except OSError:
+                    explicit_opened_root = False
+            if (
+                output_path.exists()
+                and output_path.is_dir()
+                and output_path.name not in matching_names
+                and not explicit_opened_root
+            ):
                 ps.output_dir = str(output_path / project_slug)
 
         ps.output_dir = str(project_root(ps))
@@ -1589,7 +1658,14 @@ class WorkspacePagesMixin:
         self.statusbar.showMessage("通用参数已保存并同步到各工具", 3000)
 
     def switch_workspace_page(self, page_name: str):
-        """Switch top-level workspace page and refresh shared calibration state."""
+        """Switch top-level workspace page and refresh shared calibration state.
+
+        When leaving the project page, saved edits are synced to all tool pages via
+        _sync_project_page_edits_to_runtime (which calls _sync_project_settings_to_tool_pages).
+        When switching between non-project tool pages, only shared state (calibration,
+        normalization) is refreshed -- function-specific settings are not re-applied
+        to avoid overwriting unsaved edits on those pages.
+        """
         page_map = {
             "project": self.project_page,
             "spectrum": self.spectrum_page,
@@ -1606,6 +1682,9 @@ class WorkspacePagesMixin:
             return
         current_page = self.workspace_stack.currentWidget() if hasattr(self, "workspace_stack") else None
         if current_page is getattr(self, "project_page", None):
+            # Leaving project page: save edits; sync_tools=True triggers
+            # _sync_project_settings_to_tool_pages, which calls set_project_settings
+            # on all tool pages with the freshly saved state.
             ps = self._sync_project_page_edits_to_runtime(save_project=True, sync_tools=True)
         elif page_name == "project":
             self.load_project_settings()
@@ -1618,22 +1697,20 @@ class WorkspacePagesMixin:
             self.apply_config_defaults()
             self.normalization_settings = load_normalization_settings()
         calibration = self.current_calibration()
+        # Refresh shared calibration/normalization on all tool pages without
+        # overwriting function-specific unsaved edits via set_project_settings.
         if hasattr(self, "temperature_page"):
             self.temperature_page.normalization_settings = self.normalization_settings
             self.temperature_page.calibration = calibration
-            self.temperature_page.set_project_settings(ps)
         if hasattr(self, "pie_page"):
             self.pie_page.normalization_settings = self.normalization_settings
             self.pie_page.calibration = calibration
-            self.pie_page.set_project_settings(ps)
         if hasattr(self, "mole_fraction_page"):
             self.mole_fraction_page.normalization_settings = self.normalization_settings
             self.mole_fraction_page.calibration = calibration
-            self.mole_fraction_page.set_project_settings(ps)
         if hasattr(self, "pics_page"):
             self.pics_page.normalization_settings = self.normalization_settings
             self.pics_page.calibration = calibration
-            self.pics_page.set_project_settings(ps)
         self.workspace_stack.setCurrentWidget(page)
         if page_name in self.page_buttons:
             self.page_buttons[page_name].setChecked(True)

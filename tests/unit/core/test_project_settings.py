@@ -160,3 +160,13 @@ def test_load_project_settings_accepts_saved_yaml_key_names(tmp_path):
     assert loaded.peak_algorithm == "cwt"
     assert loaded.detection_min_idx == 321
     assert loaded.pie_energy_decimals == 3
+
+
+def test_load_project_settings_warns_when_file_missing(tmp_path, caplog):
+    missing_path = tmp_path / "missing-project.yaml"
+
+    with caplog.at_level("WARNING"):
+        loaded = load_project_settings(missing_path)
+
+    assert isinstance(loaded, ProjectSettings)
+    assert "Project settings file not found" in caplog.text

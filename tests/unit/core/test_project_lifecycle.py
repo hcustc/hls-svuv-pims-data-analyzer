@@ -11,6 +11,7 @@ from bl03u_masstool.core.project_lifecycle import (
     ensure_project_structure,
     export_project_archive,
     import_initial_project_data,
+    materialize_project_data_sources,
     next_project_stage,
     validate_data_source,
 )
@@ -53,6 +54,48 @@ def test_project_lifecycle_creates_structure_and_imports_initial_data(tmp_path):
     assert statuses["project_setup"].completed is True
     assert statuses["raw_data"].completed is True
     assert next_project_stage(settings).key == "calibration"
+
+
+def test_project_lifecycle_materializes_registered_raw_sources_by_copy(tmp_path):
+    temp_source = tmp_path / "external" / "温度扫描"
+    pie_source = tmp_path / "external" / "PIE"
+    single_source = tmp_path / "external" / "single.txt"
+    sum_source = tmp_path / "external" / "sum"
+    (temp_source / "8.0eV").mkdir(parents=True)
+    pie_source.mkdir(parents=True)
+    sum_source.mkdir(parents=True)
+    single_source.write_text("single", encoding="utf-8")
+    (sum_source / "sum.txt").write_text("sum", encoding="utf-8")
+    (temp_source / "8.0eV" / "650K.txt").write_text("temp", encoding="utf-8")
+    (pie_source / "8.0eV.txt").write_text("pie", encoding="utf-8")
+
+    settings = ProjectSettings(
+        project_name="Managed Sources",
+        system="C6H6",
+        output_dir=str(tmp_path / "Project_Managed"),
+        single_spectrum_file=str(single_source),
+        sum_spectrum_folder=str(sum_source),
+        temperature_scan_folder=str(temp_source),
+        pie_scan_folder=str(pie_source),
+    )
+
+    results = materialize_project_data_sources(settings)
+
+    assert {result.source.name for result in results} == {"温度扫描", "PIE"}
+    assert Path(settings.temperature_scan_folder) == (
+        tmp_path / "Project_Managed" / "raw_data" / "temperature_scan" / "温度扫描"
+    )
+    assert Path(settings.pie_scan_folder) == tmp_path / "Project_Managed" / "raw_data" / "pie_scan" / "PIE"
+    assert settings.single_spectrum_file == str(single_source)
+    assert settings.sum_spectrum_folder == str(sum_source)
+    assert not (tmp_path / "Project_Managed" / "raw_data" / "single_spectrum").exists()
+    assert not (tmp_path / "Project_Managed" / "raw_data" / "sum_spectrum").exists()
+    assert not Path(settings.temperature_scan_folder).is_symlink()
+    assert (Path(settings.temperature_scan_folder) / "8.0eV" / "650K.txt").read_text(encoding="utf-8") == "temp"
+    assert (Path(settings.pie_scan_folder) / "8.0eV.txt").read_text(encoding="utf-8") == "pie"
+
+    second_results = materialize_project_data_sources(settings)
+    assert second_results == []
 
 
 def test_project_lifecycle_collects_registered_outputs_and_exports_archive(tmp_path):

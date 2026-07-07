@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, asdict
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,7 @@ from .normalization import NormalizationSettings, load_normalization_settings
 from .mole_fraction import MoleFractionSettings, load_mole_fraction_settings
 
 DEFAULT_PROJECT_CONFIG = Path("config/project.yaml")
+logger = logging.getLogger(__name__)
 
 
 def _optional_float_dict(value):
@@ -552,6 +554,7 @@ def _flat_to_nested(settings: ProjectSettings) -> dict:
 def load_project_settings(path: str | Path = DEFAULT_PROJECT_CONFIG) -> ProjectSettings:
     config_path = readable_config_path(path)
     if not config_path.exists():
+        logger.warning("Project settings file not found; using defaults: %s", config_path)
         return ProjectSettings()
     with config_path.open("r", encoding="utf-8") as handle:
         data = yaml.safe_load(handle) or {}
