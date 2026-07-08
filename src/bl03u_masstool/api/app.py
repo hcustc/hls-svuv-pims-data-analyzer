@@ -489,12 +489,13 @@ def _pie_artifacts(
             {
                 "recursive": payload.recursive,
                 "energy_decimals": payload.energy_decimals,
-                "prefer_gaussian": payload.gaussian,
+                "integration_method": payload.integration_method,
                 "manual_peak_path": payload.manual_peak_path,
                 "target_mz": payload.target_mz,
                 "photon_mode": payload.photon_mode,
                 "light_source": payload.light_source,
                 "mass_discrimination": payload.mass_discrimination,
+                "replicate_mode": payload.replicate_mode,
             }
         )
     manifest = build_analysis_manifest(
@@ -670,12 +671,14 @@ def _run_pie_job(job_id: str, payload: PieStartPayload) -> None:
             energy_decimals=payload.energy_decimals,
             **peak_kwargs,
             prefer_gaussian=payload.gaussian,
+            integration_method=payload.integration_method,
             manual_peak_path=manual_peak_path,
             photon_normalize=photon_mode != "off",
             photon_reference_mode="none" if photon_mode == "off" else photon_mode,
             mass_discrimination=mass_discrimination,
             light_source=light_source,
             target_mz_values=target_mz_values,
+            replicate_mode=payload.replicate_mode,
         )
         curves = build_pie_curves(analysis_df)
         summary = _pie_summary(analysis_df, curves)

@@ -18,7 +18,7 @@ from .spectrum_io import extract_header_numbers, list_spectrum_files, read_spect
 
 
 def baseline_corrected_area(y_data: Iterable[float], left: int, right: int) -> float:
-    data = np.asarray(list(y_data), dtype=float)
+    data = np.asarray(y_data, dtype=float)
     left = max(0, int(left))
     right = min(len(data) - 1, int(right))
     if left > right or data.size == 0:
@@ -29,19 +29,46 @@ def baseline_corrected_area(y_data: Iterable[float], left: int, right: int) -> f
     return float(_np_trapezoid(segment - np.min(segment)))
 
 
+def summed_counts_area(y_data: Iterable[float], left: int, right: int) -> float:
+    data = np.asarray(y_data, dtype=float)
+    left = max(0, int(left))
+    right = min(len(data) - 1, int(right))
+    if left > right or data.size == 0:
+        return 0.0
+    return float(np.sum(data[left : right + 1]))
+
+
 def gaussian_area(amplitude: float, fwhm: float) -> float:
     return float(max(0.0, amplitude * fwhm * np.sqrt(np.pi / (4 * np.log(2)))))
 
 
 def integrate_peak(y_data: Iterable[float], peak: Peak, *, prefer_gaussian: bool = True) -> float:
+    area, _method = integrate_peak_with_method(y_data, peak, prefer_gaussian=prefer_gaussian)
+    return area
+
+
+def integrate_peak_with_method(
+    y_data: Iterable[float],
+    peak: Peak,
+    *,
+    prefer_gaussian: bool = True,
+    integration_method: str | None = None,
+) -> tuple[float, str]:
+    method = integration_method or ("gaussian" if prefer_gaussian else "sum_counts")
+    method = method if method in {"sum_counts", "baseline", "gaussian"} else "sum_counts"
     if prefer_gaussian:
+        method = "gaussian"
+    if method == "gaussian":
         window_size = max(5, min(30, int(peak.right_bound) - int(peak.left_bound) + 5))
         fit = fit_gaussian(y_data, int(round(peak.index)), window_size)
         if fit is not None:
             area = gaussian_area(fit.amplitude, fit.fwhm)
             if area > 0:
-                return area
-    return baseline_corrected_area(y_data, peak.left_bound, peak.right_bound)
+                return area, "gaussian"
+        method = "sum_counts"
+    if method == "baseline":
+        return baseline_corrected_area(y_data, peak.left_bound, peak.right_bound), "baseline"
+    return summed_counts_area(y_data, peak.left_bound, peak.right_bound), "sum_counts"
 
 
 def integrate_peaks(y_data: Iterable[float], peaks: Iterable[Peak], *, prefer_gaussian: bool = True) -> list[dict]:

@@ -272,6 +272,12 @@ PROJECT_SOURCE_SPECS: dict[str, ProjectSourceSpec] = {
     "manual_peak": ProjectSourceSpec(
         "manual_peak", "手动卡峰文件", "manual_peak_file", "spectrum_analysis", "manual_peaks"
     ),
+    "kr_calibration": ProjectSourceSpec(
+        "kr_calibration", "Kr定标扫描目录", "kr_calibration_folder", "raw_data", "kr_calibration"
+    ),
+    "kr_calibration_peak": ProjectSourceSpec(
+        "kr_calibration_peak", "Kr定标卡峰文件", "kr_calibration_peak_file", "spectrum_analysis", "kr_manual_peaks"
+    ),
 }
 
 PROJECT_STAGES: tuple[ProjectStageSpec, ...] = (
@@ -537,16 +543,22 @@ def import_initial_project_data(
     return results
 
 
-RAW_PROJECT_SOURCE_KEYS: tuple[str, ...] = (
+CORE_WORKFLOW_SOURCE_KEYS: tuple[str, ...] = (
     "temperature_scan",
     "pie_scan",
+)
+
+MANAGED_PROJECT_SOURCE_KEYS: tuple[str, ...] = (
+    *CORE_WORKFLOW_SOURCE_KEYS,
+    "kr_calibration",
+    "kr_calibration_peak",
 )
 
 
 def materialize_project_data_sources(
     settings: ProjectSettings,
     *,
-    source_keys: tuple[str, ...] = RAW_PROJECT_SOURCE_KEYS,
+    source_keys: tuple[str, ...] = MANAGED_PROJECT_SOURCE_KEYS,
     mode: str = "copy",
 ) -> list[ProjectImportResult]:
     """Copy/link registered raw data sources into the managed project folder.
@@ -661,6 +673,8 @@ def _field_label(field_name: str) -> str:
         "temperature_scan_folder": "温度扫描目录",
         "pie_scan_folder": "PIE扫描目录",
         "manual_peak_file": "手动卡峰文件",
+        "kr_calibration_folder": "Kr定标扫描目录",
+        "kr_calibration_peak_file": "Kr定标卡峰文件",
         "temperature_scan_result_file": "温度扫描结果",
         "pie_identification_result_file": "PIE鉴定结果",
         "mole_fraction_result_file": "摩尔分数结果",
@@ -732,6 +746,8 @@ def _registered_artifact_fields(settings: ProjectSettings) -> dict[str, str]:
         "temperature_scan_folder": settings.temperature_scan_folder,
         "pie_scan_folder": settings.pie_scan_folder,
         "manual_peak_file": settings.manual_peak_file,
+        "kr_calibration_folder": settings.kr_calibration_folder,
+        "kr_calibration_peak_file": settings.kr_calibration_peak_file,
         "temperature_scan_result_file": settings.temperature_scan_result_file,
         "pie_identification_result_file": settings.pie_identification_result_file,
         "mole_fraction_result_file": settings.mole_fraction_result_file,
@@ -755,6 +771,8 @@ def _section_for_registered_field(field_name: str) -> ProjectDirectorySpec:
         "temperature_scan_folder": "raw_data",
         "pie_scan_folder": "raw_data",
         "manual_peak_file": "spectrum_analysis",
+        "kr_calibration_folder": "raw_data",
+        "kr_calibration_peak_file": "spectrum_analysis",
         "temperature_scan_result_file": "temperature_scan",
         "pie_identification_result_file": "pie_analysis",
         "mole_fraction_result_file": "mole_fraction",
@@ -947,7 +965,7 @@ def get_data_source_validation_status(
 
     # 关键数据源（必需）。单谱/累计谱是质谱工作台来源，可由温度/PIE目录派生，
     # 不作为项目级原始数据源完整性的判据。
-    essential_sources = set(RAW_PROJECT_SOURCE_KEYS)
+    essential_sources = set(CORE_WORKFLOW_SOURCE_KEYS)
     essential_records = [r for r in records if r.source_key in essential_sources]
 
     valid_count = sum(1 for r in essential_records if r.is_valid)
@@ -1034,7 +1052,7 @@ def analyze_workflow_capabilities(
         # 找出最关键缺少的数据源
         missing_by_frequency = {}
         for workflow, reasons in result.unavailable_workflows.items():
-            for source_key in RAW_PROJECT_SOURCE_KEYS:
+            for source_key in CORE_WORKFLOW_SOURCE_KEYS:
                 if not data_source_status.get(source_key):
                     missing_by_frequency[source_key] = missing_by_frequency.get(source_key, 0) + 1
 

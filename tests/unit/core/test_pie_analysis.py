@@ -125,7 +125,8 @@ peaks:
     )
     curves = build_pie_curves(df)
     assert set(curves) == {22}
-    assert [round(value, 6) for value in curves[22]["intensities"]] == [0.9, 0.9]
+    assert [round(value, 6) for value in curves[22]["intensities"]] == [1.2, 1.2]
+    assert set(df["integration_method"]) == {"sum_counts"}
 
 
 def test_pie_groups_average_replicates_and_subtract_same_energy_blank(tmp_path):
@@ -169,6 +170,7 @@ peaks:
         manual_peak_path=peak_file,
         prefer_gaussian=False,
         photon_normalize=False,
+        replicate_mode="mean",
     )
 
     assert len(df) == 1
@@ -176,6 +178,255 @@ peaks:
     assert df.iloc[0]["blank_file_count"] == 1
     assert bool(df.iloc[0]["background_subtracted"]) is True
     assert df.iloc[0]["raw_area"] == 10.0
+    assert df.iloc[0]["integration_method"] == "sum_counts"
+
+
+def test_pie_records_sum_counts_fallback_when_gaussian_fit_fails(tmp_path):
+    peak_file = tmp_path / "peaks.yaml"
+    peak_file.write_text(
+        """
+peaks:
+  - mz: 22
+    peak: 22
+    start: 21
+    end: 23
+""",
+        encoding="utf-8",
+    )
+    y = [0.0] * 50
+    y[22] = 10.0
+    header = [
+        "Energy:12.0 eV",
+        "IO:10 nA",
+        "Beam Current:1mA",
+        "Undulator Offset:0mm",
+        "Time:1 s",
+        "Burner Position:0 mm",
+        "Temperature:300 C",
+        "DIFF PRESSURE:1Pa",
+        "ION PRESSURE:1Pa",
+        "TOF PRESSURE:1Pa",
+    ]
+    (tmp_path / "spectrum.txt").write_text("\n".join(header + [str(value) for value in y]), encoding="utf-8")
+
+    df = analyze_pie_folder(
+        tmp_path,
+        calibration=Calibration(a=0, b=1, c=0),
+        recursive=False,
+        manual_peak_path=peak_file,
+        prefer_gaussian=True,
+        photon_normalize=False,
+    )
+
+    assert df.iloc[0]["raw_area"] == 10.0
+    assert df.iloc[0]["integration_method"] == "sum_counts"
+
+
+def test_pie_can_use_baseline_corrected_integration(tmp_path):
+    peak_file = tmp_path / "peaks.yaml"
+    peak_file.write_text(
+        """
+peaks:
+  - mz: 22
+    peak: 22
+    start: 21
+    end: 23
+""",
+        encoding="utf-8",
+    )
+    y = [0.0] * 50
+    y[21] = 5.0
+    y[22] = 10.0
+    y[23] = 5.0
+    header = [
+        "Energy:12.0 eV",
+        "IO:10 nA",
+        "Beam Current:1mA",
+        "Undulator Offset:0mm",
+        "Time:1 s",
+        "Burner Position:0 mm",
+        "Temperature:300 C",
+        "DIFF PRESSURE:1Pa",
+        "ION PRESSURE:1Pa",
+        "TOF PRESSURE:1Pa",
+    ]
+    (tmp_path / "spectrum.txt").write_text("\n".join(header + [str(value) for value in y]), encoding="utf-8")
+
+    summed = analyze_pie_folder(
+        tmp_path,
+        calibration=Calibration(a=0, b=1, c=0),
+        recursive=False,
+        manual_peak_path=peak_file,
+        prefer_gaussian=False,
+        integration_method="sum_counts",
+        photon_normalize=False,
+    )
+    baseline = analyze_pie_folder(
+        tmp_path,
+        calibration=Calibration(a=0, b=1, c=0),
+        recursive=False,
+        manual_peak_path=peak_file,
+        prefer_gaussian=False,
+        integration_method="baseline",
+        photon_normalize=False,
+    )
+
+    assert summed.iloc[0]["raw_area"] == 20.0
+    assert summed.iloc[0]["integration_method"] == "sum_counts"
+    assert baseline.iloc[0]["raw_area"] == 5.0
+    assert baseline.iloc[0]["integration_method"] == "baseline"
+
+
+def test_pie_filename_replicates_ignore_small_energy_drift(tmp_path):
+    peak_file = tmp_path / "peaks.yaml"
+    peak_file.write_text(
+        """
+peaks:
+  - mz: 22
+    peak: 22
+    start: 21
+    end: 23
+""",
+        encoding="utf-8",
+    )
+
+    def write_spectrum(name, energy, scale):
+        y = [0.0] * 50
+        y[22] = scale
+        header = [
+            f"Energy:{energy} eV",
+            "IO:10 nA",
+            "Beam Current:1mA",
+            "Undulator Offset:0mm",
+            "Time:1 s",
+            "Burner Position:0 mm",
+            "Temperature:300 C",
+            "DIFF PRESSURE:1Pa",
+            "ION PRESSURE:1Pa",
+            "TOF PRESSURE:1Pa",
+        ]
+        (tmp_path / name).write_text("\n".join(header + [str(value) for value in y]), encoding="utf-8")
+
+    write_spectrum("C24110904-0000.txt", 14.601, 10.0)
+    write_spectrum("C24110904-0001.txt", 14.699, 20.0)
+
+    df = analyze_pie_folder(
+        tmp_path,
+        calibration=Calibration(a=0, b=1, c=0),
+        recursive=False,
+        manual_peak_path=peak_file,
+        prefer_gaussian=False,
+        photon_normalize=False,
+        energy_decimals=1,
+        replicate_mode="mean",
+    )
+
+    assert len(df) == 1
+    assert df.iloc[0]["file_count"] == 2
+    assert df.iloc[0]["replicate_grouping"] == "filename"
+    assert df.iloc[0]["replicate_warning"] == ""
+    assert df.iloc[0]["raw_area"] == 15.0
+
+
+def test_pie_filename_sequence_across_energy_scan_is_not_replicate(tmp_path):
+    peak_file = tmp_path / "peaks.yaml"
+    peak_file.write_text(
+        """
+peaks:
+  - mz: 22
+    peak: 22
+    start: 21
+    end: 23
+""",
+        encoding="utf-8",
+    )
+
+    def write_spectrum(name, energy, scale):
+        y = [0.0] * 50
+        y[22] = scale
+        header = [
+            f"Energy:{energy} eV",
+            "IO:10 nA",
+            "Beam Current:1mA",
+            "Undulator Offset:0mm",
+            "Time:1 s",
+            "Burner Position:0 mm",
+            "Temperature:300 C",
+            "DIFF PRESSURE:1Pa",
+            "ION PRESSURE:1Pa",
+            "TOF PRESSURE:1Pa",
+        ]
+        (tmp_path / name).write_text("\n".join(header + [str(value) for value in y]), encoding="utf-8")
+
+    write_spectrum("C24110901-0000.txt", 8.00, 10.0)
+    write_spectrum("C24110901-0001.txt", 8.05, 20.0)
+    write_spectrum("C24110901-0002.txt", 8.10, 30.0)
+    write_spectrum("C24110901-0003.txt", 8.15, 40.0)
+
+    df = analyze_pie_folder(
+        tmp_path,
+        calibration=Calibration(a=0, b=1, c=0),
+        recursive=False,
+        manual_peak_path=peak_file,
+        prefer_gaussian=False,
+        photon_normalize=False,
+        energy_decimals=1,
+        replicate_mode="off",
+    )
+
+    curves = build_pie_curves(df)
+    assert curves[22]["energies"] == [8.0, 8.05, 8.1, 8.15]
+    assert curves[22]["intensities"] == [10.0, 20.0, 30.0, 40.0]
+    assert set(df["replicate_grouping"]) == {"energy"}
+
+
+def test_pie_fallback_grouping_warns_when_filename_replicates_are_absent(tmp_path):
+    peak_file = tmp_path / "peaks.yaml"
+    peak_file.write_text(
+        """
+peaks:
+  - mz: 22
+    peak: 22
+    start: 21
+    end: 23
+""",
+        encoding="utf-8",
+    )
+
+    def write_spectrum(name, scale):
+        y = [0.0] * 50
+        y[22] = scale
+        header = [
+            "Energy:12.0 eV",
+            "IO:10 nA",
+            "Beam Current:1mA",
+            "Undulator Offset:0mm",
+            "Time:1 s",
+            "Burner Position:0 mm",
+            "Temperature:300 C",
+            "DIFF PRESSURE:1Pa",
+            "ION PRESSURE:1Pa",
+            "TOF PRESSURE:1Pa",
+        ]
+        (tmp_path / name).write_text("\n".join(header + [str(value) for value in y]), encoding="utf-8")
+
+    write_spectrum("sample-a.txt", 10.0)
+    write_spectrum("sample-b.txt", 20.0)
+
+    df = analyze_pie_folder(
+        tmp_path,
+        calibration=Calibration(a=0, b=1, c=0),
+        recursive=False,
+        manual_peak_path=peak_file,
+        prefer_gaussian=False,
+        photon_normalize=False,
+        replicate_mode="sum",
+    )
+
+    assert len(df) == 1
+    assert df.iloc[0]["replicate_grouping"] == "energy"
+    assert "退回按能量分组" in df.iloc[0]["replicate_warning"]
+    assert df.iloc[0]["raw_area"] == 30.0
 
 
 def test_pie_blank_subtraction_rejects_mismatched_x_axis(tmp_path):

@@ -59,15 +59,20 @@ def test_project_lifecycle_creates_structure_and_imports_initial_data(tmp_path):
 def test_project_lifecycle_materializes_registered_raw_sources_by_copy(tmp_path):
     temp_source = tmp_path / "external" / "温度扫描"
     pie_source = tmp_path / "external" / "PIE"
+    kr_source = tmp_path / "external" / "Kr定标"
+    kr_peak_source = tmp_path / "external" / "kr_peaks.csv"
     single_source = tmp_path / "external" / "single.txt"
     sum_source = tmp_path / "external" / "sum"
     (temp_source / "8.0eV").mkdir(parents=True)
     pie_source.mkdir(parents=True)
+    kr_source.mkdir(parents=True)
     sum_source.mkdir(parents=True)
     single_source.write_text("single", encoding="utf-8")
     (sum_source / "sum.txt").write_text("sum", encoding="utf-8")
     (temp_source / "8.0eV" / "650K.txt").write_text("temp", encoding="utf-8")
     (pie_source / "8.0eV.txt").write_text("pie", encoding="utf-8")
+    (kr_source / "Kr_650K.txt").write_text("kr", encoding="utf-8")
+    kr_peak_source.write_text("mz,start,end\n84,1,2\n", encoding="utf-8")
 
     settings = ProjectSettings(
         project_name="Managed Sources",
@@ -77,15 +82,23 @@ def test_project_lifecycle_materializes_registered_raw_sources_by_copy(tmp_path)
         sum_spectrum_folder=str(sum_source),
         temperature_scan_folder=str(temp_source),
         pie_scan_folder=str(pie_source),
+        kr_calibration_folder=str(kr_source),
+        kr_calibration_peak_file=str(kr_peak_source),
     )
 
     results = materialize_project_data_sources(settings)
 
-    assert {result.source.name for result in results} == {"温度扫描", "PIE"}
+    assert {result.source.name for result in results} == {"温度扫描", "PIE", "Kr定标", "kr_peaks.csv"}
     assert Path(settings.temperature_scan_folder) == (
         tmp_path / "Project_Managed" / "raw_data" / "temperature_scan" / "温度扫描"
     )
     assert Path(settings.pie_scan_folder) == tmp_path / "Project_Managed" / "raw_data" / "pie_scan" / "PIE"
+    assert Path(settings.kr_calibration_folder) == (
+        tmp_path / "Project_Managed" / "raw_data" / "kr_calibration" / "Kr定标"
+    )
+    assert Path(settings.kr_calibration_peak_file) == (
+        tmp_path / "Project_Managed" / "analysis" / "spectrum" / "kr_manual_peaks" / "kr_peaks.csv"
+    )
     assert settings.single_spectrum_file == str(single_source)
     assert settings.sum_spectrum_folder == str(sum_source)
     assert not (tmp_path / "Project_Managed" / "raw_data" / "single_spectrum").exists()
@@ -93,6 +106,8 @@ def test_project_lifecycle_materializes_registered_raw_sources_by_copy(tmp_path)
     assert not Path(settings.temperature_scan_folder).is_symlink()
     assert (Path(settings.temperature_scan_folder) / "8.0eV" / "650K.txt").read_text(encoding="utf-8") == "temp"
     assert (Path(settings.pie_scan_folder) / "8.0eV.txt").read_text(encoding="utf-8") == "pie"
+    assert (Path(settings.kr_calibration_folder) / "Kr_650K.txt").read_text(encoding="utf-8") == "kr"
+    assert Path(settings.kr_calibration_peak_file).read_text(encoding="utf-8").startswith("mz,start,end")
 
     second_results = materialize_project_data_sources(settings)
     assert second_results == []

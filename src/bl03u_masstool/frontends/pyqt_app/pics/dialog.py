@@ -138,7 +138,7 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
         summary_layout.addWidget(self.summary_project_label)
         summary_layout.addWidget(self.summary_system_label)
         summary_layout.addWidget(self.summary_data_label)
-        self.summary_open_project_btn = QtWidgets.QPushButton("打开项目设置")
+        self.summary_open_project_btn = QtWidgets.QPushButton("项目管理")
         self.summary_open_project_btn.setObjectName("WorkflowButton")
         self.summary_open_project_btn.clicked.connect(self._open_project_settings)
         summary_layout.addWidget(self.summary_open_project_btn)
@@ -185,7 +185,7 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
         new_layout.addRow("物种名称:", self.txt_new_name)
 
         self.txt_new_formula = QtWidgets.QLineEdit()
-        self.txt_new_formula.setPlaceholderText("输入分子式，如 C6H5ClO")
+        self.txt_new_formula.setPlaceholderText("输入分子式")
         self.txt_new_formula.setToolTip("新物种的分子式，用于从数据库查询光电离截面")
         new_layout.addRow("分子式:", self.txt_new_formula)
 
@@ -314,7 +314,7 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
         widget = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(widget)
 
-        md_group = QtWidgets.QGroupBox("质量歧视因子设置")
+        md_group = QtWidgets.QGroupBox("质量响应校正设置")
         md_layout = QtWidgets.QFormLayout(md_group)
 
         self.combo_md_preset = QtWidgets.QComboBox()
@@ -328,7 +328,7 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.spin_md_exponent.setDecimals(5)
         self.spin_md_exponent.setValue(self.settings.mass_disc_exponent)
         self.spin_md_exponent.setSingleStep(0.001)
-        md_layout.addRow("质量歧视指数 n:", self.spin_md_exponent)
+        md_layout.addRow("质量响应指数 n:", self.spin_md_exponent)
 
         layout.addWidget(md_group)
 

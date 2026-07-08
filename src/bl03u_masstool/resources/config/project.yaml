@@ -19,8 +19,7 @@ normalization:
   light_source: io
   temperature_photon_normalize: true
   temperature_kr_correct: true
-  pie_photon_mode: first
-  mass_discrimination: 1.0
+  pie_photon_mode: none
   kr_calibration_folder:
   kr_calibration_peak_file: config/peak_integration.yaml
   expansion_factors:
@@ -72,12 +71,12 @@ function_params:
   pie:
     energy_decimals: 1
     recursive: true
-    prefer_gaussian: true
+    integration_method: sum_counts
     multi_folder_mode: false
     merge_method: low_energy_dominant
   temperature_scan:
     reference_mode: sum
-    prefer_gaussian: true
+    integration_method: sum_counts
     kr_mz: 84
   pics:
     no_mz: 30

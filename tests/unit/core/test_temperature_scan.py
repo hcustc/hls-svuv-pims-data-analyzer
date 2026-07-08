@@ -45,15 +45,187 @@ from bl03u_masstool.core.temperature_scan import (
 def test_build_temperature_curves_groups_by_rounded_mz():
     df = pd.DataFrame(
         [
-            {"temperature": 800.0, "file": "a.txt", "reference_temperature": 900.0, "mz": 17.99, "area": 10.0},
-            {"temperature": 825.0, "file": "b.txt", "reference_temperature": 900.0, "mz": 18.02, "area": 12.0},
-            {"temperature": 825.0, "file": "b.txt", "reference_temperature": 900.0, "mz": 18.01, "area": 3.0},
+            {"temperature": 800.0, "file": "a.txt", "reference_temperature": 900.0, "mz": 17.99, "area": 10.0, "replicate_mode": "sum"},
+            {"temperature": 825.0, "file": "b.txt", "reference_temperature": 900.0, "mz": 18.02, "area": 12.0, "replicate_mode": "sum"},
+            {"temperature": 825.0, "file": "b.txt", "reference_temperature": 900.0, "mz": 18.01, "area": 3.0, "replicate_mode": "sum"},
         ]
     )
     curves = build_temperature_curves(df)
     assert list(curves) == [18]
     assert curves[18]["temperatures"] == [800.0, 825.0]
     assert curves[18]["areas"] == [10.0, 15.0]
+
+
+def test_temperature_filename_replicates_can_average_or_sum(tmp_path):
+    peak_file = tmp_path / "peaks.csv"
+    peak_file.write_text("mz,peak,start,end\n22,22,21,23\n", encoding="utf-8")
+
+    def write_spectrum(name: str, energy: float, scale: float):
+        y = [0.0] * 50
+        y[22] = scale
+        header = [
+            f"Energy:{energy} eV",
+            "IO:10 nA",
+            "Beam Current:1mA",
+            "Undulator Offset:0mm",
+            "Time:1 s",
+            "Burner Position:0 mm",
+            "Temperature:400 C",
+            "DIFF PRESSURE:1Pa",
+            "ION PRESSURE:1Pa",
+            "TOF PRESSURE:1Pa",
+        ]
+        (tmp_path / name).write_text("\n".join(header + [str(value) for value in y]), encoding="utf-8")
+
+    write_spectrum("C24110904-0000.txt", 14.601, 10.0)
+    write_spectrum("C24110904-0001.txt", 14.699, 20.0)
+
+    mean_df = analyze_temperature_folder(
+        tmp_path,
+        calibration=Calibration(a=0, b=1, c=0),
+        manual_peak_path=peak_file,
+        prefer_gaussian=False,
+        photon_normalize=False,
+        replicate_mode="mean",
+    )
+    mean_curves = build_temperature_curves(mean_df)
+    assert mean_df.iloc[0]["replicate_grouping"] == "filename"
+    assert mean_df.iloc[0]["replicate_warning"] == ""
+    assert mean_df.iloc[0]["file_count"] == 2
+    assert mean_df.iloc[0]["integration_method"] == "sum_counts"
+    assert mean_curves[22]["areas"] == [15.0]
+    assert mean_curves[22]["rows"].iloc[0]["integration_method"] == "sum_counts"
+
+    sum_df = analyze_temperature_folder(
+        tmp_path,
+        calibration=Calibration(a=0, b=1, c=0),
+        manual_peak_path=peak_file,
+        prefer_gaussian=False,
+        photon_normalize=False,
+        replicate_mode="sum",
+    )
+    sum_curves = build_temperature_curves(sum_df)
+    assert sum_curves[22]["areas"] == [30.0]
+
+
+def test_temperature_can_use_baseline_corrected_integration(tmp_path):
+    peak_file = tmp_path / "peaks.csv"
+    peak_file.write_text("mz,peak,start,end\n22,22,21,23\n", encoding="utf-8")
+    y = [0.0] * 50
+    y[21] = 5.0
+    y[22] = 10.0
+    y[23] = 5.0
+    header = [
+        "Energy:12.0 eV",
+        "IO:10 nA",
+        "Beam Current:1mA",
+        "Undulator Offset:0mm",
+        "Time:1 s",
+        "Burner Position:0 mm",
+        "Temperature:400 C",
+        "DIFF PRESSURE:1Pa",
+        "ION PRESSURE:1Pa",
+        "TOF PRESSURE:1Pa",
+    ]
+    (tmp_path / "400C.txt").write_text("\n".join(header + [str(value) for value in y]), encoding="utf-8")
+
+    summed = analyze_temperature_folder(
+        tmp_path,
+        calibration=Calibration(a=0, b=1, c=0),
+        manual_peak_path=peak_file,
+        prefer_gaussian=False,
+        integration_method="sum_counts",
+        photon_normalize=False,
+    )
+    baseline = analyze_temperature_folder(
+        tmp_path,
+        calibration=Calibration(a=0, b=1, c=0),
+        manual_peak_path=peak_file,
+        prefer_gaussian=False,
+        integration_method="baseline",
+        photon_normalize=False,
+    )
+
+    assert summed.iloc[0]["raw_area"] == 20.0
+    assert summed.iloc[0]["integration_method"] == "sum_counts"
+    assert baseline.iloc[0]["raw_area"] == 5.0
+    assert baseline.iloc[0]["integration_method"] == "baseline"
+
+
+def test_temperature_replicates_are_not_merged_when_disabled(tmp_path):
+    peak_file = tmp_path / "peaks.csv"
+    peak_file.write_text("mz,peak,start,end\n22,22,21,23\n", encoding="utf-8")
+
+    def write_spectrum(name: str, scale: float):
+        y = [0.0] * 50
+        y[22] = scale
+        header = [
+            "Energy:14.6 eV",
+            "IO:10 nA",
+            "Beam Current:1mA",
+            "Undulator Offset:0mm",
+            "Time:1 s",
+            "Burner Position:0 mm",
+            "Temperature:400 C",
+            "DIFF PRESSURE:1Pa",
+            "ION PRESSURE:1Pa",
+            "TOF PRESSURE:1Pa",
+        ]
+        (tmp_path / name).write_text("\n".join(header + [str(value) for value in y]), encoding="utf-8")
+
+    write_spectrum("C24110904-0000.txt", 10.0)
+    write_spectrum("C24110904-0001.txt", 20.0)
+
+    df = analyze_temperature_folder(
+        tmp_path,
+        calibration=Calibration(a=0, b=1, c=0),
+        manual_peak_path=peak_file,
+        prefer_gaussian=False,
+        photon_normalize=False,
+        replicate_mode="off",
+    )
+    curves = build_temperature_curves(df)
+    assert list(df["replicate_mode"].unique()) == ["off"]
+    assert curves[22]["temperatures"] == [400.0, 400.0]
+    assert curves[22]["areas"] == [10.0, 20.0]
+
+
+def test_temperature_fallback_grouping_warns_when_filename_replicates_are_absent(tmp_path):
+    peak_file = tmp_path / "peaks.csv"
+    peak_file.write_text("mz,peak,start,end\n22,22,21,23\n", encoding="utf-8")
+
+    def write_spectrum(name: str, scale: float):
+        y = [0.0] * 50
+        y[22] = scale
+        header = [
+            "Energy:14.6 eV",
+            "IO:10 nA",
+            "Beam Current:1mA",
+            "Undulator Offset:0mm",
+            "Time:1 s",
+            "Burner Position:0 mm",
+            "Temperature:400 C",
+            "DIFF PRESSURE:1Pa",
+            "ION PRESSURE:1Pa",
+            "TOF PRESSURE:1Pa",
+        ]
+        (tmp_path / name).write_text("\n".join(header + [str(value) for value in y]), encoding="utf-8")
+
+    write_spectrum("sample-a.txt", 10.0)
+    write_spectrum("sample-b.txt", 20.0)
+
+    df = analyze_temperature_folder(
+        tmp_path,
+        calibration=Calibration(a=0, b=1, c=0),
+        manual_peak_path=peak_file,
+        prefer_gaussian=False,
+        photon_normalize=False,
+        replicate_mode="mean",
+    )
+    curves = build_temperature_curves(df)
+    assert df.iloc[0]["replicate_grouping"] == "temperature"
+    assert "退回按温度分组" in df.iloc[0]["replicate_warning"]
+    assert curves[22]["areas"] == [15.0]
 
 
 def test_temperature_curve_classification_trends():
@@ -139,7 +311,8 @@ def test_temperature_scan_uses_manual_peak_file_and_io_normalization(tmp_path):
     )
     curves = build_temperature_curves(df)
     assert set(curves) == {22}
-    assert [round(value, 6) for value in curves[22]["areas"]] == [0.9, 0.9]
+    assert [round(value, 6) for value in curves[22]["areas"]] == [1.2, 1.2]
+    assert set(df["integration_method"]) == {"sum_counts"}
 
 
 def test_temperature_scan_can_normalize_by_beam_current(tmp_path):
@@ -174,7 +347,7 @@ def test_temperature_scan_can_normalize_by_beam_current(tmp_path):
         prefer_gaussian=False,
         light_source="beam_current",
     )
-    assert round(float(df.iloc[0]["area"]), 6) == 0.09
+    assert round(float(df.iloc[0]["area"]), 6) == 0.12
 
 
 def test_compute_kr_expansion_factors_from_high_energy_folder(tmp_path):
@@ -383,8 +556,8 @@ def test_temperature_scan_maps_kr_expansion_by_energy_and_temperature(tmp_path):
     )
     assert by_energy_temp[("expansion_lambda", 14.6)].loc[800.0] == pytest.approx(2.0)
     assert by_energy_temp[("expansion_lambda", 14.7)].loc[800.0] == pytest.approx(4.0)
-    assert by_energy_temp[("area", 14.6)].loc[800.0] == pytest.approx(9.0)
-    assert by_energy_temp[("area", 14.7)].loc[800.0] == pytest.approx(9.0)
+    assert by_energy_temp[("area", 14.6)].loc[800.0] == pytest.approx(12.0)
+    assert by_energy_temp[("area", 14.7)].loc[800.0] == pytest.approx(12.0)
 
 
 def test_temperature_scan_sum_reference_finds_peaks_across_temperatures(tmp_path):

@@ -84,7 +84,7 @@ class IsotopeAbundanceDialog(QtWidgets.QWidget, DataFrameTableMixin):
         formula_layout.setHorizontalSpacing(8)
         formula_layout.setVerticalSpacing(8)
         self.formula_edit = QtWidgets.QLineEdit()
-        self.formula_edit.setPlaceholderText("输入分子式，例如 C6H6、CF3COOH、H2O")
+        self.formula_edit.setPlaceholderText("输入分子式")
         self.formula_edit.returnPressed.connect(self.calculate)
         self.min_percent_edit = QtWidgets.QDoubleSpinBox()
         self.min_percent_edit.setRange(0.0, 100.0)

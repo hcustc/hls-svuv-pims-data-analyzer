@@ -73,13 +73,19 @@ class WorkspacePagesMixin:
             self.normalization_settings,
             self.workspace_stack,
         )
-        self.temperature_page.set_project_settings(self.project_settings_manager.get())
+        self.temperature_page.set_project_settings(
+            self.project_settings_manager.get(),
+            activate_project_scope=self.project_settings_manager.has_project_path(),
+        )
         self.pie_page = PIESpeciesFitDialog(
             self.current_calibration(),
             self.normalization_settings,
             self.workspace_stack,
         )
-        self.pie_page.set_project_settings(self.project_settings_manager.get())
+        self.pie_page.set_project_settings(
+            self.project_settings_manager.get(),
+            activate_project_scope=self.project_settings_manager.has_project_path(),
+        )
         self.mole_fraction_page = MoleFractionDialog(
             self.current_calibration(),
             self.normalization_settings,
@@ -284,6 +290,12 @@ class WorkspacePagesMixin:
         self.project_open_button.setToolTip("打开已有项目配置文件")
         self.project_open_button.setFixedHeight(32)
         action_layout.addWidget(self.project_open_button)
+
+        self.project_close_button = QPushButton("关闭项目", action_bar)
+        self.project_close_button.setObjectName("BrowseButton")
+        self.project_close_button.setToolTip("关闭当前项目，不删除项目文件")
+        self.project_close_button.setFixedHeight(32)
+        action_layout.addWidget(self.project_close_button)
         action_layout.addSpacing(12)
 
         self.project_save_and_apply_button = QPushButton("保存并应用", action_bar)
@@ -305,9 +317,9 @@ class WorkspacePagesMixin:
         form_layout.setVerticalSpacing(6)
 
         self.project_name_edit = QLineEdit(self.project_identity_card)
-        self.project_name_edit.setPlaceholderText("例如 C6F11O2H 温度扫描项目")
+        self.project_name_edit.setPlaceholderText("输入项目名称")
         self.project_system_edit = QLineEdit(self.project_identity_card)
-        self.project_system_edit.setPlaceholderText("例如 C6F11O2H")
+        self.project_system_edit.setPlaceholderText("输入样品、体系或实验代号")
         self.project_description_edit = QLineEdit(self.project_identity_card)
         self.project_description_edit.setPlaceholderText("简要说明样品、批次或实验条件")
         self.project_output_dir_edit = QLineEdit(self.project_identity_card)
@@ -333,6 +345,7 @@ class WorkspacePagesMixin:
 
         self.project_new_button.clicked.connect(self.new_project)
         self.project_open_button.clicked.connect(self.open_project)
+        self.project_close_button.clicked.connect(self.close_current_project)
         self.project_save_and_apply_button.clicked.connect(self.save_and_apply_project_settings)
         self.project_output_dir_button.clicked.connect(
             self.select_project_output_parent_folder
@@ -483,9 +496,11 @@ class WorkspacePagesMixin:
         self.fp_pie_energy_decimals.setValue(1)
         self.fp_pie_recursive = QtWidgets.QCheckBox("递归")
         self.fp_pie_recursive.setToolTip("启用后先用高能段数据拟合，再逐步扩展到低能区，提高低信号区拟合稳定性")
-        self.fp_pie_prefer_gaussian = QtWidgets.QCheckBox("高斯积分")
-        self.fp_pie_prefer_gaussian.setToolTip("使用高斯峰面积而非简单峰值强度作为信号量，更准确反映积分强度")
-        self.fp_pie_prefer_gaussian.setChecked(True)
+        self.fp_pie_integration_method = QtWidgets.QComboBox()
+        self.fp_pie_integration_method.setToolTip("PIE 原始积分信号的默认计算方式；高斯拟合不可用时回退范围累加，并在结果中记录实际方式")
+        self.fp_pie_integration_method.addItem("范围累加", "sum_counts")
+        self.fp_pie_integration_method.addItem("扣基线积分", "baseline")
+        self.fp_pie_integration_method.addItem("高斯", "gaussian")
         self.fp_pie_multi_folder = QtWidgets.QCheckBox("多文件夹模式")
         self.fp_pie_multi_folder.setToolTip("启用后可从多个独立PIE扫描文件夹合并数据，用于不同能段的拼接实验")
         self.fp_pie_merge_method = QtWidgets.QComboBox()
@@ -497,7 +512,8 @@ class WorkspacePagesMixin:
         pie_layout.addWidget(QtWidgets.QLabel("能量小数位"), 0, 0)
         pie_layout.addWidget(self.fp_pie_energy_decimals, 0, 1)
         pie_layout.addWidget(self.fp_pie_recursive, 0, 2)
-        pie_layout.addWidget(self.fp_pie_prefer_gaussian, 0, 3)
+        pie_layout.addWidget(QtWidgets.QLabel("积分方式"), 0, 3)
+        pie_layout.addWidget(self.fp_pie_integration_method, 0, 4)
         pie_layout.addWidget(QtWidgets.QLabel("合并方法"), 1, 0)
         pie_layout.addWidget(self.fp_pie_merge_method, 1, 1)
         pie_layout.addWidget(self.fp_pie_multi_folder, 1, 2)
@@ -513,19 +529,15 @@ class WorkspacePagesMixin:
         self.fp_temp_reference_mode.setToolTip("Sum谱参考：所有温度累加后统一寻峰；独立参考：每个温度点独立寻峰")
         self.fp_temp_reference_mode.addItem("Sum谱参考", "sum")
         self.fp_temp_reference_mode.addItem("独立参考", "individual")
-        self.fp_temp_prefer_gaussian = QtWidgets.QCheckBox("高斯积分")
-        self.fp_temp_prefer_gaussian.setToolTip("使用高斯峰面积而非简单峰值强度，更准确反映积分强度")
-        self.fp_temp_prefer_gaussian.setChecked(True)
-        self.fp_temp_kr_mz = QtWidgets.QSpinBox()
-        self.fp_temp_kr_mz.setToolTip("Kr（氪）定标物种的质量数，默认84，用于计算膨胀系数 λ(T)")
-        self.fp_temp_kr_mz.setRange(1, 1000)
-        self.fp_temp_kr_mz.setValue(84)
-
+        self.fp_temp_integration_method = QtWidgets.QComboBox()
+        self.fp_temp_integration_method.setToolTip("温度扫描原始积分信号的默认计算方式；高斯拟合不可用时回退范围累加，并在结果中记录实际方式")
+        self.fp_temp_integration_method.addItem("范围累加", "sum_counts")
+        self.fp_temp_integration_method.addItem("扣基线积分", "baseline")
+        self.fp_temp_integration_method.addItem("高斯", "gaussian")
         temp_layout.addWidget(QtWidgets.QLabel("参考模式"), 0, 0)
         temp_layout.addWidget(self.fp_temp_reference_mode, 0, 1)
-        temp_layout.addWidget(self.fp_temp_prefer_gaussian, 0, 2)
-        temp_layout.addWidget(QtWidgets.QLabel("Kr 参考 m/z"), 1, 0)
-        temp_layout.addWidget(self.fp_temp_kr_mz, 1, 1)
+        temp_layout.addWidget(QtWidgets.QLabel("积分方式"), 0, 2)
+        temp_layout.addWidget(self.fp_temp_integration_method, 0, 3)
         params_grid.addWidget(temp_group, 0, 1)
 
         # -- PICS defaults --
@@ -569,7 +581,7 @@ class WorkspacePagesMixin:
         mf_layout.setVerticalSpacing(6)
 
         self.fp_mf_mass_disc_exponent = QtWidgets.QDoubleSpinBox()
-        self.fp_mf_mass_disc_exponent.setToolTip("质量歧视因子公式 D_i = (MW/30)^n 中的指数n，值取决于离子源类型和质量分析器特性")
+        self.fp_mf_mass_disc_exponent.setToolTip("质量响应因子公式 D_i = (MW/30)^n 中的指数n，值取决于离子源类型和质量分析器特性")
         self.fp_mf_mass_disc_exponent.setRange(0, 10)
         self.fp_mf_mass_disc_exponent.setDecimals(6)
         self.fp_mf_mass_disc_exponent.setValue(0.77897)
@@ -593,7 +605,7 @@ class WorkspacePagesMixin:
         self.fp_mf_reference_temperature.setRange(0, 2000)
         self.fp_mf_reference_temperature.setValue(550)
 
-        mf_layout.addWidget(QtWidgets.QLabel("质量歧视指数"), 0, 0)
+        mf_layout.addWidget(QtWidgets.QLabel("质量响应指数"), 0, 0)
         mf_layout.addWidget(self.fp_mf_mass_disc_exponent, 0, 1)
         mf_layout.addWidget(QtWidgets.QLabel("母体 m/z"), 0, 2)
         mf_layout.addWidget(self.fp_mf_parent_mz, 0, 3)
@@ -887,17 +899,78 @@ class WorkspacePagesMixin:
         """
         self._collect_all_project_parameters_from_ui(ps)
 
+    def _switch_tool_pages_to_standalone(self, ps: ProjectSettings) -> None:
+        """Refresh tool pages after the project scope is removed."""
+        self._load_project_settings_to_parameter_widgets(ps)
+        self.apply_config_defaults()
+        self.normalization_settings = load_normalization_settings()
+        calibration = self.current_calibration()
+
+        if hasattr(self, "set_spectrum_source_scope"):
+            self.set_spectrum_source_scope("custom", apply_project=False)
+            self.lineEdit.setText(getattr(self, "_custom_single_spectrum_file", ""))
+            self.folder_path.setText(getattr(self, "_custom_sum_spectrum_folder", ""))
+        if hasattr(self, "temperature_page"):
+            self.temperature_page.normalization_settings = self.normalization_settings
+            self.temperature_page.calibration = calibration
+            self.temperature_page.set_project_settings(ps, activate_project_scope=False)
+        if hasattr(self, "pie_page"):
+            self.pie_page.normalization_settings = self.normalization_settings
+            self.pie_page.calibration = calibration
+            self.pie_page.set_project_settings(ps, activate_project_scope=False)
+        if hasattr(self, "mole_fraction_page"):
+            self.mole_fraction_page.normalization_settings = self.normalization_settings
+            self.mole_fraction_page.calibration = calibration
+            self.mole_fraction_page.set_project_settings(ps)
+        if hasattr(self, "pics_page"):
+            self.pics_page.normalization_settings = self.normalization_settings
+            self.pics_page.calibration = calibration
+            self.pics_page.set_project_settings(ps)
+
     def new_project(self) -> None:
         """清空表单，准备创建新项目"""
         self._creating_new_project = True
         self._opened_project_root = None
         self.project_settings_manager.clear_project_path()
+        ps = ProjectSettings()
+        self.project_settings_manager.set(ps)
         self.project_name_edit.clear()
         self.project_system_edit.clear()
         self.project_description_edit.clear()
         self.project_output_dir_edit.clear()
+        self.project_temperature_folder_edit.clear()
+        self.project_pie_folder_edit.clear()
+        self.project_manual_peak_edit.clear()
+        self._switch_tool_pages_to_standalone(ps)
+        self._clear_datasource_row_statuses()
+        self.refresh_project_parameter_summary()
         self.project_name_edit.setFocus()
+        self.update_project_title()
+        if hasattr(self, "project_close_button"):
+            self.project_close_button.setEnabled(False)
         self.statusbar.showMessage("已清空表单，请填写项目信息并点击'保存并应用'", 3000)
+
+    def close_current_project(self) -> None:
+        """Close the active project without touching files on disk."""
+        self._creating_new_project = False
+        self._opened_project_root = None
+        self.project_settings_manager.clear_project_path()
+        ps = ProjectSettings()
+        self.project_settings_manager.set(ps)
+
+        self._read_project_settings_to_ui(ps)
+        self.project_name_edit.clear()
+        self.project_system_edit.clear()
+        self.project_description_edit.clear()
+        self.project_output_dir_edit.clear()
+        self._switch_tool_pages_to_standalone(ps)
+
+        self._clear_datasource_row_statuses()
+        self.refresh_project_parameter_summary()
+        self.update_project_title()
+        if hasattr(self, "project_close_button"):
+            self.project_close_button.setEnabled(False)
+        self.statusbar.showMessage("已关闭当前项目，工具页面已切换为临时数据", 3000)
 
     def open_project(self) -> None:
         """打开已有项目（选择项目根目录或配置文件）"""
@@ -950,6 +1023,8 @@ class WorkspacePagesMixin:
 
             self._apply_settings_to_tools(ps)
             self.update_project_title()
+            if hasattr(self, "project_close_button"):
+                self.project_close_button.setEnabled(True)
             self.refresh_project_lifecycle(ps)
             self.refresh_project_parameter_summary()
             self.refresh_project_datasource_page(ps)
@@ -1018,6 +1093,8 @@ class WorkspacePagesMixin:
 
         # Step 7: Refresh UI
         self.update_project_title()
+        if hasattr(self, "project_close_button"):
+            self.project_close_button.setEnabled(True)
         self.refresh_project_lifecycle(ps)
         self.refresh_project_parameter_summary()
         self.statusbar.showMessage("[成功] 项目已保存、初始化并应用到工具", 3000)
@@ -1063,6 +1140,8 @@ class WorkspacePagesMixin:
 
         # Refresh UI (but don't sync to tools)
         self.update_project_title()
+        if hasattr(self, "project_close_button"):
+            self.project_close_button.setEnabled(True)
         self.refresh_project_lifecycle(ps)
         self.refresh_project_parameter_summary()
         self.statusbar.showMessage(f"✓ 项目已初始化：{project_root(ps)}", 3000)
@@ -1081,9 +1160,9 @@ class WorkspacePagesMixin:
         # Temperature page and PIE page are now read-only parameter displays
         # No need to manually set folder_edit - parameters come from ProjectSettings
         if hasattr(self, "temperature_page"):
-            self.temperature_page.set_project_settings(ps)
+            self.temperature_page.set_project_settings(ps, activate_project_scope=True)
         if hasattr(self, "pie_page"):
-            self.pie_page.set_project_settings(ps)
+            self.pie_page.set_project_settings(ps, activate_project_scope=True)
             if ps.pics_database_path and os.path.exists(ps.pics_database_path):
                 self.pie_page.load_database(show_message=False)
         self._sync_project_settings_to_tool_pages(ps)
@@ -1171,6 +1250,8 @@ class WorkspacePagesMixin:
             ("温度扫描目录", "temperature_scan"),
             ("PIE扫描目录", "pie_scan"),
             ("手动卡峰文件", "manual_peak"),
+            ("Kr定标扫描目录", "kr_calibration"),
+            ("Kr定标卡峰文件", "kr_calibration_peak"),
         ]
         labels = [label for label, _source_key in source_items]
         label, ok = QtWidgets.QInputDialog.getItem(
@@ -1186,7 +1267,7 @@ class WorkspacePagesMixin:
 
         source_key = dict(source_items)[label]
         start_dir = self._dialog_start_dir(ps.output_dir)
-        if source_key == "manual_peak":
+        if source_key in {"manual_peak", "kr_calibration_peak"}:
             source_path, _ = QFileDialog.getOpenFileName(
                 self,
                 f"选择{label}",
@@ -1231,6 +1312,7 @@ class WorkspacePagesMixin:
         self.project_settings_manager.save()
 
         self._read_project_settings_to_ui(ps)
+        self._load_project_settings_to_parameter_widgets(ps)
         self._apply_settings_to_tools(ps)
         self.update_project_title()
         self.refresh_project_lifecycle(ps)
@@ -1582,8 +1664,16 @@ class WorkspacePagesMixin:
     def update_project_title(self) -> None:
         project_name = self.project_name_edit.text().strip()
         project_system = self.project_system_edit.text().strip()
-        caption = project_name or project_system or "未命名项目"
-        self.project_status_label.setText(f"当前项目: {caption}")
+        caption = project_name or project_system
+        has_project = self.project_settings_manager.has_project_path()
+        if has_project:
+            self.project_status_label.setText(f"当前项目: {caption or '未命名项目'}")
+        elif caption:
+            self.project_status_label.setText(f"新项目: {caption}（未保存）")
+        else:
+            self.project_status_label.setText("当前项目: 未打开项目")
+        if hasattr(self, "project_close_button"):
+            self.project_close_button.setEnabled(has_project)
         window_title = "BL03U_MassSpectrumTool"
         if project_name:
             window_title = f"{window_title} - {project_name}"
@@ -1598,7 +1688,7 @@ class WorkspacePagesMixin:
             ps = self.project_settings_manager.get()
             calibration = ps.to_calibration()
             light_map = {"io": "IO光电流", "beam_current": "Beam Current"}
-            pie_map = {"first": "首点归一", "none": "逐点除光强", "off": "关闭"}
+            pie_map = {"first": "光强校正", "none": "光强校正", "off": "不校正光强"}
             peak_map = {"ensemble": "Ensemble融合检测", "prominence": "Prominence", "legacy": "传统局部极大", "cwt": "CWT小波"}
             temp_map = {"sum": "Sum谱参考", "individual": "独立参考"}
             merge_map = {
@@ -1613,16 +1703,17 @@ class WorkspacePagesMixin:
                 "统一参数:\n"
                 f"定标 A={calibration.a:.6g}, B={calibration.b:.6g}, C={calibration.c:.6g}; "
                 f"光强来源={light_map.get(ps.light_source, ps.light_source)}; "
-                f"温度光强归一化={'开' if ps.temperature_photon_normalize else '关'}; "
-                f"PIE光强={pie_map.get(ps.pie_photon_mode, ps.pie_photon_mode)}; "
-                f"质量歧视D={ps.mass_discrimination:.6g}; "
+                f"Kr m/z={ps.kr_mz}; "
+                f"Kr λ(T)={'已计算' if ps.expansion_factors else '未计算'}; "
                 f"主工作台寻峰={peak_map.get(ps.peak_algorithm, ps.peak_algorithm)}\n"
                 "功能默认:\n"
+                f"温度光强归一化={'开' if ps.temperature_photon_normalize else '关'}, "
+                f"温度Kr校正={'开' if ps.temperature_kr_correct else '关'}, "
+                f"PIE光强={pie_map.get(ps.pie_photon_mode, ps.pie_photon_mode)}; "
                 f"PIE 能量小数位={ps.pie_energy_decimals}, "
                 f"递归={'开' if ps.pie_recursive else '关'}, "
                 f"合并={merge_map.get(ps.pie_merge_method, ps.pie_merge_method)}; "
                 f"温度参考={temp_map.get(ps.temp_reference_mode, ps.temp_reference_mode)}, "
-                f"Kr m/z={ps.temp_kr_mz}; "
                 f"PICS NO m/z={ps.pics_no_mz}; "
                 f"母体 m/z={ps.mf_parent_mz}, 光子能量={ps.mf_photon_energy:.4g} eV\n"
                 "分析产物:\n"

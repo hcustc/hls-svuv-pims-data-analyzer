@@ -9,6 +9,7 @@ import numpy as np
 
 
 FLOAT_RE = re.compile(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?")
+FILENAME_REPLICATE_RE = re.compile(r"^(?P<base>.+)-(?P<index>\d{3,})$")
 
 
 @dataclass
@@ -61,8 +62,8 @@ def parse_numeric_rows(lines: Iterable[str]) -> tuple[list[str], np.ndarray]:
         line = raw_line.strip()
         if not line:
             continue
-        values = [float(match.group(0)) for match in FLOAT_RE.finditer(line)]
-        if values and _line_is_numeric_like(line, values):
+        values = _parse_numeric_line(line)
+        if values:
             rows.append(values)
         else:
             metadata.append(line)
@@ -75,10 +76,23 @@ def parse_numeric_rows(lines: Iterable[str]) -> tuple[list[str], np.ndarray]:
     return metadata, np.array(padded, dtype=float)
 
 
-def _line_is_numeric_like(line: str, values: list[float]) -> bool:
-    stripped = FLOAT_RE.sub("", line)
-    stripped = stripped.replace(",", "").replace("\t", "").replace(" ", "")
-    return not stripped and bool(values)
+def _parse_numeric_line(line: str) -> list[float] | None:
+    tokens = line.replace(",", " ").replace("\t", " ").split()
+    if not tokens:
+        return None
+    try:
+        return [float(token) for token in tokens]
+    except ValueError:
+        return None
+
+
+def _load_numeric_rows_fast(lines: list[str]) -> np.ndarray | None:
+    if not lines:
+        return np.array([], dtype=float)
+    try:
+        return np.loadtxt(lines, dtype=float, ndmin=2)
+    except Exception:
+        return None
 
 
 def read_spectrum(
@@ -92,9 +106,16 @@ def read_spectrum(
     path = Path(path)
     lines = _read_lines(path)
     data_lines = lines[header_lines:] if header_lines is not None else lines
-    metadata, rows = parse_numeric_rows(data_lines)
     if header_lines is not None:
-        metadata = [line.strip() for line in lines[:header_lines] if line.strip()] + metadata
+        header_metadata = [line.strip() for line in lines[:header_lines] if line.strip()]
+        rows = _load_numeric_rows_fast(data_lines)
+        if rows is None:
+            metadata, rows = parse_numeric_rows(data_lines)
+            metadata = header_metadata + metadata
+        else:
+            metadata = header_metadata
+    else:
+        metadata, rows = parse_numeric_rows(data_lines)
 
     if rows.size == 0:
         x = np.array([], dtype=float)
@@ -122,6 +143,30 @@ def read_bl03u_txt(path: str | Path, *, trim_start: int = 4000) -> Spectrum:
 def list_spectrum_files(folder: str | Path, suffixes: tuple[str, ...] = (".txt", ".asc", ".888")) -> list[Path]:
     folder = Path(folder)
     return sorted(path for path in folder.iterdir() if path.is_file() and path.suffix.lower() in suffixes)
+
+
+def filename_replicate_key(path: str | Path) -> tuple[Path, str] | None:
+    """Return the acquisition-repeat key for names like ``C24110904-0001.txt``."""
+    path = Path(path)
+    match = FILENAME_REPLICATE_RE.match(path.stem)
+    if not match:
+        return None
+    return path.parent, match.group("base")
+
+
+def find_filename_replicate_groups(paths: Iterable[str | Path]) -> dict[tuple[Path, str], list[Path]]:
+    """Group files by parent directory and filename stem without trailing repeat index."""
+    grouped: dict[tuple[Path, str], list[Path]] = {}
+    for item in paths:
+        path = Path(item)
+        key = filename_replicate_key(path)
+        if key is not None:
+            grouped.setdefault(key, []).append(path)
+    return {
+        key: sorted(values)
+        for key, values in grouped.items()
+        if len(values) > 1
+    }
 
 
 def read_folder_spectra(

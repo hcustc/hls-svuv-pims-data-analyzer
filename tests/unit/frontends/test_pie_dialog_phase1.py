@@ -19,6 +19,7 @@ except ImportError as e:
 pytestmark = pytest.mark.gui
 
 from bl03u_masstool.core.calibration import Calibration
+from bl03u_masstool.core.project_settings import ProjectSettings
 from bl03u_masstool.frontends.pyqt_app.pie.dialog import PIESpeciesFitDialog
 
 
@@ -37,6 +38,63 @@ def pie_dialog(qapp):
     dialog.show()
     yield dialog
     dialog.deleteLater()
+
+
+def test_pie_source_scope_defaults_to_temporary_without_project(pie_dialog):
+    assert pie_dialog.pie_source_scope == "temporary"
+    assert pie_dialog.temporary_source_button.isChecked()
+    assert not pie_dialog.folder_edit.isReadOnly()
+
+
+def test_project_scope_applies_project_source_and_restores_temporary_path(pie_dialog, tmp_path):
+    temporary_folder = tmp_path / "temporary_pie"
+    project_folder = tmp_path / "project_pie"
+    temporary_folder.mkdir()
+    project_folder.mkdir()
+
+    pie_dialog.folder_edit.setText(str(temporary_folder))
+    ps = ProjectSettings(
+        project_name="Project PIE",
+        output_dir=str(tmp_path / "project"),
+        pie_scan_folder=str(project_folder),
+    )
+
+    pie_dialog.set_project_settings(ps, activate_project_scope=True)
+
+    assert pie_dialog.pie_source_scope == "project"
+    assert pie_dialog.project_source_button.isChecked()
+    assert pie_dialog.folder_edit.text() == str(project_folder)
+    assert pie_dialog.folder_edit.isReadOnly()
+
+    pie_dialog.set_pie_source_scope("temporary")
+
+    assert pie_dialog.pie_source_scope == "temporary"
+    assert pie_dialog.temporary_source_button.isChecked()
+    assert pie_dialog.folder_edit.text() == str(temporary_folder)
+    assert not pie_dialog.folder_edit.isReadOnly()
+
+
+def test_project_settings_sync_respects_temporary_source_scope(pie_dialog, tmp_path):
+    temporary_folder = tmp_path / "temporary_pie"
+    project_folder = tmp_path / "project_pie"
+    updated_project_folder = tmp_path / "updated_project_pie"
+    for folder in (temporary_folder, project_folder, updated_project_folder):
+        folder.mkdir()
+
+    ps = ProjectSettings(
+        project_name="Project PIE",
+        output_dir=str(tmp_path / "project"),
+        pie_scan_folder=str(project_folder),
+    )
+    pie_dialog.folder_edit.setText(str(temporary_folder))
+    pie_dialog.set_project_settings(ps, activate_project_scope=True)
+    pie_dialog.set_pie_source_scope("temporary")
+
+    ps.pie_scan_folder = str(updated_project_folder)
+    pie_dialog.set_project_settings(ps)
+
+    assert pie_dialog.pie_source_scope == "temporary"
+    assert pie_dialog.folder_edit.text() == str(temporary_folder)
 
 
 class TestPerM_zConfiguration:

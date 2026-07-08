@@ -153,13 +153,16 @@ def test_function_defaults_apply_to_project_settings(qapp):
         assert merge_index >= 0
         widget.temp_peak_source_combo.setCurrentIndex(peak_source_index)
         widget.temp_reference_mode_combo.setCurrentIndex(reference_index)
-        widget.temp_prefer_gaussian_check.setChecked(False)
-        widget.temp_kr_mz_edit.setValue(86)
+        temp_integration_index = widget.temp_integration_method_combo.findData("baseline")
+        assert temp_integration_index >= 0
+        widget.temp_integration_method_combo.setCurrentIndex(temp_integration_index)
         widget.temp_curve_class_change_threshold_edit.setValue(0.35)
         widget.temp_curve_class_peak_fraction_edit.setValue(0.72)
         widget.pie_energy_decimals_edit.setValue(3)
         widget.pie_recursive_check.setChecked(False)
-        widget.pie_prefer_gaussian_check.setChecked(False)
+        integration_index = widget.pie_integration_method_combo.findData("baseline")
+        assert integration_index >= 0
+        widget.pie_integration_method_combo.setCurrentIndex(integration_index)
         widget.pie_multi_folder_check.setChecked(True)
         widget.pie_merge_method_combo.setCurrentIndex(merge_index)
         widget.pics_no_mz_edit.setValue(31)
@@ -179,12 +182,13 @@ def test_function_defaults_apply_to_project_settings(qapp):
         assert ps.temp_peak_source == "manual"
         assert ps.temp_reference_mode == "individual"
         assert ps.temp_prefer_gaussian is False
-        assert ps.temp_kr_mz == 86
+        assert ps.temp_integration_method == "baseline"
         assert ps.temp_curve_class_change_threshold == pytest.approx(0.35)
         assert ps.temp_curve_class_peak_fraction == pytest.approx(0.72)
         assert ps.pie_energy_decimals == 3
         assert ps.pie_recursive is False
         assert ps.pie_prefer_gaussian is False
+        assert ps.pie_integration_method == "baseline"
         assert ps.pie_multi_folder_mode is True
         assert ps.pie_merge_method == "mean"
         assert ps.pics_no_mz == 31
@@ -210,15 +214,15 @@ def test_common_parameters_apply_to_project_settings(qapp):
         widget.set_project_settings(ps)
 
         light_idx = widget.light_source_combo.findData("beam_current")
-        pie_idx = widget.pie_photon_mode_combo.findData("off")
         preset_idx = widget.mf_md_preset_combo.findData("30 Torr (Catalysis)")
         assert light_idx >= 0
-        assert pie_idx >= 0
         assert preset_idx >= 0
+        assert not hasattr(widget, "pie_photon_mode_combo")
+        assert not hasattr(widget, "temperature_photon_check")
+        assert not hasattr(widget, "temperature_kr_check")
 
         widget.light_source_combo.setCurrentIndex(light_idx)
-        widget.pie_photon_mode_combo.setCurrentIndex(pie_idx)
-        widget.mass_discrimination_edit.setValue(0.42)
+        widget.settings.expansion_factors = {400.0: 1.0, 800.0: 1.2}
         widget.calibration_a_edit.setValue(1.23e-7)
         widget.calibration_b_edit.setValue(2.34e-4)
         widget.calibration_c_edit.setValue(0.56)
@@ -234,8 +238,10 @@ def test_common_parameters_apply_to_project_settings(qapp):
         widget.apply_to_settings(ps)
 
         assert ps.light_source == "beam_current"
-        assert ps.pie_photon_mode == "off"
-        assert ps.mass_discrimination == pytest.approx(0.42)
+        assert ps.pie_photon_mode == "none"
+        assert ps.temperature_photon_normalize is True
+        assert ps.temperature_kr_correct is False
+        assert ps.mass_discrimination == pytest.approx(1.0)
         assert ps.cal_a == pytest.approx(1.23e-7)
         assert ps.cal_b == pytest.approx(2.34e-4)
         assert ps.cal_c == pytest.approx(0.56)
@@ -247,6 +253,105 @@ def test_common_parameters_apply_to_project_settings(qapp):
         assert "H" in ps.selected_elements
         assert "O" not in ps.selected_elements
     finally:
+        widget.deleteLater()
+
+
+def test_temperature_page_owns_analysis_switches(qapp, tmp_path):
+    from bl03u_masstool.core.calibration import Calibration
+    from bl03u_masstool.core.normalization import NormalizationSettings
+    from bl03u_masstool.frontends.pyqt_app.temperature.dialog import TemperatureScanDialog
+
+    scan_dir = tmp_path / "temperature_scan"
+    scan_dir.mkdir()
+    (scan_dir / "C24110904-0000.txt").write_text("1 2\n", encoding="utf-8")
+    settings = NormalizationSettings(light_source="beam_current", expansion_factors={})
+    widget = TemperatureScanDialog(Calibration(), settings)
+    try:
+        ps = ProjectSettings(
+            temperature_scan_folder=str(scan_dir),
+            temperature_photon_normalize=False,
+            temperature_kr_correct=True,
+            temp_replicate_mode="sum",
+        )
+        widget.set_project_settings(ps, activate_project_scope=True)
+        assert widget.temperature_photon_check.isChecked() is False
+        assert widget.temperature_kr_check.isChecked() is True
+        assert widget.replicate_enabled_check.isChecked() is True
+        assert widget.replicate_mode_combo.currentData() == "sum"
+        assert "Beam Current" in widget.light_source_status_label.text()
+
+        widget.run_analysis()
+
+        assert ps.temperature_photon_normalize is False
+        assert ps.temperature_kr_correct is False
+        assert ps.temp_replicate_mode == "sum"
+        assert "退回" in widget.inline_status_text.text()
+    finally:
+        if widget.worker is not None and widget.worker.isRunning():
+            widget.worker.wait(1000)
+        widget.deleteLater()
+
+
+def test_pie_page_owns_photon_mode_switch(qapp, tmp_path, monkeypatch):
+    from bl03u_masstool.core.calibration import Calibration
+    from bl03u_masstool.core.normalization import NormalizationSettings
+    from bl03u_masstool.frontends.pyqt_app.pie.dialog import PIESpeciesFitDialog
+
+    pie_dir = tmp_path / "pie_scan"
+    pie_dir.mkdir()
+    (pie_dir / "8.0eV.txt").write_text("1 2\n", encoding="utf-8")
+
+    widget = PIESpeciesFitDialog(Calibration(), NormalizationSettings(light_source="beam_current"))
+    try:
+        ps = ProjectSettings(
+            project_name="PIE Switch",
+            output_dir=str(tmp_path / "project"),
+            pie_scan_folder=str(pie_dir),
+            pie_photon_mode="first",
+        )
+        manager = ProjectSettingsManager()
+        manager.set_project_path(tmp_path / "project")
+        manager.set(ps)
+        widget.set_project_settings(ps, activate_project_scope=True)
+
+        assert widget.photon_correction_check.isChecked() is True
+
+        monkeypatch.setattr(widget, "set_busy", lambda *args, **kwargs: None)
+
+        class _SignalStub:
+            def connect(self, *args, **kwargs):
+                pass
+
+        class DummyWorker:
+            def __init__(self, *args, **kwargs):
+                self.finished_with_result = _SignalStub()
+                self.failed = _SignalStub()
+                self.finished = _SignalStub()
+
+            def start(self):
+                pass
+
+        monkeypatch.setattr(
+            "bl03u_masstool.frontends.pyqt_app.pie.dialog.WorkerThread",
+            DummyWorker,
+        )
+
+        widget.run_analysis()
+
+        saved = load_project_settings(tmp_path / "project" / "config" / "project.yaml")
+        assert ps.pie_photon_mode == "none"
+        assert widget.normalization_settings.pie_photon_mode == "none"
+        assert saved.pie_photon_mode == "none"
+
+        widget.photon_correction_check.setChecked(False)
+        widget.run_analysis()
+
+        saved = load_project_settings(tmp_path / "project" / "config" / "project.yaml")
+        assert ps.pie_photon_mode == "off"
+        assert widget.normalization_settings.pie_photon_mode == "off"
+        assert saved.pie_photon_mode == "off"
+    finally:
+        ProjectSettingsManager().clear_project_path()
         widget.deleteLater()
 
 
@@ -280,6 +385,27 @@ def test_project_storage_field_explains_parent_and_root_semantics(qapp):
 
         assert "父目录" in placeholder
         assert "项目根目录" in placeholder
+    finally:
+        window.project_settings_manager.clear_project_path()
+        window.deleteLater()
+
+
+def test_empty_state_placeholders_do_not_use_specific_system_examples(qapp):
+    window = MainWindow()
+    try:
+        placeholders = [
+            window.project_name_edit.placeholderText(),
+            window.project_system_edit.placeholderText(),
+            window.ionization_page.query_edit.placeholderText(),
+            window.isotope_page.formula_edit.placeholderText(),
+            window.pics_page.txt_new_name.placeholderText(),
+            window.pics_page.txt_new_formula.placeholderText(),
+        ]
+        disallowed = ["C6F11O2H", "C6H6", "C6H5ClO", "Benzene", "SVUV-PIMS", "methane", "methyl"]
+
+        for placeholder in placeholders:
+            for token in disallowed:
+                assert token not in placeholder
     finally:
         window.project_settings_manager.clear_project_path()
         window.deleteLater()
@@ -382,10 +508,15 @@ def test_save_and_apply_materializes_project_data_sources(qapp, tmp_path, monkey
     downloads_dir.mkdir()
     temp_source = tmp_path / "external" / "温度扫描"
     pie_source = tmp_path / "external" / "PIE"
+    kr_source = tmp_path / "external" / "Kr定标"
+    kr_peak_source = tmp_path / "external" / "kr_peaks.csv"
     (temp_source / "8.0eV").mkdir(parents=True)
     pie_source.mkdir(parents=True)
+    kr_source.mkdir(parents=True)
     (temp_source / "8.0eV" / "650K.txt").write_text("temp", encoding="utf-8")
     (pie_source / "8.0eV.txt").write_text("pie", encoding="utf-8")
+    (kr_source / "Kr_650K.txt").write_text("kr", encoding="utf-8")
+    kr_peak_source.write_text("mz,start,end\n84,1,2\n", encoding="utf-8")
 
     window = MainWindow()
     monkeypatch.setattr(QtWidgets.QMessageBox, "critical", lambda *args, **kwargs: pytest.fail(str(args)))
@@ -395,21 +526,32 @@ def test_save_and_apply_materializes_project_data_sources(qapp, tmp_path, monkey
         window.project_output_dir_edit.setText(str(downloads_dir))
         window.project_temperature_folder_edit.setText(str(temp_source))
         window.project_pie_folder_edit.setText(str(pie_source))
+        window.project_common_parameters_widget.kr_folder_edit.setText(str(kr_source))
+        window.project_common_parameters_widget.kr_peak_mode_manual_radio.setChecked(True)
+        window.project_common_parameters_widget.kr_peak_file_edit.setText(str(kr_peak_source))
 
         window.save_and_apply_project_settings()
 
         project_dir = downloads_dir / "managed"
         managed_temp = project_dir / "raw_data" / "temperature_scan" / "温度扫描"
         managed_pie = project_dir / "raw_data" / "pie_scan" / "PIE"
+        managed_kr = project_dir / "raw_data" / "kr_calibration" / "Kr定标"
+        managed_kr_peak = project_dir / "analysis" / "spectrum" / "kr_manual_peaks" / "kr_peaks.csv"
         saved = load_project_settings(project_dir / "config" / "project.yaml")
 
         assert Path(saved.temperature_scan_folder) == managed_temp
         assert Path(saved.pie_scan_folder) == managed_pie
+        assert Path(saved.kr_calibration_folder) == managed_kr
+        assert Path(saved.kr_calibration_peak_file) == managed_kr_peak
         assert window.project_temperature_folder_edit.text() == str(managed_temp)
         assert window.project_pie_folder_edit.text() == str(managed_pie)
+        assert window.project_common_parameters_widget.kr_folder_edit.text() == str(managed_kr)
+        assert window.project_common_parameters_widget.kr_peak_file_edit.text() == str(managed_kr_peak)
         assert not managed_temp.is_symlink()
         assert (managed_temp / "8.0eV" / "650K.txt").read_text(encoding="utf-8") == "temp"
         assert (managed_pie / "8.0eV.txt").read_text(encoding="utf-8") == "pie"
+        assert (managed_kr / "Kr_650K.txt").read_text(encoding="utf-8") == "kr"
+        assert managed_kr_peak.read_text(encoding="utf-8").startswith("mz,start,end")
     finally:
         window.project_settings_manager.clear_project_path()
         window.deleteLater()
@@ -475,26 +617,127 @@ def test_open_project_restores_data_sources_and_applies_to_tools(qapp, tmp_path,
         assert window.project_temperature_folder_edit.text() == str(temperature_folder)
         assert window.project_pie_folder_edit.text() == str(pie_folder)
         assert window.project_manual_peak_edit.text() == str(manual_peak)
-        assert window.spectrum_source_scope == "custom"
-        assert not window.lineEdit.isReadOnly()
+        assert window.spectrum_source_scope == "project"
+        assert window.projectSourceButton.text() == "项目数据"
+        assert window.customSourceButton.text() == "临时数据"
+        assert window.lineEdit.isReadOnly()
+        assert window.lineEdit.text() == str(single_file)
+        assert window.folder_path.text() == str(sum_folder)
         assert window.singleBrowseButton.isEnabled()
         assert window.project_common_parameters_widget.show_actions is False
         assert window.project_common_parameters_widget.action_bar.isHidden()
         assert window.current_calibration().a == pytest.approx(9.1e-7)
         assert window.normalization_settings.light_source == "beam_current"
         assert window.normalization_settings.pie_photon_mode == "off"
-        assert window.normalization_settings.mass_discrimination == pytest.approx(0.55)
-        assert window.project_common_parameters_widget.mass_discrimination_edit.value() == pytest.approx(0.55)
+        assert window.normalization_settings.mass_discrimination == pytest.approx(1.0)
+        assert not hasattr(window.project_common_parameters_widget, "mass_discrimination_edit")
         assert window.project_common_parameters_widget.mf_md_preset_combo.currentText() == "30 Torr (Catalysis)"
         assert window.project_common_parameters_widget.mf_mass_disc_exponent_edit.value() == pytest.approx(0.75148)
         assert window.temperature_page.project_settings.temperature_scan_folder == str(temperature_folder)
-        assert window.temperature_page.normalization_settings.mass_discrimination == pytest.approx(0.55)
+        assert window.temperature_page.temperature_source_scope == "project"
+        assert window.temperature_page.project_source_button.text() == "项目数据"
+        assert window.temperature_page.temporary_source_button.text() == "临时数据"
+        assert window.temperature_page.select_folder_button.isHidden()
+        assert window.temperature_page.normalization_settings.mass_discrimination == pytest.approx(1.0)
         assert window.temperature_page.calibration.a == pytest.approx(9.1e-7)
         assert window.pie_page.project_settings.pie_scan_folder == str(pie_folder)
-        assert window.pie_page.normalization_settings.mass_discrimination == pytest.approx(0.55)
+        assert window.pie_page.pie_source_scope == "project"
+        assert window.pie_page.project_source_button.text() == "项目数据"
+        assert window.pie_page.temporary_source_button.text() == "临时数据"
+        assert window.pie_page.select_folder_button.isHidden()
+        assert window.pie_page.normalization_settings.mass_discrimination == pytest.approx(1.0)
         assert window.mole_fraction_page.project_settings.mf_md_preset == "30 Torr (Catalysis)"
         assert window.datasource_row_status_labels["temperature_scan"].text().startswith("✓")
         assert window.datasource_row_status_labels["pie_scan"].text().startswith("✓")
+    finally:
+        window.project_settings_manager.clear_project_path()
+        window.deleteLater()
+
+
+def test_close_project_returns_related_tools_to_temporary_data_scope(qapp, tmp_path, monkeypatch):
+    project_dir = tmp_path / "Opened_Project"
+    single_file = project_dir / "raw_data" / "single.txt"
+    sum_folder = project_dir / "raw_data" / "sum"
+    temperature_folder = project_dir / "raw_data" / "temperature_scan"
+    pie_folder = project_dir / "raw_data" / "pie_scan"
+    for folder in (sum_folder, temperature_folder, pie_folder):
+        folder.mkdir(parents=True)
+    single_file.parent.mkdir(parents=True, exist_ok=True)
+    single_file.write_text("tof intensity\n1 2\n", encoding="utf-8")
+    ps = ProjectSettings(
+        project_name="Opened Project",
+        system="C6H6",
+        output_dir=str(project_dir),
+        single_spectrum_file=str(single_file),
+        sum_spectrum_folder=str(sum_folder),
+        temperature_scan_folder=str(temperature_folder),
+        pie_scan_folder=str(pie_folder),
+    )
+    save_project_settings(ps, project_dir / "config" / "project.yaml")
+
+    window = MainWindow()
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getExistingDirectory", lambda *args, **kwargs: str(project_dir))
+    try:
+        window.open_project()
+
+        assert window.project_settings_manager.has_project_path()
+        assert window.spectrum_source_scope == "project"
+        assert window.temperature_page.temperature_source_scope == "project"
+        assert window.pie_page.pie_source_scope == "project"
+
+        window.close_current_project()
+
+        assert not window.project_settings_manager.has_project_path()
+        assert window.project_name_edit.text() == ""
+        assert window.project_system_edit.text() == ""
+        assert window.project_status_label.text() == "当前项目: 未打开项目"
+        assert not window.project_close_button.isEnabled()
+        assert window.spectrum_source_scope == "custom"
+        assert not window.lineEdit.isReadOnly()
+        assert window.singleBrowseButton.isEnabled()
+        assert window.temperature_page.temperature_source_scope == "temporary"
+        assert not window.temperature_page.select_folder_button.isHidden()
+        assert window.pie_page.pie_source_scope == "temporary"
+        assert not window.pie_page.select_folder_button.isHidden()
+    finally:
+        window.project_settings_manager.clear_project_path()
+        window.deleteLater()
+
+
+def test_temperature_temporary_source_survives_project_parameter_sync(qapp, tmp_path):
+    project_dir = tmp_path / "Project_Temp_Source"
+    project_temp = project_dir / "raw_data" / "temperature_scan"
+    temporary_temp = tmp_path / "temporary_temperature"
+    updated_project_temp = project_dir / "raw_data" / "temperature_scan_updated"
+    for folder in (project_temp, temporary_temp, updated_project_temp):
+        folder.mkdir(parents=True)
+
+    ps = ProjectSettings(
+        project_name="Temp Source",
+        output_dir=str(project_dir),
+        temperature_scan_folder=str(project_temp),
+    )
+    save_project_settings(ps, project_dir / "config" / "project.yaml")
+
+    window = MainWindow()
+    try:
+        window.project_settings_manager.set_project_path(project_dir)
+        window.project_settings_manager.set(ps)
+        window._read_project_settings_to_ui(ps)
+        window._load_project_settings_to_parameter_widgets(ps)
+        window._apply_settings_to_tools(ps)
+
+        assert window.temperature_page.temperature_source_scope == "project"
+        assert window.temperature_page.folder_edit.text() == str(project_temp)
+
+        window.temperature_page.set_temperature_source_scope("temporary")
+        window.temperature_page.folder_edit.setText(str(temporary_temp))
+        ps.temperature_scan_folder = str(updated_project_temp)
+        window._sync_project_settings_to_tool_pages(ps)
+
+        assert window.temperature_page.temperature_source_scope == "temporary"
+        assert window.temperature_page.folder_edit.text() == str(temporary_temp)
+        assert not window.temperature_page.select_folder_button.isHidden()
     finally:
         window.project_settings_manager.clear_project_path()
         window.deleteLater()
@@ -523,7 +766,8 @@ def test_spectrum_workbench_custom_source_does_not_overwrite_legacy_project_sour
         window._read_project_settings_to_ui(ps)
         window._apply_settings_to_tools(ps)
 
-        assert window.spectrum_source_scope == "custom"
+        assert window.spectrum_source_scope == "project"
+        window.set_spectrum_source_scope("custom")
         window.lineEdit.setText(str(custom_single))
         window._remember_custom_spectrum_paths()
 
@@ -589,15 +833,14 @@ def test_save_and_apply_persists_common_parameters_to_project_file(qapp, tmp_pat
         window.project_output_dir_edit.setText(str(project_dir))
 
         light_idx = window.project_common_parameters_widget.light_source_combo.findData("beam_current")
-        pie_idx = window.project_common_parameters_widget.pie_photon_mode_combo.findData("off")
         preset_idx = window.project_common_parameters_widget.mf_md_preset_combo.findData("150 Torr (Combustion)")
         assert light_idx >= 0
-        assert pie_idx >= 0
         assert preset_idx >= 0
+        assert not hasattr(window.project_common_parameters_widget, "pie_photon_mode_combo")
+        assert not hasattr(window.project_common_parameters_widget, "temperature_photon_check")
+        assert not hasattr(window.project_common_parameters_widget, "temperature_kr_check")
 
         window.project_common_parameters_widget.light_source_combo.setCurrentIndex(light_idx)
-        window.project_common_parameters_widget.pie_photon_mode_combo.setCurrentIndex(pie_idx)
-        window.project_common_parameters_widget.mass_discrimination_edit.setValue(0.33)
         window.project_common_parameters_widget.calibration_a_edit.setValue(4.56e-7)
         window.project_common_parameters_widget.calibration_b_edit.setValue(7.89e-4)
         window.project_common_parameters_widget.calibration_c_edit.setValue(0.12)
@@ -607,15 +850,17 @@ def test_save_and_apply_persists_common_parameters_to_project_file(qapp, tmp_pat
         window.save_and_apply_project_settings()
 
         saved = load_project_settings(project_dir / "config" / "project.yaml")
+        saved_yaml = yaml.safe_load((project_dir / "config" / "project.yaml").read_text(encoding="utf-8"))
         assert saved.light_source == "beam_current"
-        assert saved.pie_photon_mode == "off"
-        assert saved.mass_discrimination == pytest.approx(0.33)
+        assert saved.pie_photon_mode == "none"
+        assert saved.mass_discrimination == pytest.approx(1.0)
+        assert "mass_discrimination" not in saved_yaml["general_parameters"]["normalization"]
         assert saved.cal_a == pytest.approx(4.56e-7)
         assert saved.cal_b == pytest.approx(7.89e-4)
         assert saved.cal_c == pytest.approx(0.12)
         assert saved.mf_md_preset == "150 Torr (Combustion)"
         assert saved.mf_mass_disc_exponent == pytest.approx(0.76155)
-        assert window.normalization_settings.mass_discrimination == pytest.approx(0.33)
+        assert window.normalization_settings.mass_discrimination == pytest.approx(1.0)
         assert window.current_calibration().a == pytest.approx(4.56e-7)
     finally:
         window.project_settings_manager.clear_project_path()
@@ -814,7 +1059,7 @@ def test_project_page_edits_sync_when_switching_to_tools(qapp, tmp_path, monkeyp
         min_intensity=3.0,
         mass_discrimination=1.0,
         light_source="io",
-        pie_photon_mode="first",
+        pie_photon_mode="none",
     )
     save_project_settings(ps, project_dir / "config" / "project.yaml")
 
@@ -842,12 +1087,8 @@ def test_project_page_edits_sync_when_switching_to_tools(qapp, tmp_path, monkeyp
         window.project_function_defaults_widget.peak_min_intensity_edit.setValue(12.5)
 
         light_index = window.project_common_parameters_widget.light_source_combo.findData("beam_current")
-        pie_index = window.project_common_parameters_widget.pie_photon_mode_combo.findData("off")
         assert light_index >= 0
-        assert pie_index >= 0
         window.project_common_parameters_widget.light_source_combo.setCurrentIndex(light_index)
-        window.project_common_parameters_widget.pie_photon_mode_combo.setCurrentIndex(pie_index)
-        window.project_common_parameters_widget.mass_discrimination_edit.setValue(0.42)
 
         window.switch_workspace_page("spectrum")
 
@@ -856,22 +1097,25 @@ def test_project_page_edits_sync_when_switching_to_tools(qapp, tmp_path, monkeyp
         assert active.detection_min_idx == 2222
         assert active.min_intensity == pytest.approx(12.5)
         assert active.light_source == "beam_current"
-        assert active.pie_photon_mode == "off"
-        assert active.mass_discrimination == pytest.approx(0.42)
+        assert active.pie_photon_mode == "none"
+        assert active.mass_discrimination == pytest.approx(1.0)
 
         assert window.current_peak_detection_config().algorithm == "cwt"
         assert window.current_peak_detection_config().detection_min_idx == 2222
         assert window.normalization_settings.light_source == "beam_current"
         assert window.temperature_page.project_settings.peak_algorithm == "cwt"
-        assert window.temperature_page.normalization_settings.mass_discrimination == pytest.approx(0.42)
+        assert window.temperature_page.normalization_settings.mass_discrimination == pytest.approx(1.0)
         assert window.pie_page.project_settings.peak_algorithm == "cwt"
-        assert window.pie_page.normalization_settings.pie_photon_mode == "off"
+        assert window.pie_page.normalization_settings.pie_photon_mode == "none"
 
         saved = load_project_settings(project_dir / "config" / "project.yaml")
+        saved_yaml = yaml.safe_load((project_dir / "config" / "project.yaml").read_text(encoding="utf-8"))
         assert saved.peak_algorithm == "cwt"
         assert saved.detection_min_idx == 2222
         assert saved.light_source == "beam_current"
-        assert saved.mass_discrimination == pytest.approx(0.42)
+        assert saved.pie_photon_mode == "none"
+        assert saved.mass_discrimination == pytest.approx(1.0)
+        assert "mass_discrimination" not in saved_yaml["general_parameters"]["normalization"]
 
         tof = np.arange(100.0, 140.0)
         intensity = np.zeros_like(tof)
@@ -1304,12 +1548,14 @@ def test_function_default_edits_sync_when_switching_to_tools(qapp, tmp_path):
         pie_energy_decimals=1,
         pie_recursive=True,
         pie_prefer_gaussian=True,
+        pie_integration_method="gaussian",
         pie_multi_folder_mode=False,
         pie_merge_method="low_energy_dominant",
         temp_peak_source="auto",
         temp_reference_mode="sum",
         temp_prefer_gaussian=True,
-        temp_kr_mz=84,
+        temp_integration_method="gaussian",
+        kr_mz=84,
         pics_no_mz=30,
         pics_no_formula="NO",
         pics_no_mf=0.01,
@@ -1335,20 +1581,29 @@ def test_function_default_edits_sync_when_switching_to_tools(qapp, tmp_path):
         peak_source_index = widget.temp_peak_source_combo.findData("manual")
         reference_index = widget.temp_reference_mode_combo.findData("individual")
         merge_index = widget.pie_merge_method_combo.findData("first_segment_dominant")
+        temp_replicate_index = widget.temp_replicate_mode_combo.findData("sum")
+        pie_replicate_index = widget.pie_replicate_mode_combo.findData("sum")
         assert peak_source_index >= 0
         assert reference_index >= 0
         assert merge_index >= 0
+        assert temp_replicate_index >= 0
+        assert pie_replicate_index >= 0
         widget.temp_peak_source_combo.setCurrentIndex(peak_source_index)
         widget.temp_reference_mode_combo.setCurrentIndex(reference_index)
-        widget.temp_prefer_gaussian_check.setChecked(False)
-        widget.temp_kr_mz_edit.setValue(86)
+        temp_integration_index = widget.temp_integration_method_combo.findData("baseline")
+        assert temp_integration_index >= 0
+        widget.temp_integration_method_combo.setCurrentIndex(temp_integration_index)
         widget.temp_curve_class_change_threshold_edit.setValue(0.31)
         widget.temp_curve_class_peak_fraction_edit.setValue(0.73)
+        widget.temp_replicate_mode_combo.setCurrentIndex(temp_replicate_index)
         widget.pie_energy_decimals_edit.setValue(4)
         widget.pie_recursive_check.setChecked(False)
-        widget.pie_prefer_gaussian_check.setChecked(False)
+        integration_index = widget.pie_integration_method_combo.findData("baseline")
+        assert integration_index >= 0
+        widget.pie_integration_method_combo.setCurrentIndex(integration_index)
         widget.pie_multi_folder_check.setChecked(True)
         widget.pie_merge_method_combo.setCurrentIndex(merge_index)
+        widget.pie_replicate_mode_combo.setCurrentIndex(pie_replicate_index)
         widget.pics_no_mz_edit.setValue(31)
         widget.pics_no_formula_edit.setText("15NO")
         widget.pics_no_mf_edit.setValue(0.021)
@@ -1362,13 +1617,12 @@ def test_function_default_edits_sync_when_switching_to_tools(qapp, tmp_path):
         # project-page tools such as Kr calculation do not read stale defaults.
         window.project_tabs.setCurrentWidget(window.project_common_parameters_widget)
         assert window.project_settings_manager.get().pie_energy_decimals == 4
-        assert window.project_settings_manager.get().temp_kr_mz == 86
+        assert window.project_settings_manager.get().kr_mz == 84
 
         # Re-clicking the current Project tab should collect in-memory edits,
         # not reload the older project.yaml over the UI values.
         window.switch_workspace_page("project")
         assert widget.pie_energy_decimals_edit.value() == 4
-        assert widget.temp_kr_mz_edit.value() == 86
 
         window.switch_workspace_page("pie")
 
@@ -1376,14 +1630,18 @@ def test_function_default_edits_sync_when_switching_to_tools(qapp, tmp_path):
         assert active.temp_peak_source == "manual"
         assert active.temp_reference_mode == "individual"
         assert active.temp_prefer_gaussian is False
-        assert active.temp_kr_mz == 86
+        assert active.temp_integration_method == "baseline"
+        assert active.kr_mz == 84
         assert active.temp_curve_class_change_threshold == pytest.approx(0.31)
         assert active.temp_curve_class_peak_fraction == pytest.approx(0.73)
+        assert active.temp_replicate_mode == "sum"
         assert active.pie_energy_decimals == 4
         assert active.pie_recursive is False
         assert active.pie_prefer_gaussian is False
+        assert active.pie_integration_method == "baseline"
         assert active.pie_multi_folder_mode is True
         assert active.pie_merge_method == "first_segment_dominant"
+        assert active.pie_replicate_mode == "sum"
         assert active.pics_no_mz == 31
         assert active.pics_no_formula == "15NO"
         assert active.pics_no_mf == pytest.approx(0.021)
@@ -1394,7 +1652,7 @@ def test_function_default_edits_sync_when_switching_to_tools(qapp, tmp_path):
         assert active.mf_reference_temperature == pytest.approx(575.0)
 
         assert window.temperature_page.project_settings.temp_reference_mode == "individual"
-        assert window.temperature_page.project_settings.temp_kr_mz == 86
+        assert window.temperature_page.project_settings.kr_mz == 84
         assert window.pie_page.project_settings.pie_energy_decimals == 4
         assert window.pie_page.use_multi_folders.isChecked()
         assert window.pie_page.merge_method_combo.currentData() == "first_segment_dominant"

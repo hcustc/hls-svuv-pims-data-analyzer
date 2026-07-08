@@ -36,7 +36,7 @@ from bl03u_masstool.core.pics_calculator import calc_pics_single_energy
 from bl03u_masstool.core.elements import get_all_elements_from_database, filter_species_by_elements, COMMON_ELEMENTS, parse_formula as parse_formula_elements, get_elements_from_formula
 from bl03u_masstool.core.normalization import NormalizationSettings, load_normalization_settings, save_normalization_settings
 from bl03u_masstool.core.project_lifecycle import project_root
-from bl03u_masstool.core.project_settings import ProjectSettings
+from bl03u_masstool.core.project_settings import ProjectSettings, ProjectSettingsManager
 from bl03u_masstool.core.temperature_scan import (
     TEMPERATURE_CURVE_CLASS_LABELS,
     analyze_temperature_folder,
@@ -105,6 +105,9 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.project_settings: ProjectSettings | None = None
         self.project_dir: str | None = None  # Phase 3: Project directory for state persistence
         self.pie_state_dirty = False  # Phase 3 Step 2: dirty flag for unsaved config changes
+        self.pie_source_scope = "temporary"
+        self._temporary_pie_folder = ""
+        self._temporary_pie_folders: list[str] = []
         self.peak_detection = load_peak_detection_config()
         self.database: list[dict] = []
         self.analysis_df = pd.DataFrame()
@@ -137,8 +140,27 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.use_multi_folders.setObjectName("ModeToggle")
         self.use_multi_folders.toggled.connect(self.toggle_multi_folder_mode)
 
+        self.project_source_button = QtWidgets.QToolButton()
+        self.project_source_button.setText("项目数据")
+        self.project_source_button.setObjectName("ModeToggle")
+        self.project_source_button.setCheckable(True)
+        self.project_source_button.setToolTip("使用项目管理中登记的 PIE 数据源和项目拟合状态")
+        self.temporary_source_button = QtWidgets.QToolButton()
+        self.temporary_source_button.setText("临时数据")
+        self.temporary_source_button.setObjectName("ModeToggle")
+        self.temporary_source_button.setCheckable(True)
+        self.temporary_source_button.setToolTip("只为本次 PIE 物种鉴别选择数据，不写回项目配置")
+        self.source_scope_group = QtWidgets.QButtonGroup(self)
+        self.source_scope_group.setExclusive(True)
+        self.source_scope_group.addButton(self.project_source_button, 0)
+        self.source_scope_group.addButton(self.temporary_source_button, 1)
+        self.source_scope_group.idClicked.connect(
+            lambda button_id: self.set_pie_source_scope("project" if button_id == 0 else "temporary")
+        )
+
         self.folder_edit = QtWidgets.QLineEdit()
         self.folder_edit.setPlaceholderText("选择包含PIE扫描质谱文件的文件夹")
+        self.folder_edit.textChanged.connect(self._remember_temporary_source)
         self.select_folder_button = QtWidgets.QPushButton("浏览...")
         self.select_folder_button.setToolTip("选择PIE扫描文件夹")
         self.select_folder_button.clicked.connect(self.select_folder)
@@ -175,7 +197,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.common_params_button.setObjectName("BrowseButton")
         self.common_params_button.setToolTip("打开通用参数设置")
         self.common_params_button.clicked.connect(self.open_common_parameters)
-        self.summary_open_project_btn = QtWidgets.QPushButton("项目设置")
+        self.summary_open_project_btn = QtWidgets.QPushButton("项目管理")
         self.summary_open_project_btn.setObjectName("BrowseButton")
         self.summary_open_project_btn.setToolTip("修改项目名、体系、数据源等")
         self.summary_open_project_btn.clicked.connect(self._open_project_settings)
@@ -213,9 +235,33 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         folder_label = QtWidgets.QLabel("PIE数据")
         folder_label.setObjectName("ReadoutLabel")
         folder_row.addWidget(folder_label)
+        source_scope_panel = QtWidgets.QWidget()
+        source_scope_panel.setObjectName("ModeSegment")
+        source_scope_layout = QtWidgets.QHBoxLayout(source_scope_panel)
+        source_scope_layout.setContentsMargins(0, 0, 0, 0)
+        source_scope_layout.setSpacing(3)
+        source_scope_layout.addWidget(self.project_source_button)
+        source_scope_layout.addWidget(self.temporary_source_button)
+        folder_row.addWidget(source_scope_panel)
         folder_row.addWidget(self.use_multi_folders)
         folder_row.addWidget(self.folder_edit, stretch=1)
         folder_row.addWidget(self.select_folder_button)
+        self.photon_correction_check = QtWidgets.QCheckBox("光强校正")
+        self.photon_correction_check.setToolTip("开启时按每个能量点的光强逐点校正；关闭时使用原始积分信号")
+        folder_row.addWidget(self.photon_correction_check)
+        self.integration_method_label = QtWidgets.QLabel("积分方式: 范围累加")
+        self.integration_method_label.setToolTip("PIE 积分方式由项目管理 -> 功能默认参数 -> PIE 拟合设置")
+        folder_row.addWidget(self.integration_method_label)
+        self.replicate_enabled_check = QtWidgets.QCheckBox("合并重复采集")
+        self.replicate_enabled_check.setToolTip("仅在确认为同一条件多次采集时开启；关闭时每个文件按自身能量点处理")
+        self.replicate_enabled_check.toggled.connect(self._on_replicate_enabled_changed)
+        folder_row.addWidget(self.replicate_enabled_check)
+        self.replicate_mode_combo = QtWidgets.QComboBox()
+        self.replicate_mode_combo.addItem("平均", "mean")
+        self.replicate_mode_combo.addItem("累加", "sum")
+        self.replicate_mode_combo.setToolTip("开启合并重复采集后，同组重复采集的聚合方式")
+        self.replicate_mode_combo.setEnabled(False)
+        folder_row.addWidget(self.replicate_mode_combo)
         folder_row.addWidget(self.analyze_button)
         folder_row.addWidget(self.export_button)
         folder_row.addWidget(self.export_plot_button)
@@ -255,6 +301,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self._skip_save_config: bool = False  # 批量拟合完成后跳过一次save，防止覆盖fit配置
 
         # 初始化UI状态
+        self.set_pie_source_scope("temporary", restore_saved=False)
         self.toggle_multi_folder_mode(0)
 
         # ---- 主工作区 ----
@@ -1392,16 +1439,20 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             result = export_pie_results_to_excel(self, file_path)
 
             if result['success']:
-                record_project_artifact(
-                    self,
-                    "pie_identification_result_file",
-                    result.get("file_path", file_path),
-                    message="PIE鉴定结果已登记到项目管理",
-                )
+                if self._has_project_scope():
+                    record_project_artifact(
+                        self,
+                        "pie_identification_result_file",
+                        result.get("file_path", file_path),
+                        message="PIE鉴定结果已登记到项目管理",
+                    )
+                    message = f"{result['message']}\n\n已登记到项目管理。"
+                else:
+                    message = f"{result['message']}\n\n当前为临时数据模式，结果未登记到项目管理。"
                 QtWidgets.QMessageBox.information(
                     self,
                     "导出成功",
-                    f"{result['message']}\n\n已登记到项目管理。"
+                    message,
                 )
             else:
                 QtWidgets.QMessageBox.warning(
@@ -1474,7 +1525,123 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             f"已拟合: {total_text}&nbsp;&nbsp;&nbsp;平均R\u00b2: {r2_text}"
         )
 
+    def _has_project_scope(self) -> bool:
+        return self.pie_source_scope == "project"
+
+    def _has_project_state_context(self) -> bool:
+        return self._has_project_scope() or bool(self.project_dir)
+
+    def _has_project_context(self) -> bool:
+        if self.project_settings is None:
+            return False
+        return bool(
+            self.project_settings.project_name
+            or self.project_settings.pie_scan_folder
+            or (self.project_settings.output_dir and self.project_settings.output_dir != "output")
+        )
+
+    def _remember_temporary_source(self, _text: str | None = None) -> None:
+        if self.pie_source_scope != "temporary":
+            return
+        self._temporary_pie_folder = self.folder_edit.text().strip()
+        self._temporary_pie_folders = list(self.pie_folders)
+
+    def set_pie_source_scope(
+        self,
+        scope: str,
+        *,
+        restore_saved: bool = True,
+        apply_project: bool = True,
+    ) -> None:
+        scope = "project" if scope == "project" else "temporary"
+        previous_scope = getattr(self, "pie_source_scope", "temporary")
+        if previous_scope == "temporary" and scope == "project":
+            self._remember_temporary_source()
+        self.pie_source_scope = scope
+
+        if hasattr(self, "project_source_button"):
+            self.project_source_button.setChecked(scope == "project")
+        if hasattr(self, "temporary_source_button"):
+            self.temporary_source_button.setChecked(scope == "temporary")
+
+        if scope == "project":
+            if apply_project and self.project_settings is not None:
+                self._apply_project_pie_source(self.project_settings, reset_state=previous_scope != "project")
+        elif previous_scope == "project" and restore_saved:
+            self.project_dir = None
+            self.per_mz_config = {}
+            self.all_fit_results = {}
+            self.current_fit = None
+            self.current_mz = None
+            self.folder_edit.setText(self._temporary_pie_folder)
+            self.pie_folders = list(self._temporary_pie_folders)
+            self._refresh_folder_list()
+            self._update_fit_stats(0, 0, None)
+
+        self._refresh_pie_source_controls()
+        if hasattr(self, "fit_button"):
+            self._update_action_state()
+
+    def _refresh_pie_source_controls(self) -> None:
+        use_project = self._has_project_scope()
+        has_project_path = bool(self.project_settings and self.project_settings.pie_scan_folder)
+        if hasattr(self, "project_source_button"):
+            self.project_source_button.setChecked(use_project)
+            self.project_source_button.setEnabled(self._has_project_context())
+        if hasattr(self, "temporary_source_button"):
+            self.temporary_source_button.setChecked(not use_project)
+        self.folder_edit.setReadOnly(use_project)
+        self.folder_edit.setClearButtonEnabled(not use_project)
+        self.folder_edit.setPlaceholderText(
+            "项目未登记 PIE 数据源" if use_project else "选择包含PIE扫描质谱文件的文件夹"
+        )
+        self.select_folder_button.setText("浏览...")
+        self.select_folder_button.setVisible(not use_project)
+        if use_project and not has_project_path:
+            self.status_label.setText("项目未登记 PIE 数据源")
+
+    def _refresh_folder_list(self) -> None:
+        self.folder_list.clear()
+        for folder in self.pie_folders:
+            self.folder_list.addItem(Path(folder).name + f" ({folder})")
+
+    def _apply_project_pie_source(self, ps: ProjectSettings, *, reset_state: bool = False) -> None:
+        self.project_dir = str(project_root(ps))
+        if reset_state:
+            self.per_mz_config = {}
+            self.all_fit_results = {}
+            self.current_fit = None
+            self.current_mz = None
+        self.use_multi_folders.setChecked(ps.pie_multi_folder_mode)
+        self.integration_method_label.setText(f"积分方式: {self._integration_method_label(ps.pie_integration_method)}")
+        mode = ps.pie_replicate_mode if ps.pie_replicate_mode in {"mean", "sum"} else "off"
+        self.replicate_enabled_check.setChecked(mode != "off")
+        idx_mode = self.replicate_mode_combo.findData(mode if mode != "off" else "mean")
+        if idx_mode >= 0:
+            self.replicate_mode_combo.setCurrentIndex(idx_mode)
+        self._on_replicate_enabled_changed(mode != "off")
+        idx = self.merge_method_combo.findData(ps.pie_merge_method)
+        if idx >= 0:
+            self.merge_method_combo.setCurrentIndex(idx)
+        self.pie_folders = []
+        self._refresh_folder_list()
+        self.folder_edit.setText(ps.pie_scan_folder or "")
+        if reset_state:
+            self._load_per_mz_configs()
+
+    @staticmethod
+    def _integration_method_label(method: str | None) -> str:
+        return {
+            "sum_counts": "范围累加",
+            "baseline": "扣基线积分",
+            "gaussian": "高斯",
+            "mixed": "混合",
+        }.get(str(method or "sum_counts"), "范围累加")
+
     def select_folder(self):
+        if self._has_project_scope():
+            self._open_project_settings()
+            return
         folder = QtWidgets.QFileDialog.getExistingDirectory(self, "选择PIE扫描文件夹")
         if folder:
             self.folder_edit.setText(folder)
@@ -1482,65 +1649,86 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
     def toggle_multi_folder_mode(self, checked: bool):
         """切换多文件夹模式"""
         busy = getattr(self, "_busy", False)
+        use_project = self._has_project_scope()
         self.folder_edit.setEnabled(not checked and not busy)
-        self.select_folder_button.setEnabled(not checked and not busy)
-        self.add_folder_button.setEnabled(checked and not busy)
-        self.remove_folder_button.setEnabled(checked and not busy)
-        self.clear_folders_button.setEnabled(checked and not busy)
+        self.folder_edit.setReadOnly(use_project)
+        self.select_folder_button.setEnabled((not checked or use_project) and not busy)
+        self.add_folder_button.setEnabled(checked and not busy and not use_project)
+        self.remove_folder_button.setEnabled(checked and not busy and not use_project)
+        self.clear_folders_button.setEnabled(checked and not busy and not use_project)
         self.merge_method_combo.setEnabled(checked and not busy)
         self.multi_folder_section.setVisible(checked)
+        self._refresh_pie_source_controls()
 
     def add_folder(self):
         """添加文件夹到列表"""
+        if self._has_project_scope():
+            self._open_project_settings()
+            return
         folder = QtWidgets.QFileDialog.getExistingDirectory(self, "选择PIE扫描文件夹")
         if folder:
             self.pie_folders.append(folder)
             self.folder_list.addItem(Path(folder).name + f" ({folder})")
+            self._remember_temporary_source()
 
     def remove_folder(self):
         """移除选中的文件夹"""
+        if self._has_project_scope():
+            return
         current_row = self.folder_list.currentRow()
         if current_row >= 0:
             self.folder_list.takeItem(current_row)
             self.pie_folders.pop(current_row)
+            self._remember_temporary_source()
 
     def clear_folders(self):
         """清空文件夹列表"""
+        if self._has_project_scope():
+            return
         self.folder_list.clear()
         self.pie_folders.clear()
+        self._remember_temporary_source()
 
-    def set_project_settings(self, ps: ProjectSettings) -> None:
+    def set_project_settings(self, ps: ProjectSettings, *, activate_project_scope: bool | None = None) -> None:
         """Apply ProjectSettings defaults to summary bar and folder controls.
 
         Also loads per-m/z configurations from the new project's state.
         Clears previous project's in-memory state to prevent data leakage.
         """
-        # Phase 3 Step 2: Clear previous project's memory state before loading new one
-        # This prevents m/z configs from project A appearing in project B
-        self.per_mz_config = {}  # Clear configs
-        self.all_fit_results = {}  # Clear fit results (Phase 3 Step 3)
-        self.current_mz = None  # Clear current selection
-        # Note: global_solver_config is app-wide, so don't clear it here
-        # Just reset hash after project loads below
-
+        has_project_context = bool(
+            ps.project_name
+            or ps.pie_scan_folder
+            or (ps.output_dir and ps.output_dir != "output")
+        )
+        if activate_project_scope is None:
+            activate_project_scope = (self._has_project_scope() or bool(self.project_dir)) and has_project_context
+        previous_project_dir = self.project_dir
         self.project_settings = ps
-        # Phase 3 Step 2: Store project directory for state persistence
-        self.project_dir = str(project_root(ps))
+        self.integration_method_label.setText(f"积分方式: {self._integration_method_label(ps.pie_integration_method)}")
+
         project_name = ps.project_name or "---"
         system = ps.system or "---"
-        pie_path = ps.pie_scan_folder or self.folder_edit.text()
+        if activate_project_scope:
+            self.set_pie_source_scope("project", restore_saved=False, apply_project=False)
+        elif self._has_project_scope() and not has_project_context:
+            self.set_pie_source_scope("temporary")
+
+        if self._has_project_scope():
+            new_project_dir = str(project_root(ps))
+            reset_state = previous_project_dir != new_project_dir
+            self._apply_project_pie_source(ps, reset_state=reset_state)
+
+        pie_path = ps.pie_scan_folder if self._has_project_scope() else self.folder_edit.text().strip()
+        if not pie_path:
+            pie_path = "---"
         self.summary_project_label.setText(f"项目: {project_name}")
         self.summary_system_label.setText(f"体系: {system}")
-        self.summary_data_label.setText(f"PIE: {pie_path}")
-        self.use_multi_folders.setChecked(ps.pie_multi_folder_mode)
-        idx = self.merge_method_combo.findData(ps.pie_merge_method)
-        if idx >= 0:
-            self.merge_method_combo.setCurrentIndex(idx)
-        if ps.pie_scan_folder:
-            self.folder_edit.setText(ps.pie_scan_folder)
-        # Phase 3 Step 2: Load per-m/z configurations from project state
-        # (After clearing previous project's state)
-        self._load_per_mz_configs()
+        self.summary_data_label.setText(
+            f"{'项目PIE' if self._has_project_scope() else '临时PIE'}: {pie_path}"
+        )
+        if hasattr(self, "photon_correction_check"):
+            self.photon_correction_check.setChecked(ps.pie_photon_mode != "off")
+        self._refresh_pie_source_controls()
         self._update_action_state()
 
     def _load_per_mz_configs(self) -> None:
@@ -1550,7 +1738,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         Suppresses errors and only warns if loading fails - does not block project open.
         Recalculates config hashes after restoration to ensure consistency.
         """
-        if not self.project_dir or not self.database or not self.curves:
+        if not self._has_project_state_context() or not self.project_dir or not self.database or not self.curves:
             # Cannot load without project context or data
             return
 
@@ -1606,7 +1794,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         - Project is closing
         - On demand via UI action
         """
-        if not self.project_dir or not self.database or not self.curves:
+        if not self._has_project_state_context() or not self.project_dir or not self.database or not self.curves:
             # Cannot save without project context or data
             return
 
@@ -1664,7 +1852,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         Returns:
             (success, error_message)
         """
-        if not self.project_dir or not self.database or not self.curves:
+        if not self._has_project_state_context() or not self.project_dir or not self.database or not self.curves:
             # No state to save (project not yet fully initialized)
             return (True, None)
 
@@ -1721,14 +1909,25 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.pie_state_dirty = True
 
     def open_common_parameters(self):
+        self._open_project_settings()
+        if self.parent() is not None:
+            return
         dialog = CommonParametersDialog(self.normalization_settings, self.calibration, self)
         dialog.exec()
         self.calibration = load_calibration_config()
 
     def run_analysis(self):
-        use_multi = self.use_multi_folders.isChecked()
+        use_multi = self.use_multi_folders.isChecked() and not self._has_project_scope()
 
-        if use_multi:
+        if self._has_project_scope():
+            folder = (self.project_settings.pie_scan_folder if self.project_settings else "").strip()
+            if not folder:
+                QtWidgets.QMessageBox.warning(self, "提示", "请先在项目管理中登记 PIE 数据源")
+                return
+            folders = [folder]
+            merge_method = None
+            message = "正在生成项目 PIE 曲线..."
+        elif use_multi:
             if not self.pie_folders:
                 QtWidgets.QMessageBox.warning(self, "提示", "请先添加至少一个PIE扫描文件夹")
                 return
@@ -1747,17 +1946,23 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         ps = self.project_settings or ProjectSettings()
         energy_decimals = ps.pie_energy_decimals
         recursive = ps.pie_recursive
-        prefer_gaussian = ps.pie_prefer_gaussian
-        manual_peak_path = ps.manual_peak_file or None
+        integration_method = ps.pie_integration_method
+        prefer_gaussian = integration_method == "gaussian"
+        ps.pie_prefer_gaussian = prefer_gaussian
+        manual_peak_path = (ps.manual_peak_file or None) if self._has_project_scope() else None
         peak_config = ps.to_peak_detection_config() if self.project_settings else load_peak_detection_config()
         threshold_end = peak_config.threshold_end
         min_intensity = peak_config.min_intensity
         settings = self.normalization_settings
-        photon_mode = settings.pie_photon_mode
+        photon_mode = "none" if self.photon_correction_check.isChecked() else "off"
+        ps.pie_photon_mode = photon_mode
+        settings.pie_photon_mode = photon_mode
         photon_normalize = photon_mode != "off"
         photon_reference_mode = "none" if photon_mode == "off" else photon_mode
-        mass_discrimination = settings.mass_discrimination
+        mass_discrimination = 1.0
         light_source = settings.light_source
+        ps.pie_replicate_mode = self._current_replicate_mode()
+        self._save_project_analysis_switches()
         self.set_busy(True, message)
         self.worker = WorkerThread(
             lambda: self.run_pie_analysis_sync(
@@ -1785,11 +1990,13 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 min_peak_width=peak_config.min_peak_width,
                 max_peak_width=peak_config.max_peak_width,
                 prefer_gaussian=prefer_gaussian,
+                integration_method=integration_method,
                 manual_peak_path=manual_peak_path,
                 photon_normalize=photon_normalize,
                 photon_reference_mode=photon_reference_mode,
                 mass_discrimination=mass_discrimination,
                 light_source=light_source,
+                replicate_mode=self._current_replicate_mode(),
                 vote_threshold=peak_config.vote_threshold,
                 min_intensity_for_single_vote=peak_config.min_intensity_for_single_vote,
                 mz_tolerance=peak_config.mz_tolerance,
@@ -1800,6 +2007,22 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.worker.failed.connect(self.on_analysis_failed)
         self.worker.finished.connect(lambda: self.set_busy(False, "就绪"))
         self.worker.start()
+
+    def _save_project_analysis_switches(self) -> None:
+        if not self._has_project_scope() or self.project_settings is None:
+            return
+        manager = ProjectSettingsManager()
+        if manager.has_project_path():
+            manager.set(self.project_settings)
+            manager.save()
+
+    def _on_replicate_enabled_changed(self, checked: bool) -> None:
+        self.replicate_mode_combo.setEnabled(checked)
+
+    def _current_replicate_mode(self) -> str:
+        if not self.replicate_enabled_check.isChecked():
+            return "off"
+        return str(self.replicate_mode_combo.currentData() or "mean")
 
     def set_busy(self, busy: bool, message: str) -> None:
         self._busy = busy
@@ -1855,11 +2078,13 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         min_peak_width: int,
         max_peak_width: int,
         prefer_gaussian: bool,
+        integration_method: str = "sum_counts",
         manual_peak_path: str | None = None,
         photon_normalize: bool = True,
-        photon_reference_mode: str = "first",
+        photon_reference_mode: str = "none",
         mass_discrimination: float = 1.0,
         light_source: str = "io",
+        replicate_mode: str = "off",
         vote_threshold: float = 0.667,
         min_intensity_for_single_vote: float = 5.0,
         mz_tolerance: float = 0.2,
@@ -1891,12 +2116,14 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 min_peak_width=min_peak_width,
                 max_peak_width=max_peak_width,
                 prefer_gaussian=prefer_gaussian,
+                integration_method=integration_method,
                 manual_peak_path=manual_peak_path,
                 photon_normalize=photon_normalize,
                 photon_reference_mode=photon_reference_mode,
                 mass_discrimination=mass_discrimination,
                 light_source=light_source,
                 merge_method=merge_method,
+                replicate_mode=replicate_mode,
                 vote_threshold=vote_threshold,
                 min_intensity_for_single_vote=min_intensity_for_single_vote,
                 mz_tolerance=mz_tolerance,
@@ -1927,11 +2154,13 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 min_peak_width=min_peak_width,
                 max_peak_width=max_peak_width,
                 prefer_gaussian=prefer_gaussian,
+                integration_method=integration_method,
                 manual_peak_path=manual_peak_path,
                 photon_normalize=photon_normalize,
                 photon_reference_mode=photon_reference_mode,
                 mass_discrimination=mass_discrimination,
                 light_source=light_source,
+                replicate_mode=replicate_mode,
                 vote_threshold=vote_threshold,
                 min_intensity_for_single_vote=min_intensity_for_single_vote,
                 mz_tolerance=mz_tolerance,
@@ -1947,18 +2176,64 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         if hasattr(self, "_plot_stack"):
             self._plot_stack.setCurrentIndex(1)
         energy_count = self.analysis_df["energy"].nunique() if not self.analysis_df.empty else 0
-        self.summary_label.setText(f"{len(self.curves)} 条m/z曲线 | {energy_count} 个能量点")
+        replicate_note = self._replicate_status_text(self.analysis_df)
+        integration_note = self._integration_status_text(self.analysis_df)
+        self.summary_label.setText(
+            f"{len(self.curves)} 条m/z曲线 | {energy_count} 个能量点"
+            + (f" | {replicate_note}" if replicate_note else "")
+            + (f" | {integration_note}" if integration_note else "")
+        )
         self._update_fit_stats(0, 0, None)
         self._update_action_state()
         if self.curves:
             self.mz_list.setCurrentRow(0)
-            # 若数据库已加载，自动拟合全部曲线
-            if self.database:
-                QtCore.QTimer.singleShot(100, self.fit_all_curves)
-            else:
-                QtWidgets.QMessageBox.information(self, "完成", f"生成 {len(self.curves)} 条PIE曲线")
-        else:
-            QtWidgets.QMessageBox.information(self, "完成", f"生成 {len(self.curves)} 条PIE曲线")
+            message = f"生成 {len(self.curves)} 条PIE曲线，可选择 m/z 后拟合，或点击拟合全部。"
+            if replicate_note:
+                message = f"{message}\n{replicate_note}"
+            if integration_note:
+                message = f"{message}\n{integration_note}"
+            QtWidgets.QMessageBox.information(self, "完成", message)
+
+    @staticmethod
+    def _replicate_status_text(df: pd.DataFrame) -> str:
+        if df.empty or "file_count" not in df:
+            return ""
+        max_count = int(pd.to_numeric(df["file_count"], errors="coerce").fillna(1).max())
+        if max_count <= 1:
+            return ""
+        warnings = []
+        if "replicate_warning" in df:
+            warnings = sorted({str(value) for value in df["replicate_warning"].dropna() if str(value)})
+        if warnings:
+            return warnings[0]
+        mode = str(df["replicate_mode"].dropna().iloc[0]) if "replicate_mode" in df and not df["replicate_mode"].dropna().empty else "mean"
+        if mode == "off":
+            return ""
+        mode_text = "平均" if mode == "mean" else "累加"
+        grouping = str(df["replicate_grouping"].dropna().iloc[0]) if "replicate_grouping" in df and not df["replicate_grouping"].dropna().empty else ""
+        if grouping == "filename":
+            return f"按文件名识别重复采集，已{mode_text}"
+        return f"检测到重复采集，已按旧逻辑{mode_text}"
+
+    @staticmethod
+    def _integration_status_text(df: pd.DataFrame) -> str:
+        if df.empty or "integration_method" not in df:
+            return ""
+        methods = df["integration_method"].dropna().astype(str)
+        gaussian_count = int((methods == "gaussian").sum())
+        baseline_count = int((methods == "baseline").sum())
+        sum_counts_count = int((methods == "sum_counts").sum())
+        mixed_count = int((methods == "mixed").sum())
+        parts = []
+        if sum_counts_count:
+            parts.append(f"范围累加 {sum_counts_count} 点")
+        if gaussian_count:
+            parts.append(f"高斯 {gaussian_count} 点")
+        if baseline_count:
+            parts.append(f"扣基线积分 {baseline_count} 点")
+        if mixed_count:
+            parts.append(f"混合 {mixed_count} 点")
+        return "积分方式: " + "，".join(parts) if parts else ""
 
     def on_analysis_failed(self, message: str) -> None:
         self.status_label.setText(f"失败: {message}")
@@ -2124,8 +2399,12 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         rows = curve["rows"].copy()
         energies = np.round(rows["energy"].astype(float), 4).to_numpy()
         point_columns = [f"{energy:g} eV" for energy in energies]
+        integration_methods = rows.get("integration_method", pd.Series([""] * len(rows))).astype(str).map(
+            {"sum_counts": "范围累加", "gaussian": "高斯", "baseline": "扣基线积分", "mixed": "混合"}
+        ).fillna("").to_numpy()
         curve_df = pd.DataFrame(
             [
+                ["积分方式", *integration_methods],
                 ["原始积分", *np.round(rows["raw_area"].astype(float), 4).to_numpy()],
                 ["IO归一化", *np.round(rows["photon_normalized_intensity"].astype(float), 4).to_numpy()],
                 ["最终强度", *np.round(rows["normalized_intensity"].astype(float), 4).to_numpy()],

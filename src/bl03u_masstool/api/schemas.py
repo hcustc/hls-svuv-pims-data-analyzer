@@ -21,10 +21,12 @@ class PieStartPayload(BaseModel):
     target_mz: Optional[str] = None
     recursive: bool = True
     energy_decimals: int = 1
-    gaussian: bool = True
+    gaussian: bool = False
+    integration_method: str = "sum_counts"
     photon_mode: Optional[str] = None
     light_source: Optional[str] = None
     mass_discrimination: Optional[float] = None
+    replicate_mode: str = "off"
 
 
 class PieFitPayload(BaseModel):

@@ -58,11 +58,11 @@
         <div class="settings-card">
           <label>
             项目名
-            <input id="project-name" autocomplete="off" placeholder="例如 C6F11O2H PIE 分析">
+            <input id="project-name" autocomplete="off" placeholder="输入项目名称">
           </label>
           <label>
             实验体系
-            <input id="project-system" autocomplete="off" placeholder="例如 SVUV-PIMS">
+            <input id="project-system" autocomplete="off" placeholder="输入样品、体系或实验代号">
           </label>
           <label>
             项目描述
@@ -100,27 +100,15 @@
       <section id="project-settings-common" class="settings-section hidden" role="tabpanel">
         <div class="panel-heading">
           <h2>通用参数</h2>
-          <span class="muted">PIE 归一化默认设置</span>
+          <span class="muted">项目级光强参数</span>
         </div>
         <div class="settings-card">
-          <label>
-            光强处理
-            <select id="photon-mode" name="photon_mode">
-              <option value="first">归一化到首个光强</option>
-              <option value="none">直接除以光强</option>
-              <option value="off">不做光强归一化</option>
-            </select>
-          </label>
           <label>
             光强来源
             <select id="light-source" name="light_source">
               <option value="io">IO 光电流</option>
               <option value="beam_current">Beam Current 储存环束流</option>
             </select>
-          </label>
-          <label>
-            质量歧视因子 D
-            <input id="mass-discrimination" name="mass_discrimination" type="number" min="0.000001" step="0.000001" value="1">
           </label>
         </div>
       </section>
@@ -190,6 +178,11 @@
         <label>
           目标 m/z
           <input id="target-mz" name="target_mz" placeholder="留空则生成全部曲线，例如 15, 29, 44" autocomplete="off">
+        </label>
+
+        <label class="checkbox-row">
+          <input id="pie-photon-correction" name="pie_photon_correction" type="checkbox" checked>
+          光强校正
         </label>
 
         <div class="setting-summary compact" aria-label="当前 PIE 项目设置">
@@ -354,7 +347,7 @@
 
         <label>
           物种名 / 公式关键词
-          <input id="pics-name" placeholder="例如 methane, methyl" autocomplete="off">
+          <input id="pics-name" placeholder="输入物种名称或关键词" autocomplete="off">
         </label>
 
         <div class="field-row">
