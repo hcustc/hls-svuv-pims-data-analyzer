@@ -96,13 +96,15 @@ def cmd_pie(args: argparse.Namespace) -> int:
         calibration=load_calibration_config(),
         recursive=not args.no_recursive,
         energy_decimals=args.energy_decimals,
-        prefer_gaussian=not args.no_gaussian,
+        prefer_gaussian=args.integration_method == "gaussian" and not args.no_gaussian,
+        integration_method=args.integration_method,
         manual_peak_path=args.manual_peak_path,
         photon_normalize=photon_mode != "off",
         photon_reference_mode="none" if photon_mode == "off" else photon_mode,
         mass_discrimination=mass_discrimination,
         light_source=light_source,
         target_mz_values=_parse_mz_values(args.target_mz),
+        replicate_mode=args.replicate_mode,
         **_peak_kwargs(),
     )
     output = _resolve_output(args.output)
@@ -131,12 +133,13 @@ def cmd_pie(args: argparse.Namespace) -> int:
             parameters={
                 "recursive": not args.no_recursive,
                 "energy_decimals": args.energy_decimals,
-                "prefer_gaussian": not args.no_gaussian,
+                "integration_method": args.integration_method,
                 "manual_peak_path": args.manual_peak_path,
                 "target_mz": args.target_mz,
                 "photon_mode": photon_mode,
                 "light_source": light_source,
                 "mass_discrimination": mass_discrimination,
+                "replicate_mode": args.replicate_mode,
                 "fit_pics": bool(args.fit_pics),
                 "database": args.database,
             },
@@ -172,7 +175,8 @@ def cmd_temperature(args: argparse.Namespace) -> int:
     df = analyze_temperature_folder(
         args.folder,
         calibration=load_calibration_config(),
-        prefer_gaussian=not args.no_gaussian,
+        prefer_gaussian=args.integration_method == "gaussian" and not args.no_gaussian,
+        integration_method=args.integration_method,
         reference_mode=args.reference_mode,
         manual_peak_path=args.manual_peak_path,
         photon_normalize=not args.no_photon_normalize,
@@ -180,6 +184,7 @@ def cmd_temperature(args: argparse.Namespace) -> int:
         kr_mz=args.kr_mz,
         mass_discrimination=mass_discrimination,
         light_source=light_source,
+        replicate_mode=args.replicate_mode,
         **_peak_kwargs(),
     )
     output = _resolve_output(args.output)
@@ -195,13 +200,14 @@ def cmd_temperature(args: argparse.Namespace) -> int:
             input_path=args.folder,
             parameters={
                 "reference_mode": args.reference_mode,
-                "prefer_gaussian": not args.no_gaussian,
+                "integration_method": args.integration_method,
                 "manual_peak_path": args.manual_peak_path,
                 "photon_normalize": not args.no_photon_normalize,
                 "kr_correct": args.kr_correct,
                 "kr_mz": args.kr_mz,
                 "light_source": light_source,
                 "mass_discrimination": mass_discrimination,
+                "replicate_mode": args.replicate_mode,
             },
             outputs={
                 **outputs,
@@ -255,10 +261,12 @@ def build_parser() -> argparse.ArgumentParser:
     pie.add_argument("--target-mz")
     pie.add_argument("--no-recursive", action="store_true")
     pie.add_argument("--energy-decimals", type=int, default=1)
-    pie.add_argument("--no-gaussian", action="store_true")
+    pie.add_argument("--integration-method", choices=["sum_counts", "baseline", "gaussian"], default="sum_counts")
+    pie.add_argument("--no-gaussian", action="store_true", help="Compatibility option; disables gaussian when --integration-method=gaussian")
     pie.add_argument("--photon-mode", choices=["first", "none", "off"])
     pie.add_argument("--light-source", choices=["io", "beam_current"])
     pie.add_argument("--mass-discrimination", type=float)
+    pie.add_argument("--replicate-mode", choices=["off", "mean", "sum"], default="off")
     pie.add_argument("--manifest-json")
     pie.add_argument("--evidence-json")
     pie.add_argument("--report-md")
@@ -272,12 +280,14 @@ def build_parser() -> argparse.ArgumentParser:
     temperature.add_argument("--curves-json")
     temperature.add_argument("--manual-peak-path")
     temperature.add_argument("--reference-mode", choices=["sum", "max_temperature"], default="sum")
-    temperature.add_argument("--no-gaussian", action="store_true")
+    temperature.add_argument("--integration-method", choices=["sum_counts", "baseline", "gaussian"], default="sum_counts")
+    temperature.add_argument("--no-gaussian", action="store_true", help="Compatibility option; disables gaussian when --integration-method=gaussian")
     temperature.add_argument("--no-photon-normalize", action="store_true")
     temperature.add_argument("--kr-correct", action="store_true")
     temperature.add_argument("--kr-mz", type=int, default=84)
     temperature.add_argument("--light-source", choices=["io", "beam_current"])
     temperature.add_argument("--mass-discrimination", type=float)
+    temperature.add_argument("--replicate-mode", choices=["off", "mean", "sum"], default="off")
     temperature.add_argument("--manifest-json")
     temperature.add_argument("--evidence-json")
     temperature.add_argument("--report-md")

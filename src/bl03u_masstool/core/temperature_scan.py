@@ -8,11 +8,11 @@ import numpy as np
 import pandas as pd
 
 from .calibration import Calibration
-from .integration import integrate_peak
+from .integration import integrate_peak_with_method
 from .normalization import extract_light_intensity
 from .peak_ranges import load_peak_ranges, peak_ranges_to_peaks
 from .peak_detection import detect_peaks_by_algorithm
-from .spectrum_io import Spectrum, list_spectrum_files, read_spectrum
+from .spectrum_io import Spectrum, find_filename_replicate_groups, filename_replicate_key, list_spectrum_files, read_spectrum
 
 
 logger = logging.getLogger(__name__)
@@ -92,6 +92,24 @@ def extract_io_current(metadata_lines: list[str], fallback: float = 1.0) -> floa
     return extract_light_intensity(metadata_lines, "io", fallback)
 
 
+def _summarize_integration_methods(values) -> str:
+    methods = sorted({str(value) for value in values if str(value)})
+    if not methods:
+        return ""
+    if len(methods) == 1:
+        return methods[0]
+    return "mixed"
+
+
+def _normalize_integration_method(value: str | None, *, prefer_gaussian: bool | None = None) -> str:
+    if prefer_gaussian:
+        return "gaussian"
+    method = str(value or "").strip()
+    if method in {"sum_counts", "baseline", "gaussian"}:
+        return method
+    return "sum_counts"
+
+
 def analyze_temperature_folder(
     folder: str | Path,
     *,
@@ -100,6 +118,7 @@ def analyze_temperature_folder(
     threshold_end: float = 2,
     min_intensity: float = 3,
     prefer_gaussian: bool = True,
+    integration_method: str = "sum_counts",
     reference_mode: str = "sum",
     detection_min_idx: int = 3000,
     nearby_peak_window: int = 30,
@@ -132,15 +151,20 @@ def analyze_temperature_folder(
     weak_tail_cutoff_idx: int = 15000,
     temp_curve_class_change_threshold: float = 0.25,
     temp_curve_class_peak_fraction: float = 0.65,
+    replicate_mode: str = "off",
 ) -> pd.DataFrame:
     files = _iter_temperature_files(folder, (".txt",))
+    replicate_mode = "sum" if replicate_mode == "sum" else "mean" if replicate_mode == "mean" else "off"
+    filename_replicates = find_filename_replicate_groups(files) if replicate_mode != "off" else {}
     spectra = []
     for idx, path in enumerate(files):
         spectrum = read_spectrum(path, header_lines=10, trim_start=0)
         temperature = extract_temperature(spectrum.metadata_lines, idx * 10.0)
         photon_energy = extract_photon_energy(spectrum.metadata_lines, fallback=0.0)
         io_current = extract_light_intensity(spectrum.metadata_lines, light_source)
-        spectra.append((temperature, path, spectrum, io_current, photon_energy))
+        repeat_key = filename_replicate_key(path)
+        uses_filename_grouping = repeat_key is not None and repeat_key in filename_replicates
+        spectra.append((temperature, path, spectrum, io_current, photon_energy, uses_filename_grouping))
     if not spectra:
         return pd.DataFrame(
             columns=[
@@ -155,6 +179,7 @@ def analyze_temperature_folder(
                 "mz_rounded",
                 "species",
                 "raw_area",
+                "integration_method",
                 "photon_normalized_area",
                 "expansion_lambda",
                 "normalized_area",
@@ -205,10 +230,19 @@ def analyze_temperature_folder(
             weak_tail_cutoff_idx=weak_tail_cutoff_idx,
         )
 
+    configured_integration_method = _normalize_integration_method(
+        integration_method,
+        prefer_gaussian=prefer_gaussian,
+    )
     rows = []
-    for temperature, path, spectrum, io_current, photon_energy in spectra:
+    for temperature, path, spectrum, io_current, photon_energy, uses_filename_grouping in spectra:
         for peak in reference_peaks:
-            raw_area = integrate_peak(spectrum.y, peak, prefer_gaussian=prefer_gaussian)
+            raw_area, actual_integration_method = integrate_peak_with_method(
+                spectrum.y,
+                peak,
+                prefer_gaussian=prefer_gaussian,
+                integration_method=configured_integration_method,
+            )
             photon_area = raw_area / io_current if photon_normalize and io_current > 0 else raw_area
             rows.append(
                 {
@@ -217,12 +251,16 @@ def analyze_temperature_folder(
                     "io": io_current,
                     "photon_energy": photon_energy,
                     "light_source": light_source,
+                    "replicate_mode": replicate_mode,
+                    "replicate_grouping": "filename" if uses_filename_grouping else "temperature",
+                    "replicate_warning": "",
                     "reference_temperature": ref_temperature,
                     "reference_source": reference_source,
                     "mz": peak.mz,
                     "mz_rounded": int(round(peak.mz)),
                     "species": peak.species,
                     "raw_area": raw_area,
+                    "integration_method": actual_integration_method,
                     "photon_normalized_area": photon_area,
                     "expansion_lambda": 1.0,
                     "normalized_area": photon_area,
@@ -239,6 +277,17 @@ def analyze_temperature_folder(
         mass_discrimination=mass_discrimination,
         expansion_factors=expansion_factors,
     )
+    if not normalized.empty:
+        normalized["file_count"] = normalized.groupby("temperature")["file"].transform("nunique")
+        fallback_mask = (
+            (normalized["replicate_mode"].astype(str) != "off")
+            &
+            (normalized["file_count"] > 1)
+            & (normalized["replicate_grouping"].astype(str) != "filename")
+        )
+        normalized.loc[fallback_mask, "replicate_warning"] = (
+            "未识别到文件名末尾采集序号，已退回按温度分组的旧逻辑处理重复文件。"
+        )
     return annotate_temperature_curve_groups(
         normalized,
         relative_change_threshold=temp_curve_class_change_threshold,
@@ -264,9 +313,9 @@ def _iter_temperature_files(folder: str | Path, suffixes: tuple[str, ...]) -> li
     return sorted(nested_files)
 
 
-def _build_reference_spectrum(spectra: list[tuple[float, Path, Spectrum, float, float]], reference_mode: str) -> tuple[float, Spectrum, str]:
+def _build_reference_spectrum(spectra: list[tuple], reference_mode: str) -> tuple[float, Spectrum, str]:
     if reference_mode == "max_temperature":
-        ref_temperature, path, ref_spectrum, _, _ = max(spectra, key=lambda item: item[0])
+        ref_temperature, path, ref_spectrum, *_ = max(spectra, key=lambda item: item[0])
         return ref_temperature, ref_spectrum, path.name
 
     if reference_mode != "sum":
@@ -522,6 +571,7 @@ def compute_kr_expansion_factors(
     threshold_end: float = 2,
     min_intensity: float = 3,
     prefer_gaussian: bool = True,
+    integration_method: str = "sum_counts",
     reference_mode: str = "sum",
     detection_min_idx: int = 3000,
     nearby_peak_window: int = 30,
@@ -545,6 +595,7 @@ def compute_kr_expansion_factors(
         threshold_end=threshold_end,
         min_intensity=min_intensity,
         prefer_gaussian=prefer_gaussian,
+        integration_method=integration_method,
         reference_mode=reference_mode,
         detection_min_idx=detection_min_idx,
         nearby_peak_window=nearby_peak_window,
@@ -669,24 +720,64 @@ def build_temperature_curves(
         working["expansion_lambda"] = 1.0
     if "species" not in working:
         working["species"] = ""
+    if "integration_method" not in working:
+        working["integration_method"] = ""
     if "photon_energy" not in working:
         working["photon_energy"] = np.nan
+    if "replicate_mode" not in working:
+        working["replicate_mode"] = "sum"
+    if "replicate_grouping" not in working:
+        working["replicate_grouping"] = "temperature"
+    if "replicate_warning" not in working:
+        working["replicate_warning"] = ""
+    replicate_mode = str(
+        working["replicate_mode"].dropna().iloc[0]
+        if not working["replicate_mode"].dropna().empty
+        else "off"
+    )
+    area_agg = "mean" if replicate_mode != "sum" else "sum"
     for mz, group in working.groupby("mz_rounded"):
-        ordered = (
-            group.groupby("temperature", as_index=False)
-            .agg(
-                area=("area", "sum"),
-                raw_area=("raw_area", "sum"),
-                photon_normalized_area=("photon_normalized_area", "sum"),
-                expansion_lambda=("expansion_lambda", "first"),
-                species=("species", "first"),
-                photon_energy=("photon_energy", "first"),
-                mz=("mz", "mean"),
-                file_count=("file", "nunique"),
-                reference_temperature=("reference_temperature", "first"),
+        group = group.copy()
+        group["file_count"] = group.groupby("temperature")["file"].transform("nunique")
+        fallback_replicates = pd.Series(dtype=int)
+        if replicate_mode != "off":
+            fallback_replicates = (
+                group.groupby("temperature")["file"]
+                .nunique()
+                .loc[lambda counts: counts > 1]
             )
-            .sort_values("temperature")
-        )
+        if replicate_mode != "off" and not fallback_replicates.empty:
+            for temperature in fallback_replicates.index:
+                mask = (
+                    (group["temperature"] == temperature)
+                    & (group["replicate_grouping"].astype(str) != "filename")
+                )
+                if mask.any():
+                    group.loc[mask, "replicate_warning"] = (
+                        "未识别到文件名末尾采集序号，已退回按温度分组的旧逻辑处理重复文件。"
+                    )
+        if replicate_mode == "off":
+            ordered = group.sort_values(["temperature", "file"]).reset_index(drop=True)
+        else:
+            ordered = (
+                group.groupby("temperature", as_index=False)
+                .agg(
+                    area=("area", area_agg),
+                    raw_area=("raw_area", area_agg),
+                    integration_method=("integration_method", _summarize_integration_methods),
+                    photon_normalized_area=("photon_normalized_area", area_agg),
+                    expansion_lambda=("expansion_lambda", "first"),
+                    species=("species", "first"),
+                    photon_energy=("photon_energy", "first"),
+                    mz=("mz", "mean"),
+                    file_count=("file", "nunique"),
+                    replicate_mode=("replicate_mode", "first"),
+                    replicate_grouping=("replicate_grouping", lambda values: "filename" if (values.astype(str) == "filename").any() else "temperature"),
+                    replicate_warning=("replicate_warning", lambda values: "; ".join(sorted({str(v) for v in values if str(v)}))),
+                    reference_temperature=("reference_temperature", "first"),
+                )
+                .sort_values("temperature")
+            )
         classification = classify_temperature_curve(
             ordered["temperature"],
             ordered["area"],

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import yaml
+import pytest
 
 from bl03u_masstool.core.project_settings import ProjectSettings, load_project_settings, save_project_settings
 
@@ -33,7 +34,6 @@ def test_project_settings_round_trip_preserves_nested_yaml_fields(tmp_path):
         temperature_photon_normalize=False,
         temperature_kr_correct=True,
         pie_photon_mode="each",
-        mass_discrimination=0.9,
         kr_calibration_folder="data/kr",
         kr_calibration_peak_file="config/peak.yaml",
         expansion_factors={14.6: {550.0: 1.0, 600.0: 1.1}, 14.7: {550.0: 1.0, 600.0: 1.2}},
@@ -45,10 +45,12 @@ def test_project_settings_round_trip_preserves_nested_yaml_fields(tmp_path):
         pie_energy_decimals=2,
         pie_recursive=False,
         pie_prefer_gaussian=False,
+        pie_integration_method="baseline",
         pie_multi_folder_mode=True,
         pie_merge_method="mean",
         temp_reference_mode="kr",
         temp_prefer_gaussian=False,
+        temp_integration_method="baseline",
         temp_kr_mz=86,
         temp_curve_class_change_threshold=0.33,
         temp_curve_class_peak_fraction=0.72,
@@ -92,7 +94,8 @@ def test_project_settings_round_trip_preserves_nested_yaml_fields(tmp_path):
     assert loaded.temperature_photon_normalize is False
     assert loaded.temperature_kr_correct is True
     assert loaded.pie_photon_mode == settings.pie_photon_mode
-    assert loaded.mass_discrimination == settings.mass_discrimination
+    saved_yaml = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert "mass_discrimination" not in saved_yaml["general_parameters"]["normalization"]
     assert loaded.kr_calibration_folder == settings.kr_calibration_folder
     assert loaded.kr_calibration_peak_file == settings.kr_calibration_peak_file
     assert loaded.expansion_factors == settings.expansion_factors
@@ -104,10 +107,12 @@ def test_project_settings_round_trip_preserves_nested_yaml_fields(tmp_path):
     assert loaded.pie_energy_decimals == settings.pie_energy_decimals
     assert loaded.pie_recursive is False
     assert loaded.pie_prefer_gaussian is False
+    assert loaded.pie_integration_method == "baseline"
     assert loaded.pie_multi_folder_mode is True
     assert loaded.pie_merge_method == settings.pie_merge_method
     assert loaded.temp_reference_mode == settings.temp_reference_mode
     assert loaded.temp_prefer_gaussian is False
+    assert loaded.temp_integration_method == "baseline"
     assert loaded.temp_kr_mz == settings.temp_kr_mz
     assert loaded.temp_curve_class_change_threshold == settings.temp_curve_class_change_threshold
     assert loaded.temp_curve_class_peak_fraction == settings.temp_curve_class_peak_fraction
@@ -160,6 +165,29 @@ def test_load_project_settings_accepts_saved_yaml_key_names(tmp_path):
     assert loaded.peak_algorithm == "cwt"
     assert loaded.detection_min_idx == 321
     assert loaded.pie_energy_decimals == 3
+
+
+def test_load_project_settings_accepts_legacy_mass_discrimination(tmp_path):
+    path = tmp_path / "legacy-project.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "general_parameters": {
+                    "normalization": {
+                        "light_source": "beam_current",
+                        "mass_discrimination": 0.42,
+                    },
+                },
+            },
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = load_project_settings(path)
+
+    assert loaded.light_source == "beam_current"
+    assert loaded.mass_discrimination == pytest.approx(0.42)
 
 
 def test_load_project_settings_warns_when_file_missing(tmp_path, caplog):

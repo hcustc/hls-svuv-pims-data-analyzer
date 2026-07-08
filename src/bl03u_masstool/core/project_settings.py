@@ -66,7 +66,7 @@ class ProjectSettings:
     light_source: str = "io"
     temperature_photon_normalize: bool = True
     temperature_kr_correct: bool = False
-    pie_photon_mode: str = "first"
+    pie_photon_mode: str = "none"
     mass_discrimination: float = 1.0
     kr_calibration_folder: str = ""
     kr_calibration_peak_file: str = ""
@@ -104,17 +104,21 @@ class ProjectSettings:
     # === PIE Defaults ===
     pie_energy_decimals: int = 1
     pie_recursive: bool = True
-    pie_prefer_gaussian: bool = True
+    pie_prefer_gaussian: bool = False
+    pie_integration_method: str = "sum_counts"
     pie_multi_folder_mode: bool = False
     pie_merge_method: str = "low_energy_dominant"
+    pie_replicate_mode: str = "off"
 
     # === Temperature Scan Defaults ===
     temp_peak_source: str = "auto"  # "auto" or "manual"
     temp_reference_mode: str = "sum"  # Only used when temp_peak_source == "auto"
-    temp_prefer_gaussian: bool = True
+    temp_prefer_gaussian: bool = False
+    temp_integration_method: str = "sum_counts"
     temp_kr_mz: int = 84
     temp_curve_class_change_threshold: float = 0.25  # 相对变化阈值：判断"生成"或"消耗"需要达到最大值的多少百分比
     temp_curve_class_peak_fraction: float = 0.65  # 端点峰值比例：端点信号需达到最大值的多少百分比才判定为"生成"或"消耗"
+    temp_replicate_mode: str = "off"
 
     # === PICS Defaults ===
     pics_no_mz: int = 30
@@ -174,7 +178,7 @@ class ProjectSettings:
             temperature_photon_normalize=self.temperature_photon_normalize,
             temperature_kr_correct=self.temperature_kr_correct,
             pie_photon_mode=self.pie_photon_mode,
-            mass_discrimination=self.mass_discrimination,
+            mass_discrimination=1.0,
             kr_calibration_folder=self.kr_calibration_folder,
             kr_calibration_peak_file=self.kr_calibration_peak_file,
             expansion_factors=dict(self.expansion_factors),
@@ -321,21 +325,29 @@ def _nested_to_flat(data: dict) -> dict:
             for k, kk in [("pie_energy_decimals", "energy_decimals"),
                           ("pie_recursive", "recursive"),
                           ("pie_prefer_gaussian", "prefer_gaussian"),
+                          ("pie_integration_method", "integration_method"),
                           ("pie_multi_folder_mode", "multi_folder_mode"),
-                          ("pie_merge_method", "merge_method")]:
+                          ("pie_merge_method", "merge_method"),
+                          ("pie_replicate_mode", "replicate_mode")]:
                 if kk in pie:
                     flat[k] = pie[kk]
+            if "integration_method" not in pie and pie.get("prefer_gaussian") is True:
+                flat["pie_integration_method"] = "gaussian"
 
         temp = fd.get("temperature_scan", {})
         if isinstance(temp, dict):
             for k, kk in [("temp_peak_source", "peak_source"),
                           ("temp_reference_mode", "reference_mode"),
                           ("temp_prefer_gaussian", "prefer_gaussian"),
+                          ("temp_integration_method", "integration_method"),
                           ("temp_kr_mz", "kr_mz"),
                           ("temp_curve_class_change_threshold", "curve_class_change_threshold"),
-                          ("temp_curve_class_peak_fraction", "curve_class_peak_fraction")]:
+                          ("temp_curve_class_peak_fraction", "curve_class_peak_fraction"),
+                          ("temp_replicate_mode", "replicate_mode")]:
                 if kk in temp:
                     flat[k] = temp[kk]
+            if "integration_method" not in temp and temp.get("prefer_gaussian") is True:
+                flat["temp_integration_method"] = "gaussian"
 
         pics = fd.get("pics", {})
         if isinstance(pics, dict):
@@ -479,7 +491,6 @@ def _flat_to_nested(settings: ProjectSettings) -> dict:
                 "temperature_photon_normalize": d["temperature_photon_normalize"],
                 "temperature_kr_correct": d["temperature_kr_correct"],
                 "pie_photon_mode": d["pie_photon_mode"],
-                "mass_discrimination": d["mass_discrimination"],
                 "kr_calibration_folder": d["kr_calibration_folder"],
                 "kr_calibration_peak_file": d["kr_calibration_peak_file"],
                 "expansion_factors": _optional_float_dict(d["expansion_factors"]),
@@ -517,17 +528,19 @@ def _flat_to_nested(settings: ProjectSettings) -> dict:
             "pie": {
                 "energy_decimals": d["pie_energy_decimals"],
                 "recursive": d["pie_recursive"],
-                "prefer_gaussian": d["pie_prefer_gaussian"],
+                "integration_method": d["pie_integration_method"],
                 "multi_folder_mode": d["pie_multi_folder_mode"],
                 "merge_method": d["pie_merge_method"],
+                "replicate_mode": d["pie_replicate_mode"],
             },
             "temperature_scan": {
                 "peak_source": d["temp_peak_source"],
                 "reference_mode": d["temp_reference_mode"],
-                "prefer_gaussian": d["temp_prefer_gaussian"],
+                "integration_method": d["temp_integration_method"],
                 "kr_mz": d["temp_kr_mz"],
                 "curve_class_change_threshold": d["temp_curve_class_change_threshold"],
                 "curve_class_peak_fraction": d["temp_curve_class_peak_fraction"],
+                "replicate_mode": d["temp_replicate_mode"],
             },
             "pics": {
                 "no_mz": d["pics_no_mz"],
@@ -592,7 +605,6 @@ def migrate_from_legacy_configs() -> ProjectSettings:
         s.temperature_photon_normalize = ns.temperature_photon_normalize
         s.temperature_kr_correct = ns.temperature_kr_correct
         s.pie_photon_mode = ns.pie_photon_mode
-        s.mass_discrimination = ns.mass_discrimination
         s.kr_calibration_folder = ns.kr_calibration_folder
         s.kr_calibration_peak_file = ns.kr_calibration_peak_file
         s.expansion_factors = dict(ns.expansion_factors)

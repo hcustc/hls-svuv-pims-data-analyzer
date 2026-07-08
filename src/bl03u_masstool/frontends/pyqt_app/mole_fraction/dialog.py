@@ -106,7 +106,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         summary_layout.addWidget(self.summary_project_label)
         summary_layout.addWidget(self.summary_system_label)
         summary_layout.addWidget(self.summary_data_label)
-        self.summary_open_project_btn = QtWidgets.QPushButton("打开项目设置")
+        self.summary_open_project_btn = QtWidgets.QPushButton("项目管理")
         self.summary_open_project_btn.setObjectName("WorkflowButton")
         self.summary_open_project_btn.clicked.connect(self._open_project_settings)
         summary_layout.addWidget(self.summary_open_project_btn)
@@ -139,7 +139,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
     @property
     def _mass_disc_exponent(self) -> float:
-        """统一读取质量歧视因子指数：优先使用项目设置，回退到legacy设置。"""
+        """统一读取质量响应指数：优先使用项目设置，回退到 legacy 设置。"""
         if self.project_settings is not None:
             return self.project_settings.mf_mass_disc_exponent
         return self.settings.mass_disc_exponent

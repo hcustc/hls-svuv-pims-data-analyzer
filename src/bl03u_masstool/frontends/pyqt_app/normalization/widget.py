@@ -219,28 +219,9 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
         self.light_source_combo.addItem("IO 光电流", "io")
         self.light_source_combo.addItem("Beam Current 储存环束流", "beam_current")
 
-        self.pie_photon_mode_combo = QtWidgets.QComboBox()
-        self.pie_photon_mode_combo.addItem("归一化到首个光强", "first")
-        self.pie_photon_mode_combo.addItem("直接除以光强", "none")
-        self.pie_photon_mode_combo.addItem("不做光强归一化", "off")
-
-        self.mass_discrimination_edit = QtWidgets.QDoubleSpinBox()
-        self.mass_discrimination_edit.setRange(0.000001, 1_000_000)
-        self.mass_discrimination_edit.setDecimals(6)
-        self.mass_discrimination_edit.setMaximumWidth(150)
-        self.mass_discrimination_edit.setToolTip("温度扫描/PIE分析使用的质量歧视因子 D")
-
         row = 0
         layout.addWidget(QtWidgets.QLabel("光强来源:"), row, 0)
         layout.addWidget(self.light_source_combo, row, 1)
-
-        row += 1
-        layout.addWidget(QtWidgets.QLabel("PIE光强归一化:"), row, 0)
-        layout.addWidget(self.pie_photon_mode_combo, row, 1)
-
-        row += 1
-        layout.addWidget(QtWidgets.QLabel("质量歧视因子 D:"), row, 0)
-        layout.addWidget(self.mass_discrimination_edit, row, 1)
 
         layout.setColumnStretch(1, 1)
         return group
@@ -282,9 +263,9 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
             layout.setColumnStretch(col, 1)
         return group
 
-    # ── Section 3: 质量歧视校正 ────────────────────────────────────
+    # ── Section 3: 摩尔分数质量响应校正 ────────────────────────────
     def _build_mass_discrimination_section(self) -> QtWidgets.QGroupBox:
-        group = QtWidgets.QGroupBox("质量歧视校正")
+        group = QtWidgets.QGroupBox("摩尔分数质量响应校正")
         layout = QtWidgets.QGridLayout(group)
         layout.setHorizontalSpacing(12)
         layout.setVerticalSpacing(8)
@@ -302,7 +283,7 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
         self.mf_mass_disc_exponent_edit.setMaximumWidth(120)
 
         # 公式标签
-        formula_label = QtWidgets.QLabel("公式: Dᵢ = (MW / 30)ⁿ")
+        formula_label = QtWidgets.QLabel("响应因子公式: Dᵢ = (MW / 30)ⁿ")
         formula_label.setObjectName("FormulaLabel")
 
         row = 0
@@ -492,23 +473,9 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
         self.light_source_combo = QtWidgets.QComboBox()
         self.light_source_combo.addItem("IO 光电流", "io")
         self.light_source_combo.addItem("Beam Current 储存环束流", "beam_current")
-        self.pie_photon_mode_combo = QtWidgets.QComboBox()
-        self.pie_photon_mode_combo.addItem("归一化到首个光强", "first")
-        self.pie_photon_mode_combo.addItem("直接除以光强", "none")
-        self.pie_photon_mode_combo.addItem("不做光强归一化", "off")
-        self.mass_discrimination_edit = QtWidgets.QDoubleSpinBox()
-        self.mass_discrimination_edit.setRange(0.000001, 1_000_000)
-        self.mass_discrimination_edit.setDecimals(6)
-        self.mass_discrimination_edit.setToolTip("温度扫描/PIE分析使用的质量歧视因子 D")
-
         norm_layout.addWidget(QtWidgets.QLabel("光强来源:"), 0, 0)
         norm_layout.addWidget(self.light_source_combo, 0, 1)
-        norm_layout.addWidget(QtWidgets.QLabel("PIE光强归一化:"), 1, 0)
-        norm_layout.addWidget(self.pie_photon_mode_combo, 1, 1)
-        norm_layout.addWidget(QtWidgets.QLabel("质量歧视因子 D:"), 1, 2)
-        norm_layout.addWidget(self.mass_discrimination_edit, 1, 3)
         norm_layout.setColumnStretch(1, 1)
-        norm_layout.setColumnStretch(3, 1)
         layout.addWidget(norm_group)
 
         # 定标参数
@@ -560,8 +527,8 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
 
-        # 质量歧视因子
-        md_group = QtWidgets.QGroupBox("质量歧视因子  D_i = (MW / 30)^n")
+        # 摩尔分数质量响应校正
+        md_group = QtWidgets.QGroupBox("摩尔分数质量响应校正  D_i = (MW / 30)^n")
         md_layout = QtWidgets.QVBoxLayout(md_group)
         md_layout.setSpacing(8)
 
@@ -573,12 +540,12 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
             self.mf_md_preset_combo.addItem(name)
         self.mf_md_preset_combo.currentTextChanged.connect(self._on_mf_md_preset_changed)
         self.mf_mass_disc_exponent_edit = QtWidgets.QDoubleSpinBox()
-        self.mf_mass_disc_exponent_edit.setToolTip("公式中的指数 n，决定质量歧视强度")
+        self.mf_mass_disc_exponent_edit.setToolTip("公式中的指数 n，决定质量响应校正强度")
         self.mf_mass_disc_exponent_edit.setRange(0.0, 10.0)
         self.mf_mass_disc_exponent_edit.setDecimals(5)
         self.mf_mass_disc_exponent_edit.setSingleStep(0.001)
         self.mf_mass_disc_exponent_edit.setValue(0.77897)
-        self.mf_md_preview_btn = QtWidgets.QPushButton("预览 D_i 列表")
+        self.mf_md_preview_btn = QtWidgets.QPushButton("预览响应因子 D_i")
         self.mf_md_preview_btn.setCheckable(True)
         self.mf_md_preview_btn.clicked.connect(self._toggle_md_preview)
 
@@ -591,7 +558,7 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
 
         self.mf_md_preview_table = QtWidgets.QTableWidget()
         self.mf_md_preview_table.setColumnCount(3)
-        self.mf_md_preview_table.setHorizontalHeaderLabels(["物种", "分子量 (MW)", "D_i"])
+        self.mf_md_preview_table.setHorizontalHeaderLabels(["物种", "分子量 (MW)", "响应因子 D_i"])
         self.mf_md_preview_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
         self.mf_md_preview_table.setAlternatingRowColors(True)
         self.mf_md_preview_table.setVisible(False)
@@ -671,8 +638,6 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
         # 这确保项目的参数设置在项目关闭/重新打开时被保留
         if self.project_settings:
             combo_set_data(self.light_source_combo, self.project_settings.light_source)
-            self.mass_discrimination_edit.setValue(self.project_settings.mass_discrimination)
-            combo_set_data(self.pie_photon_mode_combo, self.project_settings.pie_photon_mode)
             self.kr_folder_edit.setText(self.project_settings.kr_calibration_folder)
             self.kr_peak_file_edit.setText(self.project_settings.kr_calibration_peak_file)
             self.kr_mz_combo.setCurrentText(str(self.project_settings.kr_mz))
@@ -685,8 +650,6 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
         else:
             # 无项目时，从本地 NormalizationSettings 加载
             combo_set_data(self.light_source_combo, self.settings.light_source)
-            self.mass_discrimination_edit.setValue(self.settings.mass_discrimination)
-            combo_set_data(self.pie_photon_mode_combo, self.settings.pie_photon_mode)
             self.kr_folder_edit.setText(self.settings.kr_calibration_folder)
             self.kr_peak_file_edit.setText(self.settings.kr_calibration_peak_file)
             self.kr_mz_combo.setCurrentText(str(self.settings.kr_mz))
@@ -732,8 +695,7 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
         if project_settings is not None:
             self.project_settings = project_settings
         self.settings.light_source = self.light_source_combo.currentData()
-        self.settings.mass_discrimination = self.mass_discrimination_edit.value()
-        self.settings.pie_photon_mode = self.pie_photon_mode_combo.currentData()
+        self.settings.mass_discrimination = 1.0
         self.settings.kr_calibration_folder = self.kr_folder_edit.text().strip()
         self.settings.kr_mz = int(self.kr_mz_combo.currentText())
         # 根据卡峰模式决定是否保存卡峰文件路径
@@ -749,8 +711,6 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
         # 同步所有项目特定参数到 ProjectSettings
         if target:
             target.light_source = self.settings.light_source
-            target.mass_discrimination = self.settings.mass_discrimination
-            target.pie_photon_mode = self.settings.pie_photon_mode
             target.kr_calibration_folder = self.settings.kr_calibration_folder
             target.kr_mz = int(self.kr_mz_combo.currentText())
             # 根据卡峰模式决定是否保存卡峰文件路径
@@ -1560,12 +1520,11 @@ class FunctionDefaultsWidget(QtWidgets.QWidget):
         self.temp_reference_mode_combo.addItem("独立参考", "individual")
         self.temp_reference_mode_combo.setToolTip("温度扫描自动寻峰时的参考谱来源")
 
-        self.temp_prefer_gaussian_check = QtWidgets.QCheckBox("高斯积分")
-        self.temp_prefer_gaussian_check.setToolTip("使用高斯峰面积而非简单峰值强度作为积分信号")
-
-        self.temp_kr_mz_edit = QtWidgets.QSpinBox()
-        self.temp_kr_mz_edit.setRange(1, 1000)
-        self.temp_kr_mz_edit.setToolTip("Kr 膨胀校正使用的质量数")
+        self.temp_integration_method_combo = QtWidgets.QComboBox()
+        self.temp_integration_method_combo.addItem("范围累加", "sum_counts")
+        self.temp_integration_method_combo.addItem("扣基线积分", "baseline")
+        self.temp_integration_method_combo.addItem("高斯", "gaussian")
+        self.temp_integration_method_combo.setToolTip("温度扫描原始积分信号的默认计算方式；高斯拟合不可用时回退范围累加，并在结果中记录实际方式")
 
         self.temp_curve_class_change_threshold_edit = QtWidgets.QDoubleSpinBox()
         self.temp_curve_class_change_threshold_edit.setRange(0.0, 1.0)
@@ -1578,18 +1537,24 @@ class FunctionDefaultsWidget(QtWidgets.QWidget):
         self.temp_curve_class_peak_fraction_edit.setDecimals(3)
         self.temp_curve_class_peak_fraction_edit.setSingleStep(0.01)
         self.temp_curve_class_peak_fraction_edit.setToolTip("端点信号占最大值的比例阈值")
+        self.temp_replicate_mode_combo = QtWidgets.QComboBox()
+        self.temp_replicate_mode_combo.addItem("不合并重复采集", "off")
+        self.temp_replicate_mode_combo.addItem("平均重复采集", "mean")
+        self.temp_replicate_mode_combo.addItem("累加重复采集", "sum")
+        self.temp_replicate_mode_combo.setToolTip("仅在确认同一条件多次采集时选择平均或累加")
 
         form.addWidget(QtWidgets.QLabel("峰来源"), 0, 0)
         form.addWidget(self.temp_peak_source_combo, 0, 1)
         form.addWidget(QtWidgets.QLabel("参考模式"), 0, 2)
         form.addWidget(self.temp_reference_mode_combo, 0, 3)
-        form.addWidget(self.temp_prefer_gaussian_check, 0, 4)
-        form.addWidget(QtWidgets.QLabel("Kr m/z"), 1, 0)
-        form.addWidget(self.temp_kr_mz_edit, 1, 1)
-        form.addWidget(QtWidgets.QLabel("分类变化阈值"), 1, 2)
-        form.addWidget(self.temp_curve_class_change_threshold_edit, 1, 3)
-        form.addWidget(QtWidgets.QLabel("端点峰值比例"), 1, 4)
-        form.addWidget(self.temp_curve_class_peak_fraction_edit, 1, 5)
+        form.addWidget(QtWidgets.QLabel("积分方式"), 0, 4)
+        form.addWidget(self.temp_integration_method_combo, 0, 5)
+        form.addWidget(QtWidgets.QLabel("分类变化阈值"), 1, 0)
+        form.addWidget(self.temp_curve_class_change_threshold_edit, 1, 1)
+        form.addWidget(QtWidgets.QLabel("端点峰值比例"), 1, 2)
+        form.addWidget(self.temp_curve_class_peak_fraction_edit, 1, 3)
+        form.addWidget(QtWidgets.QLabel("重复采集"), 2, 0)
+        form.addWidget(self.temp_replicate_mode_combo, 2, 1)
         for col in (1, 3, 5):
             form.setColumnStretch(col, 1)
 
@@ -1615,8 +1580,11 @@ class FunctionDefaultsWidget(QtWidgets.QWidget):
         self.pie_recursive_check = QtWidgets.QCheckBox("递归拟合")
         self.pie_recursive_check.setToolTip("先拟合高能段，再逐步扩展到低能区")
 
-        self.pie_prefer_gaussian_check = QtWidgets.QCheckBox("高斯积分")
-        self.pie_prefer_gaussian_check.setToolTip("使用高斯峰面积作为 PIE 信号")
+        self.pie_integration_method_combo = QtWidgets.QComboBox()
+        self.pie_integration_method_combo.addItem("范围累加", "sum_counts")
+        self.pie_integration_method_combo.addItem("扣基线积分", "baseline")
+        self.pie_integration_method_combo.addItem("高斯", "gaussian")
+        self.pie_integration_method_combo.setToolTip("PIE 原始积分信号的默认计算方式；高斯拟合不可用时回退范围累加，并在结果中记录实际方式")
 
         self.pie_multi_folder_check = QtWidgets.QCheckBox("多文件夹模式")
         self.pie_multi_folder_check.setToolTip("允许从多个 PIE 扫描目录合并能段")
@@ -1626,14 +1594,22 @@ class FunctionDefaultsWidget(QtWidgets.QWidget):
         self.pie_merge_method_combo.addItem("第一组为主", "first_segment_dominant")
         self.pie_merge_method_combo.addItem("简单拼接", "mean")
         self.pie_merge_method_combo.setToolTip("多文件夹 PIE 数据的合并方式")
+        self.pie_replicate_mode_combo = QtWidgets.QComboBox()
+        self.pie_replicate_mode_combo.addItem("不合并重复采集", "off")
+        self.pie_replicate_mode_combo.addItem("平均重复采集", "mean")
+        self.pie_replicate_mode_combo.addItem("累加重复采集", "sum")
+        self.pie_replicate_mode_combo.setToolTip("仅在确认同一条件多次采集时选择平均或累加")
 
         form.addWidget(QtWidgets.QLabel("能量小数位"), 0, 0)
         form.addWidget(self.pie_energy_decimals_edit, 0, 1)
         form.addWidget(self.pie_recursive_check, 0, 2)
-        form.addWidget(self.pie_prefer_gaussian_check, 0, 3)
+        form.addWidget(QtWidgets.QLabel("积分方式"), 0, 3)
+        form.addWidget(self.pie_integration_method_combo, 0, 4)
         form.addWidget(QtWidgets.QLabel("合并方法"), 1, 0)
         form.addWidget(self.pie_merge_method_combo, 1, 1)
         form.addWidget(self.pie_multi_folder_check, 1, 2)
+        form.addWidget(QtWidgets.QLabel("重复采集"), 2, 0)
+        form.addWidget(self.pie_replicate_mode_combo, 2, 1)
         for col in (1, 3):
             form.setColumnStretch(col, 1)
 
@@ -1758,15 +1734,16 @@ class FunctionDefaultsWidget(QtWidgets.QWidget):
         self.peak_gaussian_boundary_scale_edit.setValue(self.peak_detection.gaussian_boundary_scale)
         combo_set_data(self.temp_peak_source_combo, ps.temp_peak_source)
         combo_set_data(self.temp_reference_mode_combo, ps.temp_reference_mode)
-        self.temp_prefer_gaussian_check.setChecked(ps.temp_prefer_gaussian)
-        self.temp_kr_mz_edit.setValue(ps.temp_kr_mz)
+        combo_set_data(self.temp_integration_method_combo, ps.temp_integration_method)
         self.temp_curve_class_change_threshold_edit.setValue(ps.temp_curve_class_change_threshold)
         self.temp_curve_class_peak_fraction_edit.setValue(ps.temp_curve_class_peak_fraction)
+        combo_set_data(self.temp_replicate_mode_combo, ps.temp_replicate_mode)
         self.pie_energy_decimals_edit.setValue(ps.pie_energy_decimals)
         self.pie_recursive_check.setChecked(ps.pie_recursive)
-        self.pie_prefer_gaussian_check.setChecked(ps.pie_prefer_gaussian)
+        combo_set_data(self.pie_integration_method_combo, ps.pie_integration_method)
         self.pie_multi_folder_check.setChecked(ps.pie_multi_folder_mode)
         combo_set_data(self.pie_merge_method_combo, ps.pie_merge_method)
+        combo_set_data(self.pie_replicate_mode_combo, ps.pie_replicate_mode)
         self.pics_no_mz_edit.setValue(ps.pics_no_mz)
         self.pics_no_formula_edit.setText(ps.pics_no_formula)
         self.pics_no_mf_edit.setValue(ps.pics_no_mf)
@@ -1840,15 +1817,18 @@ class FunctionDefaultsWidget(QtWidgets.QWidget):
         target.mz_tolerance = self.peak_detection.mz_tolerance
         target.temp_peak_source = str(self.temp_peak_source_combo.currentData())
         target.temp_reference_mode = str(self.temp_reference_mode_combo.currentData())
-        target.temp_prefer_gaussian = self.temp_prefer_gaussian_check.isChecked()
-        target.temp_kr_mz = self.temp_kr_mz_edit.value()
+        target.temp_integration_method = str(self.temp_integration_method_combo.currentData())
+        target.temp_prefer_gaussian = target.temp_integration_method == "gaussian"
         target.temp_curve_class_change_threshold = self.temp_curve_class_change_threshold_edit.value()
         target.temp_curve_class_peak_fraction = self.temp_curve_class_peak_fraction_edit.value()
+        target.temp_replicate_mode = str(self.temp_replicate_mode_combo.currentData())
         target.pie_energy_decimals = self.pie_energy_decimals_edit.value()
         target.pie_recursive = self.pie_recursive_check.isChecked()
-        target.pie_prefer_gaussian = self.pie_prefer_gaussian_check.isChecked()
+        target.pie_integration_method = str(self.pie_integration_method_combo.currentData())
+        target.pie_prefer_gaussian = target.pie_integration_method == "gaussian"
         target.pie_multi_folder_mode = self.pie_multi_folder_check.isChecked()
         target.pie_merge_method = str(self.pie_merge_method_combo.currentData())
+        target.pie_replicate_mode = str(self.pie_replicate_mode_combo.currentData())
         target.pics_no_mz = self.pics_no_mz_edit.value()
         target.pics_no_formula = self.pics_no_formula_edit.text().strip() or "NO"
         target.pics_no_mf = self.pics_no_mf_edit.value()

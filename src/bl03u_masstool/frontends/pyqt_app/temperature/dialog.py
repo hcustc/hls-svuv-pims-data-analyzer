@@ -30,7 +30,7 @@ from bl03u_masstool.core.pie_analysis import analyze_pie_folder, build_pie_curve
 from bl03u_masstool.core.pics_calculator import calc_pics_single_energy
 from bl03u_masstool.core.elements import get_all_elements_from_database, filter_species_by_elements, COMMON_ELEMENTS, parse_formula as parse_formula_elements, get_elements_from_formula
 from bl03u_masstool.core.normalization import NormalizationSettings, load_normalization_settings, save_normalization_settings
-from bl03u_masstool.core.project_settings import ProjectSettings
+from bl03u_masstool.core.project_settings import ProjectSettings, ProjectSettingsManager
 from bl03u_masstool.core.temperature_scan import (
     TEMPERATURE_CURVE_CLASS_LABELS,
     analyze_temperature_folder,
@@ -72,6 +72,8 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.calibration = calibration
         self.normalization_settings = normalization_settings or NormalizationSettings()
         self.project_settings: ProjectSettings | None = None
+        self.temperature_source_scope = "temporary"
+        self._temporary_temperature_folder = ""
         self.peak_detection = load_peak_detection_config()
         self.result_df = pd.DataFrame()
         self.curves: dict[int, dict] = {}
@@ -173,13 +175,71 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         params_label.setObjectName("ReadoutLabel")
         params_layout.addWidget(params_label)
 
+        self.project_source_button = QtWidgets.QToolButton()
+        self.project_source_button.setText("项目数据")
+        self.project_source_button.setObjectName("ModeToggle")
+        self.project_source_button.setCheckable(True)
+        self.project_source_button.setToolTip("使用项目管理中登记的温度扫描数据源")
+        self.temporary_source_button = QtWidgets.QToolButton()
+        self.temporary_source_button.setText("临时数据")
+        self.temporary_source_button.setObjectName("ModeToggle")
+        self.temporary_source_button.setCheckable(True)
+        self.temporary_source_button.setToolTip("只为本次温度扫描分析选择数据，不写回项目配置")
+        self.source_scope_group = QtWidgets.QButtonGroup(self)
+        self.source_scope_group.setExclusive(True)
+        self.source_scope_group.addButton(self.project_source_button, 0)
+        self.source_scope_group.addButton(self.temporary_source_button, 1)
+        self.source_scope_group.idClicked.connect(
+            lambda button_id: self.set_temperature_source_scope("project" if button_id == 0 else "temporary")
+        )
+        source_scope_panel = QtWidgets.QWidget()
+        source_scope_panel.setObjectName("ModeSegment")
+        source_scope_layout = QtWidgets.QHBoxLayout(source_scope_panel)
+        source_scope_layout.setContentsMargins(0, 0, 0, 0)
+        source_scope_layout.setSpacing(3)
+        source_scope_layout.addWidget(self.project_source_button)
+        source_scope_layout.addWidget(self.temporary_source_button)
+        params_layout.addWidget(source_scope_panel)
+
+        self.folder_edit = QtWidgets.QLineEdit()
+        self.folder_edit.setPlaceholderText("选择温度扫描数据文件夹")
+        self.folder_edit.textChanged.connect(self._remember_temporary_source)
+        params_layout.addWidget(self.folder_edit, stretch=1)
+
+        self.select_folder_button = QtWidgets.QPushButton("浏览...")
+        self.select_folder_button.setObjectName("BrowseButton")
+        self.select_folder_button.setToolTip("选择温度扫描数据文件夹")
+        self.select_folder_button.clicked.connect(self.select_folder)
+        params_layout.addWidget(self.select_folder_button)
+
         self.temperature_photon_check = QtWidgets.QCheckBox("光强归一化")
-        self.temperature_kr_check = QtWidgets.QCheckBox("Kr膨胀校正")
+        self.temperature_photon_check.setToolTip("使用项目管理中设置的光强来源归一化温度扫描信号")
+        self.temperature_kr_check = QtWidgets.QCheckBox("Kr 校正")
+        self.temperature_kr_check.setToolTip("使用项目管理中计算的 Kr 膨胀系数 λ(T) 校正温度扫描信号")
+        self.temperature_kr_check.toggled.connect(self._on_temperature_kr_toggled)
+        self.light_source_status_label = QtWidgets.QLabel("光强来源: IO")
+        self.light_source_status_label.setObjectName("ReadoutValue")
+        self.integration_method_label = QtWidgets.QLabel("积分方式: 范围累加")
+        self.integration_method_label.setObjectName("ReadoutValue")
+        self.integration_method_label.setToolTip("温度扫描积分方式由项目管理 -> 功能默认参数 -> 温度扫描设置")
         params_layout.addWidget(self.temperature_photon_check)
         params_layout.addWidget(self.temperature_kr_check)
+        params_layout.addWidget(self.light_source_status_label)
+        params_layout.addWidget(self.integration_method_label)
+        self.replicate_enabled_check = QtWidgets.QCheckBox("合并重复采集")
+        self.replicate_enabled_check.setToolTip("仅在确认为同一条件多次采集时开启；关闭时每个文件按自身条件处理")
+        self.replicate_enabled_check.toggled.connect(self._on_replicate_enabled_changed)
+        params_layout.addWidget(self.replicate_enabled_check)
+        self.replicate_mode_combo = QtWidgets.QComboBox()
+        self.replicate_mode_combo.addItem("平均", "mean")
+        self.replicate_mode_combo.addItem("累加", "sum")
+        self.replicate_mode_combo.setToolTip("开启合并重复采集后，同组重复采集的聚合方式")
+        self.replicate_mode_combo.setEnabled(False)
+        params_layout.addWidget(self.replicate_mode_combo)
         params_layout.addStretch(1)
 
         root.addWidget(params_bar)
+        self.set_temperature_source_scope("temporary", restore_saved=False)
 
         # ── Body: sidebar + main area ────────────────────────────────────────
         body_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
@@ -349,8 +409,115 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         if stack is not None and stack.count() > 1:
             stack.setCurrentIndex(1)
 
-    def set_project_settings(self, ps: ProjectSettings) -> None:
+    def _has_project_scope(self) -> bool:
+        return self.temperature_source_scope == "project"
+
+    def _has_project_context(self) -> bool:
+        if self.project_settings is None:
+            return False
+        return bool(
+            self.project_settings.project_name
+            or self.project_settings.temperature_scan_folder
+            or (self.project_settings.output_dir and self.project_settings.output_dir != "output")
+        )
+
+    def _remember_temporary_source(self, _text: str | None = None) -> None:
+        if self.temperature_source_scope != "temporary":
+            return
+        self._temporary_temperature_folder = self.folder_edit.text().strip()
+
+    def set_temperature_source_scope(
+        self,
+        scope: str,
+        *,
+        restore_saved: bool = True,
+        apply_project: bool = True,
+    ) -> None:
+        scope = "project" if scope == "project" else "temporary"
+        previous_scope = getattr(self, "temperature_source_scope", "temporary")
+        if previous_scope == "temporary" and scope == "project":
+            self._remember_temporary_source()
+        self.temperature_source_scope = scope
+        if hasattr(self, "project_source_button"):
+            self.project_source_button.setChecked(scope == "project")
+        if hasattr(self, "temporary_source_button"):
+            self.temporary_source_button.setChecked(scope == "temporary")
+        if scope == "project":
+            if apply_project and self.project_settings is not None:
+                self.folder_edit.setText(self.project_settings.temperature_scan_folder or "")
+        elif previous_scope == "project" and restore_saved:
+            self.folder_edit.setText(self._temporary_temperature_folder)
+        self._refresh_temperature_source_controls()
+
+    def _refresh_temperature_source_controls(self) -> None:
+        use_project = self._has_project_scope()
+        has_project_path = bool(self.project_settings and self.project_settings.temperature_scan_folder)
+        if hasattr(self, "project_source_button"):
+            self.project_source_button.setChecked(use_project)
+            self.project_source_button.setEnabled(self._has_project_context())
+        if hasattr(self, "temporary_source_button"):
+            self.temporary_source_button.setChecked(not use_project)
+        self.folder_edit.setReadOnly(use_project)
+        self.folder_edit.setClearButtonEnabled(not use_project)
+        self.folder_edit.setPlaceholderText(
+            "项目未登记温度扫描数据源" if use_project else "选择温度扫描数据文件夹"
+        )
+        self.select_folder_button.setText("浏览...")
+        self.select_folder_button.setVisible(not use_project)
+        if use_project and not has_project_path:
+            self._show_inline_empty("请先在项目管理中配置温度扫描文件夹")
+
+    def select_folder(self) -> None:
+        if self._has_project_scope():
+            self._open_project_settings()
+            return
+        folder = QtWidgets.QFileDialog.getExistingDirectory(self, "选择温度扫描数据文件夹")
+        if folder:
+            self.folder_edit.setText(folder)
+
+    def _current_temperature_folder(self) -> str:
+        if self._has_project_scope():
+            return (self.project_settings.temperature_scan_folder if self.project_settings else "").strip()
+        return self.folder_edit.text().strip()
+
+    def _refresh_normalization_status(self) -> None:
+        ps = self.project_settings or ProjectSettings()
+        light_source = "IO" if self.normalization_settings.light_source == "io" else "Beam Current"
+        self.temperature_photon_check.blockSignals(True)
+        self.temperature_photon_check.setChecked(bool(ps.temperature_photon_normalize))
+        self.temperature_photon_check.blockSignals(False)
+        self.temperature_kr_check.blockSignals(True)
+        self.temperature_kr_check.setChecked(bool(ps.temperature_kr_correct))
+        self.temperature_kr_check.blockSignals(False)
+        self.light_source_status_label.setText(f"光强来源: {light_source}")
+        self.integration_method_label.setText(f"积分方式: {self._integration_method_label(ps.temp_integration_method)}")
+
+    @staticmethod
+    def _integration_method_label(method: str | None) -> str:
+        return {
+            "sum_counts": "范围累加",
+            "baseline": "扣基线积分",
+            "gaussian": "高斯",
+            "mixed": "混合",
+        }.get(str(method or "sum_counts"), "范围累加")
+
+    def _on_temperature_kr_toggled(self, checked: bool) -> None:
+        if not checked or self.normalization_settings.expansion_factors:
+            return
+        self.temperature_kr_check.blockSignals(True)
+        self.temperature_kr_check.setChecked(False)
+        self.temperature_kr_check.blockSignals(False)
+        self._show_inline_error("尚未计算 Kr 膨胀系数 λ(T)，已退回为不使用 Kr 校正。请先到项目管理 -> 通用参数计算。")
+
+    def set_project_settings(self, ps: ProjectSettings, *, activate_project_scope: bool | None = None) -> None:
         """Keep project context visible while project-owned parameters stay in 项目管理."""
+        has_project_context = bool(
+            ps.project_name
+            or ps.temperature_scan_folder
+            or (ps.output_dir and ps.output_dir != "output")
+        )
+        if activate_project_scope is None:
+            activate_project_scope = self._has_project_scope() and has_project_context
         self.project_settings = ps
 
         if hasattr(self, "summary_project_label"):
@@ -358,18 +525,38 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
             system = ps.system or "---"
             self.summary_project_label.setText(f"项目: {project_name}")
             self.summary_system_label.setText(f"体系: {system}")
-            data_path = ps.temperature_scan_folder or "---"
+
+        if activate_project_scope:
+            self.set_temperature_source_scope("project", restore_saved=False, apply_project=False)
+        elif self._has_project_scope() and not has_project_context:
+            self.set_temperature_source_scope("temporary")
+
+        if self._has_project_scope():
+            self.folder_edit.setText(ps.temperature_scan_folder or "")
+        data_path = self._current_temperature_folder() or "---"
 
         # 加载温度扫描参数
-        if hasattr(self, "temperature_photon_check"):
-            self.temperature_photon_check.setChecked(ps.temperature_photon_normalize)
-            self.temperature_kr_check.setChecked(ps.temperature_kr_correct)
-            self.summary_data_label.setText(f"数据源: {data_path}")
+        if hasattr(self, "replicate_mode_combo"):
+            mode = ps.temp_replicate_mode if ps.temp_replicate_mode in {"mean", "sum"} else "off"
+            self.replicate_enabled_check.setChecked(mode != "off")
+            idx = self.replicate_mode_combo.findData(mode if mode != "off" else "mean")
+            if idx >= 0:
+                self.replicate_mode_combo.setCurrentIndex(idx)
+            self._on_replicate_enabled_changed(mode != "off")
+            self.summary_data_label.setText(
+                f"{'项目温扫' if self._has_project_scope() else '临时温扫'}: {data_path}"
+            )
+        self._refresh_normalization_status()
 
-        if ps.temperature_scan_folder:
+        self._refresh_temperature_source_controls()
+        if self._current_temperature_folder():
             self._show_inline_empty('项目参数已同步，点击"开始分析"')
         else:
-            self._show_inline_empty("请先在项目管理中配置温度扫描文件夹")
+            self._show_inline_empty(
+                "请先在项目管理中配置温度扫描文件夹"
+                if self._has_project_scope()
+                else "请选择温度扫描数据文件夹"
+            )
 
     def _show_inline_error(self, msg: str, retry_callback=None):
         self.inline_status_icon.setText("\u26a0\ufe0f")
@@ -424,14 +611,19 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         # Get parameters from project settings (single source of truth)
         ps = self.project_settings or ProjectSettings()
 
-        # 从UI保存温度扫描参数到ProjectSettings
-        if hasattr(self, "temperature_photon_check") and ps:
+        # 温度扫描页保存本功能的分析开关；项目管理只维护所需参数/资源。
+        if ps:
+            ps.temp_replicate_mode = self._current_replicate_mode()
             ps.temperature_photon_normalize = self.temperature_photon_check.isChecked()
             ps.temperature_kr_correct = self.temperature_kr_check.isChecked()
 
-        folder = ps.temperature_scan_folder
+        folder = self._current_temperature_folder()
         if not folder:
-            self._show_inline_error("请在项目管理中配置温度扫描文件夹")
+            self._show_inline_error(
+                "请在项目管理中配置温度扫描文件夹"
+                if self._has_project_scope()
+                else "请选择温度扫描数据文件夹"
+            )
             return
 
         # If folder has no direct .txt files but has subdirectories, ask user to pick a subfolder
@@ -449,16 +641,17 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         threshold_end = peak_config.threshold_end
         min_intensity = peak_config.min_intensity
         reference_mode = ps.temp_reference_mode
-        prefer_gaussian = ps.temp_prefer_gaussian
+        integration_method = ps.temp_integration_method
+        prefer_gaussian = integration_method == "gaussian"
 
         # Auto-switch to manual peak detection if peak file is set
         effective_peak_source = ps.temp_peak_source
-        if ps.manual_peak_file and ps.temp_peak_source == "auto":
+        if self._has_project_scope() and ps.manual_peak_file and ps.temp_peak_source == "auto":
             effective_peak_source = "manual"
 
         # Get manual peak file if using manual peak detection
         manual_peak_path = None
-        if effective_peak_source == "manual":
+        if self._has_project_scope() and effective_peak_source == "manual":
             manual_peak_path = ps.manual_peak_file
             if not manual_peak_path:
                 self._show_inline_error("请在项目管理中配置手动卡峰文件")
@@ -467,10 +660,22 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         settings = self.normalization_settings
         photon_normalize = ps.temperature_photon_normalize
         kr_correct = ps.temperature_kr_correct
-        kr_mz = ps.temp_kr_mz
-        mass_discrimination = settings.mass_discrimination
+        kr_mz = ps.kr_mz
+        mass_discrimination = 1.0
         light_source = settings.light_source
         expansion_factors = settings.expansion_factors if kr_correct else None
+        if kr_correct and not expansion_factors:
+            self._show_inline_error(
+                "已勾选 Kr 校正，但尚未计算 λ(T)，本次分析已退回。请先到 项目管理 -> 通用参数 计算 Kr 膨胀系数。"
+            )
+            self.temperature_kr_check.blockSignals(True)
+            self.temperature_kr_check.setChecked(False)
+            self.temperature_kr_check.blockSignals(False)
+            ps.temperature_kr_correct = False
+            if self._has_project_scope():
+                self._save_project_switches()
+            return
+        self._save_project_switches()
         self.set_busy(True, "正在分析温度扫描数据...")
         self.worker = WorkerThread(
             lambda: analyze_temperature_folder(
@@ -496,6 +701,7 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 min_peak_width=peak_config.min_peak_width,
                 max_peak_width=peak_config.max_peak_width,
                 prefer_gaussian=prefer_gaussian,
+                integration_method=integration_method,
                 reference_mode=reference_mode,
                 manual_peak_path=manual_peak_path,
                 photon_normalize=photon_normalize,
@@ -512,6 +718,7 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 weak_tail_cutoff_idx=peak_config.weak_tail_cutoff_idx,
                 temp_curve_class_change_threshold=ps.temp_curve_class_change_threshold,
                 temp_curve_class_peak_fraction=ps.temp_curve_class_peak_fraction,
+                replicate_mode=self._current_replicate_mode(),
             ),
             self,
         )
@@ -523,25 +730,32 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
     def compute_kr_expansion(self):
         # Get parameters from project settings (single source of truth)
         ps = self.project_settings or ProjectSettings()
-        folder = ps.temperature_scan_folder
+        folder = self._current_temperature_folder()
         if not folder:
-            QtWidgets.QMessageBox.warning(self, "提示", "请在项目管理中配置温度扫描文件夹")
+            QtWidgets.QMessageBox.warning(
+                self,
+                "提示",
+                "请在项目管理中配置温度扫描文件夹"
+                if self._has_project_scope()
+                else "请选择温度扫描数据文件夹",
+            )
             return
 
         peak_config = ps.to_peak_detection_config() if self.project_settings else load_peak_detection_config()
         threshold_end = peak_config.threshold_end
         min_intensity = peak_config.min_intensity
         reference_mode = ps.temp_reference_mode
-        prefer_gaussian = ps.temp_prefer_gaussian
+        integration_method = ps.temp_integration_method
+        prefer_gaussian = integration_method == "gaussian"
 
         # Auto-switch to manual peak detection if peak file is set
         effective_peak_source = ps.temp_peak_source
-        if ps.manual_peak_file and ps.temp_peak_source == "auto":
+        if self._has_project_scope() and ps.manual_peak_file and ps.temp_peak_source == "auto":
             effective_peak_source = "manual"
 
         # Get manual peak file if using manual peak detection
         manual_peak_path = None
-        if effective_peak_source == "manual":
+        if self._has_project_scope() and effective_peak_source == "manual":
             manual_peak_path = ps.manual_peak_file
             if not manual_peak_path:
                 QtWidgets.QMessageBox.warning(self, "提示", "请在项目管理中配置手动卡峰文件")
@@ -549,7 +763,7 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
         settings = self.normalization_settings
         light_source = settings.light_source
-        kr_mz = ps.temp_kr_mz
+        kr_mz = ps.kr_mz
         self.set_busy(True, "正在计算 Kr 膨胀系数...")
         self.worker = WorkerThread(
             lambda: compute_kr_expansion_factors(
@@ -561,6 +775,7 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 threshold_end=threshold_end,
                 min_intensity=min_intensity,
                 prefer_gaussian=prefer_gaussian,
+                integration_method=integration_method,
                 reference_mode=reference_mode,
                 detection_min_idx=peak_config.detection_min_idx,
                 nearby_peak_window=peak_config.nearby_peak_window,
@@ -583,17 +798,13 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         settings = self.normalization_settings
         expansion_factors = parse_expansion_factors_from_result(result)
         settings.expansion_factors = expansion_factors
-        settings.temperature_kr_correct = True
         save_normalization_settings(settings)
-        if self.project_settings is not None:
+        if self._has_project_scope() and self.project_settings is not None:
             self.project_settings.expansion_factors = dict(expansion_factors)
-            self.project_settings.temperature_kr_correct = True
-            from bl03u_masstool.core.project_settings import ProjectSettingsManager
             manager = ProjectSettingsManager()
             manager.set(self.project_settings)
             manager.save()
-        if hasattr(self, "temperature_kr_check"):
-            self.temperature_kr_check.setChecked(True)
+        self._refresh_normalization_status()
 
         if "photon_energy" in result.columns and result["photon_energy"].nunique(dropna=True) > 1:
             point_text = (
@@ -607,15 +818,29 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
             "成功计算 Kr 膨胀系数！\n"
             f"参考温度: {result['reference_temperature'].iloc[0]:.1f}°C\n"
             f"共 {point_text}\n\n"
-            "已启用 Kr 校正，将自动重新分析温度扫描数据",
+            "如需在本次温度扫描中使用，请勾选顶部的 Kr 校正后重新分析。",
         )
         if self.worker is not None:
             try:
                 self.worker.finished.disconnect()
             except (RuntimeError, TypeError):
                 pass
-        self.run_analysis()
 
+    def _save_project_switches(self) -> None:
+        if not self._has_project_scope() or self.project_settings is None:
+            return
+        manager = ProjectSettingsManager()
+        if manager.has_project_path():
+            manager.set(self.project_settings)
+            manager.save()
+
+    def _on_replicate_enabled_changed(self, checked: bool) -> None:
+        self.replicate_mode_combo.setEnabled(checked)
+
+    def _current_replicate_mode(self) -> str:
+        if not self.replicate_enabled_check.isChecked():
+            return "off"
+        return str(self.replicate_mode_combo.currentData() or "mean")
 
     def set_busy(self, busy: bool, message: str) -> None:
         self.run_button.setDisabled(busy)
@@ -634,13 +859,65 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.curves = build_temperature_curves(self.result_df)
         self.populate_mz_list()
         temperature_count = self.result_df["temperature"].nunique() if not self.result_df.empty else 0
-        self.summary_label.setText(f"{len(self.curves)} 条m/z曲线 | {temperature_count} 个温度点")
+        replicate_note = self._replicate_status_text(self.result_df)
+        integration_note = self._integration_status_text(self.result_df)
+        self.summary_label.setText(
+            f"{len(self.curves)} 条m/z曲线 | {temperature_count} 个温度点"
+            + (f" | {replicate_note}" if replicate_note else "")
+            + (f" | {integration_note}" if integration_note else "")
+        )
         self.update_group_summary()
         self._show_plot()  # reveal plot, hide empty state
         self.export_button.setEnabled(True)
         self.export_plot_button.setEnabled(True)
         self.preview_data_button.setEnabled(True)
-        self._show_inline_success(f"已完成分析，生成 {len(self.result_df)} 行温度扫描结果")
+        success = f"已完成分析，生成 {len(self.result_df)} 行温度扫描结果"
+        if replicate_note:
+            success = f"{success}；{replicate_note}"
+        if integration_note:
+            success = f"{success}；{integration_note}"
+        self._show_inline_success(success)
+
+    @staticmethod
+    def _replicate_status_text(df: pd.DataFrame) -> str:
+        if df.empty or "file_count" not in df:
+            return ""
+        max_count = int(pd.to_numeric(df["file_count"], errors="coerce").fillna(1).max())
+        if max_count <= 1:
+            return ""
+        warnings = []
+        if "replicate_warning" in df:
+            warnings = sorted({str(value) for value in df["replicate_warning"].dropna() if str(value)})
+        if warnings:
+            return warnings[0]
+        mode = str(df["replicate_mode"].dropna().iloc[0]) if "replicate_mode" in df and not df["replicate_mode"].dropna().empty else "mean"
+        if mode == "off":
+            return ""
+        mode_text = "平均" if mode == "mean" else "累加"
+        grouping = str(df["replicate_grouping"].dropna().iloc[0]) if "replicate_grouping" in df and not df["replicate_grouping"].dropna().empty else ""
+        if grouping == "filename":
+            return f"按文件名识别重复采集，已{mode_text}"
+        return f"检测到重复采集，已按旧逻辑{mode_text}"
+
+    @staticmethod
+    def _integration_status_text(df: pd.DataFrame) -> str:
+        if df.empty or "integration_method" not in df:
+            return ""
+        methods = df["integration_method"].dropna().astype(str)
+        gaussian_count = int((methods == "gaussian").sum())
+        baseline_count = int((methods == "baseline").sum())
+        sum_counts_count = int((methods == "sum_counts").sum())
+        mixed_count = int((methods == "mixed").sum())
+        parts = []
+        if sum_counts_count:
+            parts.append(f"范围累加 {sum_counts_count} 点")
+        if gaussian_count:
+            parts.append(f"高斯 {gaussian_count} 点")
+        if baseline_count:
+            parts.append(f"扣基线积分 {baseline_count} 点")
+        if mixed_count:
+            parts.append(f"混合 {mixed_count} 点")
+        return "积分方式: " + "，".join(parts) if parts else ""
 
     def on_analysis_failed(self, message: str) -> None:
         self._show_inline_error(f"分析失败: {message}", lambda: self.run_analysis())
@@ -766,9 +1043,13 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.current_mz = int(mz_value)
         curve = self.curves[self.current_mz]
         rows = curve["rows"].copy()
+        integration_methods = rows.get("integration_method", pd.Series([""] * len(rows))).astype(str).map(
+            {"sum_counts": "范围累加", "gaussian": "高斯", "baseline": "扣基线积分", "mixed": "混合"}
+        ).fillna("")
         curve_df = pd.DataFrame(
             {
                 "温度(C)": np.round(rows["temperature"].astype(float), 1),
+                "积分方式": integration_methods,
                 "原始积分": np.round(rows["raw_area"].astype(float), 4),
                 "IO归一化": np.round(rows["photon_normalized_area"].astype(float), 4),
                 "λ(T)": np.round(rows["expansion_lambda"].astype(float), 6),
@@ -871,6 +1152,7 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         min_intensity: float,
         *,
         prefer_gaussian: bool = True,
+        integration_method: str = "sum_counts",
         reference_mode: str = "sum",
         manual_peak_path: str | None = None,
         photon_normalize: bool = False,
@@ -880,6 +1162,7 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         expansion_factors: dict[float, float] | None = None,
         temp_curve_class_change_threshold: float = 0.25,
         temp_curve_class_peak_fraction: float = 0.65,
+        replicate_mode: str = "off",
     ) -> pd.DataFrame:
         peak_config = (
             self.project_settings.to_peak_detection_config()
@@ -901,6 +1184,7 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
             gaussian_boundary_scale=peak_config.gaussian_boundary_scale,
             boundary_padding=peak_config.boundary_padding,
             prefer_gaussian=prefer_gaussian,
+            integration_method=integration_method,
             reference_mode=reference_mode,
             manual_peak_path=manual_peak_path,
             photon_normalize=photon_normalize,
@@ -910,6 +1194,7 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
             expansion_factors=expansion_factors,
             temp_curve_class_change_threshold=temp_curve_class_change_threshold,
             temp_curve_class_peak_fraction=temp_curve_class_peak_fraction,
+            replicate_mode=replicate_mode,
         )
 
     def export_result(self):
@@ -928,13 +1213,17 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.result_df.to_excel(path, index=False)
         else:
             self.result_df.to_csv(path, index=False, encoding="utf-8-sig")
-        record_project_artifact(
-            self,
-            "temperature_scan_result_file",
-            path,
-            message="温度扫描结果已登记到项目管理",
-        )
-        QtWidgets.QMessageBox.information(self, "成功", "温度扫描结果已导出并登记到项目管理。")
+        if self._has_project_scope():
+            record_project_artifact(
+                self,
+                "temperature_scan_result_file",
+                path,
+                message="温度扫描结果已登记到项目管理",
+            )
+            message = "温度扫描结果已导出并登记到项目管理。"
+        else:
+            message = "温度扫描结果已导出。当前为临时数据模式，结果未登记到项目管理。"
+        QtWidgets.QMessageBox.information(self, "成功", message)
 
     def export_plot(self):
         if self.plot_widget is None or self.plot_widget.figure is None:
@@ -949,12 +1238,13 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         if not path:
             return
         if self.plot_widget.save_plot(path):
-            record_project_artifact(
-                self,
-                "temperature_scan_plot_file",
-                path,
-                message="温度扫描曲线图已登记到项目管理",
-            )
+            if self._has_project_scope():
+                record_project_artifact(
+                    self,
+                    "temperature_scan_plot_file",
+                    path,
+                    message="温度扫描曲线图已登记到项目管理",
+                )
             QtWidgets.QMessageBox.information(self, "成功", f"曲线图已导出：{path}")
         else:
             QtWidgets.QMessageBox.warning(self, "错误", "导出图表失败")

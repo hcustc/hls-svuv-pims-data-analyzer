@@ -47,7 +47,7 @@ def gaussian(x, amplitude: float, mean: float, std_dev: float, baseline: float):
 
 
 def fit_gaussian(y_data: Iterable[float], center_idx: int, window_size: int = 20) -> GaussianFit | None:
-    data = np.asarray(list(y_data), dtype=float)
+    data = np.asarray(y_data, dtype=float)
     if data.size == 0:
         return None
     start_idx = max(0, int(center_idx) - int(window_size))

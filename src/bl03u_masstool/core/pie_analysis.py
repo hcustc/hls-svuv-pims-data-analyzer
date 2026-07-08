@@ -9,11 +9,11 @@ import numpy as np
 import pandas as pd
 
 from .calibration import Calibration
-from .integration import baseline_corrected_area, gaussian_area
+from .integration import baseline_corrected_area, gaussian_area, summed_counts_area
 from .normalization import extract_light_intensity
 from .peak_ranges import load_peak_ranges, peak_ranges_to_peaks
 from .peak_detection import detect_peaks_by_algorithm, fit_gaussian
-from .spectrum_io import Spectrum, extract_first_number, read_spectrum
+from .spectrum_io import Spectrum, extract_first_number, find_filename_replicate_groups, filename_replicate_key, read_spectrum
 
 
 logger = logging.getLogger(__name__)
@@ -208,10 +208,15 @@ def _group_spectra_by_energy(
     recursive: bool,
     energy_decimals: int,
     light_source: str,
+    replicate_mode: str = "off",
 ) -> list[dict]:
-    grouped: dict[float, list[tuple[Path, Spectrum, float, float]]] = {}
+    replicate_mode = "sum" if replicate_mode == "sum" else "mean" if replicate_mode == "mean" else "off"
+    grouped: dict[object, list[tuple[Path, Spectrum, float, float]]] = {}
     blank_grouped: dict[float, list[tuple[Path, Spectrum, float, float]]] = {}
     files = _iter_pie_files(folder, suffixes, recursive)
+    filename_replicates = find_filename_replicate_groups(files) if replicate_mode != "off" else {}
+    filename_replicate_energy_keys: dict[tuple[Path, str], set[float]] = {}
+    spectra: list[tuple[Path, Spectrum, float, float, float]] = []
     for path in files:
         spectrum = read_spectrum(path, header_lines=10 if path.suffix.lower() == ".txt" else None, trim_start=0)
         if len(spectrum.y) == 0:
@@ -223,21 +228,51 @@ def _group_spectra_by_energy(
             continue
         energy_key = round(energy, energy_decimals)
         io_current = extract_light_intensity(spectrum.metadata_lines, light_source)
-        target = blank_grouped if _is_blank_spectrum_path(path) else grouped
-        target.setdefault(energy_key, []).append((path, spectrum, energy, io_current))
+        spectra.append((path, spectrum, energy, energy_key, io_current))
+        repeat_key = filename_replicate_key(path)
+        if repeat_key is not None and repeat_key in filename_replicates:
+            filename_replicate_energy_keys.setdefault(repeat_key, set()).add(energy_key)
+
+    valid_filename_replicates = {
+        key
+        for key, energy_keys in filename_replicate_energy_keys.items()
+        if len(energy_keys) <= 2
+    }
+
+    for path, spectrum, energy, energy_key, io_current in spectra:
+        if _is_blank_spectrum_path(path):
+            blank_grouped.setdefault(energy_key, []).append((path, spectrum, energy, io_current))
+            continue
+        if replicate_mode == "off":
+            grouped.setdefault(("file", path), []).append((path, spectrum, energy, io_current))
+            continue
+        repeat_key = filename_replicate_key(path)
+        if repeat_key is not None and repeat_key in valid_filename_replicates:
+            grouped.setdefault(("filename", repeat_key), []).append((path, spectrum, energy, io_current))
+        else:
+            grouped.setdefault(("energy", energy_key), []).append((path, spectrum, energy, io_current))
     groups = []
-    for energy_key, items in grouped.items():
+    for group_key, items in grouped.items():
+        energy_key = round(float(np.mean([item[2] for item in items])), energy_decimals)
         blank_items = blank_grouped.get(energy_key, [])
         min_len = min(
             [len(item[1].y) for item in items]
             + [len(item[1].y) for item in blank_items]
         )
         x_values = _aligned_x_values(items + blank_items, min_len)
-        y_mean = np.mean([item[1].y[:min_len] for item in items], axis=0)
+        y_stack = [item[1].y[:min_len] for item in items]
+        y_value = np.sum(y_stack, axis=0) if replicate_mode == "sum" else np.mean(y_stack, axis=0)
         blank_file_count = len(blank_items)
         if blank_items:
-            blank_mean = np.mean([item[1].y[:min_len] for item in blank_items], axis=0)
-            y_mean = y_mean - blank_mean
+            blank_stack = [item[1].y[:min_len] for item in blank_items]
+            blank_value = np.sum(blank_stack, axis=0) if replicate_mode == "sum" else np.mean(blank_stack, axis=0)
+            y_value = y_value - blank_value
+        uses_filename_grouping = bool(group_key[0] == "filename")
+        warning = ""
+        if replicate_mode != "off" and not uses_filename_grouping and len(items) > 1:
+            warning = (
+                "未识别到文件名末尾采集序号，已退回按能量分组的旧逻辑处理重复文件。"
+            )
         groups.append({
             "energy": float(np.mean([item[2] for item in items])),
             "energy_key": energy_key,
@@ -245,17 +280,72 @@ def _group_spectra_by_energy(
             "light_source": light_source,
             "file_count": len(items),
             "files": [item[0].name for item in items],
+            "replicate_mode": replicate_mode,
+            "replicate_grouping": "filename" if uses_filename_grouping else "energy",
+            "replicate_warning": warning,
             "blank_file_count": blank_file_count,
             "blank_files": [item[0].name for item in blank_items],
             "background_subtracted": bool(blank_items),
             "spectrum": Spectrum(
                 x=np.asarray(x_values, dtype=float),
-                y=np.asarray(y_mean, dtype=float),
+                y=np.asarray(y_value, dtype=float),
                 metadata_lines=[],
                 path=str(folder),
             ),
         })
     return sorted(groups, key=lambda x: x["energy"])
+
+
+def _peak_integration_specs(reference_peaks: list) -> list[tuple[object, int, int]]:
+    return [
+        (
+            peak,
+            int(round(peak.index)),
+            max(5, min(30, int(peak.right_bound) - int(peak.left_bound) + 5)),
+        )
+        for peak in reference_peaks
+    ]
+
+
+def _integrate_pie_peak(
+    y_data: np.ndarray,
+    peak: object,
+    center_idx: int,
+    window_size: int,
+    *,
+    prefer_gaussian: bool,
+    integration_method: str = "sum_counts",
+) -> tuple[float, str]:
+    method = "gaussian" if prefer_gaussian else integration_method
+    method = method if method in {"sum_counts", "baseline", "gaussian"} else "sum_counts"
+    if method == "gaussian":
+        fit = fit_gaussian(y_data, center_idx, window_size)
+        if fit is not None:
+            area = gaussian_area(fit.amplitude, fit.fwhm)
+            if area > 0:
+                return area, "gaussian"
+        method = "sum_counts"
+    if method == "baseline":
+        return baseline_corrected_area(y_data, peak.left_bound, peak.right_bound), "baseline"
+    return summed_counts_area(y_data, peak.left_bound, peak.right_bound), "sum_counts"
+
+
+def _summarize_integration_methods(values) -> str:
+    methods = sorted({str(value) for value in values if str(value)})
+    if not methods:
+        return ""
+    if len(methods) == 1:
+        return methods[0]
+    return "mixed"
+
+
+def normalize_integration_method(value: str | None, *, prefer_gaussian: bool | None = None) -> str:
+    if prefer_gaussian:
+        return "gaussian"
+    method = str(value or "").strip()
+    if method in {"sum_counts", "baseline", "gaussian"}:
+        return method
+    return "sum_counts"
 
 
 def analyze_pie_folder(
@@ -285,12 +375,14 @@ def analyze_pie_folder(
     min_peak_width: int = 1,
     max_peak_width: int = 80,
     prefer_gaussian: bool = True,
+    integration_method: str = "sum_counts",
     manual_peak_path: str | Path | None = None,
     photon_normalize: bool = True,
     photon_reference_mode: str = "first",
     mass_discrimination: float = 1.0,
     light_source: str = "io",
     target_mz_values: list[int] | None = None,
+    replicate_mode: str = "off",
     vote_threshold: float = 0.667,
     min_intensity_for_single_vote: float = 5.0,
     mz_tolerance: float = 0.2,
@@ -305,12 +397,14 @@ def analyze_pie_folder(
         recursive=recursive,
         energy_decimals=energy_decimals,
         light_source=light_source,
+        replicate_mode=replicate_mode,
     )
     if not groups:
         return pd.DataFrame(columns=[
-            "energy", "file_count", "io", "light_source", "mz", "mz_rounded",
+            "energy", "file_count", "io", "light_source", "replicate_mode", "replicate_grouping",
+            "replicate_warning", "mz", "mz_rounded",
             "species", "photon_normalized_intensity", "normalized_intensity",
-            "raw_area", "left_bound", "right_bound", "blank_file_count",
+            "raw_area", "integration_method", "left_bound", "right_bound", "blank_file_count",
             "background_subtracted",
         ])
     if manual_peak_path:
@@ -359,17 +453,20 @@ def analyze_pie_folder(
     denominator = float(mass_discrimination)
     if denominator <= 0:
         raise ValueError("mass_discrimination must be positive")
+    configured_integration_method = normalize_integration_method(integration_method, prefer_gaussian=prefer_gaussian)
+    peak_specs = _peak_integration_specs(reference_peaks)
     rows = []
     for group in groups:
         spectrum = group["spectrum"]
-        for peak in reference_peaks:
-            center_idx = int(round(peak.index))
-            raw_area = baseline_corrected_area(spectrum.y, peak.left_bound, peak.right_bound)
-            if prefer_gaussian:
-                window_size = max(5, min(30, peak.right_bound - peak.left_bound + 5))
-                fit = fit_gaussian(spectrum.y, center_idx, window_size)
-                if fit is not None:
-                    raw_area = gaussian_area(fit.amplitude, fit.fwhm)
+        for peak, center_idx, window_size in peak_specs:
+            raw_area, actual_integration_method = _integrate_pie_peak(
+                spectrum.y,
+                peak,
+                center_idx,
+                window_size,
+                prefer_gaussian=prefer_gaussian,
+                integration_method=configured_integration_method,
+            )
             photon_normalized = raw_area
             if photon_normalize:
                 photon_normalized = raw_area / group["io"] if group["io"] > 0 else 0.0
@@ -383,6 +480,9 @@ def analyze_pie_folder(
                 "file_count": group["file_count"],
                 "io": group["io"],
                 "light_source": group["light_source"],
+                "replicate_mode": group.get("replicate_mode", replicate_mode),
+                "replicate_grouping": group.get("replicate_grouping", ""),
+                "replicate_warning": group.get("replicate_warning", ""),
                 "blank_file_count": group.get("blank_file_count", 0),
                 "background_subtracted": bool(group.get("background_subtracted", False)),
                 "reference_energy": reference_group["energy"],
@@ -393,6 +493,7 @@ def analyze_pie_folder(
                 "photon_normalized_intensity": photon_normalized,
                 "normalized_intensity": normalized,
                 "raw_area": raw_area,
+                "integration_method": actual_integration_method,
                 "left_bound": peak.left_bound,
                 "right_bound": peak.right_bound,
             })
@@ -411,19 +512,26 @@ def build_pie_curves(analysis_df: pd.DataFrame) -> dict[int, dict]:
         working["photon_normalized_intensity"] = working["normalized_intensity"]
     if "species" not in working:
         working["species"] = ""
+    if "integration_method" not in working:
+        working["integration_method"] = ""
     for mz, group in working.groupby("mz_rounded"):
         group = group.sort_values("energy").reset_index(drop=True)
-        group["energy_rounded"] = group["energy"].round(2)
-        ordered = group.groupby("energy_rounded", as_index=False).agg(
-            energy=("energy", "mean"),
-            normalized_intensity=("normalized_intensity", "mean"),
-            raw_area=("raw_area", "mean"),
-            photon_normalized_intensity=("photon_normalized_intensity", "mean"),
-            species=("species", "first"),
-            mz=("mz", "mean"),
-            file_count=("file_count", "first"),
-            io=("io", "first"),
-        ).sort_values("energy")
+        replicate_modes = set(group.get("replicate_mode", pd.Series(dtype=object)).dropna().astype(str))
+        if replicate_modes == {"off"}:
+            ordered = group.copy()
+        else:
+            group["energy_rounded"] = group["energy"].round(2)
+            ordered = group.groupby("energy_rounded", as_index=False).agg(
+                energy=("energy", "mean"),
+                normalized_intensity=("normalized_intensity", "mean"),
+                raw_area=("raw_area", "mean"),
+                photon_normalized_intensity=("photon_normalized_intensity", "mean"),
+                integration_method=("integration_method", _summarize_integration_methods),
+                species=("species", "first"),
+                mz=("mz", "mean"),
+                file_count=("file_count", "first"),
+                io=("io", "first"),
+            ).sort_values("energy")
         curves[int(mz)] = {
             "mz": int(mz),
             "mz_exact_mean": float(ordered["mz"].mean()),
@@ -667,7 +775,7 @@ def _empty_pie_dataframe() -> pd.DataFrame:
     return pd.DataFrame(columns=[
         "energy", "file_count", "io", "light_source", "mz", "mz_rounded",
         "species", "photon_normalized_intensity", "normalized_intensity",
-        "raw_area", "left_bound", "right_bound", "blank_file_count",
+        "raw_area", "integration_method", "left_bound", "right_bound", "blank_file_count",
         "background_subtracted",
     ])
 
@@ -676,6 +784,8 @@ def _aggregate_segment_by_energy(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df.copy()
     seg_df = df.sort_values("energy").reset_index(drop=True).copy()
+    if "integration_method" not in seg_df:
+        seg_df["integration_method"] = ""
     seg_df["energy_rounded"] = seg_df["energy"].round(2)
     agg_spec = {
         "energy": ("energy", "mean"),
@@ -683,6 +793,7 @@ def _aggregate_segment_by_energy(df: pd.DataFrame) -> pd.DataFrame:
         "normalized_intensity": ("normalized_intensity", "mean"),
         "raw_area": ("raw_area", "mean"),
         "photon_normalized_intensity": ("photon_normalized_intensity", "mean"),
+        "integration_method": ("integration_method", _summarize_integration_methods),
         "mz": ("mz", "mean"),
         "species": ("species", "first"),
         "file_count": ("file_count", "first"),
@@ -853,12 +964,14 @@ def analyze_multiple_pie_folders(
     min_peak_width: int = 1,
     max_peak_width: int = 80,
     prefer_gaussian: bool = True,
+    integration_method: str = "sum_counts",
     manual_peak_path: str | Path | None = None,
     photon_normalize: bool = True,
     photon_reference_mode: str = "first",
     mass_discrimination: float = 1.0,
     light_source: str = "io",
     merge_method: str = "low_energy_dominant",
+    replicate_mode: str = "off",
     vote_threshold: float = 0.667,
     min_intensity_for_single_vote: float = 5.0,
     mz_tolerance: float = 0.2,
@@ -878,6 +991,7 @@ def analyze_multiple_pie_folders(
             recursive=recursive,
             energy_decimals=energy_decimals,
             light_source=light_source,
+            replicate_mode=replicate_mode,
         )
         all_spectra_by_folder.append((folder_idx, folder, groups))
         all_spectra_flat.extend(groups)
@@ -929,6 +1043,8 @@ def analyze_multiple_pie_folders(
     if denominator <= 0:
         raise ValueError("mass_discrimination must be positive")
 
+    configured_integration_method = normalize_integration_method(integration_method, prefer_gaussian=prefer_gaussian)
+    peak_specs = _peak_integration_specs(reference_peaks)
     all_rows = []
     for folder_idx, folder, groups in all_spectra_by_folder:
         for group in groups:
@@ -937,13 +1053,15 @@ def analyze_multiple_pie_folders(
             io_current = group["io"]
             file_count = group["file_count"]
 
-            for peak in reference_peaks:
-                raw_area = baseline_corrected_area(spectrum.y, peak.left_bound, peak.right_bound)
-                if prefer_gaussian:
-                    window_size = max(5, min(30, peak.right_bound - peak.left_bound + 5))
-                    fit = fit_gaussian(spectrum.y, int(round(peak.index)), window_size)
-                    if fit is not None:
-                        raw_area = gaussian_area(fit.amplitude, fit.fwhm)
+            for peak, center_idx, window_size in peak_specs:
+                raw_area, actual_integration_method = _integrate_pie_peak(
+                    spectrum.y,
+                    peak,
+                    center_idx,
+                    window_size,
+                    prefer_gaussian=prefer_gaussian,
+                    integration_method=configured_integration_method,
+                )
 
                 photon_normalized = raw_area
                 if photon_normalize:
@@ -957,6 +1075,9 @@ def analyze_multiple_pie_folders(
                     "file_count": file_count,
                     "io": io_current,
                     "light_source": light_source,
+                    "replicate_mode": group.get("replicate_mode", replicate_mode),
+                    "replicate_grouping": group.get("replicate_grouping", ""),
+                    "replicate_warning": group.get("replicate_warning", ""),
                     "blank_file_count": group.get("blank_file_count", 0),
                     "background_subtracted": bool(group.get("background_subtracted", False)),
                     "reference_energy": ref_group["energy"],
@@ -969,6 +1090,7 @@ def analyze_multiple_pie_folders(
                     "photon_normalized_intensity": photon_normalized,
                     "normalized_intensity": normalized,
                     "raw_area": raw_area,
+                    "integration_method": actual_integration_method,
                     "left_bound": peak.left_bound,
                     "right_bound": peak.right_bound,
                 })

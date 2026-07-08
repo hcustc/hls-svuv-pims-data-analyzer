@@ -98,7 +98,7 @@ function defaultWebProjectSettings() {
       manual_peak_file: "config/peak_integration.yaml",
     },
     normalization: {
-      pie_photon_mode: "first",
+      pie_photon_mode: "none",
       light_source: "io",
       mass_discrimination: 1,
     },
@@ -182,9 +182,8 @@ function applyProjectSettingsToForms() {
   setFieldValue("folder", settings.data_sources.pie_scan_folder);
   setFieldValue("manual-peak-path", settings.data_sources.manual_peak_file);
   setFieldValue("pics-database-path", settings.data_sources.pics_database_path);
-  setFieldValue("photon-mode", settings.normalization.pie_photon_mode);
+  setFieldValue("pie-photon-correction", settings.normalization.pie_photon_mode !== "off");
   setFieldValue("light-source", settings.normalization.light_source);
-  setFieldValue("mass-discrimination", settings.normalization.mass_discrimination);
   setFieldValue("energy-decimals", settings.function_params.pie.energy_decimals);
   setFieldValue("recursive", settings.function_params.pie.recursive);
   setFieldValue("gaussian", settings.function_params.pie.prefer_gaussian);
@@ -211,9 +210,9 @@ function collectProjectSettingsFromForms() {
       pics_database_path: fieldValue("pics-database-path").trim(),
     },
     normalization: {
-      pie_photon_mode: fieldValue("photon-mode", "first"),
+      pie_photon_mode: fieldValue("pie-photon-correction", true) ? "none" : "off",
       light_source: fieldValue("light-source", "io"),
-      mass_discrimination: numericFieldValue("mass-discrimination", 1, { min: 0.000001 }),
+      mass_discrimination: 1,
     },
     function_params: {
       ...current.function_params,
@@ -244,7 +243,8 @@ function updateProjectSettingSummaries() {
   const projectName = settings.project.project_name || "未命名项目";
   const pieSummary = $("pie-settings-summary");
   if (pieSummary) {
-    pieSummary.textContent = `${projectName}；${settings.data_sources.pie_scan_folder || "未设置 PIE 目录"}；${settings.normalization.light_source} / D=${settings.normalization.mass_discrimination}；能量小数 ${settings.function_params.pie.energy_decimals}`;
+    const photonText = fieldValue("pie-photon-correction", true) ? "光强校正" : "不校正光强";
+    pieSummary.textContent = `${projectName}；${settings.data_sources.pie_scan_folder || "未设置 PIE 目录"}；${settings.normalization.light_source}；${photonText}；能量小数 ${settings.function_params.pie.energy_decimals}`;
   }
   const libraryText = state.picsLibraryId ? `临时工作库 ${state.picsLibraryId.slice(0, 8)}` : "服务器维护库";
   const picsSummary = $("pics-settings-summary");
@@ -736,9 +736,9 @@ function payloadFromForm() {
     recursive: Boolean(settings.function_params.pie.recursive),
     energy_decimals: Number(settings.function_params.pie.energy_decimals || 1),
     gaussian: Boolean(settings.function_params.pie.prefer_gaussian),
-    photon_mode: settings.normalization.pie_photon_mode,
+    photon_mode: fieldValue("pie-photon-correction", true) ? "none" : "off",
     light_source: settings.normalization.light_source,
-    mass_discrimination: Number(settings.normalization.mass_discrimination || 1),
+    mass_discrimination: 1,
   };
 }
 

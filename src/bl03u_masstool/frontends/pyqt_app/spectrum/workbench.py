@@ -407,16 +407,16 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         scope_segment_layout.setContentsMargins(0, 0, 0, 0)
         scope_segment_layout.setSpacing(3)
         self.projectSourceButton = QtWidgets.QToolButton(source_panel)
-        self.projectSourceButton.setText("继承项目")
+        self.projectSourceButton.setText("项目数据")
         self.projectSourceButton.setObjectName("ModeToggle")
         self.projectSourceButton.setCheckable(True)
         self.projectSourceButton.setFixedSize(72, 28)
         self.projectSourceButton.setToolTip("使用项目管理中登记的质谱工作台路径")
         self.customSourceButton = QtWidgets.QToolButton(source_panel)
-        self.customSourceButton.setText("自选路径")
+        self.customSourceButton.setText("临时数据")
         self.customSourceButton.setObjectName("ModeToggle")
         self.customSourceButton.setCheckable(True)
-        self.customSourceButton.setFixedSize(64, 28)
+        self.customSourceButton.setFixedSize(72, 28)
         self.customSourceButton.setToolTip("只在当前质谱工作台使用此路径，不写回项目配置")
         self.sourceScopeGroup = QtWidgets.QButtonGroup(source_panel)
         self.sourceScopeGroup.setExclusive(True)
@@ -670,7 +670,7 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
 
     def apply_project_spectrum_paths(self, project_settings, *, activate: bool = False) -> None:
         if activate:
-            self.set_spectrum_source_scope("custom", apply_project=False)
+            self.set_spectrum_source_scope("project", apply_project=False)
         if getattr(self, "spectrum_source_scope", "custom") != "project":
             self._refresh_spectrum_source_controls()
             return

@@ -77,7 +77,7 @@ class IonizationEnergyLookupWidget(QtWidgets.QWidget, DataFrameTableMixin):
         input_layout.setVerticalSpacing(8)
 
         self.query_edit = QtWidgets.QLineEdit()
-        self.query_edit.setPlaceholderText("输入分子式、名称、CAS号或NIST ID，例如 C6H6、Benzene、71-43-2、C71432")
+        self.query_edit.setPlaceholderText("输入分子式、名称、CAS号或NIST ID")
         self.query_edit.returnPressed.connect(self.query_webbook)
         self.search_type_combo = QtWidgets.QComboBox()
         self.search_type_combo.addItem("自动", "auto")
