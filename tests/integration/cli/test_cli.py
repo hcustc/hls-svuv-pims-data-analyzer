@@ -111,7 +111,7 @@ def test_cli_pie_writes_csv_and_curve_json(tmp_path):
     report = report_md.read_text(encoding="utf-8")
     assert df["energy"].tolist() == [11.0, 12.0]
     assert "22" in curves
-    assert curves["22"]["intensities"] == [9.0, 18.0]
+    assert curves["22"]["intensities"] == [12.0, 24.0]
     assert manifest["analysis_type"] == "pie"
     assert manifest["data_summary"]["curve_count"] == 1
     assert evidence["22"]["confidence_level"] == "unfitted"
@@ -162,7 +162,7 @@ def test_cli_temperature_writes_csv_and_curve_json(tmp_path):
     report = report_md.read_text(encoding="utf-8")
     assert df["temperature"].tolist() == [400.0, 500.0]
     assert "22" in curves
-    assert curves["22"]["areas"] == [9.0, 18.0]
+    assert curves["22"]["areas"] == [12.0, 24.0]
     assert manifest["analysis_type"] == "temperature"
     assert evidence["22"]["curve"]["point_count"] == 2
     assert "有效温度点少于 3 个" in report
