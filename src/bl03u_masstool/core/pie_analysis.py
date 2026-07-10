@@ -69,7 +69,7 @@ def save_species_database_sqlite(database: list[dict], sqlite_path: str | Path, 
                     species_id, 
                     int(item["mz"]), 
                     str(item["species"]), 
-                    item.get("ie"), 
+                    item.get("ie") if item.get("ie") is not None else item.get("ionization_energy"),
                     item.get("formula"), 
                     item.get("elements"), 
                     item.get("smiles"),
@@ -103,11 +103,17 @@ def load_species_database_sqlite(path: str | Path) -> tuple[list[dict], dict[int
                 continue
             index = len(database)
             mz = int(species_row["mz"])
+            ionization_energy = species_row["ionization_energy"]
             database.append({
                 "id": int(species_row["id"]),
                 "mz": mz,
                 "species": species_row["name"],
-                "ie": species_row["ionization_energy"],
+                # Keep both names because the fitting core historically uses ``ie``
+                # while the PyQt candidate model used ``ionization_energy``.
+                "ie": ionization_energy,
+                "ionization_energy": ionization_energy,
+                "ie_source": "PICS数据库" if ionization_energy is not None else "",
+                "ie_query_status": "available" if ionization_energy is not None else "not_queried",
                 "formula": species_row["formula"],
                 "elements": species_row["elements"],
                 "smiles": species_row["smiles"],
@@ -566,6 +572,12 @@ def _clean_coefficient_map(coefficients: dict[int, float] | None) -> dict[int, f
     return cleaned
 
 
+def species_ionization_energy_value(species: dict) -> object:
+    """Return IE using the legacy and PyQt schema aliases."""
+    value = species.get("ie")
+    return species.get("ionization_energy") if value is None else value
+
+
 def fit_species_combination_with_curve(
     species_list: list[dict],
     experimental_energies,
@@ -665,14 +677,19 @@ def fit_species_combination_with_curve(
         # TODO: 改进为贡献度范数判断，而非绝对系数阈值（见 locked_candidates_refactor_plan.md Phase 4）
         if coeffs[idx] > 0.001 or active_species_ids[idx] in locked_ids:
             component = design[:, idx] * coeffs[idx]
-            key = (species["species"], species.get("ie"))
+            ionization_energy = species_ionization_energy_value(species)
+            key = (species["species"], ionization_energy)
             if key not in merged:
                 merged[key] = {
                     "mz": int(species["mz"]),
                     "ids": [],
                     "coefficients_by_id": {},
                     "species": species["species"],
-                    "ie": species.get("ie"),
+                    "ie": ionization_energy,
+                    "ionization_energy": ionization_energy,
+                    "ie_source": species.get("ie_source", ""),
+                    "ie_query_status": species.get("ie_query_status", ""),
+                    "ie_message": species.get("ie_message", ""),
                     "formula": species.get("formula"),
                     "elements": species.get("elements"),
                     "smiles": species.get("smiles"),
@@ -695,6 +712,10 @@ def fit_species_combination_with_curve(
             "coefficients_by_id": item["coefficients_by_id"],
             "species": item["species"],
             "ie": item["ie"],
+            "ionization_energy": item["ionization_energy"],
+            "ie_source": item.get("ie_source", ""),
+            "ie_query_status": item.get("ie_query_status", ""),
+            "ie_message": item.get("ie_message", ""),
             "formula": item.get("formula"),
             "elements": item.get("elements"),
             "smiles": item.get("smiles"),

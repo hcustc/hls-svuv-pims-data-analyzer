@@ -25,6 +25,8 @@ TEMPERATURE_CURVE_CLASS_LABELS = {
     "unclassified": "暂未区分",
 }
 
+PRODUCT_LIKE_TEMPERATURE_CURVE_CLASSES = {"formation", "intermediate"}
+
 
 def group_energies_by_tolerance(energies: list[float], tolerance: float = 0.01) -> dict[float, list[float]]:
     """按误差容忍度将能量值分组。
@@ -696,6 +698,99 @@ def _kr_expansion_rows_for_signal_series(
             row["reference_energy"] = float(photon_energy)
         rows.append(row)
     return rows
+
+
+def identify_product_energy_intervals(
+    energy_curve_rows: pd.DataFrame | list[dict],
+    *,
+    product_classes: set[str] | None = None,
+    max_gap: float | None = None,
+) -> dict:
+    """Summarize energies where one m/z shows product-like temperature behavior.
+
+    ``energy_curve_rows`` is expected to contain one row per photon energy with
+    at least ``energy`` and ``curve_class``. Product-like defaults to formation
+    and intermediate temperature curves.
+    """
+    product_classes = product_classes or PRODUCT_LIKE_TEMPERATURE_CURVE_CLASSES
+    rows = pd.DataFrame(energy_curve_rows).copy()
+    if rows.empty:
+        return {
+            "intervals": [],
+            "product_energies": [],
+            "all_energies": [],
+            "rows": pd.DataFrame(columns=["energy", "curve_class", "is_product_like"]),
+        }
+
+    if "energy" not in rows.columns:
+        return {
+            "intervals": [],
+            "product_energies": [],
+            "all_energies": [],
+            "rows": pd.DataFrame(columns=["energy", "curve_class", "is_product_like"]),
+        }
+
+    rows["energy"] = pd.to_numeric(rows["energy"], errors="coerce")
+    rows = rows.dropna(subset=["energy"]).sort_values("energy").reset_index(drop=True)
+    if "curve_class" not in rows.columns:
+        rows["curve_class"] = ""
+    rows["curve_class"] = rows["curve_class"].astype(str)
+    rows["is_product_like"] = rows["curve_class"].isin(product_classes)
+
+    all_energies = [float(value) for value in rows["energy"].tolist()]
+    product_energies = [float(value) for value in rows.loc[rows["is_product_like"], "energy"].tolist()]
+    if not product_energies:
+        return {
+            "intervals": [],
+            "product_energies": product_energies,
+            "all_energies": all_energies,
+            "rows": rows,
+        }
+
+    if max_gap is None:
+        unique_energies = sorted(set(all_energies))
+        gaps = [
+            float(unique_energies[index + 1] - unique_energies[index])
+            for index in range(len(unique_energies) - 1)
+            if unique_energies[index + 1] > unique_energies[index]
+        ]
+        max_gap = max(gaps) * 1.5 if gaps else 0.0
+
+    intervals: list[dict] = []
+    start: float | None = None
+    end: float | None = None
+    interval_points: list[float] = []
+    previous_energy: float | None = None
+    for row in rows.itertuples(index=False):
+        energy = float(row.energy)
+        is_product_like = bool(row.is_product_like)
+        has_gap = (
+            previous_energy is not None
+            and max_gap > 0
+            and energy - previous_energy > max_gap + 1e-9
+        )
+        if not is_product_like or has_gap:
+            if start is not None and end is not None:
+                intervals.append({"start": start, "end": end, "energies": interval_points})
+            start = end = None
+            interval_points = []
+        if is_product_like:
+            if start is None:
+                start = energy
+                interval_points = [energy]
+            else:
+                interval_points.append(energy)
+            end = energy
+        previous_energy = energy
+    if start is not None and end is not None:
+        intervals.append({"start": start, "end": end, "energies": interval_points})
+
+    return {
+        "intervals": intervals,
+        "product_energies": product_energies,
+        "all_energies": all_energies,
+        "rows": rows,
+    }
 
 
 

@@ -694,11 +694,18 @@ def compute_database_fingerprint(database: List[Dict]) -> Dict[str, str]:
     species_hashes = []
     for item in database:
         cs = np.array(item.get('cross_sections', []))
+        ie_value = item.get('ie')
+        if ie_value is None:
+            ie_value = item.get('ionization_energy')
+        try:
+            normalized_ie = float(ie_value) if ie_value is not None else None
+        except (TypeError, ValueError):
+            normalized_ie = None
 
         species_info = {
             'id': item.get('id'),
             'species': item.get('species'),
-            'ie': float(item.get('ionization_energy', 0.0)),
+            'ie': normalized_ie,
             'cs_len': len(cs),
             'cs_sum': float(np.nansum(np.abs(cs))) if len(cs) > 0 else None,
         }

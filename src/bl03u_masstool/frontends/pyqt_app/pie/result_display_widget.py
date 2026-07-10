@@ -16,6 +16,8 @@ ResultDisplayWidget - 结果详情展示面板
 
 from PyQt6 import QtCore, QtWidgets
 
+from bl03u_masstool.core.pie_analysis import species_ionization_energy_value
+
 
 class ResultDisplayWidget(QtWidgets.QWidget):
     """结果详情面板 - 曲线数据和物种贡献明细"""
@@ -37,15 +39,8 @@ class ResultDisplayWidget(QtWidgets.QWidget):
         # ---- 初始隐藏 ----
         self.setVisible(False)
 
-        # ---- 面板样式 ----
+        # ---- 面板样式钩子（具体样式由应用级 QSS 统一管理） ----
         self.setObjectName("ResultDisplayPanel")
-        self.setStyleSheet("""
-            #ResultDisplayPanel {
-                border: 1px solid #cbd5e1;
-                border-radius: 4px;
-                background-color: #ffffff;
-            }
-        """)
 
         # ---- 内部状态 ----
         self._current_status = "UNFITTED"
@@ -58,15 +53,6 @@ class ResultDisplayWidget(QtWidgets.QWidget):
         # Header: "结果详情" [状态] + [导出按钮] (with background)
         header_frame = QtWidgets.QFrame()
         header_frame.setObjectName("ResultPanelHeader")
-        header_frame.setStyleSheet("""
-            #ResultPanelHeader {
-                background-color: #f1f5f9;
-                border-bottom: 1px solid #e2e8f0;
-                border-radius: 3px;
-                padding: 4px 0px;
-                margin-bottom: 4px;
-            }
-        """)
         header_frame.setFixedHeight(32)
         header = QtWidgets.QHBoxLayout(header_frame)
         header.setContentsMargins(8, 4, 8, 4)
@@ -77,11 +63,17 @@ class ResultDisplayWidget(QtWidgets.QWidget):
 
         # ► 状态指示器
         self.status_indicator = QtWidgets.QLabel("")  # 显示状态文字
+        self.status_indicator.setObjectName("ResultStatus")
         self.status_indicator.setFixedWidth(100)
         self.status_indicator.setToolTip("结果有效性状态: COMPLETED / OBSOLETE / FAILED")
         header.addWidget(self.status_indicator)
 
         header.addStretch()
+
+        self.metrics_label = QtWidgets.QLabel("")
+        self.metrics_label.setObjectName("ResultMetrics")
+        self.metrics_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        header.addWidget(self.metrics_label)
 
         main_layout.addWidget(header_frame)
 
@@ -101,6 +93,7 @@ class ResultDisplayWidget(QtWidgets.QWidget):
         self.fit_table.setWordWrap(False)
         self.fit_table.setAlternatingRowColors(True)
         self.fit_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.fit_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         self.result_tabs.addTab(self.fit_table, "物种贡献明细")
 
         main_layout.addWidget(self.result_tabs, stretch=1)
@@ -176,27 +169,27 @@ class ResultDisplayWidget(QtWidgets.QWidget):
         """
         if not results:
             self.fit_table.setRowCount(0)
+            self.metrics_label.setText("")
             return
 
         species_list = results.get("species", [])
         r_squared = results.get("r_squared", 0.0)
         rmse = results.get("rmse", 0.0)
         mae = results.get("mae", 0.0)
+        self.metrics_label.setText(f"R² {r_squared:.4f}   RMSE {rmse:.4g}   MAE {mae:.4g}")
 
         self.fit_table.setColumnCount(5)
         self.fit_table.setHorizontalHeaderLabels(["物种", "系数", "贡献(%)", "IE(eV)", "m/z"])
         self.fit_table.setRowCount(len(species_list) + 1)  # +1 for summary row
 
-        total_contribution = sum(sp.get("contribution", 0.0) for sp in species_list)
-        if total_contribution == 0:
-            total_contribution = 1.0  # Avoid division by zero
-
         # 物种行
         for row, species in enumerate(species_list):
             name = species.get("species", "")
             coeff = species.get("coefficient", 0.0)
-            contrib = species.get("contribution", 0.0)
-            ie = species.get("ionization_energy", 0.0)
+            contrib_pct = float(
+                species.get("contribution_percent", species.get("contribution", 0.0)) or 0.0
+            )
+            ie = species_ionization_energy_value(species)
             mz = species.get("mz", "")
 
             # 物种名
@@ -210,13 +203,24 @@ class ResultDisplayWidget(QtWidgets.QWidget):
             self.fit_table.setItem(row, 1, coeff_item)
 
             # 贡献%
-            contrib_pct = (float(contrib) / total_contribution * 100) if total_contribution > 0 else 0
             contrib_item = QtWidgets.QTableWidgetItem(f"{contrib_pct:.2f}%")
             contrib_item.setFlags(contrib_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
             self.fit_table.setItem(row, 2, contrib_item)
 
             # IE
-            ie_item = QtWidgets.QTableWidgetItem(f"{float(ie):.4f}")
+            try:
+                ie_value = float(ie)
+                ie_text = f"{ie_value:.4f}" if ie_value > 0 else "未查到"
+            except (TypeError, ValueError):
+                ie_text = {
+                    "pending": "查询中…",
+                    "failed": "查询失败",
+                }.get(str(species.get("ie_query_status", "")), "未查到")
+            ie_item = QtWidgets.QTableWidgetItem(ie_text)
+            ie_item.setToolTip(
+                f"来源: {species.get('ie_source') or '未提供'}\n"
+                f"{species.get('ie_message') or ''}"
+            )
             ie_item.setFlags(ie_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
             self.fit_table.setItem(row, 3, ie_item)
 
@@ -247,6 +251,7 @@ class ResultDisplayWidget(QtWidgets.QWidget):
         """清空所有表格数据"""
         self.curve_table.setRowCount(0)
         self.fit_table.setRowCount(0)
+        self.metrics_label.setText("")
         self.set_result_status("UNFITTED")
 
     # ---- 状态管理方法 ----
@@ -256,12 +261,13 @@ class ResultDisplayWidget(QtWidgets.QWidget):
         设置结果有效性状态
 
         Args:
-            status: "UNFITTED" | "COMPLETED" | "OBSOLETE" | "FAILED" | "CONFIRMED"
+            status: "UNFITTED" | "PREVIEW" | "COMPLETED" | "OBSOLETE" | "FAILED" | "CONFIRMED"
         """
         self._current_status = status
 
         status_text = {
             "UNFITTED": "",
+            "PREVIEW": "[参数预览]",
             "COMPLETED": "[已拟合]",
             "OBSOLETE": "[结果过期]",
             "FAILED": "[拟合失败]",
@@ -269,13 +275,9 @@ class ResultDisplayWidget(QtWidgets.QWidget):
         }
         self.status_indicator.setText(status_text.get(status, ""))
 
-        status_color = {
-            "COMPLETED": "color: #1d4ed8;",
-            "OBSOLETE": "color: #92400e;",
-            "FAILED": "color: #dc2626;",
-            "CONFIRMED": "color: #166534; font-weight: bold;",
-        }
-        self.status_indicator.setStyleSheet(status_color.get(status, ""))
+        self.status_indicator.setProperty("status", status.lower())
+        self.status_indicator.style().unpolish(self.status_indicator)
+        self.status_indicator.style().polish(self.status_indicator)
 
     def get_result_status(self) -> str:
         """获取当前结果状态"""

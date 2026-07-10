@@ -61,6 +61,9 @@ def test_species_sqlite_roundtrip(tmp_path):
     assert len(loaded) == 1
     assert index == {18: [0]}
     assert loaded[0]["species"] == "Water"
+    assert loaded[0]["ie"] == 12.6
+    assert loaded[0]["ionization_energy"] == 12.6
+    assert loaded[0]["ie_source"] == "PICS数据库"
     assert [round(value, 6) for value in loaded[0]["cross_sections"].tolist()] == [0.0, 1.2, 2.4]
 
 

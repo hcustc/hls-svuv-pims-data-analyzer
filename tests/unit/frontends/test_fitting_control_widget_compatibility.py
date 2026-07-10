@@ -155,3 +155,88 @@ class TestEdgeCases:
 
         assert widget._locked_species == []
         assert widget.get_force_species() == []
+
+
+def test_candidate_table_displays_ie_and_missing_query_status(widget):
+    widget.populate_unified_species_table(
+        30,
+        [
+            {
+                "id": 1,
+                "mz": 30,
+                "species": "Nitric oxide",
+                "ie": 9.2642,
+                "energies": [9.0, 10.0],
+                "cross_sections": [0.0, 1.0],
+            },
+            {
+                "id": 2,
+                "mz": 30,
+                "species": "Unknown isomer",
+                "ie": None,
+                "energies": [9.0, 10.0],
+                "cross_sections": [0.0, 1.0],
+            },
+        ],
+        [],
+    )
+
+    assert widget.species_table.columnCount() == 5
+    assert widget.species_table.item(0, 2).text() == "9.2642"
+    assert widget.species_table.item(1, 2).text() == "待查询"
+
+    widget.update_ionization_energy_for_ids(
+        {2},
+        value=None,
+        status="not_found",
+        source="NIST WebBook",
+        message="未返回匹配物种",
+    )
+    assert widget.species_table.item(1, 2).text() == "未查到"
+    assert widget.ie_query_btn.isEnabled()
+
+
+def test_candidate_readiness_and_summary_follow_enabled_rows(widget):
+    widget.populate_unified_species_table(
+        30,
+        [
+            {"id": 1, "mz": 30, "species": "NO", "energies": [9.0, 10.0], "cross_sections": [0.0, 1.0]},
+            {"id": 2, "mz": 30, "species": "N2", "energies": [9.0, 10.0], "cross_sections": [0.0, 1.0]},
+        ],
+        [],
+    )
+
+    ready, reason = widget.get_fit_readiness()
+    assert ready is True
+    assert reason == ""
+    assert "2 个候选" in widget.candidate_summary_label.text()
+    assert "2 个启用" in widget.candidate_summary_label.text()
+
+    widget._set_all_rows_checked(False)
+
+    ready, reason = widget.get_fit_readiness()
+    assert ready is False
+    assert "至少启用一个" in reason
+    assert "0 个启用" in widget.candidate_summary_label.text()
+
+
+def test_manual_coefficient_mode_and_preview_guard_confirmation(widget):
+    widget.populate_unified_species_table(
+        30,
+        [{"id": 1, "mz": 30, "species": "NO", "energies": [9.0, 10.0], "cross_sections": [0.0, 1.0]}],
+        [],
+    )
+    coefficient = widget.species_table.cellWidget(0, 3)
+    coefficient.setValue(1.25)
+    assert widget.fit_mode_label.text() == "手动系数"
+
+    model = {
+        "r_squared": 0.98,
+        "species": [{"species": "NO", "coefficient": 1.25, "contribution_percent": 100.0}],
+    }
+    widget.show_fit_result(model, "PREVIEW")
+    assert not widget.confirm_btn.isEnabled()
+    assert "参数预览" in widget.result_status_label.text()
+
+    widget.show_fit_result(model, "COMPLETED")
+    assert widget.confirm_btn.isEnabled()

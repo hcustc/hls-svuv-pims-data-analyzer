@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 from datetime import datetime
+import hashlib
+import json
+import logging
 from pathlib import Path
+import re
 
 import numpy as np
 import pandas as pd
@@ -36,6 +41,7 @@ from bl03u_masstool.core.temperature_scan import (
     analyze_temperature_folder,
     build_temperature_curves,
     compute_kr_expansion_factors,
+    identify_product_energy_intervals,
 )
 from bl03u_masstool.core.mole_fraction import (
     MASS_DISCRIMINATION_PRESETS,
@@ -58,7 +64,14 @@ from bl03u_masstool.frontends.pyqt_app.project_artifacts import record_project_a
 from bl03u_masstool.frontends.pyqt_app.common.widgets import DataFrameTableMixin
 from bl03u_masstool.frontends.pyqt_app.common.static_plot import StaticCurvePlot
 
+
+logger = logging.getLogger(__name__)
+
+
 class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
+    ALL_ENERGY_FOLDERS = "__all_energy_folders__"
+    CACHE_VERSION = 2
+
     # 曲线分类颜色映射
     CURVE_CLASS_COLORS = {
         "formation": "#10b981",      # 绿色 - 生成(升高)
@@ -77,103 +90,50 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.peak_detection = load_peak_detection_config()
         self.result_df = pd.DataFrame()
         self.curves: dict[int, dict] = {}
+        self.energy_results: list[dict] = []
         self.current_mz: int | None = None
         self.worker: WorkerThread | None = None
+        self.energy_interval_result: dict | None = None
+        self._busy = False
+        self._selected_temperature_folder = ""
+        self._autoload_worker: WorkerThread | None = None
+        self._autoload_cache_token: dict | None = None
         self.setWindowTitle("温度扫描分析")
         self.resize(1280, 800)
         root = QtWidgets.QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(8)
 
-        # ── Toolbar ─────────────────────────────────────────────────────────
-        toolbar = QtWidgets.QWidget()
-        toolbar.setObjectName("TempToolbar")
-        toolbar_layout = QtWidgets.QHBoxLayout(toolbar)
-        toolbar_layout.setContentsMargins(8, 6, 8, 6)
-        toolbar_layout.setSpacing(6)
+        # ── Compact workflow/data source bar ────────────────────────────────
+        source_panel = QtWidgets.QWidget()
+        source_panel.setObjectName("ControlBar")
+        data_layout = QtWidgets.QVBoxLayout(source_panel)
+        data_layout.setContentsMargins(8, 8, 8, 8)
+        data_layout.setSpacing(6)
 
-        # Project info (read-only chip)
+        self.summary_bar = QtWidgets.QWidget()
+        summary_layout = QtWidgets.QHBoxLayout(self.summary_bar)
+        summary_layout.setContentsMargins(0, 0, 0, 0)
+        summary_layout.setSpacing(6)
         self.summary_project_label = QtWidgets.QLabel("项目: ---")
         self.summary_system_label = QtWidgets.QLabel("体系: ---")
         self.summary_data_label = QtWidgets.QLabel("数据源: ---")
         for lbl in (self.summary_project_label, self.summary_system_label, self.summary_data_label):
             lbl.setObjectName("ReadoutValue")
-        toolbar_layout.addWidget(self.summary_project_label)
-        toolbar_layout.addWidget(self.summary_system_label)
-        toolbar_layout.addWidget(self.summary_data_label, stretch=1)
+            lbl.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        summary_layout.addWidget(self.summary_project_label)
+        summary_layout.addWidget(self.summary_system_label)
+        summary_layout.addWidget(self.summary_data_label, stretch=1)
+        self.workflow_stage_label = QtWidgets.QLabel("步骤 1/3 · 选择温度扫描数据")
+        self.workflow_stage_label.setObjectName("PieWorkflowStage")
+        summary_layout.addWidget(self.workflow_stage_label)
+        data_layout.addWidget(self.summary_bar)
 
-        # Action buttons
-        self.run_button = QtWidgets.QPushButton("开始分析")
-        self.run_button.setObjectName("WorkflowButton")
-        self.run_button.setToolTip("开始分析温度扫描数据")
-        self.run_button.clicked.connect(self.run_analysis)
-
-        self.export_button = QtWidgets.QPushButton("导出结果")
-        self.export_button.setObjectName("ExportButton")
-        self.export_button.setToolTip("导出分析结果为CSV")
-        self.export_button.setEnabled(False)
-        self.export_button.clicked.connect(self.export_result)
-
-        self.export_plot_button = QtWidgets.QPushButton("导出图表")
-        self.export_plot_button.setObjectName("ExportButton")
-        self.export_plot_button.setToolTip("导出当前曲线图表为PNG/PDF")
-        self.export_plot_button.setEnabled(False)
-        self.export_plot_button.clicked.connect(self.export_plot)
-
-        self.preview_data_button = QtWidgets.QPushButton("预览数据")
-        self.preview_data_button.setObjectName("ExportButton")
-        self.preview_data_button.setToolTip("预览全部积分结果")
-        self.preview_data_button.setEnabled(False)
-        self.preview_data_button.clicked.connect(self.show_data_preview)
-
-        self.summary_open_project_btn = QtWidgets.QPushButton("项目管理")
-        self.summary_open_project_btn.setObjectName("BrowseButton")
-        self.summary_open_project_btn.setToolTip("在项目管理中修改数据源、寻峰、归一化和温度扫描默认参数")
-        self.summary_open_project_btn.clicked.connect(self._open_project_settings)
-
-        # Sidebar toggle
-        self.sidebar_toggle_btn = QtWidgets.QPushButton("◀ 曲线")
-        self.sidebar_toggle_btn.setObjectName("BrowseButton")
-        self.sidebar_toggle_btn.setToolTip("展开/折叠曲线浏览")
-        self.sidebar_toggle_btn.setCheckable(True)
-        self.sidebar_toggle_btn.setChecked(True)
-        self.sidebar_toggle_btn.clicked.connect(self._toggle_sidebar)
-
-        for btn in (self.run_button, self.export_button, self.export_plot_button,
-                    self.preview_data_button, self.summary_open_project_btn, self.sidebar_toggle_btn):
-            toolbar_layout.addWidget(btn)
-
-        # Inline status
-        self.inline_status_icon = QtWidgets.QLabel("")
-        self.inline_status_icon.setFixedWidth(20)
-        self.inline_status_text = QtWidgets.QLabel("就绪")
-        self.inline_status_text.setObjectName("InlineStatusLabel")
-        self.inline_retry_button = QtWidgets.QPushButton("重试")
-        self.inline_retry_button.setMaximumWidth(52)
-        self.inline_retry_button.hide()
-        self.inline_action_hint = QtWidgets.QLabel('在项目管理确认数据源和参数后，点击"开始分析"')
-        self.inline_action_hint.setObjectName("ProjectHint")
-        toolbar_layout.addWidget(self.inline_status_icon)
-        toolbar_layout.addWidget(self.inline_status_text)
-        toolbar_layout.addWidget(self.inline_action_hint)
-        toolbar_layout.addWidget(self.inline_retry_button)
-        root.addWidget(toolbar)
-
-        # thin separator
-        sep = QtWidgets.QFrame()
-        sep.setFrameShape(QtWidgets.QFrame.Shape.HLine)
-        sep.setObjectName("NavSeparator")
-        root.addWidget(sep)
-
-        # ── Temperature Scan Parameters ────────────────────────────────────
-        params_bar = QtWidgets.QWidget()
-        params_layout = QtWidgets.QHBoxLayout(params_bar)
-        params_layout.setContentsMargins(8, 4, 8, 4)
-        params_layout.setSpacing(12)
-
-        params_label = QtWidgets.QLabel("温度扫描参数：")
-        params_label.setObjectName("ReadoutLabel")
-        params_layout.addWidget(params_label)
+        source_row = QtWidgets.QHBoxLayout()
+        source_row.setSpacing(6)
+        source_label = QtWidgets.QLabel("温扫数据")
+        source_label.setObjectName("ReadoutLabel")
+        source_row.addWidget(source_label)
 
         self.project_source_button = QtWidgets.QToolButton()
         self.project_source_button.setText("项目数据")
@@ -199,19 +159,43 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         source_scope_layout.setSpacing(3)
         source_scope_layout.addWidget(self.project_source_button)
         source_scope_layout.addWidget(self.temporary_source_button)
-        params_layout.addWidget(source_scope_panel)
+        source_row.addWidget(source_scope_panel)
 
         self.folder_edit = QtWidgets.QLineEdit()
         self.folder_edit.setPlaceholderText("选择温度扫描数据文件夹")
-        self.folder_edit.textChanged.connect(self._remember_temporary_source)
-        params_layout.addWidget(self.folder_edit, stretch=1)
+        self.folder_edit.textChanged.connect(self._on_temperature_source_path_changed)
+        source_row.addWidget(self.folder_edit, stretch=1)
 
         self.select_folder_button = QtWidgets.QPushButton("浏览...")
         self.select_folder_button.setObjectName("BrowseButton")
         self.select_folder_button.setToolTip("选择温度扫描数据文件夹")
         self.select_folder_button.clicked.connect(self.select_folder)
-        params_layout.addWidget(self.select_folder_button)
+        source_row.addWidget(self.select_folder_button)
 
+        self.scan_folder_label = QtWidgets.QLabel("扫描批次")
+        self.scan_folder_label.setObjectName("ReadoutLabel")
+        self.scan_folder_combo = QtWidgets.QComboBox()
+        self.scan_folder_combo.setMinimumWidth(190)
+        self.scan_folder_combo.setToolTip("选择实际用于生成温度曲线的文件夹；项目根目录含多个能量子目录时在这里切换")
+        self.scan_folder_combo.currentIndexChanged.connect(self._on_temperature_folder_option_changed)
+        source_row.addWidget(self.scan_folder_label)
+        source_row.addWidget(self.scan_folder_combo)
+
+        self.run_button = QtWidgets.QPushButton("生成曲线")
+        self.run_button.setObjectName("WorkflowButton")
+        self.run_button.setToolTip("按当前数据源和分析开关生成温度扫描曲线")
+        self.run_button.clicked.connect(self.run_analysis)
+        source_row.addWidget(self.run_button)
+
+        self.summary_open_project_btn = QtWidgets.QPushButton("项目管理")
+        self.summary_open_project_btn.setObjectName("BrowseButton")
+        self.summary_open_project_btn.setToolTip("在项目管理中修改数据源、寻峰、归一化和温度扫描默认参数")
+        self.summary_open_project_btn.clicked.connect(self._open_project_settings)
+        source_row.addWidget(self.summary_open_project_btn)
+        data_layout.addLayout(source_row)
+
+        analysis_options_row = QtWidgets.QHBoxLayout()
+        analysis_options_row.setSpacing(8)
         self.temperature_photon_check = QtWidgets.QCheckBox("光强归一化")
         self.temperature_photon_check.setToolTip("使用项目管理中设置的光强来源归一化温度扫描信号")
         self.temperature_kr_check = QtWidgets.QCheckBox("Kr 校正")
@@ -222,23 +206,63 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.integration_method_label = QtWidgets.QLabel("积分方式: 范围累加")
         self.integration_method_label.setObjectName("ReadoutValue")
         self.integration_method_label.setToolTip("温度扫描积分方式由项目管理 -> 功能默认参数 -> 温度扫描设置")
-        params_layout.addWidget(self.temperature_photon_check)
-        params_layout.addWidget(self.temperature_kr_check)
-        params_layout.addWidget(self.light_source_status_label)
-        params_layout.addWidget(self.integration_method_label)
+        analysis_options_row.addWidget(self.temperature_photon_check)
+        analysis_options_row.addWidget(self.temperature_kr_check)
+        analysis_options_row.addWidget(self.light_source_status_label)
+        analysis_options_row.addWidget(self.integration_method_label)
         self.replicate_enabled_check = QtWidgets.QCheckBox("合并重复采集")
         self.replicate_enabled_check.setToolTip("仅在确认为同一条件多次采集时开启；关闭时每个文件按自身条件处理")
         self.replicate_enabled_check.toggled.connect(self._on_replicate_enabled_changed)
-        params_layout.addWidget(self.replicate_enabled_check)
+        analysis_options_row.addWidget(self.replicate_enabled_check)
         self.replicate_mode_combo = QtWidgets.QComboBox()
         self.replicate_mode_combo.addItem("平均", "mean")
         self.replicate_mode_combo.addItem("累加", "sum")
         self.replicate_mode_combo.setToolTip("开启合并重复采集后，同组重复采集的聚合方式")
         self.replicate_mode_combo.setEnabled(False)
-        params_layout.addWidget(self.replicate_mode_combo)
-        params_layout.addStretch(1)
+        analysis_options_row.addWidget(self.replicate_mode_combo)
+        analysis_options_row.addStretch(1)
 
-        root.addWidget(params_bar)
+        self.inline_status_icon = QtWidgets.QLabel("")
+        self.inline_status_icon.setFixedWidth(20)
+        self.inline_status_text = QtWidgets.QLabel("就绪")
+        self.inline_status_text.setObjectName("InlineStatusLabel")
+        self.inline_status_text.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.inline_retry_button = QtWidgets.QPushButton("重试")
+        self.inline_retry_button.setObjectName("BrowseButton")
+        self.inline_retry_button.setMaximumWidth(52)
+        self.inline_retry_button.hide()
+        self.inline_action_hint = QtWidgets.QLabel('确认数据源后点击"生成曲线"')
+        self.inline_action_hint.setObjectName("ProjectHint")
+        analysis_options_row.addWidget(self.inline_status_icon)
+        analysis_options_row.addWidget(self.inline_status_text)
+        analysis_options_row.addWidget(self.inline_action_hint)
+        analysis_options_row.addWidget(self.inline_retry_button)
+
+        self.export_button = QtWidgets.QPushButton("导出结果")
+        self.export_button.setObjectName("ExportButton")
+        self.export_button.setToolTip("导出分析结果为 CSV 或 Excel")
+        self.export_button.clicked.connect(self.export_result)
+        self.export_plot_button = QtWidgets.QPushButton("导出图表")
+        self.export_plot_button.setObjectName("ExportButton")
+        self.export_plot_button.setToolTip("导出当前曲线图表为 PNG/PDF")
+        self.export_plot_button.clicked.connect(self.export_plot)
+        self.preview_data_button = QtWidgets.QPushButton("预览数据")
+        self.preview_data_button.setObjectName("BrowseButton")
+        self.preview_data_button.setToolTip("预览全部积分结果")
+        self.preview_data_button.clicked.connect(self.show_data_preview)
+        self.sidebar_toggle_btn = QtWidgets.QPushButton("◀ 曲线")
+        self.sidebar_toggle_btn.setObjectName("BrowseButton")
+        self.sidebar_toggle_btn.setToolTip("展开/折叠曲线浏览")
+        self.sidebar_toggle_btn.setCheckable(True)
+        self.sidebar_toggle_btn.setChecked(True)
+        self.sidebar_toggle_btn.clicked.connect(self._toggle_sidebar)
+        analysis_options_row.addWidget(self.export_button)
+        analysis_options_row.addWidget(self.export_plot_button)
+        analysis_options_row.addWidget(self.preview_data_button)
+        analysis_options_row.addWidget(self.sidebar_toggle_btn)
+
+        data_layout.addLayout(analysis_options_row)
+        root.addWidget(source_panel)
         self.set_temperature_source_scope("temporary", restore_saved=False)
 
         # ── Body: sidebar + main area ────────────────────────────────────────
@@ -329,7 +353,7 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         empty_icon = QtWidgets.QLabel("[数据]")
         empty_icon.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         empty_icon.setStyleSheet("font-size: 48px;")
-        empty_msg = QtWidgets.QLabel('尚未生成温度扫描曲线\n\n在项目管理确认数据源和参数后，点击"开始分析"')
+        empty_msg = QtWidgets.QLabel('尚未生成温度扫描曲线\n\n确认数据源和参数后，点击"生成曲线"')
         empty_msg.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         empty_msg.setObjectName("ProjectHint")
         empty_msg.setWordWrap(True)
@@ -354,9 +378,13 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.current_curve_label.setObjectName("HintLabel")
         self.current_curve_metric_label = QtWidgets.QLabel("生成曲线后可在左侧选择 m/z")
         self.current_curve_metric_label.setObjectName("HintLabel")
+        self.current_interval_label = QtWidgets.QLabel("电离区间: --")
+        self.current_interval_label.setObjectName("ReadoutValue")
+        self.current_interval_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
         curve_stats_layout.addWidget(curve_stats_title)
         curve_stats_layout.addWidget(self.current_curve_label)
         curve_stats_layout.addWidget(self.current_curve_metric_label, stretch=1)
+        curve_stats_layout.addWidget(self.current_interval_label)
 
         # Toggle table visibility button
         self.toggle_table_button = QtWidgets.QPushButton("查看数据")
@@ -379,7 +407,13 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.curve_table.setAlternatingRowColors(True)
         self.curve_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.detail_tabs.addTab(self.curve_table, "当前曲线")
+        self.energy_interval_table = QtWidgets.QTableWidget()
+        self.energy_interval_table.setWordWrap(False)
+        self.energy_interval_table.setAlternatingRowColors(True)
+        self.energy_interval_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.detail_tabs.addTab(self.energy_interval_table, "电离区间")
         right_layout.addWidget(self.detail_tabs, stretch=2)
+        self._update_action_state()
 
     def _open_project_settings(self):
         """跳转到项目管理页面。"""
@@ -409,6 +443,11 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         if stack is not None and stack.count() > 1:
             stack.setCurrentIndex(1)
 
+    def _show_empty_plot(self) -> None:
+        stack = self._plot_container.layout()
+        if stack is not None and stack.count() > 0:
+            stack.setCurrentIndex(0)
+
     def _has_project_scope(self) -> bool:
         return self.temperature_source_scope == "project"
 
@@ -425,6 +464,105 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         if self.temperature_source_scope != "temporary":
             return
         self._temporary_temperature_folder = self.folder_edit.text().strip()
+
+    def _on_temperature_source_path_changed(self, text: str | None = None) -> None:
+        self._remember_temporary_source(text)
+        self._refresh_temperature_folder_options()
+        self._update_action_state()
+
+    def _on_temperature_folder_option_changed(self, _index: int) -> None:
+        previous_mz = self.current_mz
+        self._selected_temperature_folder = str(self.scan_folder_combo.currentData() or "")
+        self._refresh_temperature_source_summary()
+        if self.energy_results:
+            self._apply_energy_view_selection(preferred_mz=previous_mz)
+        self._update_action_state()
+
+    @staticmethod
+    def _folder_has_spectrum_files(folder: str | Path) -> bool:
+        path = Path(folder)
+        if not path.is_dir():
+            return False
+        return any(child.is_file() and child.suffix.lower() == ".txt" for child in path.iterdir())
+
+    @staticmethod
+    def _energy_sort_key(path: Path) -> tuple[int, float, str]:
+        if "ev" in path.name.lower():
+            match = re.search(r"\d+(?:\.\d+)?", path.name)
+            if match:
+                return (0, float(match.group(0)), path.name)
+        return (1, 0.0, path.name)
+
+    @staticmethod
+    def _energy_from_folder_name(folder: str | Path) -> float | None:
+        name = Path(folder).name
+        if "ev" not in name.lower():
+            return None
+        match = re.search(r"\d+(?:\.\d+)?", name)
+        return float(match.group(0)) if match else None
+
+    def _temperature_folder_options(self, root_folder: str | Path) -> list[tuple[str, str]]:
+        root = Path(root_folder)
+        if not root.is_dir():
+            return []
+        if self._folder_has_spectrum_files(root):
+            return [(f"{root.name} (当前文件夹)", str(root))]
+        options = [
+            (child.name, str(child))
+            for child in sorted(
+                (item for item in root.iterdir() if item.is_dir() and self._folder_has_spectrum_files(item)),
+                key=self._energy_sort_key,
+            )
+        ]
+        return options
+
+    def _refresh_temperature_folder_options(self) -> None:
+        if not hasattr(self, "scan_folder_combo"):
+            return
+        root_folder = self._current_temperature_root_folder()
+        previous = self._selected_temperature_folder
+        folder_options = self._temperature_folder_options(root_folder) if root_folder else []
+        energy_options = [
+            (label, path)
+            for label, path in folder_options
+            if self._energy_from_folder_name(path) is not None
+        ]
+        options = list(folder_options)
+        if len(energy_options) > 1:
+            options.insert(0, ("全部能量", self.ALL_ENERGY_FOLDERS))
+
+        self.scan_folder_combo.blockSignals(True)
+        self.scan_folder_combo.clear()
+        for label, path in options:
+            self.scan_folder_combo.addItem(label, path)
+        if options:
+            selected_index = 0
+            if previous and previous != self.ALL_ENERGY_FOLDERS:
+                for index, (_label, path) in enumerate(options):
+                    if path == previous:
+                        selected_index = index
+                        break
+            elif previous == self.ALL_ENERGY_FOLDERS:
+                selected_index = 0
+            self.scan_folder_combo.setCurrentIndex(selected_index)
+            self._selected_temperature_folder = str(self.scan_folder_combo.itemData(selected_index) or "")
+        else:
+            self._selected_temperature_folder = ""
+        self.scan_folder_combo.blockSignals(False)
+
+        has_multiple_options = len(energy_options) > 1
+        has_root = bool(root_folder)
+        self.scan_folder_label.setVisible(has_root)
+        self.scan_folder_combo.setVisible(has_root)
+        self.scan_folder_combo.setEnabled(bool(options) and not getattr(self, "_busy", False))
+        if has_root and not folder_options:
+            self.scan_folder_combo.addItem("未找到 .txt 数据", "")
+        self.scan_folder_combo.setToolTip(
+            f"当前数据源下发现 {len(folder_options)} 个可分析能量文件夹；默认生成全部能量曲线。"
+            if has_multiple_options
+            else "当前数据源将直接用于生成温度曲线。"
+        )
+        self._refresh_temperature_source_summary()
 
     def set_temperature_source_scope(
         self,
@@ -448,22 +586,28 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         elif previous_scope == "project" and restore_saved:
             self.folder_edit.setText(self._temporary_temperature_folder)
         self._refresh_temperature_source_controls()
+        self._refresh_temperature_folder_options()
+        self._update_action_state()
 
     def _refresh_temperature_source_controls(self) -> None:
         use_project = self._has_project_scope()
         has_project_path = bool(self.project_settings and self.project_settings.temperature_scan_folder)
+        busy = getattr(self, "_busy", False)
         if hasattr(self, "project_source_button"):
             self.project_source_button.setChecked(use_project)
-            self.project_source_button.setEnabled(self._has_project_context())
+            self.project_source_button.setEnabled(self._has_project_context() and not busy)
         if hasattr(self, "temporary_source_button"):
             self.temporary_source_button.setChecked(not use_project)
+            self.temporary_source_button.setEnabled(not busy)
         self.folder_edit.setReadOnly(use_project)
+        self.folder_edit.setEnabled(not busy or use_project)
         self.folder_edit.setClearButtonEnabled(not use_project)
         self.folder_edit.setPlaceholderText(
             "项目未登记温度扫描数据源" if use_project else "选择温度扫描数据文件夹"
         )
         self.select_folder_button.setText("浏览...")
         self.select_folder_button.setVisible(not use_project)
+        self.select_folder_button.setEnabled(not busy)
         if use_project and not has_project_path:
             self._show_inline_empty("请先在项目管理中配置温度扫描文件夹")
 
@@ -475,10 +619,62 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         if folder:
             self.folder_edit.setText(folder)
 
-    def _current_temperature_folder(self) -> str:
+    def _current_temperature_root_folder(self) -> str:
         if self._has_project_scope():
             return (self.project_settings.temperature_scan_folder if self.project_settings else "").strip()
         return self.folder_edit.text().strip()
+
+    def _current_temperature_folder(self) -> str:
+        if self._selected_temperature_folder == self.ALL_ENERGY_FOLDERS:
+            return self._current_temperature_root_folder()
+        return self._selected_temperature_folder or self._current_temperature_root_folder()
+
+    def _selected_analysis_folders(self) -> list[tuple[float | None, str]]:
+        root_folder = self._current_temperature_root_folder()
+        selected = self._selected_temperature_folder
+        if selected == self.ALL_ENERGY_FOLDERS:
+            return self._analysis_folders_for_energy_interval()
+        folder = self._current_temperature_folder()
+        if not folder:
+            return []
+        energy = self._energy_from_folder_name(folder)
+        return [(energy, folder)]
+
+    def _generation_analysis_folders(self) -> list[tuple[float | None, str]]:
+        energy_folders = self._analysis_folders_for_energy_interval()
+        if len(energy_folders) > 1:
+            return energy_folders
+        return self._selected_analysis_folders()
+
+    def _visible_energy_results(self) -> list[dict]:
+        if not self.energy_results:
+            return []
+        selected = self._selected_temperature_folder
+        if not selected or selected == self.ALL_ENERGY_FOLDERS:
+            return list(self.energy_results)
+        return [
+            item
+            for item in self.energy_results
+            if str(item.get("folder", "")) == selected
+        ]
+
+    def _refresh_temperature_source_summary(self) -> None:
+        if not hasattr(self, "summary_data_label"):
+            return
+        root_path = self._current_temperature_root_folder()
+        selected_path = self._current_temperature_folder()
+        if not root_path:
+            data_text = "---"
+        elif self._selected_temperature_folder == self.ALL_ENERGY_FOLDERS:
+            count = len(self._analysis_folders_for_energy_interval())
+            data_text = f"{Path(root_path).name} / 全部能量({count})"
+        elif selected_path and selected_path != root_path:
+            data_text = f"{Path(root_path).name} / {Path(selected_path).name}"
+        else:
+            data_text = root_path
+        self.summary_data_label.setText(
+            f"{'项目温扫' if self._has_project_scope() else '临时温扫'}: {data_text}"
+        )
 
     def _refresh_normalization_status(self) -> None:
         ps = self.project_settings or ProjectSettings()
@@ -533,8 +729,6 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
         if self._has_project_scope():
             self.folder_edit.setText(ps.temperature_scan_folder or "")
-        data_path = self._current_temperature_folder() or "---"
-
         # 加载温度扫描参数
         if hasattr(self, "replicate_mode_combo"):
             mode = ps.temp_replicate_mode if ps.temp_replicate_mode in {"mean", "sum"} else "off"
@@ -543,20 +737,19 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
             if idx >= 0:
                 self.replicate_mode_combo.setCurrentIndex(idx)
             self._on_replicate_enabled_changed(mode != "off")
-            self.summary_data_label.setText(
-                f"{'项目温扫' if self._has_project_scope() else '临时温扫'}: {data_path}"
-            )
         self._refresh_normalization_status()
 
         self._refresh_temperature_source_controls()
-        if self._current_temperature_folder():
-            self._show_inline_empty('项目参数已同步，点击"开始分析"')
-        else:
+        self._refresh_temperature_folder_options()
+        if not self._current_temperature_folder():
             self._show_inline_empty(
                 "请先在项目管理中配置温度扫描文件夹"
                 if self._has_project_scope()
                 else "请选择温度扫描数据文件夹"
             )
+        elif not self._try_load_project_temperature_cache_async():
+            self._show_inline_empty('项目参数已同步，点击"生成曲线"')
+        self._update_action_state()
 
     def _show_inline_error(self, msg: str, retry_callback=None):
         self.inline_status_icon.setText("\u26a0\ufe0f")
@@ -603,9 +796,510 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.inline_status_text.setProperty("status", status)
         self.inline_status_text.style().unpolish(self.inline_status_text)
         self.inline_status_text.style().polish(self.inline_status_text)
+        self._update_action_state()
 
     def open_common_parameters(self):
         self._open_project_settings()
+
+    def _analysis_parameters(self) -> dict:
+        ps = self.project_settings or ProjectSettings()
+        peak_config = ps.to_peak_detection_config() if self.project_settings else load_peak_detection_config()
+        integration_method = ps.temp_integration_method
+        kr_correct = bool(ps.temperature_kr_correct)
+        effective_peak_source = ps.temp_peak_source
+        if self._has_project_scope() and ps.manual_peak_file and ps.temp_peak_source == "auto":
+            effective_peak_source = "manual"
+        manual_peak_path = None
+        if self._has_project_scope() and effective_peak_source == "manual":
+            manual_peak_path = ps.manual_peak_file
+
+        return {
+            "project_settings": ps,
+            "peak_config": peak_config,
+            "threshold_end": peak_config.threshold_end,
+            "min_intensity": peak_config.min_intensity,
+            "reference_mode": ps.temp_reference_mode,
+            "integration_method": integration_method,
+            "prefer_gaussian": integration_method == "gaussian",
+            "manual_peak_path": manual_peak_path,
+            "effective_peak_source": effective_peak_source,
+            "photon_normalize": bool(ps.temperature_photon_normalize),
+            "kr_correct": kr_correct,
+            "kr_mz": ps.kr_mz,
+            "mass_discrimination": 1.0,
+            "light_source": self.normalization_settings.light_source,
+            "expansion_factors": self.normalization_settings.expansion_factors if kr_correct else None,
+            "replicate_mode": self._current_replicate_mode(),
+        }
+
+    def _validate_analysis_parameters(self, params: dict) -> bool:
+        if (
+            self._has_project_scope()
+            and params.get("effective_peak_source") == "manual"
+            and not params.get("manual_peak_path")
+        ):
+            self._show_inline_error("请在项目管理中配置手动卡峰文件")
+            return False
+        if params.get("kr_correct") and not params.get("expansion_factors"):
+            self._show_inline_error(
+                "已勾选 Kr 校正，但尚未计算 λ(T)，本次分析已退回。请先到 项目管理 -> 通用参数 计算 Kr 膨胀系数。"
+            )
+            return False
+        return True
+
+    def _analysis_folders_for_energy_interval(self) -> list[tuple[float, str]]:
+        root_folder = self._current_temperature_root_folder()
+        if not root_folder:
+            return []
+        folders: list[tuple[float, str]] = []
+        for _label, folder in self._temperature_folder_options(root_folder):
+            energy = self._energy_from_folder_name(folder)
+            if energy is None:
+                continue
+            folders.append((energy, folder))
+        if not folders and self._folder_has_spectrum_files(root_folder):
+            energy = self._energy_from_folder_name(root_folder)
+            if energy is not None:
+                folders.append((energy, root_folder))
+        return sorted(folders, key=lambda item: item[0])
+
+    def _analyze_temperature_folder_with_params(self, folder: str, params: dict) -> pd.DataFrame:
+        peak_config = params["peak_config"]
+        ps = params["project_settings"]
+        return analyze_temperature_folder(
+            folder,
+            calibration=self.calibration,
+            algorithm=peak_config.algorithm,
+            threshold_end=params["threshold_end"],
+            min_intensity=params["min_intensity"],
+            detection_min_idx=peak_config.detection_min_idx,
+            nearby_peak_window=peak_config.nearby_peak_window,
+            duplicate_window=peak_config.duplicate_window,
+            weak_tail_early_window=peak_config.weak_tail_early_window,
+            weak_tail_late_window=peak_config.weak_tail_late_window,
+            weak_tail_ratio=peak_config.weak_tail_ratio,
+            gaussian_window_max=peak_config.gaussian_window_max,
+            gaussian_boundary_scale=peak_config.gaussian_boundary_scale,
+            boundary_padding=peak_config.boundary_padding,
+            prominence_ratio=peak_config.prominence_ratio,
+            smoothing_window=peak_config.smoothing_window,
+            smoothing_poly_order=peak_config.smoothing_poly_order,
+            baseline_window=peak_config.baseline_window,
+            baseline_percentile=peak_config.baseline_percentile,
+            min_peak_width=peak_config.min_peak_width,
+            max_peak_width=peak_config.max_peak_width,
+            prefer_gaussian=params["prefer_gaussian"],
+            integration_method=params["integration_method"],
+            reference_mode=params["reference_mode"],
+            manual_peak_path=params["manual_peak_path"],
+            photon_normalize=params["photon_normalize"],
+            kr_correct=params["kr_correct"],
+            kr_mz=params["kr_mz"],
+            mass_discrimination=params["mass_discrimination"],
+            light_source=params["light_source"],
+            expansion_factors=params["expansion_factors"],
+            vote_threshold=peak_config.vote_threshold,
+            min_intensity_for_single_vote=peak_config.min_intensity_for_single_vote,
+            mz_tolerance=peak_config.mz_tolerance,
+            cwt_snr_threshold=peak_config.cwt_snr_threshold,
+            cwt_wavelet_max_width=peak_config.cwt_wavelet_max_width,
+            weak_tail_cutoff_idx=peak_config.weak_tail_cutoff_idx,
+            temp_curve_class_change_threshold=ps.temp_curve_class_change_threshold,
+            temp_curve_class_peak_fraction=ps.temp_curve_class_peak_fraction,
+            replicate_mode=params["replicate_mode"],
+        )
+
+    def _analyze_temperature_folders_with_params(
+        self,
+        folders: list[tuple[float | None, str]],
+        params: dict,
+    ) -> dict:
+        energy_results: list[dict] = []
+        frames: list[pd.DataFrame] = []
+        for energy, folder in folders:
+            result_df = self._analyze_temperature_folder_with_params(folder, params)
+            if not result_df.empty:
+                result_df = result_df.copy()
+                result_df["scan_folder"] = Path(folder).name
+                result_df["scan_energy"] = float(energy) if energy is not None else np.nan
+                frames.append(result_df)
+            energy_results.append(
+                {
+                    "energy": float(energy) if energy is not None else self._infer_energy_from_result(result_df),
+                    "folder": folder,
+                    "folder_label": Path(folder).name,
+                    "result_df": result_df,
+                    "curves": build_temperature_curves(result_df),
+                }
+            )
+        combined = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        return {"result_df": combined, "energy_results": energy_results}
+
+    def _analyze_temperature_folders_with_cache(
+        self,
+        folders: list[tuple[float | None, str]],
+        params: dict,
+    ) -> dict:
+        cache_key = self._temperature_cache_key(folders, params)
+        cached = self._load_temperature_analysis_cache(cache_key)
+        if cached is not None:
+            cached["from_cache"] = True
+            return cached
+
+        result = self._analyze_temperature_folders_with_params(folders, params)
+        self._save_temperature_analysis_cache(cache_key, result)
+        result["from_cache"] = False
+        return result
+
+    def _try_load_project_temperature_cache_async(self) -> bool:
+        if not self._has_project_scope() or self.project_settings is None:
+            return False
+        folders = self._generation_analysis_folders()
+        if not folders:
+            return False
+        try:
+            params = self._analysis_parameters()
+        except Exception:
+            return False
+        if (
+            self._has_project_scope()
+            and params.get("effective_peak_source") == "manual"
+            and not params.get("manual_peak_path")
+        ):
+            return False
+        if params.get("kr_correct") and not params.get("expansion_factors"):
+            return False
+
+        cache_key = self._temperature_cache_key(folders, params)
+        token = self._project_temperature_cache_token(folders, cache_key)
+        self._autoload_cache_token = token
+        self._show_inline_empty("正在检查项目温度扫描缓存...")
+        self._autoload_worker = WorkerThread(
+            lambda: self._load_temperature_analysis_cache(cache_key),
+            self,
+        )
+        self._autoload_worker.finished_with_result.connect(
+            lambda result, expected_token=token: self._on_project_temperature_cache_loaded(result, expected_token)
+        )
+        self._autoload_worker.failed.connect(
+            lambda _message, expected_token=token: self._on_project_temperature_cache_failed(expected_token)
+        )
+        self._autoload_worker.start()
+        return True
+
+    def _project_temperature_cache_token(
+        self,
+        folders: list[tuple[float | None, str]],
+        cache_key: str,
+    ) -> dict:
+        ps = self.project_settings or ProjectSettings()
+        return {
+            "cache_key": cache_key,
+            "output_dir": str(ps.output_dir or ""),
+            "temperature_scan_folder": str(ps.temperature_scan_folder or ""),
+            "folders": [(float(energy) if energy is not None else None, str(folder)) for energy, folder in folders],
+        }
+
+    def _is_current_project_temperature_cache_token(self, token: dict | None) -> bool:
+        if not token or not self._has_project_scope() or self.project_settings is None:
+            return False
+        folders = self._generation_analysis_folders()
+        return token == self._project_temperature_cache_token(folders, str(token.get("cache_key", "")))
+
+    def _on_project_temperature_cache_failed(self, expected_token: dict | None = None) -> None:
+        if not self._is_current_project_temperature_cache_token(expected_token):
+            return
+        self._show_inline_empty('项目参数已同步，点击"生成曲线"')
+
+    def _on_project_temperature_cache_loaded(self, result: object, expected_token: dict | None = None) -> None:
+        if not self._is_current_project_temperature_cache_token(expected_token):
+            logger.debug("Ignored stale temperature-scan project cache autoload result.")
+            return
+        if not result:
+            self._show_inline_empty('项目参数已同步，点击"生成曲线"')
+            self._update_action_state()
+            return
+        if isinstance(result, dict):
+            result["from_cache"] = True
+            self.on_analysis_complete(result)
+            self._show_inline_success("已自动载入项目缓存的温度扫描曲线")
+        else:
+            self._show_inline_empty('项目参数已同步，点击"生成曲线"')
+        self._update_action_state()
+
+    def _temperature_cache_dir(self) -> Path:
+        if self.project_settings is not None and self.project_settings.output_dir:
+            root = Path(self.project_settings.output_dir)
+            return root / "analysis" / "temperature_scan" / "cache"
+        else:
+            return ensure_output_dir("analysis", "temperature_scan") / "cache"
+
+    def _temperature_cache_key(self, folders: list[tuple[float | None, str]], params: dict) -> str:
+        payload = {
+            "version": self.CACHE_VERSION,
+            "folders": self._folder_fingerprints(folders),
+            "parameters": self._analysis_cache_parameters(params),
+        }
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()[:24]
+
+    def _folder_fingerprints(self, folders: list[tuple[float | None, str]]) -> list[dict]:
+        fingerprints: list[dict] = []
+        for energy, folder in folders:
+            folder_path = Path(folder)
+            files = [
+                {
+                    "name": path.name,
+                    "size": path.stat().st_size,
+                    "mtime_ns": path.stat().st_mtime_ns,
+                }
+                for path in sorted(folder_path.iterdir())
+                if path.is_file() and path.suffix.lower() == ".txt"
+            ]
+            fingerprints.append(
+                {
+                    "energy": float(energy) if energy is not None else None,
+                    "folder": str(folder_path),
+                    "folder_mtime_ns": folder_path.stat().st_mtime_ns if folder_path.exists() else None,
+                    "files": files,
+                }
+            )
+        return fingerprints
+
+    def _analysis_cache_parameters(self, params: dict) -> dict:
+        peak_config = params["peak_config"]
+        ps = params["project_settings"]
+        manual_peak_path = params.get("manual_peak_path")
+        manual_peak_fingerprint = None
+        if manual_peak_path:
+            manual_path = Path(manual_peak_path)
+            if manual_path.exists():
+                manual_peak_fingerprint = {
+                    "path": str(manual_path),
+                    "size": manual_path.stat().st_size,
+                    "mtime_ns": manual_path.stat().st_mtime_ns,
+                }
+            else:
+                manual_peak_fingerprint = {"path": str(manual_path), "missing": True}
+        return {
+            "calibration": {
+                "a": float(self.calibration.a),
+                "b": float(self.calibration.b),
+                "c": float(self.calibration.c),
+            },
+            "peak_config": asdict(peak_config),
+            "reference_mode": params["reference_mode"],
+            "integration_method": params["integration_method"],
+            "prefer_gaussian": params["prefer_gaussian"],
+            "manual_peak_path": manual_peak_path,
+            "manual_peak_fingerprint": manual_peak_fingerprint,
+            "photon_normalize": params["photon_normalize"],
+            "kr_correct": params["kr_correct"],
+            "kr_mz": params["kr_mz"],
+            "mass_discrimination": params["mass_discrimination"],
+            "light_source": params["light_source"],
+            "expansion_factors": params["expansion_factors"],
+            "replicate_mode": params["replicate_mode"],
+            "temp_curve_class_change_threshold": ps.temp_curve_class_change_threshold,
+            "temp_curve_class_peak_fraction": ps.temp_curve_class_peak_fraction,
+        }
+
+    def _cache_paths(self, cache_key: str) -> tuple[Path, Path]:
+        cache_dir = self._temperature_cache_dir() / cache_key
+        return cache_dir / "manifest.json", cache_dir / "results.csv"
+
+    def _save_temperature_analysis_cache(self, cache_key: str, result: dict) -> None:
+        result_df = result.get("result_df", pd.DataFrame())
+        if not isinstance(result_df, pd.DataFrame) or result_df.empty:
+            return
+        manifest_path, result_path = self._cache_paths(cache_key)
+        try:
+            manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            result_df.to_csv(result_path, index=False, encoding="utf-8-sig")
+            energy_items = [
+                {
+                    "energy": item.get("energy"),
+                    "folder": item.get("folder"),
+                    "folder_label": item.get("folder_label"),
+                }
+                for item in result.get("energy_results", [])
+            ]
+            manifest = {
+                "version": self.CACHE_VERSION,
+                "created_at": datetime.now().isoformat(timespec="seconds"),
+                "result_file": result_path.name,
+                "row_count": int(len(result_df)),
+                "energy_results": energy_items,
+            }
+            manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            # Cache writes are an optimization; analysis results remain valid if this fails.
+            logger.exception("Failed to save temperature-scan analysis cache at %s", manifest_path.parent)
+            return
+
+    def _load_temperature_analysis_cache(self, cache_key: str) -> dict | None:
+        manifest_path, result_path = self._cache_paths(cache_key)
+        if not manifest_path.exists() or not result_path.exists():
+            return None
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if int(manifest.get("version", -1)) != self.CACHE_VERSION:
+                return None
+            result_df = pd.read_csv(result_path)
+            if not isinstance(result_df, pd.DataFrame):
+                return None
+            for column in ("species", "integration_method", "replicate_grouping", "replicate_warning", "scan_folder"):
+                if column in result_df:
+                    result_df[column] = result_df[column].fillna("").astype(str)
+            energy_results = self._energy_results_from_cached_dataframe(result_df, manifest.get("energy_results", []))
+            return {"result_df": result_df, "energy_results": energy_results}
+        except Exception:
+            return None
+
+    def _energy_results_from_cached_dataframe(self, result_df: pd.DataFrame, energy_items: list[dict]) -> list[dict]:
+        energy_results: list[dict] = []
+        for item in energy_items:
+            folder_label = str(item.get("folder_label") or Path(str(item.get("folder", ""))).name)
+            energy = item.get("energy")
+            if "scan_folder" in result_df:
+                group_df = result_df[result_df["scan_folder"].astype(str) == folder_label].copy()
+            else:
+                group_df = result_df.copy()
+            if group_df.empty:
+                continue
+            energy_results.append(
+                {
+                    "energy": float(energy) if energy is not None and pd.notna(energy) else self._infer_energy_from_result(group_df),
+                    "folder": item.get("folder", ""),
+                    "folder_label": folder_label,
+                    "result_df": group_df,
+                    "curves": build_temperature_curves(group_df),
+                }
+            )
+        if not energy_results and not result_df.empty:
+            energy_results.append(
+                {
+                    "energy": self._infer_energy_from_result(result_df),
+                    "folder": self._current_temperature_folder(),
+                    "folder_label": Path(self._current_temperature_folder()).name,
+                    "result_df": result_df,
+                    "curves": build_temperature_curves(result_df),
+                }
+            )
+        return energy_results
+
+    @staticmethod
+    def _infer_energy_from_result(result_df: pd.DataFrame) -> float | None:
+        if result_df.empty or "photon_energy" not in result_df:
+            return None
+        values = pd.to_numeric(result_df["photon_energy"], errors="coerce").dropna()
+        values = values[values > 0]
+        if values.empty:
+            return None
+        unique_values = sorted({round(float(value), 6) for value in values})
+        return float(unique_values[0]) if len(unique_values) == 1 else None
+
+    def _energy_interval_summary_for_mz(self, target_mz: int) -> dict:
+        rows: list[dict] = []
+        for item in self.energy_results:
+            energy = item.get("energy")
+            if energy is None or not np.isfinite(float(energy)):
+                continue
+            curve = item.get("curves", {}).get(int(target_mz))
+            if curve is None:
+                rows.append(
+                    {
+                        "energy": float(energy),
+                        "folder": item.get("folder_label", Path(str(item.get("folder", ""))).name),
+                        "mz": int(target_mz),
+                        "curve_class": "missing",
+                        "curve_class_label": "未检出",
+                        "curve_class_reason": "当前能量未生成该 m/z 曲线",
+                        "points": 0,
+                        "max_signal": 0.0,
+                        "temperature_range": "",
+                    }
+                )
+                continue
+            rows.append(self._energy_curve_summary_row(target_mz, float(energy), str(item.get("folder_label", "")), curve))
+
+        summary = identify_product_energy_intervals(rows)
+        summary["target_mz"] = int(target_mz)
+        return summary
+
+    @staticmethod
+    def _energy_curve_summary_row(target_mz: int, energy: float, folder_label: str, curve: dict) -> dict:
+        temperatures = np.asarray(curve.get("temperatures", []), dtype=float)
+        areas = np.asarray(curve.get("areas", []), dtype=float)
+        valid = np.isfinite(temperatures) & np.isfinite(areas)
+        temperatures = temperatures[valid]
+        areas = areas[valid]
+        if temperatures.size and areas.size:
+            max_signal = float(np.nanmax(areas))
+            temperature_range = f"{float(np.nanmin(temperatures)):.0f}-{float(np.nanmax(temperatures)):.0f} °C"
+        else:
+            max_signal = 0.0
+            temperature_range = ""
+        return {
+            "energy": float(energy),
+            "folder": folder_label,
+            "mz": int(target_mz),
+            "curve_class": curve.get("curve_class", "unclassified"),
+            "curve_class_label": curve.get("curve_class_label", TEMPERATURE_CURVE_CLASS_LABELS["unclassified"]),
+            "curve_class_reason": curve.get("curve_class_reason", ""),
+            "points": len(curve.get("temperatures", [])),
+            "max_signal": max_signal,
+            "temperature_range": temperature_range,
+        }
+
+    @staticmethod
+    def _format_energy_intervals(summary: dict) -> str:
+        intervals = summary.get("intervals", [])
+        if not intervals:
+            return "未识别到产物型区间"
+        return "；".join(
+            f"{item['start']:.2f}-{item['end']:.2f} eV"
+            if abs(float(item["start"]) - float(item["end"])) > 1e-9
+            else f"{item['start']:.2f} eV"
+            for item in intervals
+        )
+
+    def _populate_energy_interval_table(self, result: dict) -> None:
+        rows = result.get("rows", pd.DataFrame())
+        if not isinstance(rows, pd.DataFrame):
+            rows = pd.DataFrame(rows)
+        display = rows.copy()
+        if display.empty:
+            self.energy_interval_table.clear()
+            self.energy_interval_table.setRowCount(0)
+            self.energy_interval_table.setColumnCount(0)
+            return
+        display["产物型"] = display["is_product_like"].map(lambda value: "是" if bool(value) else "否")
+        display_df = pd.DataFrame(
+            {
+                "能量(eV)": display["energy"].map(lambda value: f"{float(value):.2f}"),
+                "线形": display["curve_class_label"],
+                "产物型": display["产物型"],
+                "最高信号": display["max_signal"].map(lambda value: f"{float(value):.4g}" if pd.notna(value) else ""),
+                "温度范围": display["temperature_range"],
+                "说明": display["curve_class_reason"],
+                "文件夹": display["folder"],
+            }
+        )
+        self.set_dataframe(self.energy_interval_table, display_df)
+        for row_index, is_product in enumerate(display["is_product_like"].tolist()):
+            if not is_product:
+                continue
+            for column in range(self.energy_interval_table.columnCount()):
+                item = self.energy_interval_table.item(row_index, column)
+                if item is None:
+                    continue
+                item.setBackground(QtGui.QBrush(QtGui.QColor("#ecfdf5")))
+                if column == 2:
+                    font = item.font()
+                    font.setBold(True)
+                    item.setFont(font)
+                    item.setForeground(QtGui.QBrush(QtGui.QColor("#047857")))
 
     def run_analysis(self):
         # Get parameters from project settings (single source of truth)
@@ -617,8 +1311,8 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
             ps.temperature_photon_normalize = self.temperature_photon_check.isChecked()
             ps.temperature_kr_correct = self.temperature_kr_check.isChecked()
 
-        folder = self._current_temperature_folder()
-        if not folder:
+        folders = self._generation_analysis_folders()
+        if not folders:
             self._show_inline_error(
                 "请在项目管理中配置温度扫描文件夹"
                 if self._has_project_scope()
@@ -626,100 +1320,29 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
             )
             return
 
-        # If folder has no direct .txt files but has subdirectories, ask user to pick a subfolder
-        folder_path = Path(folder)
-        has_direct_txt = any(p.is_file() and p.suffix.lower() == ".txt" for p in folder_path.iterdir())
-        if not has_direct_txt and any(p.is_dir() for p in folder_path.iterdir()):
-            selected = QtWidgets.QFileDialog.getExistingDirectory(
-                self, "选择包含 .txt 文件的子文件夹", folder
-            )
-            if not selected:
-                return
-            folder = selected
+        missing_folders = [folder for _energy, folder in folders if not self._folder_has_spectrum_files(folder)]
+        if missing_folders:
+            self._show_inline_error("当前扫描批次未找到 .txt 质谱文件，请切换扫描批次或检查数据源")
+            return
 
-        peak_config = ps.to_peak_detection_config() if self.project_settings else load_peak_detection_config()
-        threshold_end = peak_config.threshold_end
-        min_intensity = peak_config.min_intensity
-        reference_mode = ps.temp_reference_mode
-        integration_method = ps.temp_integration_method
-        prefer_gaussian = integration_method == "gaussian"
-
-        # Auto-switch to manual peak detection if peak file is set
-        effective_peak_source = ps.temp_peak_source
-        if self._has_project_scope() and ps.manual_peak_file and ps.temp_peak_source == "auto":
-            effective_peak_source = "manual"
-
-        # Get manual peak file if using manual peak detection
-        manual_peak_path = None
-        if self._has_project_scope() and effective_peak_source == "manual":
-            manual_peak_path = ps.manual_peak_file
-            if not manual_peak_path:
-                self._show_inline_error("请在项目管理中配置手动卡峰文件")
-                return
-
-        settings = self.normalization_settings
-        photon_normalize = ps.temperature_photon_normalize
-        kr_correct = ps.temperature_kr_correct
-        kr_mz = ps.kr_mz
-        mass_discrimination = 1.0
-        light_source = settings.light_source
-        expansion_factors = settings.expansion_factors if kr_correct else None
-        if kr_correct and not expansion_factors:
-            self._show_inline_error(
-                "已勾选 Kr 校正，但尚未计算 λ(T)，本次分析已退回。请先到 项目管理 -> 通用参数 计算 Kr 膨胀系数。"
-            )
-            self.temperature_kr_check.blockSignals(True)
-            self.temperature_kr_check.setChecked(False)
-            self.temperature_kr_check.blockSignals(False)
-            ps.temperature_kr_correct = False
-            if self._has_project_scope():
-                self._save_project_switches()
+        params = self._analysis_parameters()
+        if not self._validate_analysis_parameters(params):
+            if params.get("kr_correct") and not params.get("expansion_factors"):
+                self.temperature_kr_check.blockSignals(True)
+                self.temperature_kr_check.setChecked(False)
+                self.temperature_kr_check.blockSignals(False)
+                ps.temperature_kr_correct = False
+                if self._has_project_scope():
+                    self._save_project_switches()
             return
         self._save_project_switches()
-        self.set_busy(True, "正在分析温度扫描数据...")
+        if len(folders) > 1:
+            message = f"正在分析 {len(folders)} 个能量文件夹..."
+        else:
+            message = "正在分析温度扫描数据..."
+        self.set_busy(True, message)
         self.worker = WorkerThread(
-            lambda: analyze_temperature_folder(
-                folder,
-                calibration=self.calibration,
-                algorithm=peak_config.algorithm,
-                threshold_end=threshold_end,
-                min_intensity=min_intensity,
-                detection_min_idx=peak_config.detection_min_idx,
-                nearby_peak_window=peak_config.nearby_peak_window,
-                duplicate_window=peak_config.duplicate_window,
-                weak_tail_early_window=peak_config.weak_tail_early_window,
-                weak_tail_late_window=peak_config.weak_tail_late_window,
-                weak_tail_ratio=peak_config.weak_tail_ratio,
-                gaussian_window_max=peak_config.gaussian_window_max,
-                gaussian_boundary_scale=peak_config.gaussian_boundary_scale,
-                boundary_padding=peak_config.boundary_padding,
-                prominence_ratio=peak_config.prominence_ratio,
-                smoothing_window=peak_config.smoothing_window,
-                smoothing_poly_order=peak_config.smoothing_poly_order,
-                baseline_window=peak_config.baseline_window,
-                baseline_percentile=peak_config.baseline_percentile,
-                min_peak_width=peak_config.min_peak_width,
-                max_peak_width=peak_config.max_peak_width,
-                prefer_gaussian=prefer_gaussian,
-                integration_method=integration_method,
-                reference_mode=reference_mode,
-                manual_peak_path=manual_peak_path,
-                photon_normalize=photon_normalize,
-                kr_correct=kr_correct,
-                kr_mz=kr_mz,
-                mass_discrimination=mass_discrimination,
-                light_source=light_source,
-                expansion_factors=expansion_factors,
-                vote_threshold=peak_config.vote_threshold,
-                min_intensity_for_single_vote=peak_config.min_intensity_for_single_vote,
-                mz_tolerance=peak_config.mz_tolerance,
-                cwt_snr_threshold=peak_config.cwt_snr_threshold,
-                cwt_wavelet_max_width=peak_config.cwt_wavelet_max_width,
-                weak_tail_cutoff_idx=peak_config.weak_tail_cutoff_idx,
-                temp_curve_class_change_threshold=ps.temp_curve_class_change_threshold,
-                temp_curve_class_peak_fraction=ps.temp_curve_class_peak_fraction,
-                replicate_mode=self._current_replicate_mode(),
-            ),
+            lambda: self._analyze_temperature_folders_with_cache(folders, params),
             self,
         )
         self.worker.finished_with_result.connect(self.on_analysis_complete)
@@ -836,6 +1459,7 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
     def _on_replicate_enabled_changed(self, checked: bool) -> None:
         self.replicate_mode_combo.setEnabled(checked)
+        self._update_action_state()
 
     def _current_replicate_mode(self) -> str:
         if not self.replicate_enabled_check.isChecked():
@@ -843,40 +1467,185 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         return str(self.replicate_mode_combo.currentData() or "mean")
 
     def set_busy(self, busy: bool, message: str) -> None:
-        self.run_button.setDisabled(busy)
-        self.summary_open_project_btn.setDisabled(busy)
-        # export only available when there are results and not busy
-        self.export_button.setEnabled(not busy and not self.result_df.empty)
+        self._busy = busy
+        self.summary_open_project_btn.setEnabled(not busy)
+        self.mz_list.setEnabled(not busy)
+        self.curve_filter_edit.setEnabled(not busy)
+        self.curve_display_combo.setEnabled(not busy)
+        self.curve_group_combo.setEnabled(not busy)
+        self._refresh_temperature_source_controls()
+        self._refresh_temperature_folder_options()
         if busy:
             self.inline_status_icon.setText("")
             self.inline_status_text.setText(message)
             self._set_inline_status("busy")
             self.inline_action_hint.hide()
             self.inline_retry_button.hide()
+        else:
+            self._update_action_state()
+
+    def _has_analysis_source(self) -> bool:
+        return bool(self._selected_analysis_folders())
+
+    def _update_action_state(self) -> None:
+        if not hasattr(self, "run_button"):
+            return
+        busy = getattr(self, "_busy", False)
+        has_source = bool(self._selected_analysis_folders())
+        has_results = not self.result_df.empty
+        has_curves = bool(self.curves)
+        has_selection = self.current_mz is not None and self.current_mz in self.curves
+
+        self.run_button.setEnabled(has_source and not busy)
+        self.export_button.setEnabled(has_results and not busy)
+        self.export_plot_button.setEnabled(has_curves and has_selection and not busy)
+        self.preview_data_button.setEnabled(has_results and not busy)
+        if hasattr(self, "toggle_table_button"):
+            self.toggle_table_button.setEnabled((has_selection or self.energy_interval_result is not None) and not busy)
+        self.scan_folder_combo.setEnabled(has_source and self.scan_folder_combo.count() > 1 and not busy)
+
+        if busy:
+            workflow_text = "处理中 · 请稍候"
+            workflow_status = "busy"
+        elif not has_source:
+            workflow_text = "步骤 1/3 · 选择温度扫描数据"
+            workflow_status = "pending"
+        elif not has_curves:
+            workflow_text = "步骤 2/3 · 生成温度曲线"
+            workflow_status = "active"
+        elif not has_selection:
+            workflow_text = "步骤 3/3 · 选择 m/z 曲线"
+            workflow_status = "pending"
+        else:
+            workflow_text = "结果就绪 · 可查看或导出"
+            workflow_status = "complete"
+        self.workflow_stage_label.setText(workflow_text)
+        self.workflow_stage_label.setProperty("status", workflow_status)
+        self.workflow_stage_label.style().unpolish(self.workflow_stage_label)
+        self.workflow_stage_label.style().polish(self.workflow_stage_label)
 
     def on_analysis_complete(self, result: object) -> None:
-        self.result_df = result
-        self.curves = build_temperature_curves(self.result_df)
-        self.populate_mz_list()
+        from_cache = False
+        if isinstance(result, dict):
+            self.result_df = result.get("result_df", pd.DataFrame())
+            self.energy_results = list(result.get("energy_results", []))
+            from_cache = bool(result.get("from_cache", False))
+        else:
+            self.result_df = result
+            self.energy_results = [
+                {
+                    "energy": self._infer_energy_from_result(self.result_df),
+                    "folder": self._current_temperature_folder(),
+                    "folder_label": Path(self._current_temperature_folder()).name,
+                    "result_df": self.result_df,
+                    "curves": build_temperature_curves(self.result_df),
+                }
+            ]
+        self.curves = self._build_display_curves()
+        self.energy_interval_result = None
+        self.populate_mz_list(preferred_mz=self.current_mz)
         temperature_count = self.result_df["temperature"].nunique() if not self.result_df.empty else 0
+        energy_count = len([item for item in self.energy_results if item.get("curves")])
         replicate_note = self._replicate_status_text(self.result_df)
         integration_note = self._integration_status_text(self.result_df)
         self.summary_label.setText(
-            f"{len(self.curves)} 条m/z曲线 | {temperature_count} 个温度点"
+            f"{len(self.curves)} 条m/z曲线 | {energy_count} 个能量 | {temperature_count} 个温度点"
             + (f" | {replicate_note}" if replicate_note else "")
             + (f" | {integration_note}" if integration_note else "")
         )
         self.update_group_summary()
-        self._show_plot()  # reveal plot, hide empty state
-        self.export_button.setEnabled(True)
-        self.export_plot_button.setEnabled(True)
-        self.preview_data_button.setEnabled(True)
-        success = f"已完成分析，生成 {len(self.result_df)} 行温度扫描结果"
+        if self.curves:
+            self._show_plot()  # reveal plot, hide empty state
+        else:
+            self._show_empty_plot()
+        success = (
+            f"已从缓存读取 {len(self.result_df)} 行温度扫描结果"
+            if from_cache
+            else f"已完成分析，生成 {len(self.result_df)} 行温度扫描结果"
+        )
+        if energy_count > 1:
+            success = f"{success}；已汇总 {energy_count} 个能量文件夹"
         if replicate_note:
             success = f"{success}；{replicate_note}"
         if integration_note:
             success = f"{success}；{integration_note}"
         self._show_inline_success(success)
+        self._update_action_state()
+
+    def _build_display_curves(self, energy_results: list[dict] | None = None) -> dict[int, dict]:
+        energy_results = self._visible_energy_results() if energy_results is None else energy_results
+        if not energy_results:
+            return build_temperature_curves(self.result_df)
+
+        display_curves: dict[int, dict] = {}
+        all_mz = sorted(
+            {
+                int(mz)
+                for item in energy_results
+                for mz in item.get("curves", {}).keys()
+            }
+        )
+        for mz in all_mz:
+            energy_curves = [
+                (item, item.get("curves", {}).get(mz))
+                for item in energy_results
+                if item.get("curves", {}).get(mz) is not None
+            ]
+            if not energy_curves:
+                continue
+            class_key, class_label = self._summarize_mz_class([curve for _item, curve in energy_curves])
+            rows = []
+            temperatures: list[float] = []
+            areas: list[float] = []
+            for item, curve in energy_curves:
+                curve_rows = curve["rows"].copy()
+                curve_rows["scan_energy"] = item.get("energy")
+                curve_rows["scan_folder"] = item.get("folder_label", "")
+                rows.append(curve_rows)
+                temperatures.extend(float(value) for value in curve.get("temperatures", []))
+                areas.extend(float(value) for value in curve.get("areas", []))
+            combined_rows = pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
+            display_curves[mz] = {
+                "mz": int(mz),
+                "species": str(energy_curves[0][1].get("species", "")),
+                "temperatures": temperatures,
+                "areas": areas,
+                "curve_class": class_key,
+                "curve_class_label": class_label,
+                "curve_class_reason": "跨能量汇总分类",
+                "rows": combined_rows,
+                "energy_curves": energy_curves,
+            }
+        return display_curves
+
+    def _apply_energy_view_selection(self, *, preferred_mz: int | None = None) -> None:
+        if not self.energy_results:
+            return
+        self.curves = self._build_display_curves()
+        self.energy_interval_result = None
+        self.populate_mz_list(preferred_mz=preferred_mz)
+        selected_count = len(self._visible_energy_results())
+        total_count = len(self.energy_results)
+        temperature_count = self.result_df["temperature"].nunique() if not self.result_df.empty else 0
+        if selected_count == total_count:
+            prefix = f"{len(self.curves)} 条m/z曲线 | {total_count} 个能量"
+        else:
+            prefix = f"{len(self.curves)} 条m/z曲线 | 当前 {selected_count} 个能量 / 共 {total_count} 个能量"
+        self.summary_label.setText(f"{prefix} | {temperature_count} 个温度点")
+        self.update_group_summary()
+
+    @staticmethod
+    def _summarize_mz_class(curves: list[dict]) -> tuple[str, str]:
+        classes = [curve.get("curve_class", "unclassified") for curve in curves]
+        if "formation" in classes:
+            key = "formation"
+        elif "intermediate" in classes:
+            key = "intermediate"
+        elif "consumption" in classes:
+            key = "consumption"
+        else:
+            key = "unclassified"
+        return key, TEMPERATURE_CURVE_CLASS_LABELS[key]
 
     @staticmethod
     def _replicate_status_text(df: pd.DataFrame) -> str:
@@ -921,8 +1690,11 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
     def on_analysis_failed(self, message: str) -> None:
         self._show_inline_error(f"分析失败: {message}", lambda: self.run_analysis())
+        self._update_action_state()
 
-    def populate_mz_list(self):
+    def populate_mz_list(self, *args, preferred_mz: int | None = None):
+        if args and preferred_mz is None and isinstance(args[0], int) and args[0] in self.curves:
+            preferred_mz = int(args[0])
         self.mz_list.clear()
         selected_group = self.curve_group_combo.currentData() if hasattr(self, "curve_group_combo") else "all"
         display_mode = self.curve_display_combo.currentData() if hasattr(self, "curve_display_combo") else "grouped"
@@ -930,11 +1702,14 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.populate_mz_list_flat(selected_group)
         else:
             self.populate_mz_list_grouped(selected_group)
-        first_item = self.first_curve_tree_item()
-        if first_item is not None:
-            self.mz_list.setCurrentItem(first_item)
+        item = self.find_curve_tree_item(preferred_mz) if preferred_mz is not None else None
+        if item is None:
+            item = self.first_curve_tree_item()
+        if item is not None:
+            self.mz_list.setCurrentItem(item)
         else:
             self.on_mz_selected(None)
+        self._update_action_state()
 
     def populate_mz_list_grouped(self, selected_group: str):
         for group_key in ("formation", "consumption", "intermediate", "unclassified"):
@@ -999,7 +1774,10 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
     def curve_tree_label(self, mz: int, curve: dict, *, include_group: bool) -> str:
         label = curve.get("species") or ""
         suffix = f" {label}" if label and label != "Unknown" else ""
-        base = f"{mz}{suffix}  ({len(curve['temperatures'])}点)"
+        energy_count = len(curve.get("energy_curves", []))
+        point_count = len(curve.get("temperatures", []))
+        count_text = f"{energy_count}能量/{point_count}点" if energy_count > 1 else f"{point_count}点"
+        base = f"{mz}{suffix}  ({count_text})"
         if include_group:
             class_label = curve.get("curve_class_label", TEMPERATURE_CURVE_CLASS_LABELS["unclassified"])
             return f"[{class_label}] {base}"
@@ -1012,6 +1790,19 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 return item
             if item.childCount() > 0:
                 return item.child(0)
+        return None
+
+    def find_curve_tree_item(self, mz: int | None):
+        if mz is None:
+            return None
+        for index in range(self.mz_list.topLevelItemCount()):
+            item = self.mz_list.topLevelItem(index)
+            if item.data(0, QtCore.Qt.ItemDataRole.UserRole) == int(mz):
+                return item
+            for child_index in range(item.childCount()):
+                child = item.child(child_index)
+                if child.data(0, QtCore.Qt.ItemDataRole.UserRole) == int(mz):
+                    return child
         return None
 
     def update_group_summary(self):
@@ -1030,10 +1821,16 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.curve_table.clear()
             self.curve_table.setRowCount(0)
             self.curve_table.setColumnCount(0)
+            self.energy_interval_table.clear()
+            self.energy_interval_table.setRowCount(0)
+            self.energy_interval_table.setColumnCount(0)
+            self.energy_interval_result = None
             self.current_curve_label.setText("未选择")
             self.current_curve_metric_label.setText("调整筛选或重新生成曲线")
+            self.current_interval_label.setText("电离区间: --")
             if self.plot_widget is not None:
                 self.plot_widget.clear_plot(title="未选择温度曲线")
+            self._update_action_state()
             return
         mz_value = current.data(0, QtCore.Qt.ItemDataRole.UserRole)
         if mz_value is None:
@@ -1042,23 +1839,42 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
             return
         self.current_mz = int(mz_value)
         curve = self.curves[self.current_mz]
+        self.energy_interval_result = self._energy_interval_summary_for_mz(self.current_mz)
+        self._populate_energy_interval_table(self.energy_interval_result)
         rows = curve["rows"].copy()
         integration_methods = rows.get("integration_method", pd.Series([""] * len(rows))).astype(str).map(
             {"sum_counts": "范围累加", "gaussian": "高斯", "baseline": "扣基线积分", "mixed": "混合"}
         ).fillna("")
-        curve_df = pd.DataFrame(
-            {
-                "温度(C)": np.round(rows["temperature"].astype(float), 1),
-                "积分方式": integration_methods,
-                "原始积分": np.round(rows["raw_area"].astype(float), 4),
-                "IO归一化": np.round(rows["photon_normalized_area"].astype(float), 4),
-                "λ(T)": np.round(rows["expansion_lambda"].astype(float), 6),
-                "最终强度": np.round(rows["area"].astype(float), 4),
-            }
-        )
-        # 转置表格，使温度点成为列头
-        curve_df_transposed = curve_df.set_index("温度(C)").T
-        self.set_dataframe(self.curve_table, curve_df_transposed)
+        if len(curve.get("energy_curves", [])) > 1:
+            curve_df = pd.DataFrame(
+                {
+                    "能量(eV)": pd.to_numeric(rows.get("scan_energy", pd.Series([np.nan] * len(rows))), errors="coerce").map(
+                        lambda value: f"{float(value):.2f}" if pd.notna(value) else ""
+                    ),
+                    "文件夹": rows.get("scan_folder", pd.Series([""] * len(rows))).astype(str),
+                    "温度(C)": np.round(rows["temperature"].astype(float), 1),
+                    "积分方式": integration_methods,
+                    "原始积分": np.round(rows["raw_area"].astype(float), 4),
+                    "IO归一化": np.round(rows["photon_normalized_area"].astype(float), 4),
+                    "λ(T)": np.round(rows["expansion_lambda"].astype(float), 6),
+                    "最终强度": np.round(rows["area"].astype(float), 4),
+                }
+            )
+            self.set_dataframe(self.curve_table, curve_df)
+            self.curve_table.verticalHeader().setVisible(False)
+        else:
+            curve_df = pd.DataFrame(
+                {
+                    "温度(C)": np.round(rows["temperature"].astype(float), 1),
+                    "积分方式": integration_methods,
+                    "原始积分": np.round(rows["raw_area"].astype(float), 4),
+                    "IO归一化": np.round(rows["photon_normalized_area"].astype(float), 4),
+                    "λ(T)": np.round(rows["expansion_lambda"].astype(float), 6),
+                    "最终强度": np.round(rows["area"].astype(float), 4),
+                }
+            )
+            curve_df_transposed = curve_df.set_index("温度(C)").T
+            self._set_curve_detail_table(curve_df_transposed)
         class_label = curve.get("curve_class_label", "")
         self.current_curve_label.setText(f"m/z {self.current_mz}")
 
@@ -1079,15 +1895,52 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 f"{class_label} | {len(curve['temperatures'])} 个点 | "
                 f"{t_min:.0f}–{t_max:.0f} °C | 最大值 {max_value:.2f} @ {t_at_max:.0f} °C"
             )
+            energy_count = len(curve.get("energy_curves", []))
+            if energy_count > 1:
+                status_text = f"{class_label} | {energy_count} 个能量 | {len(curve['temperatures'])} 个点 | 最大值 {max_value:.2f}"
         else:
             status_text = f"{class_label} | {len(curve['temperatures'])} 个温度点"
 
         self.current_curve_metric_label.setText(status_text)
+        self.current_interval_label.setText(f"电离区间: {self._format_energy_intervals(self.energy_interval_result)}")
         self.update_plot(curve)
+        self._update_action_state()
+
+    def _set_curve_detail_table(self, df: pd.DataFrame) -> None:
+        """Render one selected m/z curve with explicit calculation-step row labels."""
+        self.set_dataframe(self.curve_table, df)
+        row_labels = [str(index) for index in df.index]
+        self.curve_table.setVerticalHeaderLabels(row_labels)
+        self.curve_table.verticalHeader().setVisible(True)
+        self.curve_table.verticalHeader().setMinimumWidth(96)
+        self.curve_table.verticalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        self.curve_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+
+        final_row = row_labels.index("最终强度") if "最终强度" in row_labels else -1
+        if final_row >= 0:
+            header_item = self.curve_table.verticalHeaderItem(final_row)
+            if header_item is not None:
+                font = header_item.font()
+                font.setBold(True)
+                header_item.setFont(font)
+                header_item.setForeground(QtGui.QBrush(QtGui.QColor("#047857")))
+            for column in range(self.curve_table.columnCount()):
+                item = self.curve_table.item(final_row, column)
+                if item is None:
+                    continue
+                font = item.font()
+                font.setBold(True)
+                item.setFont(font)
+                item.setForeground(QtGui.QBrush(QtGui.QColor("#047857")))
+                item.setBackground(QtGui.QBrush(QtGui.QColor("#ecfdf5")))
 
     def update_plot(self, curve: dict):
         if self.plot_widget is None:
             return
+        if len(curve.get("energy_curves", [])) > 1:
+            self.update_multi_energy_plot(curve)
+            return
+
         x_values = np.asarray(curve["temperatures"], dtype=float)
         y_values = np.asarray(curve["areas"], dtype=float)
         valid = np.isfinite(x_values) & np.isfinite(y_values)
@@ -1144,6 +1997,73 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 )
 
         self.plot_widget.finish()
+
+    def update_multi_energy_plot(self, curve: dict) -> None:
+        target_mz = int(curve.get("mz", 0))
+        title = f"m/z {target_mz} 各能量温度响应曲线"
+        self.plot_widget.clear_plot(title=title, xlabel="温度 / °C", ylabel="归一化信号")
+
+        palette = [
+            "#2563eb", "#f97316", "#10b981", "#7c3aed", "#dc2626",
+            "#0891b2", "#ca8a04", "#db2777", "#4f46e5", "#16a34a",
+            "#ea580c", "#475569",
+        ]
+        x_arrays: list[np.ndarray] = []
+        y_arrays: list[np.ndarray] = []
+        plotted = 0
+        energy_curves = sorted(
+            curve.get("energy_curves", []),
+            key=lambda pair: (
+                float(pair[0].get("energy")) if pair[0].get("energy") is not None else float("inf"),
+                str(pair[0].get("folder_label", "")),
+            ),
+        )
+        for index, (item, energy_curve) in enumerate(energy_curves):
+            energy = item.get("energy")
+            label = (
+                f"{float(energy):.2f} eV"
+                if energy is not None and np.isfinite(float(energy))
+                else str(item.get("folder_label", ""))
+            )
+            x_values = np.asarray(energy_curve.get("temperatures", []), dtype=float)
+            y_values = np.asarray(energy_curve.get("areas", []), dtype=float)
+            valid = np.isfinite(x_values) & np.isfinite(y_values)
+            x_values = x_values[valid]
+            y_values = y_values[valid]
+            if x_values.size == 0 or y_values.size == 0:
+                continue
+            color = palette[index % len(palette)]
+            plot_x, plot_y = self.plot_widget.plot_series(
+                x_values,
+                y_values,
+                label=label,
+                color=color,
+                linewidth=1.9,
+                marker="o",
+                markersize=4.8,
+                alpha=0.92,
+            )
+            x_arrays.append(plot_x)
+            y_arrays.append(plot_y)
+            plotted += 1
+
+        if plotted == 0:
+            self.plot_widget.show_empty("无有效数据", title=title)
+            return
+
+        self.plot_widget.apply_data_limits(x_arrays, y_arrays, x_pad_min=8.0, y_pad_min=0.02)
+        if self.plot_widget.axes is not None:
+            all_y = np.concatenate([values for values in y_arrays if values.size]) if y_arrays else np.array([])
+            if all_y.size and float(np.nanmin(all_y)) < 0 < float(np.nanmax(all_y)):
+                self.plot_widget.axes.axhline(
+                    0.0,
+                    color="#94A3B8",
+                    linewidth=1.0,
+                    linestyle=(0, (4, 4)),
+                    alpha=0.55,
+                    zorder=0,
+                )
+        self.plot_widget.finish(legend=True, legend_loc="upper right")
 
     def run_analysis_sync(
         self,

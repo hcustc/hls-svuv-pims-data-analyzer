@@ -233,6 +233,14 @@ class TestDatabaseFingerprint:
 
         assert fp1['cross_section_hash'] != fp2['cross_section_hash']
 
+    def test_fingerprint_allows_missing_ionization_energy(self, sample_database):
+        sample_database[0]['ie'] = None
+        sample_database[0]['ionization_energy'] = None
+
+        fingerprint = compute_database_fingerprint(sample_database)
+
+        assert fingerprint['total_species'] == len(sample_database)
+
 
 class TestPieStateManagerSave:
     """Test PIE state saving."""

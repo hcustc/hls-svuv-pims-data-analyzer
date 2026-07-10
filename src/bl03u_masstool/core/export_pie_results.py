@@ -3,6 +3,9 @@ import numpy as np
 from pathlib import Path
 from datetime import datetime
 
+from bl03u_masstool.core.pie_analysis import species_ionization_energy_value
+
+
 def export_pie_results_to_excel(pie_dialog, output_path: str | Path) -> dict:
     """
     导出PIE物种鉴定结果到Excel文件，格式符合摩尔分数处理小程序要求
@@ -34,7 +37,7 @@ def export_pie_results_to_excel(pie_dialog, output_path: str | Path) -> dict:
                     results.append({
                         '质量数': mz,
                         '物种名称': species_info.get('species', 'Unknown'),
-                        '电离能(eV)': species_info.get('ie', 0),
+                        '电离能(eV)': species_ionization_energy_value(species_info),
                         '匹配系数': species_info.get('coefficient', 0),
                         '贡献比例(%)': species_info.get('contribution_percent', 0),
                         'R²': r_squared
@@ -43,7 +46,7 @@ def export_pie_results_to_excel(pie_dialog, output_path: str | Path) -> dict:
                 results.append({
                     '质量数': mz,
                     '物种名称': 'Unknown',
-                    '电离能(eV)': 0,
+                    '电离能(eV)': None,
                     '匹配系数': 0,
                     '贡献比例(%)': 0,
                     'R²': r_squared
@@ -69,7 +72,9 @@ def export_pie_results_to_excel(pie_dialog, output_path: str | Path) -> dict:
     export_df = df[['质量数', '物种名称', '电离能(eV)', '匹配系数', '贡献比例(%)', 'R²']].copy()
     
     # 四舍五入数值
-    export_df['电离能(eV)'] = export_df['电离能(eV)'].round(4)
+    # Missing IE is a valid outcome of the lookup workflow; keep it as a blank
+    # Excel cell instead of coercing it to the physically misleading value 0.
+    export_df['电离能(eV)'] = pd.to_numeric(export_df['电离能(eV)'], errors='coerce').round(4)
     export_df['匹配系数'] = export_df['匹配系数'].round(6)
     export_df['贡献比例(%)'] = export_df['贡献比例(%)'].round(2)
     export_df['R²'] = export_df['R²'].round(6)

@@ -87,6 +87,54 @@ class NistWebBookResult:
         return self.selected_compound.best_ie
 
 
+def select_species_ionization_energy(
+    result: NistWebBookResult,
+    *,
+    species_name: str,
+    formula: str | None = None,
+) -> tuple[NistCompoundIonization, NistIonizationEnergy] | None:
+    """Select an unambiguous IE match for one PICS species.
+
+    NIST name/formula searches can return several isomers. Automatic PIE
+    enrichment must not silently attach the first isomer's IE to a different
+    structure, so a value is accepted only when the query selected one entry,
+    an exact species-name match exists, or one unique formula match remains.
+    """
+
+    normalized_name = species_name.strip().casefold()
+    normalized_formula = (formula or "").strip().casefold()
+    selected = result.selected_compound
+    if selected is not None and selected.best_ie is not None:
+        selected_name = (selected.name or "").strip().casefold()
+        selected_formula = (selected.formula or "").strip().casefold()
+        selected_is_exact = selected_name == normalized_name or (
+            normalized_formula and selected_formula == normalized_formula
+        )
+        if selected_is_exact or result.search_type in {"formula", "id", "inchi"}:
+            return selected, selected.best_ie
+
+    candidates = [compound for compound in result.compounds if compound.best_ie is not None]
+    exact_name_matches = [
+        compound
+        for compound in candidates
+        if (compound.name or "").strip().casefold() == normalized_name
+    ]
+    if len(exact_name_matches) == 1:
+        compound = exact_name_matches[0]
+        return compound, compound.best_ie  # type: ignore[return-value]
+
+    if normalized_formula:
+        formula_matches = [
+            compound
+            for compound in candidates
+            if (compound.formula or "").strip().casefold() == normalized_formula
+        ]
+        if len(formula_matches) == 1:
+            compound = formula_matches[0]
+            return compound, compound.best_ie  # type: ignore[return-value]
+    return None
+
+
 @dataclass(frozen=True)
 class LocalIonizationEnergyMatch:
     species_id: int

@@ -28,7 +28,10 @@ from bl03u_masstool.core.isotope import (
     parse_element_count_ranges,
     parse_formula,
 )
-from bl03u_masstool.core.nist_webbook import default_nist_webbook_client
+from bl03u_masstool.core.nist_webbook import (
+    default_nist_webbook_client,
+    select_species_ionization_energy,
+)
 from bl03u_masstool.core.output_paths import ensure_output_dir
 from bl03u_masstool.core.pie_analysis import analyze_pie_folder, build_pie_curves, identify_species_for_mz_with_curve, load_species_database, analyze_multiple_pie_folders, merge_pie_segments
 from bl03u_masstool.core.pie_state import PieStateManager
@@ -116,8 +119,14 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.current_fit: dict | None = None
         self.all_fit_results: dict[int, dict] = {}  # 保存所有拟合结果
         self.worker: WorkerThread | None = None
+        self.ie_lookup_worker: WorkerThread | None = None
+        self._ie_lookup_cache: dict[str, dict] = {}
+        self._ie_lookup_pending: dict[str, dict] = {}
+        self._ie_lookup_inflight: set[str] = set()
+        self._ie_lookup_active_requests: list[dict] = []
         self.pie_folders: list[str] = []
         self._busy = False
+        self._fit_preview_active = False
         # Per-m/z 配置存储（Phase 1）+ 版本管理（Phase 2）
         self.per_mz_config: dict[int, dict] = {}
         # Phase 2: 全局求解配置版本管理
@@ -160,7 +169,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
         self.folder_edit = QtWidgets.QLineEdit()
         self.folder_edit.setPlaceholderText("选择包含PIE扫描质谱文件的文件夹")
-        self.folder_edit.textChanged.connect(self._remember_temporary_source)
+        self.folder_edit.textChanged.connect(self._on_source_path_changed)
         self.select_folder_button = QtWidgets.QPushButton("浏览...")
         self.select_folder_button.setToolTip("选择PIE扫描文件夹")
         self.select_folder_button.clicked.connect(self.select_folder)
@@ -203,6 +212,8 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.summary_open_project_btn.clicked.connect(self._open_project_settings)
         self.status_label = QtWidgets.QLabel("就绪")
         self.status_label.setObjectName("ProjectStatus")
+        self.status_label.setMaximumWidth(420)
+        self.status_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
         self.select_folder_button.setObjectName("BrowseButton")
 
         # ---- 紧凑数据源控制带 ----
@@ -228,6 +239,10 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         summary_layout.addWidget(self.summary_project_label)
         summary_layout.addWidget(self.summary_system_label)
         summary_layout.addWidget(self.summary_data_label)
+        summary_layout.addStretch()
+        self.workflow_stage_label = QtWidgets.QLabel("步骤 1/3 · 选择数据并生成曲线")
+        self.workflow_stage_label.setObjectName("PieWorkflowStage")
+        summary_layout.addWidget(self.workflow_stage_label)
         data_layout.addWidget(self.summary_bar)
 
         folder_row = QtWidgets.QHBoxLayout()
@@ -246,29 +261,35 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         folder_row.addWidget(self.use_multi_folders)
         folder_row.addWidget(self.folder_edit, stretch=1)
         folder_row.addWidget(self.select_folder_button)
+        folder_row.addWidget(self.analyze_button)
+        data_layout.addLayout(folder_row)
+
+        analysis_options_row = QtWidgets.QHBoxLayout()
+        analysis_options_row.setSpacing(8)
         self.photon_correction_check = QtWidgets.QCheckBox("光强校正")
         self.photon_correction_check.setToolTip("开启时按每个能量点的光强逐点校正；关闭时使用原始积分信号")
-        folder_row.addWidget(self.photon_correction_check)
+        analysis_options_row.addWidget(self.photon_correction_check)
         self.integration_method_label = QtWidgets.QLabel("积分方式: 范围累加")
+        self.integration_method_label.setObjectName("HintLabel")
         self.integration_method_label.setToolTip("PIE 积分方式由项目管理 -> 功能默认参数 -> PIE 拟合设置")
-        folder_row.addWidget(self.integration_method_label)
+        analysis_options_row.addWidget(self.integration_method_label)
         self.replicate_enabled_check = QtWidgets.QCheckBox("合并重复采集")
         self.replicate_enabled_check.setToolTip("仅在确认为同一条件多次采集时开启；关闭时每个文件按自身能量点处理")
         self.replicate_enabled_check.toggled.connect(self._on_replicate_enabled_changed)
-        folder_row.addWidget(self.replicate_enabled_check)
+        analysis_options_row.addWidget(self.replicate_enabled_check)
         self.replicate_mode_combo = QtWidgets.QComboBox()
         self.replicate_mode_combo.addItem("平均", "mean")
         self.replicate_mode_combo.addItem("累加", "sum")
         self.replicate_mode_combo.setToolTip("开启合并重复采集后，同组重复采集的聚合方式")
         self.replicate_mode_combo.setEnabled(False)
-        folder_row.addWidget(self.replicate_mode_combo)
-        folder_row.addWidget(self.analyze_button)
-        folder_row.addWidget(self.export_button)
-        folder_row.addWidget(self.export_plot_button)
-        folder_row.addWidget(self.common_params_button)
-        folder_row.addWidget(self.summary_open_project_btn)
-        folder_row.addWidget(self.status_label)
-        data_layout.addLayout(folder_row)
+        analysis_options_row.addWidget(self.replicate_mode_combo)
+        analysis_options_row.addStretch()
+        analysis_options_row.addWidget(self.export_button)
+        analysis_options_row.addWidget(self.export_plot_button)
+        analysis_options_row.addWidget(self.common_params_button)
+        analysis_options_row.addWidget(self.summary_open_project_btn)
+        analysis_options_row.addWidget(self.status_label)
+        data_layout.addLayout(analysis_options_row)
 
         # 多文件夹列表区域 (只在多文件夹模式显示)
         self.multi_folder_section = QtWidgets.QGroupBox("多段PIE文件夹 (按能量顺序添加)")
@@ -299,6 +320,10 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self._locked_species: list[str] = []
         self._result_panel_expanded: bool = False  # 记录用户展开/收起状态，切换m/z时保留
         self._skip_save_config: bool = False  # 批量拟合完成后跳过一次save，防止覆盖fit配置
+        self._preview_timer = QtCore.QTimer(self)
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.setInterval(180)
+        self._preview_timer.timeout.connect(self._rebuild_manual_fit)
 
         # 初始化UI状态
         self.set_pie_source_scope("temporary", restore_saved=False)
@@ -306,6 +331,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
         # ---- 主工作区 ----
         splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+        splitter.setObjectName("MainSplitter")
 
         left_panel = QtWidgets.QWidget()
         left_panel.setObjectName("SidePanel")
@@ -327,16 +353,37 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.mz_filter_edit.setObjectName("CurveSearch")
         self.mz_filter_edit.setPlaceholderText("搜索 m/z / 物种")
         self.mz_filter_edit.textChanged.connect(self.populate_mz_list)
-        left_layout.addWidget(self.mz_filter_edit)
+        search_row = QtWidgets.QHBoxLayout()
+        search_row.setSpacing(6)
+        search_row.addWidget(self.mz_filter_edit, stretch=1)
+        self.mz_status_filter_combo = QtWidgets.QComboBox()
+        self.mz_status_filter_combo.setToolTip("按拟合状态筛选曲线")
+        self.mz_status_filter_combo.addItem("全部状态", "all")
+        self.mz_status_filter_combo.addItem("待拟合", "unfitted")
+        self.mz_status_filter_combo.addItem("已拟合", "completed")
+        self.mz_status_filter_combo.addItem("已确认", "confirmed")
+        self.mz_status_filter_combo.addItem("结果过期", "obsolete")
+        self.mz_status_filter_combo.addItem("失败", "failed")
+        self.mz_status_filter_combo.currentIndexChanged.connect(self.populate_mz_list)
+        search_row.addWidget(self.mz_status_filter_combo)
+        left_layout.addLayout(search_row)
         self.mz_list = QtWidgets.QListWidget()
         self.mz_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
         self.mz_list.currentItemChanged.connect(self.on_mz_selected)
+        self.mz_list.itemSelectionChanged.connect(self._on_mz_selection_changed)
         self.mz_list.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
         self.mz_list.customContextMenuRequested.connect(self._on_mz_list_context_menu)
         left_layout.addWidget(self.mz_list, stretch=1)
-        mz_hint = QtWidgets.QLabel("按住 Cmd/Ctrl 可多选")
+        selection_row = QtWidgets.QHBoxLayout()
+        selection_row.setSpacing(4)
+        mz_hint = QtWidgets.QLabel("Cmd/Ctrl 多选")
         mz_hint.setObjectName("HintLabel")
-        left_layout.addWidget(mz_hint)
+        selection_row.addWidget(mz_hint)
+        selection_row.addStretch()
+        self.mz_selection_label = QtWidgets.QLabel("未选择")
+        self.mz_selection_label.setObjectName("PieSelectionSummary")
+        selection_row.addWidget(self.mz_selection_label)
+        left_layout.addLayout(selection_row)
 
         # 主拟合按钮：智能感知多选
         self.fit_button = QtWidgets.QPushButton("拟合当前")
@@ -359,11 +406,12 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.more_actions_btn.setObjectName("BrowseButton")
         self.more_actions_btn.setToolTip("批量重拟合、穷举优选、清除拟合等高级操作")
         self.more_actions_menu = QtWidgets.QMenu(self)
-        self.more_actions_menu.addAction(
-            "批量重拟合（已保存配置）"
-        ).triggered.connect(self.refit_selected_curves)
-        self.more_actions_menu.addAction("穷举优选").triggered.connect(self._exhaustive_best_fit)
-        self.more_actions_menu.addAction("清除拟合").triggered.connect(self.clear_all_fits)
+        self.refit_selected_action = self.more_actions_menu.addAction("批量重拟合（已保存配置）")
+        self.refit_selected_action.triggered.connect(self.refit_selected_curves)
+        self.exhaustive_action = self.more_actions_menu.addAction("穷举优选")
+        self.exhaustive_action.triggered.connect(self._exhaustive_best_fit)
+        self.clear_fits_action = self.more_actions_menu.addAction("清除拟合")
+        self.clear_fits_action.triggered.connect(self.clear_all_fits)
         self.more_actions_menu.addSeparator()
         self.more_actions_menu.addAction("重新加载PICS截面数据库").triggered.connect(
             lambda: self.load_database(show_message=True)
@@ -421,19 +469,6 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.show_result_detail_btn.setObjectName("ResultDetailLink")
         self.show_result_detail_btn.setToolTip("展开/收起详细数据面板（曲线数据、残差等）")
         self.show_result_detail_btn.setFixedHeight(20)
-        self.show_result_detail_btn.setStyleSheet("""
-            #ResultDetailLink {
-                border: none;
-                background-color: transparent;
-                color: #0369a1;
-                padding: 2px 4px;
-                text-decoration: underline;
-                font-size: 12px;
-            }
-            #ResultDetailLink:hover {
-                color: #0284c7;
-            }
-        """)
         self.show_result_detail_btn.setVisible(False)  # 初始隐藏，拟合完成后显示
         stats_bar_layout.addWidget(self.show_result_detail_btn)
 
@@ -465,10 +500,13 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.fitting_control_widget.locked_candidate_removed.connect(self._on_locked_species_changed)
         self.fitting_control_widget.species_config_changed.connect(self._on_fitting_config_changed)
         self.fitting_control_widget.candidates_zeroed.connect(self._on_fitting_config_changed)
+        self.fitting_control_widget.candidate_selection_changed.connect(self._on_candidate_selection_changed)
+        self.fitting_control_widget.fit_readiness_changed.connect(self._on_fit_readiness_changed)
         self.fitting_control_widget.candidate_lock_toggled.connect(self._on_locked_species_changed)
         self.fitting_control_widget.confirmation_requested.connect(self._confirm_identification)
         self.fitting_control_widget.export_requested.connect(self.export_pie_results)
         self.fitting_control_widget.pics_import_requested.connect(self._goto_pics_import)
+        self.fitting_control_widget.ie_query_requested.connect(self._request_current_ie_lookup)
 
         # ---- 连接ResultDisplayWidget信号 ----
         # （结果面板现仅作详细数据查看，操作按钮已移入右侧面板）
@@ -524,6 +562,10 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
     def _update_result_detail_button(self):
         """根据结果状态更新'结果详情 ›'按钮的可见性和文本，并保留用户展开状态"""
+        if self._fit_preview_active and self.current_fit:
+            self.show_result_detail_btn.setVisible(True)
+            self.show_result_detail_btn.setText("查看参数预览 ›")
+            return
         if self.current_mz is None or self.current_mz not in self.all_fit_results:
             self.show_result_detail_btn.setVisible(False)
             # 无结果时收起面板（不改变记录的展开状态）
@@ -532,7 +574,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             return
 
         result = self.all_fit_results[self.current_mz]
-        current_per_mz_hash = self._get_per_mz_config_hash(self.current_mz)
+        current_per_mz_hash = self._get_status_config_hash(self.current_mz)
         current_global_hash = self.global_solver_config.get("config_hash", "")
         status = self._derive_result_status(result, current_per_mz_hash, current_global_hash)
 
@@ -657,20 +699,37 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
     def _on_locked_species_changed(self):
         """锁定候选物种改变时标记dirty并更新状态"""
         self.mark_pie_config_changed()
-        # 触发实时拟合预览
-        self._rebuild_manual_fit()
+        self._schedule_manual_fit_preview()
 
     def _on_fitting_config_changed(self):
         """拟合配置改变时标记dirty、更新结果状态并重新拟合预览"""
         self.mark_pie_config_changed()
-        # 如果有当前的拟合结果，标记为OBSOLETE
-        if self.current_mz and self.all_fit_results.get(self.current_mz):
+        # 配置变化会使已提交结果（包括已确认结果）失效。
+        if self.current_mz is not None and self.all_fit_results.get(self.current_mz):
             current_result = self.all_fit_results[self.current_mz]
-            if current_result.get("_status") == "COMPLETED":
+            if current_result.get("success"):
                 current_result["_status"] = "OBSOLETE"
+                current_result.pop("_confirmed", None)
+                current_result.pop("_confirmed_timestamp", None)
+                self.fitting_control_widget.set_fit_result_status("OBSOLETE")
                 self.result_display_widget.set_result_status("OBSOLETE")
-        # 触发实时拟合预览
-        self._rebuild_manual_fit()
+                self._update_result_detail_button()
+        self._schedule_manual_fit_preview()
+        self._update_action_state()
+
+    def _schedule_manual_fit_preview(self) -> None:
+        """Debounce coefficient/selection changes before rebuilding the preview."""
+        if self._busy or self.current_mz is None:
+            return
+        self._preview_timer.start()
+
+    def _on_candidate_selection_changed(self, _selected_ids: list[int]) -> None:
+        self._update_action_state()
+
+    def _on_fit_readiness_changed(self, ready: bool, reason: str) -> None:
+        if not ready and reason:
+            self.fit_button.setToolTip(reason)
+        self._update_action_state()
 
     def _update_species_table_coefficients(self, fit_model: dict):
         """将拟合结果中的系数更新到右侧候选物种表格"""
@@ -696,7 +755,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                         species_name = name_label.text()
                         # 如果这个物种在拟合结果中，更新系数
                         if species_name in coeff_map:
-                            coeff_widget = self.species_table.cellWidget(row, 2)
+                            coeff_widget = self.species_table.cellWidget(row, 3)
                             if isinstance(coeff_widget, QtWidgets.QDoubleSpinBox):
                                 coeff_widget.setValue(coeff_map[species_name])
                                 # 也更新数据结构
@@ -704,6 +763,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                                     self.fitting_control_widget._unified_species_data[row]["coefficient"] = coeff_map[species_name]
         finally:
             self.fitting_control_widget._updating = False
+        self.fitting_control_widget._refresh_candidate_summary()
 
     def load_database(self, show_message: bool = True):
         path = self.database_edit.text().strip() if hasattr(self, "database_edit") else ""
@@ -830,6 +890,16 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         payload = self._build_per_mz_config_payload(config)
         return self._compute_config_hash(payload)
 
+    def _get_status_config_hash(self, mz: int) -> str:
+        """Use live panel state for the visible m/z and saved state for all others."""
+        if (
+            mz == self.current_mz
+            and self.fitting_control_widget._current_mz == mz
+            and self.fitting_control_widget._candidates_loaded
+        ):
+            return self._get_current_per_mz_config_hash(mz)
+        return self._get_per_mz_config_hash(mz)
+
     @staticmethod
     def _derive_result_status(
         result: dict | None,
@@ -918,6 +988,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
         # 刷新表格显示
         self.fitting_control_widget._refresh_table_from_data()
+        self.fitting_control_widget._refresh_candidate_summary()
 
     # ---- 候选物种面板方法 ----
 
@@ -926,6 +997,277 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         filtered_db = self.get_filtered_database()
         locked_species = self.fitting_control_widget.get_locked_species()
         self.fitting_control_widget.populate_unified_species_table(mz, filtered_db, locked_species)
+        self._schedule_missing_ie_lookup(mz)
+
+    @staticmethod
+    def _species_ie_cache_key(species: dict) -> str:
+        name = str(species.get("species") or species.get("name") or "").strip().casefold()
+        formula = str(species.get("formula") or "").strip().casefold()
+        return f"{name}\x1f{formula}" if name else ""
+
+    @staticmethod
+    def _species_ie_value(species: dict) -> float | None:
+        value = species.get("ie")
+        if value is None:
+            value = species.get("ionization_energy")
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return None
+        return numeric if np.isfinite(numeric) and numeric > 0 else None
+
+    def _request_current_ie_lookup(self) -> None:
+        if self.current_mz is None:
+            return
+        self._schedule_missing_ie_lookup(self.current_mz, force=True)
+
+    def _schedule_missing_ie_lookup(
+        self,
+        mz: int,
+        *,
+        force: bool = False,
+        species_names: set[str] | None = None,
+    ) -> None:
+        normalized_names = {name.strip().casefold() for name in (species_names or set()) if name.strip()}
+        for species in self.database:
+            if int(species.get("mz", -1)) != int(mz):
+                continue
+            species_name = str(species.get("species") or "").strip()
+            if normalized_names and species_name.casefold() not in normalized_names:
+                continue
+            value = self._species_ie_value(species)
+            if value is not None:
+                species["ie"] = value
+                species["ionization_energy"] = value
+                if not species.get("ie_source"):
+                    species["ie_source"] = "PICS数据库"
+                species["ie_query_status"] = "available"
+                continue
+
+            cache_key = self._species_ie_cache_key(species)
+            if not cache_key:
+                continue
+            if force:
+                cached = self._ie_lookup_cache.get(cache_key)
+                if cached and cached.get("status") != "available":
+                    self._ie_lookup_cache.pop(cache_key, None)
+            cached = self._ie_lookup_cache.get(cache_key)
+            if cached is not None:
+                self._apply_ie_lookup_result(cached)
+                continue
+            if cache_key in self._ie_lookup_pending or cache_key in self._ie_lookup_inflight:
+                continue
+
+            request = {
+                "cache_key": cache_key,
+                "species": species_name,
+                "formula": str(species.get("formula") or "").strip(),
+                "mz": int(species.get("mz", mz)),
+            }
+            self._ie_lookup_pending[cache_key] = request
+            self._apply_ie_state(
+                cache_key,
+                value=None,
+                status="pending",
+                source="IE查询",
+                message="正在查询本地物种库 / NIST WebBook…",
+            )
+        self._start_ie_lookup_worker()
+
+    def _start_ie_lookup_worker(self) -> None:
+        if self.ie_lookup_worker is not None and self.ie_lookup_worker.isRunning():
+            return
+        if not self._ie_lookup_pending:
+            return
+        requests = list(self._ie_lookup_pending.values())
+        self._ie_lookup_pending.clear()
+        self._ie_lookup_active_requests = requests
+        self._ie_lookup_inflight.update(request["cache_key"] for request in requests)
+        self.ie_lookup_worker = WorkerThread(
+            lambda: self._query_ie_requests_sync(requests),
+            self,
+        )
+        self.ie_lookup_worker.finished_with_result.connect(self._on_ie_lookup_complete)
+        self.ie_lookup_worker.failed.connect(self._on_ie_lookup_failed)
+        self.ie_lookup_worker.finished.connect(self._on_ie_lookup_finished)
+        self.ie_lookup_worker.start()
+
+    @staticmethod
+    def _query_ie_requests_sync(requests: list[dict]) -> list[dict]:
+        client = default_nist_webbook_client()
+        results: list[dict] = []
+        for request in requests:
+            query = str(request.get("species") or request.get("formula") or "").strip()
+            try:
+                query_result = client.query_ionization_energy(query, search_type="auto")
+                match = select_species_ionization_energy(
+                    query_result,
+                    species_name=str(request.get("species") or ""),
+                    formula=str(request.get("formula") or "") or None,
+                )
+                if match is None:
+                    results.append({
+                        **request,
+                        "value": None,
+                        "status": "not_found",
+                        "source": "本地物种库 / NIST WebBook",
+                        "message": query_result.message or "未找到可唯一匹配的 IE。",
+                    })
+                    continue
+                compound, ionization_energy = match
+                source = (
+                    "本地PICS数据库"
+                    if ionization_energy.source.startswith("local")
+                    else "NIST WebBook"
+                )
+                details = [query_result.message, compound.message]
+                if ionization_energy.method:
+                    details.append(f"方法: {ionization_energy.method}")
+                results.append({
+                    **request,
+                    "value": float(ionization_energy.value),
+                    "status": "available",
+                    "source": source,
+                    "message": " ".join(part for part in details if part),
+                })
+            except Exception as exc:
+                results.append({
+                    **request,
+                    "value": None,
+                    "status": "failed",
+                    "source": "IE查询",
+                    "message": str(exc),
+                })
+        return results
+
+    def _on_ie_lookup_complete(self, results: object) -> None:
+        found_count = 0
+        missing_count = 0
+        for result in list(results or []):
+            self._ie_lookup_cache[str(result.get("cache_key", ""))] = dict(result)
+            self._apply_ie_lookup_result(result)
+            if result.get("status") == "available":
+                found_count += 1
+            else:
+                missing_count += 1
+        if not self._busy and (found_count or missing_count):
+            self.status_label.setText(f"IE查询完成: 查到 {found_count} 个，未查到/失败 {missing_count} 个")
+
+    def _on_ie_lookup_failed(self, message: str) -> None:
+        for request in self._ie_lookup_active_requests:
+            result = {
+                **request,
+                "value": None,
+                "status": "failed",
+                "source": "IE查询",
+                "message": message,
+            }
+            self._ie_lookup_cache[request["cache_key"]] = result
+            self._apply_ie_lookup_result(result)
+
+    def _on_ie_lookup_finished(self) -> None:
+        for request in self._ie_lookup_active_requests:
+            self._ie_lookup_inflight.discard(request["cache_key"])
+        worker = self.ie_lookup_worker
+        self.ie_lookup_worker = None
+        self._ie_lookup_active_requests = []
+        if worker is not None:
+            worker.deleteLater()
+        self._start_ie_lookup_worker()
+
+    def _apply_ie_lookup_result(self, result: dict) -> None:
+        self._apply_ie_state(
+            str(result.get("cache_key", "")),
+            value=result.get("value"),
+            status=str(result.get("status") or "not_found"),
+            source=str(result.get("source") or ""),
+            message=str(result.get("message") or ""),
+        )
+
+    def _apply_ie_state(
+        self,
+        cache_key: str,
+        *,
+        value: float | None,
+        status: str,
+        source: str,
+        message: str,
+    ) -> None:
+        affected_ids: set[int] = set()
+        for species in self.database:
+            if self._species_ie_cache_key(species) != cache_key:
+                continue
+            species["ie"] = value
+            species["ionization_energy"] = value
+            species["ie_query_status"] = status
+            species["ie_source"] = source
+            species["ie_message"] = message
+            try:
+                affected_ids.add(int(species.get("id")))
+            except (TypeError, ValueError):
+                pass
+
+        for config in self.per_mz_config.values():
+            for species in config.get("selected_species", []):
+                if self._species_ie_cache_key(species) == cache_key:
+                    species["ie"] = value
+                    species["ionization_energy"] = value
+                    species["ie_query_status"] = status
+                    species["ie_source"] = source
+                    species["ie_message"] = message
+
+        for fit_result in self.all_fit_results.values():
+            model = fit_result.get("model") or {}
+            for species in model.get("species", []):
+                ids = {int(item) for item in species.get("ids", []) if str(item).lstrip("-").isdigit()}
+                if not (ids & affected_ids) and self._species_ie_cache_key(species) != cache_key:
+                    continue
+                species["ie"] = value
+                species["ionization_energy"] = value
+                species["ie_query_status"] = status
+                species["ie_source"] = source
+                species["ie_message"] = message
+
+        self.fitting_control_widget.update_ionization_energy_for_ids(
+            affected_ids,
+            value=value,
+            status=status,
+            source=source,
+            message=message,
+        )
+        if self.current_fit is not None:
+            for species in self.current_fit.get("species", []):
+                ids = {int(item) for item in species.get("ids", []) if str(item).lstrip("-").isdigit()}
+                if not (ids & affected_ids) and self._species_ie_cache_key(species) != cache_key:
+                    continue
+                species["ie"] = value
+                species["ionization_energy"] = value
+                species["ie_query_status"] = status
+                species["ie_source"] = source
+                species["ie_message"] = message
+            if self.current_mz in self.all_fit_results:
+                current_result = self.all_fit_results[self.current_mz]
+                current_hash = self._get_status_config_hash(self.current_mz)
+                status_code = self._derive_result_status(
+                    current_result,
+                    current_hash,
+                    self.global_solver_config.get("config_hash", ""),
+                )
+                if current_result.get("_confirmed") and status_code == "COMPLETED":
+                    status_code = "CONFIRMED"
+                self.fitting_control_widget.show_fit_result(self.current_fit, status_code)
+                self.result_display_widget.update_fit_table(self.current_fit)
+
+    def _schedule_ie_for_fit_results(self, results: dict) -> None:
+        for mz, fit_result in results.items():
+            model = fit_result.get("model") or {}
+            missing_names = {
+                str(species.get("species") or "")
+                for species in model.get("species", [])
+                if self._species_ie_value(species) is None
+            }
+            if missing_names:
+                self._schedule_missing_ie_lookup(int(mz), species_names=missing_names)
 
     def _get_candidate_panel_state(self) -> dict:
         """从统一的物种表格中获取当前配置状态"""
@@ -945,8 +1287,8 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
                 species_id = int(species.get("id", row + 1))
 
-                # Col 2: 系数（QDoubleSpinBox）
-                coeff_widget = self.species_table.cellWidget(row, 2)
+                # Col 3: 系数（QDoubleSpinBox）
+                coeff_widget = self.species_table.cellWidget(row, 3)
                 if isinstance(coeff_widget, QtWidgets.QDoubleSpinBox):
                     coefficients[species_id] = coeff_widget.value()
 
@@ -971,9 +1313,11 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         selected = panel_state["selected_species"]
 
         if not selected:
+            self._fit_preview_active = False
             if self.current_fit is not None:
                 self.current_fit = None
                 self.refresh_current_plot()
+            self._update_result_detail_button()
             return
 
         curve = self.curves[self.current_mz]
@@ -1037,10 +1381,20 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         species_results = []
         for idx, (species, c) in enumerate(zip(selected, coeffs)):
             component = design_columns[idx] * c
+            ionization_energy = self._species_ie_value(species)
+            species_id = int(species.get("id", idx + 1))
             species_results.append({
+                "id": species_id,
+                "ids": [species_id],
+                "mz": int(species.get("mz", self.current_mz)),
                 "species": species.get("species", ""),
                 "coefficient": float(c),
-                "ie": species.get("ionization_energy"),
+                "ie": ionization_energy,
+                "ionization_energy": ionization_energy,
+                "ie_source": species.get("ie_source", ""),
+                "ie_query_status": species.get("ie_query_status", ""),
+                "ie_message": species.get("ie_message", ""),
+                "formula": species.get("formula"),
                 "component_intensities": component.tolist(),
                 "contribution_percent": float(c) / sum(coeffs) * 100 if sum(coeffs) > 0 else 0,
                 "r_squared": r_squared,
@@ -1057,6 +1411,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             "candidate_count": len(selected),
         }
 
+        self._fit_preview_active = True
         self.current_fit = manual_model
         curve = self.curves[self.current_mz]
         self.update_plot(curve, manual_model)
@@ -1069,6 +1424,12 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             "residual": (intensities - fitted).tolist(),
         })
         self.result_display_widget.update_fit_table(manual_model)
+        self.result_display_widget.set_result_status("PREVIEW")
+        self.fitting_control_widget.show_fit_result(manual_model, "PREVIEW")
+        self._update_result_detail_button()
+        self.status_label.setText(
+            f"m/z {self.current_mz} 参数预览 · R²={r_squared:.4f} · 点击拟合后方可确认"
+        )
 
     def get_filtered_database(self) -> list:
         """获取根据全局元素设置筛选后的数据库"""
@@ -1086,28 +1447,66 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             QtWidgets.QMessageBox.warning(self, "提示", "请先生成PIE曲线")
             return
 
+        mz_list = list(self.curves.keys())
+        database_snapshot = list(self.get_filtered_database())
+        locked_species_snapshot = self.fitting_control_widget.get_locked_species()
+        self._fit_all_input_configs = {}
+        for mz in mz_list:
+            candidates = [item for item in database_snapshot if item.get("mz") == mz]
+            self._fit_all_input_configs[mz] = {
+                "selected_species": candidates,
+                "coefficients": {
+                    int(species.get("id", idx + 1)): 0.0
+                    for idx, species in enumerate(candidates)
+                },
+                "locked_ids": [
+                    int(species.get("id", idx + 1))
+                    for idx, species in enumerate(candidates)
+                    if species.get("species") in locked_species_snapshot
+                ],
+            }
+        config_hashes = {mz: self._get_per_mz_config_hash(mz) for mz in mz_list}
+        global_hash = self.global_solver_config.get("config_hash", "")
         self.set_busy(True, "正在一键拟合所有曲线...")
         self.worker = WorkerThread(
-            lambda: self.fit_curves_sync(list(self.curves.keys())),
+            lambda: self.fit_curves_sync(
+                mz_list,
+                database=database_snapshot,
+                locked_species=locked_species_snapshot,
+                config_hashes=config_hashes,
+                global_hash=global_hash,
+            ),
             self,
         )
         self.worker.finished_with_result.connect(self.on_fit_all_complete)
         self.worker.failed.connect(self.on_analysis_failed)
-        self.worker.finished.connect(lambda: self.set_busy(False, "就绪"))
+        self.worker.finished.connect(lambda: self.set_busy(False, self.status_label.text()))
         self.worker.start()
 
-    def fit_curves_sync(self, mz_list: list) -> dict:
+    def fit_curves_sync(
+        self,
+        mz_list: list,
+        *,
+        database: list | None = None,
+        locked_species: list[str] | None = None,
+        config_hashes: dict[int, str] | None = None,
+        global_hash: str | None = None,
+    ) -> dict:
         """拟合指定的质量数曲线"""
-        filtered_db = self.get_filtered_database()
-        locked_species = self.fitting_control_widget.get_locked_species()
-
-        # Phase 2: 获取全局配置哈希（对所有 m/z 相同）
-        global_hash = self.global_solver_config.get("config_hash", "")
+        filtered_db = database if database is not None else self.get_filtered_database()
+        locked_species = (
+            locked_species
+            if locked_species is not None
+            else self.fitting_control_widget.get_locked_species()
+        )
+        config_hashes = config_hashes or {}
+        if global_hash is None:
+            global_hash = self.global_solver_config.get("config_hash", "")
 
         results = {}
         for mz in mz_list:
             # Phase 2: 为这个 m/z 捕获启动时的配置哈希
-            per_mz_hash = self._get_per_mz_config_hash(mz)
+            per_mz_hash = config_hashes.get(mz, self._get_per_mz_config_hash(mz))
 
             curve = self.curves.get(mz)
             if not curve:
@@ -1147,8 +1546,10 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
     def on_fit_all_complete(self, results: dict):
         """一键拟合完成"""
+        self._fit_preview_active = False
         # 保存所有拟合结果
         self.all_fit_results = results
+        self._schedule_ie_for_fit_results(results)
 
         fitted_count = sum(1 for r in results.values() if r.get('success'))
         total_count = len(self.curves)
@@ -1167,51 +1568,28 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             # 为所有成功拟合的 m/z 保存配置，使哈希匹配、状态显示为 COMPLETED
             for mz, result in results.items():
                 if result.get('success') and result.get('model'):
-                    fit_species = result['model'].get('species', [])
+                    input_config = getattr(self, "_fit_all_input_configs", {}).get(mz, {})
                     self.per_mz_config[mz] = {
-                        "selected_species": fit_species,
-                        "coefficients": {int(s.get("id", idx + 1)): float(s.get("coefficient", 0.0))
-                                         for idx, s in enumerate(fit_species)},
-                        "locked_ids": [],
+                        "selected_species": list(input_config.get("selected_species", [])),
+                        "coefficients": dict(input_config.get("coefficients", {})),
+                        "locked_ids": list(input_config.get("locked_ids", [])),
                     }
                     # 重新用刚保存的配置计算哈希，确保 _derive_result_status 判断为 COMPLETED
                     new_hash = self._get_per_mz_config_hash(mz)
                     self.all_fit_results[mz]['fit_config_hash'] = new_hash
 
-            if first_result.get('success') and first_result.get('model'):
-                self.current_fit = first_result['model']
-
-                results_list = first_result['model'].get('species', [])
-                fit_df = pd.DataFrame(
-                    [
-                        {
-                            "物种名称": item["species"],
-                            "电离能(eV)": "" if item.get("ie") is None else round(float(item["ie"]), 4),
-                            "匹配系数": round(float(item["coefficient"]), 6),
-                            "贡献(%)": round(float(item["contribution_percent"]), 2),
-                            "R²": round(float(item["r_squared"]), 5),
-                        }
-                        for item in results_list
-                    ],
-                    columns=["物种名称", "电离能(eV)", "匹配系数", "贡献(%)", "R²"],
-                )
-                self.set_dataframe(self.fit_table, fit_df)
-
-                if first_mz in self.curves:
-                    self.update_plot(self.curves[first_mz], first_result['model'])
-
-            self.refresh_current_plot()
-            # 设置标志位，避免 setCurrentRow 触发 on_mz_selected 时覆盖刚保存的 fit 配置
-            self._skip_save_config = True
-            self.mz_list.setCurrentRow(0)
-
         self.populate_mz_list()
+        if fitted_count > 0:
+            for row in range(self.mz_list.count()):
+                item = self.mz_list.item(row)
+                if int(item.data(QtCore.Qt.ItemDataRole.UserRole)) == first_mz:
+                    self._skip_save_config = True
+                    self.mz_list.setCurrentItem(item)
+                    break
+        failed_count = total_count - fitted_count
+        self.status_label.setText(f"拟合全部完成: 成功 {fitted_count} 条，失败 {failed_count} 条")
         self._update_action_state()
 
-        QtWidgets.QMessageBox.information(
-            self, "完成",
-            f"拟合完成！\n已拟合: {fitted_count} / {total_count} 条曲线"
-        )
 
     def _on_mz_list_context_menu(self, pos):
         menu = QtWidgets.QMenu(self)
@@ -1225,33 +1603,11 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         # 防止并发拟合
         if self._busy:
             return
-        selected_items = self.mz_list.selectedItems()
-        if not selected_items:
+        mz_list = self._selected_mz_values()
+        if not mz_list:
             QtWidgets.QMessageBox.warning(self, "提示", "请先选择要拟合的质量数")
             return
-
-        mz_list = []
-        for item in selected_items:
-            mz = item.data(QtCore.Qt.ItemDataRole.UserRole)
-            if mz is None:
-                continue
-            try:
-                mz_list.append(int(mz))
-            except (TypeError, ValueError):
-                continue
-
-        if not mz_list:
-            return
-
-        self.set_busy(True, f"正在拟合 {len(mz_list)} 条曲线...")
-        self.worker = WorkerThread(
-            lambda: self.fit_selected_curves_sync(mz_list),
-            self,
-        )
-        self.worker.finished_with_result.connect(self.on_refit_complete)
-        self.worker.failed.connect(self.on_analysis_failed)
-        self.worker.finished.connect(lambda: self.set_busy(False, "就绪"))
-        self.worker.start()
+        self._fit_multiple_with_panel_state(mz_list)
 
     def fit_selected_curves_sync(self, mz_list: list) -> dict:
         """使用 per-m/z 配置拟合选中的曲线"""
@@ -1334,6 +1690,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         for mz, result in results.items():
             if result.get('success'):
                 self.all_fit_results[mz] = result
+        self._schedule_ie_for_fit_results(results)
 
         # Phase 3 Step 3: Mark results dirty when refit completes
         self.pie_state_dirty = True
@@ -1396,14 +1753,19 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
     def clear_all_fits(self):
         """清除所有拟合"""
+        self._preview_timer.stop()
+        self._fit_preview_active = False
         self.current_fit = None
         self.all_fit_results = {}
         # Phase 3 Step 3: Mark results dirty when clearing fits
         self.pie_state_dirty = True
         self.fit_table.setRowCount(0)
+        self.fitting_control_widget.clear_fit_result()
         self.result_display_widget.clear_data()
         self._update_fit_stats(0, len(self.curves), None)
         self.refresh_current_plot()
+        self.populate_mz_list()
+        self.status_label.setText("已清除全部拟合结果，候选配置保留")
         self._update_action_state()
 
     def export_pie_results(self):
@@ -1476,8 +1838,17 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         result = self.all_fit_results.get(self.current_mz)
         if not result or not result.get("success"):
             return
+        current_status = self._derive_result_status(
+            result,
+            self._get_status_config_hash(self.current_mz),
+            self.global_solver_config.get("config_hash", ""),
+        )
+        if self._fit_preview_active or current_status != "COMPLETED":
+            self.status_label.setText("参数已变化，请先重新拟合后再确认鉴定")
+            return
 
         # 标记为已确认
+        self._fit_preview_active = False
         result["_confirmed"] = True
         result["_confirmed_timestamp"] = time.time()
 
@@ -1494,6 +1865,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         names = ", ".join(s.get("species", "?") for s in species_list[:3])
         r2 = result.get("r_squared", 0.0)
         self.status_label.setText(f"m/z {self.current_mz} 已确认: {names}  R²={r2:.4f}")
+        self._update_action_state()
 
     # ── Force species management (delegated to FittingControlWidget) ───────
 
@@ -1546,6 +1918,11 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self._temporary_pie_folder = self.folder_edit.text().strip()
         self._temporary_pie_folders = list(self.pie_folders)
 
+    def _on_source_path_changed(self, _text: str | None = None) -> None:
+        self._remember_temporary_source(_text)
+        if hasattr(self, "fit_button"):
+            self._update_action_state()
+
     def set_pie_source_scope(
         self,
         scope: str,
@@ -1585,11 +1962,13 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
     def _refresh_pie_source_controls(self) -> None:
         use_project = self._has_project_scope()
         has_project_path = bool(self.project_settings and self.project_settings.pie_scan_folder)
+        busy = getattr(self, "_busy", False)
         if hasattr(self, "project_source_button"):
             self.project_source_button.setChecked(use_project)
-            self.project_source_button.setEnabled(self._has_project_context())
+            self.project_source_button.setEnabled(self._has_project_context() and not busy)
         if hasattr(self, "temporary_source_button"):
             self.temporary_source_button.setChecked(not use_project)
+            self.temporary_source_button.setEnabled(not busy)
         self.folder_edit.setReadOnly(use_project)
         self.folder_edit.setClearButtonEnabled(not use_project)
         self.folder_edit.setPlaceholderText(
@@ -1659,6 +2038,8 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.merge_method_combo.setEnabled(checked and not busy)
         self.multi_folder_section.setVisible(checked)
         self._refresh_pie_source_controls()
+        if hasattr(self, "fit_button"):
+            self._update_action_state()
 
     def add_folder(self):
         """添加文件夹到列表"""
@@ -1670,6 +2051,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.pie_folders.append(folder)
             self.folder_list.addItem(Path(folder).name + f" ({folder})")
             self._remember_temporary_source()
+            self._update_action_state()
 
     def remove_folder(self):
         """移除选中的文件夹"""
@@ -1680,6 +2062,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.folder_list.takeItem(current_row)
             self.pie_folders.pop(current_row)
             self._remember_temporary_source()
+            self._update_action_state()
 
     def clear_folders(self):
         """清空文件夹列表"""
@@ -1688,6 +2071,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.folder_list.clear()
         self.pie_folders.clear()
         self._remember_temporary_source()
+        self._update_action_state()
 
     def set_project_settings(self, ps: ProjectSettings, *, activate_project_scope: bool | None = None) -> None:
         """Apply ProjectSettings defaults to summary bar and folder controls.
@@ -2005,7 +2389,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         )
         self.worker.finished_with_result.connect(self.on_analysis_complete)
         self.worker.failed.connect(self.on_analysis_failed)
-        self.worker.finished.connect(lambda: self.set_busy(False, "就绪"))
+        self.worker.finished.connect(lambda: self.set_busy(False, self.status_label.text()))
         self.worker.start()
 
     def _save_project_analysis_switches(self) -> None:
@@ -2031,25 +2415,100 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.common_params_button.setEnabled(not busy)
         self.use_multi_folders.setEnabled(not busy)
         self.summary_open_project_btn.setEnabled(not busy)
+        self.mz_list.setEnabled(not busy)
+        self.mz_filter_edit.setEnabled(not busy)
+        self.mz_status_filter_combo.setEnabled(not busy)
+        self.fitting_control_widget.setEnabled(not busy)
         self.toggle_multi_folder_mode(self.use_multi_folders.isChecked())
         self._update_action_state()
+
+    def _has_analysis_source(self) -> bool:
+        if self._has_project_scope():
+            return bool(self.project_settings and self.project_settings.pie_scan_folder.strip())
+        if self.use_multi_folders.isChecked():
+            return bool(self.pie_folders)
+        return bool(self.folder_edit.text().strip())
+
+    def _has_fit_candidates_for_mz(self, mz: int) -> bool:
+        if mz == self.current_mz and self.fitting_control_widget._current_mz == mz:
+            ready, _reason = self.fitting_control_widget.get_fit_readiness()
+            return ready
+        if mz in self.per_mz_config:
+            return bool(self.per_mz_config[mz].get("selected_species"))
+        return any(item.get("mz") == mz for item in self.get_filtered_database())
 
     def _update_action_state(self) -> None:
         busy = getattr(self, "_busy", False)
         has_curves = bool(self.curves)
         has_fit_records = bool(self.all_fit_results)
-        has_successful_fits = any(result.get("success") for result in self.all_fit_results.values())
+        current_global_hash = self.global_solver_config.get("config_hash", "")
+        has_valid_fits = any(
+            result.get("success")
+            and self._derive_result_status(
+                result,
+                self._get_status_config_hash(mz),
+                current_global_hash,
+            ) == "COMPLETED"
+            for mz, result in self.all_fit_results.items()
+        )
+        selected_mzs = self._selected_mz_values() if hasattr(self, "mz_list") else []
+        has_selection = bool(selected_mzs)
+        selection_ready = has_selection and all(self._has_fit_candidates_for_mz(mz) for mz in selected_mzs)
+        has_database = bool(self.database)
+
+        self.analyze_button.setEnabled(self._has_analysis_source() and not busy)
         self.export_button.setEnabled(has_curves and not busy)
         self.export_plot_button.setEnabled(has_curves and not busy)
-        self.fit_button.setEnabled(has_curves and not busy)
-        self.fit_all_button.setEnabled(has_curves and not busy)
-        self.more_actions_btn.setEnabled(not busy)
-        # 更新菜单项的启用状态
-        for action in self.more_actions_menu.actions():
-            if action.text() == "清除拟合":
-                action.setEnabled(has_fit_records and not busy)
-            elif action.text() in ("穷举优选", "批量重拟合（已保存配置）"):
-                action.setEnabled(has_curves and not busy)
+        self.fit_button.setEnabled(has_curves and has_database and selection_ready and not busy)
+        self.fit_all_button.setEnabled(has_curves and has_database and not busy)
+        self.more_actions_btn.setEnabled((has_curves or has_fit_records) and not busy)
+        self.clear_fits_action.setEnabled(has_fit_records and not busy)
+        self.refit_selected_action.setEnabled(has_curves and has_selection and not busy)
+        self.exhaustive_action.setEnabled(
+            has_curves
+            and len(selected_mzs) == 1
+            and self.current_mz is not None
+            and len(self.fitting_control_widget._get_selected_candidate_ids()) >= 2
+            and not busy
+        )
+        self.fitting_control_widget.set_export_available(has_valid_fits and not busy)
+
+        if len(selected_mzs) > 1:
+            self.fit_button.setText(f"拟合选中的 {len(selected_mzs)} 条")
+            self.fit_button.setToolTip("每条曲线使用自己的已保存配置；未配置曲线使用其 PICS 数据库候选")
+        elif len(selected_mzs) == 1:
+            result = self.all_fit_results.get(selected_mzs[0])
+            self.fit_button.setText("重新拟合当前" if result else "拟合当前")
+            ready, reason = self.fitting_control_widget.get_fit_readiness()
+            self.fit_button.setToolTip(
+                "使用右侧已启用候选拟合当前曲线" if ready else reason
+            )
+        else:
+            self.fit_button.setText("拟合当前")
+            self.fit_button.setToolTip("请先选择一条 m/z 曲线")
+
+        if busy:
+            workflow_text = "处理中 · 请稍候"
+            workflow_status = "busy"
+        elif not has_curves:
+            workflow_text = "步骤 1/3 · 选择数据并生成曲线"
+            workflow_status = "pending"
+        elif not has_selection:
+            workflow_text = "步骤 2/3 · 选择 m/z 曲线"
+            workflow_status = "pending"
+        elif not selection_ready:
+            workflow_text = "步骤 3/3 · 启用候选物种"
+            workflow_status = "warning"
+        elif has_valid_fits:
+            workflow_text = "结果就绪 · 可确认或导出"
+            workflow_status = "complete"
+        else:
+            workflow_text = "步骤 3/3 · 配置候选并拟合"
+            workflow_status = "active"
+        self.workflow_stage_label.setText(workflow_text)
+        self.workflow_stage_label.setProperty("status", workflow_status)
+        self.workflow_stage_label.style().unpolish(self.workflow_stage_label)
+        self.workflow_stage_label.style().polish(self.workflow_stage_label)
 
     def run_pie_analysis_sync(
         self,
@@ -2169,6 +2628,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
     def on_analysis_complete(self, result: object) -> None:
         self.analysis_df, self.curves = result
+        self._fit_preview_active = False
         self.current_fit = None
         self.all_fit_results = {}  # 重置拟合结果
         self.populate_mz_list()
@@ -2178,11 +2638,13 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         energy_count = self.analysis_df["energy"].nunique() if not self.analysis_df.empty else 0
         replicate_note = self._replicate_status_text(self.analysis_df)
         integration_note = self._integration_status_text(self.analysis_df)
-        self.summary_label.setText(
-            f"{len(self.curves)} 条m/z曲线 | {energy_count} 个能量点"
-            + (f" | {replicate_note}" if replicate_note else "")
-            + (f" | {integration_note}" if integration_note else "")
-        )
+        self.summary_label.setText(f"{len(self.curves)} 条 · {energy_count} 能量点")
+        summary_details = [f"{len(self.curves)} 条 m/z 曲线", f"{energy_count} 个能量点"]
+        if replicate_note:
+            summary_details.append(replicate_note)
+        if integration_note:
+            summary_details.append(integration_note)
+        self.summary_label.setToolTip("\n".join(summary_details))
         self._update_fit_stats(0, 0, None)
         self._update_action_state()
         if self.curves:
@@ -2192,7 +2654,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 message = f"{message}\n{replicate_note}"
             if integration_note:
                 message = f"{message}\n{integration_note}"
-            QtWidgets.QMessageBox.information(self, "完成", message)
+            self.status_label.setText(message.replace("\n", " · "))
 
     @staticmethod
     def _replicate_status_text(df: pd.DataFrame) -> str:
@@ -2252,12 +2714,14 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
             # Phase 2: 使用哈希推导结果状态
             result = self.all_fit_results.get(mz)
-            current_per_mz_hash = self._get_per_mz_config_hash(mz)
+            current_per_mz_hash = self._get_status_config_hash(mz)
             current_global_hash = self.global_solver_config.get("config_hash", "")
             fit_state_code = self._derive_result_status(result, current_per_mz_hash, current_global_hash)
 
             # 状态文字和颜色配置
-            is_confirmed = result.get("_confirmed", False) if result else False
+            is_confirmed = bool(
+                result and result.get("_confirmed", False) and fit_state_code == "COMPLETED"
+            )
             if is_confirmed:
                 r2 = result.get("r_squared", 0.0) if result else 0.0
                 status_str = f"✓ R²={r2:.3f}"
@@ -2303,17 +2767,45 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         if self.mz_list.count() == 0:
             self.on_mz_selected(None)
 
+    def _selected_mz_values(self) -> list[int]:
+        values: list[int] = []
+        for item in self.mz_list.selectedItems():
+            try:
+                values.append(int(item.data(QtCore.Qt.ItemDataRole.UserRole)))
+            except (TypeError, ValueError):
+                continue
+        return values
+
+    def _on_mz_selection_changed(self) -> None:
+        selected_count = len(self._selected_mz_values())
+        self.mz_selection_label.setText(
+            "未选择" if selected_count == 0 else f"已选 {selected_count} 条"
+        )
+        self._update_action_state()
+
     def _pie_curve_matches_filter(self, mz: int, curve: dict) -> bool:
         query = self.mz_filter_edit.text().strip().lower() if hasattr(self, "mz_filter_edit") else ""
-        if not query:
-            return True
 
         # Phase 2: 使用哈希推导结果状态以匹配过滤
         result = self.all_fit_results.get(mz)
-        current_per_mz_hash = self._get_per_mz_config_hash(mz)
+        current_per_mz_hash = self._get_status_config_hash(mz)
         current_global_hash = self.global_solver_config.get("config_hash", "")
         fit_state_code = self._derive_result_status(result, current_per_mz_hash, current_global_hash)
         fit_state_text, _ = self._get_status_display(fit_state_code)
+
+        status_filter = "all"
+        if hasattr(self, "mz_status_filter_combo"):
+            status_filter = str(self.mz_status_filter_combo.currentData() or "all")
+        is_confirmed = bool(result and result.get("_confirmed") and fit_state_code == "COMPLETED")
+        if status_filter == "confirmed" and not is_confirmed:
+            return False
+        if status_filter == "completed" and (fit_state_code != "COMPLETED" or is_confirmed):
+            return False
+        if status_filter not in {"all", "completed", "confirmed"} and fit_state_code.lower() != status_filter:
+            return False
+
+        if not query:
+            return True
 
         haystack = " ".join(
             str(value)
@@ -2326,6 +2818,8 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         return query in haystack
 
     def on_mz_selected(self, current, previous=None):
+        self._preview_timer.stop()
+        self._fit_preview_active = False
         # 保存前一个 m/z 的候选物种配置（除非被标记为跳过）
         if self.current_mz is not None and not self._skip_save_config:
             self._save_current_mz_config()
@@ -2342,6 +2836,8 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.result_display_widget.clear_data()
             if self.plot_widget is not None:
                 self.plot_widget.clear_plot(title="未选择 PIE 曲线")
+            self._update_result_detail_button()
+            self._update_action_state()
             return
         self.current_mz = int(current.data(QtCore.Qt.ItemDataRole.UserRole))
 
@@ -2350,7 +2846,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             fit_result = self.all_fit_results[self.current_mz]
 
             # Phase 2: 计算结果状态
-            current_per_mz_hash = self._get_per_mz_config_hash(self.current_mz)
+            current_per_mz_hash = self._get_status_config_hash(self.current_mz)
             current_global_hash = self.global_solver_config.get("config_hash", "")
             fit_state_code = self._derive_result_status(fit_result, current_per_mz_hash, current_global_hash)
             fit_state_text, fit_state_emoji = self._get_status_display(fit_state_code)
@@ -2359,7 +2855,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 self.current_fit = fit_result['model']
 
                 # 更新右侧结果摘要区
-                confirmed = fit_result.get('_confirmed', False)
+                confirmed = bool(fit_result.get('_confirmed', False) and fit_state_code == "COMPLETED")
                 display_status = "CONFIRMED" if confirmed else fit_state_code
                 self.fitting_control_widget.show_fit_result(fit_result['model'], display_status)
                 if confirmed:
@@ -2372,9 +2868,9 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
                 # Phase 2: 在状态栏显示结果有效性
                 if fit_state_code == "OBSOLETE":
-                    status_msg = f"{fit_state_emoji} {fit_state_text} - 配置已修改，请重新拟合"
+                    status_msg = f"{fit_state_emoji} {fit_state_text} - 配置已修改，请重新拟合".strip()
                 else:
-                    status_msg = f"{fit_state_emoji} {fit_state_text}"
+                    status_msg = f"{fit_state_emoji} {fit_state_text}".strip()
                 self.set_busy(False, status_msg)
             else:
                 self.current_fit = None
@@ -2385,7 +2881,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
                 # Phase 2: 显示失败状态
                 if not fit_result.get('success'):
-                    status_msg = f"{fit_state_emoji} {fit_state_text}"
+                    status_msg = f"{fit_state_emoji} {fit_state_text}".strip()
                     self.set_busy(False, status_msg)
         else:
             self.current_fit = None
@@ -2414,8 +2910,14 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.result_display_widget.update_curve_data({
             "energies": energies,
             "experimental": rows["normalized_intensity"].astype(float).to_numpy(),
-            "total_fit": self.current_fit.get("total_fit", []) if self.current_fit else [],
-            "residual": self.current_fit.get("residual", []) if self.current_fit else [],
+            "total_fit": (
+                self.current_fit.get("total_fit", self.current_fit.get("fitted", []))
+                if self.current_fit else []
+            ),
+            "residual": (
+                self.current_fit.get("residual", self.current_fit.get("residuals", []))
+                if self.current_fit else []
+            ),
         })
         self.set_dataframe(self.curve_table, curve_df)
 
@@ -2425,12 +2927,9 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         # 恢复该 m/z 的候选物种配置
         self._restore_mz_config(self.current_mz)
 
-        # 若有拟合结果，将系数同步到表格（_restore_mz_config 可能因 ID 不匹配而失败）
-        if self.current_fit:
-            self._update_species_table_coefficients(self.current_fit)
-
         # 更新图表
         self.update_plot(curve, self.current_fit)
+        self._update_action_state()
 
     def _on_pie_plot_mouse_move(self, pos):
         """Retained for older signal wiring; Matplotlib trend plots are intentionally low-interaction."""
@@ -2535,32 +3034,18 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             return
 
         # 检测多选：若选中多条，询问用户是否批量拟合
-        selected_items = self.mz_list.selectedItems()
-        if len(selected_items) > 1:
-            mz_list = []
-            for item in selected_items:
-                mz = item.data(QtCore.Qt.ItemDataRole.UserRole)
-                if mz is not None:
-                    try:
-                        mz_list.append(int(mz))
-                    except (TypeError, ValueError):
-                        pass
-            if mz_list:
-                reply = QtWidgets.QMessageBox.question(
-                    self,
-                    "批量拟合",
-                    f"检测到已选中 {len(mz_list)} 条曲线。\n"
-                    f"将对每条曲线应用当前右侧面板配置进行批量拟合。\n\n"
-                    f"是否继续？",
-                    QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
-                )
-                if reply == QtWidgets.QMessageBox.StandardButton.Yes:
-                    self._fit_multiple_with_panel_state(mz_list)
-                return
+        mz_list = self._selected_mz_values()
+        if len(mz_list) > 1:
+            self._fit_multiple_with_panel_state(mz_list)
+            return
 
         # 单选：原有逻辑
         if self.current_mz is None or self.current_mz not in self.curves:
             QtWidgets.QMessageBox.warning(self, "提示", "请先选择一条m/z曲线")
+            return
+        ready, reason = self.fitting_control_widget.get_fit_readiness()
+        if not ready:
+            self.status_label.setText(reason)
             return
         self._fit_single_curve_with_panel_state(self.current_mz)
 
@@ -2571,6 +3056,10 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         if mz not in self.curves:
             return
 
+        self._preview_timer.stop()
+        self._fit_preview_active = False
+        self._save_current_mz_config()
+
         fit_per_mz_hash = self._get_current_per_mz_config_hash(mz)
         fit_global_hash = self.global_solver_config.get("config_hash", "")
 
@@ -2579,10 +3068,8 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             curve = self.curves[mz]
             panel_state = self._get_candidate_panel_state()
             selected = panel_state["selected_species"]
-
             if not selected:
-                filtered_db = self.get_filtered_database()
-                selected = [item for item in filtered_db if item.get("mz") == mz]
+                raise ValueError("请至少启用一个候选物种")
 
             # 检查用户是否手动编辑了系数
             user_coefficients = panel_state["coefficients"]
@@ -2594,15 +3081,17 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 fit_model = fit_species_combination_with_curve(
                     selected, curve["energies"], curve["intensities"],
                     coefficient_mode="manual", coefficients=user_coefficients,
+                    locked_species_ids=panel_state["locked_ids"],
                 )
             else:
                 # 没有手动编辑，使用 NNLS 自动优化
                 fit_model = fit_species_combination_with_curve(
                     selected, curve["energies"], curve["intensities"],
+                    locked_species_ids=panel_state["locked_ids"],
                 )
 
             results = fit_model.get("species", [])
-            self.current_fit = fit_model
+            self.current_fit = fit_model if results else None
             self.current_mz = mz
 
             self.all_fit_results[mz] = {
@@ -2614,6 +3103,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 "global_config_hash": fit_global_hash,
                 "fit_timestamp": time.time(),
             }
+            self._schedule_ie_for_fit_results({mz: self.all_fit_results[mz]})
             self.pie_state_dirty = True
 
             fit_df = pd.DataFrame(
@@ -2630,13 +3120,21 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 columns=["物种名称", "电离能(eV)", "匹配系数", "贡献(%)", "R²"],
             )
             self.set_dataframe(self.fit_table, fit_df)
-            self.update_plot(curve, fit_model)
+            self.update_plot(curve, fit_model if results else None)
 
-            # 将拟合结果的系数更新回右侧候选物种表格
-            self._update_species_table_coefficients(fit_model)
-
-            self.fitting_control_widget.show_fit_result(fit_model, "COMPLETED")
-            self.result_display_widget.set_result_status("COMPLETED")
+            if results:
+                self.fitting_control_widget.show_fit_result(fit_model, "COMPLETED")
+                self.result_display_widget.update_fit_table(fit_model)
+                self.result_display_widget.update_curve_data({
+                    "energies": fit_model.get("energies", curve.get("energies", [])),
+                    "experimental": fit_model.get("experimental", curve.get("intensities", [])),
+                    "total_fit": fit_model.get("total_fit", fit_model.get("fitted", [])),
+                    "residual": fit_model.get("residual", fit_model.get("residuals", [])),
+                })
+                self.result_display_widget.set_result_status("COMPLETED")
+            else:
+                self.fitting_control_widget.clear_fit_result()
+                self.result_display_widget.set_result_status("FAILED")
             self._update_result_detail_button()
 
             self.status_label.setText(
@@ -2651,47 +3149,91 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.populate_mz_list()
             self._update_action_state()
             if not results:
-                QtWidgets.QMessageBox.information(self, "结果", "当前m/z没有匹配到可拟合的物种")
+                self.status_label.setText(f"m/z {mz}: 当前候选无法形成有效拟合")
         except Exception as exc:
-            QtWidgets.QMessageBox.warning(self, "错误", str(exc))
+            self._fit_preview_active = False
+            self.current_fit = None
+            self.all_fit_results[mz] = {
+                "success": False,
+                "error": str(exc),
+                "fit_timestamp": time.time(),
+            }
+            self.fitting_control_widget.clear_fit_result()
+            self.result_display_widget.set_result_status("FAILED")
+            self.status_label.setText(f"m/z {mz} 拟合失败: {exc}")
+            self.populate_mz_list()
+            self._update_action_state()
         finally:
-            self.set_busy(False, "就绪")
+            final_message = self.status_label.text()
+            self.set_busy(False, final_message if "拟合中" not in final_message else "就绪")
 
     def _fit_multiple_with_panel_state(self, mz_list: list[int]):
-        """用当前右侧面板配置批量拟合多条曲线（多选场景）。"""
+        """Fit selected curves with per-m/z configurations prepared on the UI thread."""
         if self._busy:
             return
+        self._preview_timer.stop()
+        self._fit_preview_active = False
+        self._save_current_mz_config()
+        jobs = self._build_selected_fit_jobs(mz_list)
+        self._active_fit_jobs = jobs
         self.set_busy(True, f"正在批量拟合 {len(mz_list)} 条曲线...")
         self.worker = WorkerThread(
-            lambda: self._fit_multiple_sync(mz_list),
+            lambda: self._fit_multiple_sync(
+                jobs,
+                self.global_solver_config.get("config_hash", ""),
+            ),
             self,
         )
         self.worker.finished_with_result.connect(self._on_multi_panel_fit_complete)
         self.worker.failed.connect(self.on_analysis_failed)
-        self.worker.finished.connect(lambda: self.set_busy(False, "就绪"))
+        self.worker.finished.connect(lambda: self.set_busy(False, self.status_label.text()))
         self.worker.start()
 
-    def _fit_multiple_sync(self, mz_list: list[int]) -> dict:
-        """工作线程：用当前面板配置批量拟合。"""
-        from bl03u_masstool.core.pie_analysis import fit_species_combination_with_curve
-
-        global_hash = self.global_solver_config.get("config_hash", "")
-        panel_state = self._get_candidate_panel_state()
-
-        results = {}
+    def _build_selected_fit_jobs(self, mz_list: list[int]) -> dict[int, dict]:
+        """Snapshot per-m/z inputs without touching Qt widgets from the worker thread."""
+        filtered_database = list(self.get_filtered_database())
+        jobs: dict[int, dict] = {}
         for mz in mz_list:
             curve = self.curves.get(mz)
             if not curve:
                 continue
-            per_mz_hash = self._get_per_mz_config_hash(mz)
-            selected = panel_state["selected_species"]
+            config = self.per_mz_config.get(mz)
+            if config is None:
+                selected = [item for item in filtered_database if item.get("mz") == mz]
+                coefficients: dict[int, float] = {}
+                locked_ids: list[int] = []
+            else:
+                selected = list(config.get("selected_species", []))
+                coefficients = {
+                    int(species_id): float(value)
+                    for species_id, value in config.get("coefficients", {}).items()
+                }
+                locked_ids = [int(value) for value in config.get("locked_ids", [])]
+            jobs[mz] = {
+                "curve": curve,
+                "selected_species": selected,
+                "coefficients": coefficients,
+                "locked_ids": locked_ids,
+                "per_mz_hash": self._get_per_mz_config_hash(mz),
+            }
+        return jobs
+
+    @staticmethod
+    def _fit_multiple_sync(jobs: dict[int, dict], global_hash: str) -> dict:
+        """Worker-thread fitting using immutable UI-thread snapshots."""
+        from bl03u_masstool.core.pie_analysis import fit_species_combination_with_curve
+
+        results = {}
+        for mz, job in jobs.items():
+            curve = job["curve"]
+            selected = job["selected_species"]
             if not selected:
-                filtered_db = self.get_filtered_database()
-                selected = [item for item in filtered_db if item.get("mz") == mz]
+                results[mz] = {"success": False, "error": "未启用候选物种"}
+                continue
 
             try:
                 # 检查用户是否手动编辑了系数
-                user_coefficients = panel_state["coefficients"]
+                user_coefficients = job["coefficients"]
                 species_ids = [int(s.get("id", idx + 1)) for idx, s in enumerate(selected)]
                 has_manual_coefficients = any(user_coefficients.get(sid, 0.0) > 0.0 for sid in species_ids)
 
@@ -2700,11 +3242,13 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                     fit_model = fit_species_combination_with_curve(
                         selected, curve["energies"], curve["intensities"],
                         coefficient_mode="manual", coefficients=user_coefficients,
+                        locked_species_ids=job["locked_ids"],
                     )
                 else:
                     # 没有手动编辑，使用 NNLS 自动优化
                     fit_model = fit_species_combination_with_curve(
                         selected, curve["energies"], curve["intensities"],
+                        locked_species_ids=job["locked_ids"],
                     )
 
                 fit_result_species = fit_model.get("species", [])
@@ -2713,19 +3257,19 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                     "model": fit_model,
                     "species": fit_result_species[:3],
                     "r_squared": fit_model.get("r_squared", 0.0),
-                    "fit_config_hash": per_mz_hash,
+                    "fit_config_hash": job["per_mz_hash"],
                     "global_config_hash": global_hash,
                     "fit_timestamp": time.time(),
                 }
-            except Exception:
-                results[mz] = {"success": False, "error": "拟合失败"}
+            except Exception as exc:
+                results[mz] = {"success": False, "error": str(exc)}
         return results
 
     def _on_multi_panel_fit_complete(self, results: dict):
         """批量面板拟合完成回调。"""
         for mz, result in results.items():
-            if result.get("success"):
-                self.all_fit_results[mz] = result
+            self.all_fit_results[mz] = result
+        self._schedule_ie_for_fit_results(results)
         self.pie_state_dirty = True
 
         fitted_count = sum(1 for r in self.all_fit_results.values() if r.get("success"))
@@ -2737,32 +3281,31 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         # 为所有成功拟合的 m/z 保存配置（使哈希匹配）
         for mz, result in results.items():
             if result.get("success") and result.get("model"):
-                fit_species = result["model"].get("species", [])
+                input_job = getattr(self, "_active_fit_jobs", {}).get(mz, {})
+                input_species = list(input_job.get("selected_species", []))
                 self.per_mz_config[mz] = {
-                    "selected_species": fit_species,
-                    "coefficients": {int(s.get("id", idx + 1)): float(s.get("coefficient", 0.0))
-                                     for idx, s in enumerate(fit_species)},
-                    "locked_ids": [],
+                    "selected_species": input_species,
+                    "coefficients": dict(input_job.get("coefficients", {})),
+                    "locked_ids": list(input_job.get("locked_ids", [])),
                 }
-
-        # 显示第一条成功结果
-        for mz, result in results.items():
-            if result.get("success") and result.get("model"):
-                self.current_mz = mz
-                self.current_fit = result["model"]
-                self._update_species_table_coefficients(result["model"])
-                self.fitting_control_widget.show_fit_result(result["model"], "COMPLETED")
-                self.result_display_widget.set_result_status("COMPLETED")
-                self._update_result_detail_button()
-                if mz in self.curves:
-                    self.update_plot(self.curves[mz], result["model"])
-                break
+                result["fit_config_hash"] = self._get_per_mz_config_hash(mz)
 
         self.populate_mz_list()
+        first_success_mz = next(
+            (mz for mz, result in results.items() if result.get("success") and result.get("model")),
+            None,
+        )
+        if first_success_mz is not None:
+            for row in range(self.mz_list.count()):
+                item = self.mz_list.item(row)
+                if int(item.data(QtCore.Qt.ItemDataRole.UserRole)) == first_success_mz:
+                    self.mz_list.setCurrentItem(item)
+                    break
         self._update_action_state()
         new_count = sum(1 for r in results.values() if r.get("success"))
-        QtWidgets.QMessageBox.information(
-            self, "完成", f"批量拟合完成！\n本次拟合: {new_count} / {len(results)} 条曲线"
+        failed_count = len(results) - new_count
+        self.status_label.setText(
+            f"批量拟合完成: 成功 {new_count} 条，失败 {failed_count} 条"
         )
 
     def _exhaustive_best_fit(self):
@@ -2804,7 +3347,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         )
         self.worker.finished_with_result.connect(self._on_exhaustive_complete)
         self.worker.failed.connect(self.on_analysis_failed)
-        self.worker.finished.connect(lambda: self.set_busy(False, "就绪"))
+        self.worker.finished.connect(lambda: self.set_busy(False, self.status_label.text()))
         self.worker.start()
 
     def _on_exhaustive_complete(self, ranked: list[dict]):
