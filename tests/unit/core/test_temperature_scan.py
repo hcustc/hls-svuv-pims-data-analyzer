@@ -39,6 +39,7 @@ from bl03u_masstool.core.temperature_scan import (
     build_temperature_curves,
     classify_temperature_curve,
     compute_kr_expansion_factors,
+    identify_product_energy_intervals,
 )
 
 
@@ -106,6 +107,48 @@ def test_temperature_filename_replicates_can_average_or_sum(tmp_path):
     )
     sum_curves = build_temperature_curves(sum_df)
     assert sum_curves[22]["areas"] == [30.0]
+
+
+def test_temperature_root_with_energy_subfolders_is_discovered(tmp_path):
+    peak_file = tmp_path / "peaks.csv"
+    peak_file.write_text("mz,peak,start,end\n22,22,21,23\n", encoding="utf-8")
+
+    root = tmp_path / "temperature_root"
+    low = root / "8eV"
+    high = root / "9.5eV"
+    low.mkdir(parents=True)
+    high.mkdir(parents=True)
+
+    def write_spectrum(path, *, energy: float, temperature: float, scale: float):
+        y = [0.0] * 50
+        y[22] = scale
+        header = [
+            f"Energy:{energy} eV",
+            "IO:10 nA",
+            "Beam Current:1mA",
+            "Undulator Offset:0mm",
+            "Time:1 s",
+            "Burner Position:0 mm",
+            f"Temperature:{temperature} C",
+            "DIFF PRESSURE:1Pa",
+            "ION PRESSURE:1Pa",
+            "TOF PRESSURE:1Pa",
+        ]
+        path.write_text("\n".join(header + [str(value) for value in y]), encoding="utf-8")
+
+    write_spectrum(low / "low_650.txt", energy=8.0, temperature=650.0, scale=10.0)
+    write_spectrum(high / "high_750.txt", energy=9.5, temperature=750.0, scale=20.0)
+
+    df = analyze_temperature_folder(
+        root,
+        calibration=Calibration(a=0, b=1, c=0),
+        manual_peak_path=peak_file,
+        prefer_gaussian=False,
+        photon_normalize=False,
+    )
+
+    assert sorted(df["photon_energy"].unique()) == [8.0, 9.5]
+    assert sorted(df["temperature"].unique()) == [650.0, 750.0]
 
 
 def test_temperature_can_use_baseline_corrected_integration(tmp_path):
@@ -234,6 +277,27 @@ def test_temperature_curve_classification_trends():
     assert classify_temperature_curve(temperatures, [10, 6, 3, 1, 0])["curve_class"] == "consumption"
     assert classify_temperature_curve(temperatures, [0, 2, 10, 2, 0])["curve_class"] == "intermediate"
     assert classify_temperature_curve(temperatures, [3, 3.1, 3, 3.1, 3])["curve_class"] == "unclassified"
+
+
+def test_identify_product_energy_intervals_uses_product_like_curve_classes():
+    result = identify_product_energy_intervals(
+        [
+            {"energy": 8.0, "curve_class": "unclassified"},
+            {"energy": 8.7, "curve_class": "formation"},
+            {"energy": 9.0, "curve_class": "intermediate"},
+            {"energy": 9.5, "curve_class": "consumption"},
+            {"energy": 11.0, "curve_class": "formation"},
+            {"energy": 11.5, "curve_class": "formation"},
+        ],
+        max_gap=0.8,
+    )
+
+    assert result["product_energies"] == [8.7, 9.0, 11.0, 11.5]
+    assert result["intervals"] == [
+        {"start": 8.7, "end": 9.0, "energies": [8.7, 9.0]},
+        {"start": 11.0, "end": 11.5, "energies": [11.0, 11.5]},
+    ]
+    assert result["rows"]["is_product_like"].tolist() == [False, True, True, False, True, True]
 
 
 def test_load_manual_peak_ranges_from_yaml(tmp_path):

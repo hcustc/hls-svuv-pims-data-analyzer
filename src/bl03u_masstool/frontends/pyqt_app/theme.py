@@ -89,6 +89,151 @@ QWidget#SidePanel {{
     border-radius: 6px;
 }}
 
+QWidget#FittingConfigPanel,
+QWidget#ResultDisplayPanel {{
+    background: {t.panel_bg};
+    border: 1px solid {t.border};
+    border-radius: 6px;
+}}
+
+QFrame#PanelHeader,
+QFrame#ResultPanelHeader {{
+    background: {t.panel_alt};
+    border: 0;
+    border-bottom: 1px solid {t.border_light};
+    border-radius: 4px;
+}}
+
+QLabel#PieMzBadge,
+QLabel#FitModeBadge {{
+    background: {t.primary_soft};
+    border: 1px solid {t.primary_border};
+    border-radius: 4px;
+    color: {t.primary_hover};
+    font-weight: 600;
+    padding: 2px 6px;
+}}
+
+QLabel#FitModeBadge[mode="manual"] {{
+    background: {t.warning_bg};
+    border-color: {t.warning_border};
+    color: {t.warning};
+}}
+
+QLabel#CandidateSummary,
+QLabel#ResultMetrics {{
+    background: transparent;
+    color: {t.text_secondary};
+    font-weight: 600;
+}}
+
+QLabel#PieWorkflowStage,
+QLabel#PieSelectionSummary {{
+    background: {t.panel_subtle};
+    border: 1px solid {t.border};
+    border-radius: 4px;
+    color: {t.text_secondary};
+    font-weight: 600;
+    padding: 2px 7px;
+}}
+
+QLabel#PieWorkflowStage[status="active"] {{
+    background: {t.primary_soft};
+    border-color: {t.primary_border};
+    color: {t.primary_hover};
+}}
+
+QLabel#PieWorkflowStage[status="busy"] {{
+    background: #eef2ff;
+    border-color: #a5b4fc;
+    color: #4338ca;
+}}
+
+QLabel#PieWorkflowStage[status="warning"] {{
+    background: {t.warning_bg};
+    border-color: {t.warning_border};
+    color: {t.warning};
+}}
+
+QLabel#PieWorkflowStage[status="complete"] {{
+    background: #f0fdf4;
+    border-color: #86efac;
+    color: {t.success};
+}}
+
+QLabel#PieEmptyIcon {{
+    background: transparent;
+    color: {t.text_muted};
+    font-size: 26px;
+}}
+
+QLabel#PieEmptyTitle {{
+    background: transparent;
+    color: {t.text_primary};
+    font-size: 12pt;
+    font-weight: 700;
+}}
+
+QLabel#ResultStatus {{
+    background: transparent;
+    font-weight: 600;
+}}
+
+QLabel#ResultStatus[status="preview"] {{ color: #7c3aed; }}
+QLabel#ResultStatus[status="completed"] {{ color: {t.primary_hover}; }}
+QLabel#ResultStatus[status="obsolete"] {{ color: {t.warning}; }}
+QLabel#ResultStatus[status="failed"] {{ color: {t.danger}; }}
+QLabel#ResultStatus[status="confirmed"] {{ color: {t.success}; font-weight: 700; }}
+
+QPushButton#LockCandidateButton {{
+    background: {t.panel_alt};
+    border: 1px solid {t.border};
+    border-radius: 3px;
+    color: {t.text_muted};
+    padding: 0;
+    min-height: 20px;
+}}
+
+QPushButton#LockCandidateButton:hover {{
+    background: {t.panel_subtle};
+    border-color: {t.text_muted};
+}}
+
+QPushButton#LockCandidateButton[locked="true"] {{
+    background: #fbbf24;
+    border-color: #f59e0b;
+    color: #92400e;
+    font-weight: 700;
+}}
+
+QPushButton#IconButton {{
+    background: transparent;
+    border: 1px solid transparent;
+    color: {t.text_muted};
+    padding: 0;
+    min-height: 20px;
+}}
+
+QPushButton#IconButton:hover {{
+    background: #fef2f2;
+    border-color: #fecaca;
+    color: {t.danger};
+}}
+
+QPushButton#ResultDetailLink {{
+    background: transparent;
+    border: 0;
+    color: #0369a1;
+    padding: 1px 4px;
+    min-height: 16px;
+    text-decoration: underline;
+}}
+
+QPushButton#ResultDetailLink:hover {{
+    background: transparent;
+    color: #0284c7;
+}}
+
 QWidget#TempToolbar {{
     background: {t.panel_bg};
     border-bottom: 1px solid {t.border};

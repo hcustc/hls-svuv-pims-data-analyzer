@@ -292,6 +292,430 @@ def test_temperature_page_owns_analysis_switches(qapp, tmp_path):
         widget.deleteLater()
 
 
+def test_temperature_page_lists_energy_subfolders_for_project_source(qapp, tmp_path):
+    from bl03u_masstool.core.calibration import Calibration
+    from bl03u_masstool.frontends.pyqt_app.temperature.dialog import TemperatureScanDialog
+
+    root = tmp_path / "temperature_scan"
+    low = root / "8eV"
+    high = root / "9.5eV"
+    range_energy = root / "14.6-14.8eV"
+    low.mkdir(parents=True)
+    high.mkdir(parents=True)
+    range_energy.mkdir(parents=True)
+    (low / "C24110901-0000.txt").write_text("1\n2\n", encoding="utf-8")
+    (high / "C24110902-0000.txt").write_text("1\n2\n", encoding="utf-8")
+    (range_energy / "C24110903-0000.txt").write_text("1\n2\n", encoding="utf-8")
+
+    widget = TemperatureScanDialog(Calibration())
+    try:
+        ps = ProjectSettings(
+            project_name="Energy Source",
+            output_dir=str(tmp_path / "project"),
+            temperature_scan_folder=str(root),
+        )
+        widget.set_project_settings(ps, activate_project_scope=True)
+
+        assert widget.temperature_source_scope == "project"
+        assert widget.scan_folder_combo.count() == 4
+        assert [widget.scan_folder_combo.itemText(i) for i in range(widget.scan_folder_combo.count())] == [
+            "全部能量",
+            "8eV",
+            "9.5eV",
+            "14.6-14.8eV",
+        ]
+        assert widget._current_temperature_folder() == str(root)
+        assert widget._selected_analysis_folders() == [
+            (8.0, str(low)),
+            (9.5, str(high)),
+            (14.6, str(range_energy)),
+        ]
+        assert widget.run_button.isEnabled()
+        assert widget.workflow_stage_label.text() == "步骤 2/3 · 生成温度曲线"
+        assert not hasattr(widget, "interval_mz_spin")
+        assert not hasattr(widget, "energy_interval_button")
+
+        widget.scan_folder_combo.setCurrentIndex(2)
+        assert widget._current_temperature_folder() == str(high)
+        assert "9.5eV" in widget.summary_data_label.text()
+    finally:
+        widget.deleteLater()
+
+
+def test_temperature_curve_detail_table_shows_calculation_row_labels(qapp):
+    from bl03u_masstool.core.calibration import Calibration
+    from bl03u_masstool.frontends.pyqt_app.temperature.dialog import TemperatureScanDialog
+
+    widget = TemperatureScanDialog(Calibration())
+    try:
+        df = pd.DataFrame(
+            {
+                650.0: ["范围累加", 26.0, 0.3428, 1.0, 0.3428],
+                750.0: ["范围累加", 26.0, 0.3467, 1.036516, 0.3345],
+            },
+            index=["积分方式", "原始积分", "IO归一化", "λ(T)", "最终强度"],
+        )
+        widget._set_curve_detail_table(df)
+
+        labels = [
+            widget.curve_table.verticalHeaderItem(row).text()
+            for row in range(widget.curve_table.rowCount())
+        ]
+        assert labels == ["积分方式", "原始积分", "IO归一化", "λ(T)", "最终强度"]
+        assert not widget.curve_table.verticalHeader().isHidden()
+        assert widget.curve_table.item(4, 0).font().bold()
+    finally:
+        widget.deleteLater()
+
+
+def test_temperature_energy_interval_table_marks_product_like_rows(qapp):
+    from bl03u_masstool.core.calibration import Calibration
+    from bl03u_masstool.core.temperature_scan import identify_product_energy_intervals
+    from bl03u_masstool.frontends.pyqt_app.temperature.dialog import TemperatureScanDialog
+
+    widget = TemperatureScanDialog(Calibration())
+    try:
+        result = identify_product_energy_intervals(
+            [
+                {
+                    "energy": 8.0,
+                    "folder": "8eV",
+                    "mz": 70,
+                    "curve_class": "unclassified",
+                    "curve_class_label": "暂未区分",
+                    "curve_class_reason": "趋势不满足规则",
+                    "points": 10,
+                    "max_signal": 0.2,
+                    "temperature_range": "650-1000 °C",
+                },
+                {
+                    "energy": 8.7,
+                    "folder": "8.7eV",
+                    "mz": 70,
+                    "curve_class": "formation",
+                    "curve_class_label": "生成(升高)",
+                    "curve_class_reason": "高温端信号明显高于低温端",
+                    "points": 10,
+                    "max_signal": 12.5,
+                    "temperature_range": "650-1000 °C",
+                },
+            ]
+        )
+        widget._populate_energy_interval_table(result)
+
+        assert widget.energy_interval_table.rowCount() == 2
+        assert widget.energy_interval_table.item(0, 2).text() == "否"
+        assert widget.energy_interval_table.item(1, 2).text() == "是"
+        assert widget.energy_interval_table.item(1, 2).font().bold()
+    finally:
+        widget.deleteLater()
+
+
+def test_temperature_selected_mz_updates_multi_energy_plot_and_interval_card(qapp):
+    from bl03u_masstool.core.calibration import Calibration
+    from bl03u_masstool.frontends.pyqt_app.temperature.dialog import TemperatureScanDialog
+
+    widget = TemperatureScanDialog(Calibration())
+    try:
+        def curve(mz: int, curve_class: str, label: str, areas: list[float]) -> dict:
+            rows = pd.DataFrame(
+                {
+                    "temperature": [650.0, 750.0, 850.0],
+                    "file": ["a.txt", "b.txt", "c.txt"],
+                    "mz": [float(mz)] * 3,
+                    "area": areas,
+                    "raw_area": areas,
+                    "photon_normalized_area": areas,
+                    "expansion_lambda": [1.0, 1.0, 1.0],
+                    "integration_method": ["sum_counts"] * 3,
+                    "species": [""] * 3,
+                }
+            )
+            return {
+                "mz": mz,
+                "species": "",
+                "temperatures": [650.0, 750.0, 850.0],
+                "areas": areas,
+                "curve_class": curve_class,
+                "curve_class_label": label,
+                "curve_class_reason": "测试",
+                "rows": rows,
+            }
+
+        widget.energy_results = [
+            {"energy": 8.0, "folder": "/tmp/8eV", "folder_label": "8eV", "curves": {70: curve(70, "formation", "生成(升高)", [1, 2, 3])}},
+            {"energy": 8.7, "folder": "/tmp/8.7eV", "folder_label": "8.7eV", "curves": {70: curve(70, "intermediate", "中间体(先升后降低)", [1, 3, 1])}},
+            {"energy": 9.0, "folder": "/tmp/9eV", "folder_label": "9eV", "curves": {70: curve(70, "unclassified", "暂未区分", [1, 1, 1])}},
+        ]
+        widget.curves = widget._build_display_curves()
+        widget.populate_mz_list()
+
+        assert widget.current_mz == 70
+        assert "8.00-8.70 eV" in widget.current_interval_label.text()
+        assert widget.energy_interval_table.rowCount() == 3
+        assert widget.energy_interval_table.item(0, 2).text() == "是"
+        assert widget.energy_interval_table.item(2, 2).text() == "否"
+        assert "各能量" in widget.plot_widget.axes.get_title()
+    finally:
+        widget.deleteLater()
+
+
+def test_temperature_energy_combo_filters_cached_curves_without_rerun(qapp, tmp_path):
+    from bl03u_masstool.core.calibration import Calibration
+    from bl03u_masstool.frontends.pyqt_app.temperature.dialog import TemperatureScanDialog
+
+    root = tmp_path / "temperature_scan"
+    low = root / "8eV"
+    high = root / "9eV"
+    low.mkdir(parents=True)
+    high.mkdir(parents=True)
+    (low / "a.txt").write_text("1\n2\n", encoding="utf-8")
+    (high / "b.txt").write_text("1\n2\n", encoding="utf-8")
+
+    def curve(mz: int, energy: float, areas: list[float]) -> dict:
+        rows = pd.DataFrame(
+            {
+                "temperature": [650.0, 750.0, 850.0],
+                "file": [f"{energy}-a.txt", f"{energy}-b.txt", f"{energy}-c.txt"],
+                "mz": [float(mz)] * 3,
+                "area": areas,
+                "raw_area": areas,
+                "photon_normalized_area": areas,
+                "expansion_lambda": [1.0, 1.0, 1.0],
+                "integration_method": ["sum_counts"] * 3,
+                "species": [""] * 3,
+            }
+        )
+        return {
+            "mz": mz,
+            "species": "",
+            "temperatures": [650.0, 750.0, 850.0],
+            "areas": areas,
+            "curve_class": "formation",
+            "curve_class_label": "生成(升高)",
+            "curve_class_reason": "测试",
+            "rows": rows,
+        }
+
+    widget = TemperatureScanDialog(Calibration())
+    try:
+        ps = ProjectSettings(
+            project_name="Energy Switch",
+            output_dir=str(tmp_path / "project"),
+            temperature_scan_folder=str(root),
+        )
+        widget.set_project_settings(ps, activate_project_scope=True)
+        widget.energy_results = [
+            {"energy": 8.0, "folder": str(low), "folder_label": "8eV", "curves": {70: curve(70, 8.0, [1.0, 2.0, 3.0])}},
+            {"energy": 9.0, "folder": str(high), "folder_label": "9eV", "curves": {70: curve(70, 9.0, [10.0, 20.0, 30.0])}},
+        ]
+        widget.result_df = pd.concat([item["curves"][70]["rows"] for item in widget.energy_results], ignore_index=True)
+        widget._apply_energy_view_selection(preferred_mz=70)
+
+        assert widget.current_mz == 70
+        assert "各能量" in widget.plot_widget.axes.get_title()
+        assert widget.curve_table.rowCount() == 6
+
+        widget.scan_folder_combo.setCurrentIndex(widget.scan_folder_combo.findData(str(low)))
+        qapp.processEvents()
+
+        assert widget.current_mz == 70
+        assert widget.plot_widget.axes.get_title() == "m/z 70 温度响应曲线"
+        assert widget.curve_table.columnCount() == 3
+        assert widget.curve_table.horizontalHeaderItem(0).text() == "650.0"
+        assert "8.00-9.00 eV" in widget.current_interval_label.text()
+
+        widget.scan_folder_combo.setCurrentIndex(widget.scan_folder_combo.findData(widget.ALL_ENERGY_FOLDERS))
+        qapp.processEvents()
+
+        assert "各能量" in widget.plot_widget.axes.get_title()
+        assert widget.curve_table.rowCount() == 6
+    finally:
+        widget.deleteLater()
+
+
+def test_temperature_analysis_cache_reuses_integrated_results(qapp, tmp_path):
+    from bl03u_masstool.core.calibration import Calibration
+    from bl03u_masstool.frontends.pyqt_app.temperature.dialog import TemperatureScanDialog
+
+    root = tmp_path / "temperature_scan"
+    low = root / "8eV"
+    low.mkdir(parents=True)
+    (low / "a.txt").write_text("1\n2\n", encoding="utf-8")
+
+    widget = TemperatureScanDialog(Calibration())
+    try:
+        ps = ProjectSettings(
+            project_name="Cache Project",
+            output_dir=str(tmp_path / "project"),
+            temperature_scan_folder=str(root),
+            temperature_photon_normalize=False,
+            temperature_kr_correct=False,
+        )
+        widget.set_project_settings(ps, activate_project_scope=True)
+        folders = [(8.0, str(low))]
+        params = widget._analysis_parameters()
+        calls = {"count": 0}
+
+        def fake_analyze(folder, params):
+            calls["count"] += 1
+            return pd.DataFrame(
+                {
+                    "temperature": [650.0, 750.0, 850.0],
+                    "file": ["a.txt", "b.txt", "c.txt"],
+                    "mz": [70.0, 70.0, 70.0],
+                    "area": [1.0, 2.0, 3.0],
+                    "raw_area": [1.0, 2.0, 3.0],
+                    "photon_normalized_area": [1.0, 2.0, 3.0],
+                    "expansion_lambda": [1.0, 1.0, 1.0],
+                    "integration_method": ["sum_counts"] * 3,
+                    "species": [""] * 3,
+                    "curve_class": ["formation"] * 3,
+                    "curve_class_label": ["生成(升高)"] * 3,
+                    "curve_class_reason": ["测试"] * 3,
+                    "reference_temperature": [850.0, 850.0, 850.0],
+                }
+            )
+
+        widget._analyze_temperature_folder_with_params = fake_analyze
+        first = widget._analyze_temperature_folders_with_cache(folders, params)
+        assert first["from_cache"] is False
+        assert calls["count"] == 1
+        assert (Path(ps.output_dir) / "analysis" / "temperature_scan" / "cache").is_dir()
+
+        def fail_analyze(folder, params):
+            raise AssertionError("cache miss caused recomputation")
+
+        widget._analyze_temperature_folder_with_params = fail_analyze
+        second = widget._analyze_temperature_folders_with_cache(folders, params)
+
+        assert second["from_cache"] is True
+        assert second["result_df"].shape == first["result_df"].shape
+        assert second["energy_results"][0]["folder_label"] == "8eV"
+        assert 70 in second["energy_results"][0]["curves"]
+    finally:
+        widget.deleteLater()
+
+
+def test_temperature_project_open_autoloads_cached_curves(qapp, tmp_path):
+    from bl03u_masstool.core.calibration import Calibration
+    from bl03u_masstool.frontends.pyqt_app.temperature.dialog import TemperatureScanDialog
+
+    root = tmp_path / "temperature_scan"
+    low = root / "8eV"
+    low.mkdir(parents=True)
+    (low / "a.txt").write_text("1\n2\n", encoding="utf-8")
+    ps = ProjectSettings(
+        project_name="Autoload Cache",
+        output_dir=str(tmp_path / "project"),
+        temperature_scan_folder=str(root),
+        temperature_photon_normalize=False,
+        temperature_kr_correct=False,
+    )
+    folders = [(8.0, str(low))]
+
+    writer = TemperatureScanDialog(Calibration())
+    try:
+        writer.set_project_settings(ps, activate_project_scope=True)
+        params = writer._analysis_parameters()
+
+        def fake_analyze(folder, params):
+            return pd.DataFrame(
+                {
+                    "temperature": [650.0, 750.0, 850.0],
+                    "file": ["a.txt", "b.txt", "c.txt"],
+                    "mz": [70.0, 70.0, 70.0],
+                    "area": [1.0, 2.0, 3.0],
+                    "raw_area": [1.0, 2.0, 3.0],
+                    "photon_normalized_area": [1.0, 2.0, 3.0],
+                    "expansion_lambda": [1.0, 1.0, 1.0],
+                    "integration_method": ["sum_counts"] * 3,
+                    "species": [""] * 3,
+                    "curve_class": ["formation"] * 3,
+                    "curve_class_label": ["生成(升高)"] * 3,
+                    "curve_class_reason": ["测试"] * 3,
+                    "reference_temperature": [850.0, 850.0, 850.0],
+                }
+            )
+
+        writer._analyze_temperature_folder_with_params = fake_analyze
+        writer._analyze_temperature_folders_with_cache(folders, params)
+    finally:
+        writer.deleteLater()
+
+    reader = TemperatureScanDialog(Calibration())
+    try:
+        reader.set_project_settings(ps, activate_project_scope=True)
+        deadline = QtCore.QDeadlineTimer(3000)
+        while reader._autoload_worker is not None and reader._autoload_worker.isRunning() and not deadline.hasExpired():
+            qapp.processEvents()
+            QtCore.QThread.msleep(10)
+        qapp.processEvents()
+
+        assert not reader.result_df.empty
+        assert 70 in reader.curves
+        assert reader.current_mz == 70
+        assert "已自动载入" in reader.inline_status_text.text() or "缓存" in reader.inline_status_text.text()
+    finally:
+        if reader._autoload_worker is not None and reader._autoload_worker.isRunning():
+            reader._autoload_worker.wait(1000)
+        reader.deleteLater()
+
+
+def test_temperature_project_cache_autoload_ignores_stale_project_result(qapp, tmp_path):
+    from bl03u_masstool.core.calibration import Calibration
+    from bl03u_masstool.frontends.pyqt_app.temperature.dialog import TemperatureScanDialog
+
+    old_root = tmp_path / "old_temperature"
+    new_root = tmp_path / "new_temperature"
+    old_energy = old_root / "8eV"
+    new_energy = new_root / "9eV"
+    old_energy.mkdir(parents=True)
+    new_energy.mkdir(parents=True)
+    (old_energy / "old.txt").write_text("1\n2\n", encoding="utf-8")
+    (new_energy / "new.txt").write_text("1\n2\n", encoding="utf-8")
+
+    old_ps = ProjectSettings(
+        project_name="Old Project",
+        output_dir=str(tmp_path / "old_project"),
+        temperature_scan_folder=str(old_root),
+    )
+    new_ps = ProjectSettings(
+        project_name="New Project",
+        output_dir=str(tmp_path / "new_project"),
+        temperature_scan_folder=str(new_root),
+    )
+
+    widget = TemperatureScanDialog(Calibration())
+    try:
+        widget.set_project_settings(old_ps, activate_project_scope=True)
+        old_folders = widget._generation_analysis_folders()
+        old_token = widget._project_temperature_cache_token(old_folders, "old-cache")
+
+        widget.set_project_settings(new_ps, activate_project_scope=True)
+        stale_result = {
+            "result_df": pd.DataFrame(
+                {
+                    "temperature": [650.0],
+                    "mz": [70.0],
+                    "area": [1.0],
+                    "raw_area": [1.0],
+                    "photon_normalized_area": [1.0],
+                    "expansion_lambda": [1.0],
+                    "integration_method": ["sum_counts"],
+                }
+            ),
+            "energy_results": [],
+        }
+        widget._on_project_temperature_cache_loaded(stale_result, old_token)
+
+        assert widget.result_df.empty
+        assert widget.curves == {}
+        assert "New Project" in widget.summary_project_label.text()
+    finally:
+        widget.deleteLater()
+
+
 def test_pie_page_owns_photon_mode_switch(qapp, tmp_path, monkeypatch):
     from bl03u_masstool.core.calibration import Calibration
     from bl03u_masstool.core.normalization import NormalizationSettings

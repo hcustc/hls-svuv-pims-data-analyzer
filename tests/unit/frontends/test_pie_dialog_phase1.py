@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 
 import numpy as np
+import pandas as pd
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -19,7 +20,13 @@ except ImportError as e:
 pytestmark = pytest.mark.gui
 
 from bl03u_masstool.core.calibration import Calibration
+from bl03u_masstool.core.nist_webbook import (
+    NistCompoundIonization,
+    NistIonizationEnergy,
+    NistWebBookResult,
+)
 from bl03u_masstool.core.project_settings import ProjectSettings
+from bl03u_masstool.frontends.pyqt_app.pie import dialog as pie_dialog_module
 from bl03u_masstool.frontends.pyqt_app.pie.dialog import PIESpeciesFitDialog
 
 
@@ -38,6 +45,90 @@ def pie_dialog(qapp):
     dialog.show()
     yield dialog
     dialog.deleteLater()
+
+
+def test_ie_query_batch_keeps_missing_species_nonfatal(monkeypatch):
+    nitric_oxide = NistCompoundIonization(
+        nist_id="C10102439",
+        name="Nitric oxide",
+        formula="NO",
+        cas_rn="10102-43-9",
+        url=None,
+        ion_energetics_url=None,
+        evaluated_ie=NistIonizationEnergy(9.2642, source="evaluated"),
+    )
+
+    class FakeClient:
+        def query_ionization_energy(self, query, *, search_type="auto"):
+            if query == "Nitric oxide":
+                return NistWebBookResult(
+                    query=query,
+                    search_type=search_type,
+                    requested_url="https://example.test/no",
+                    compounds=(nitric_oxide,),
+                    selected_compound=nitric_oxide,
+                    message="命中",
+                )
+            return NistWebBookResult(
+                query=query,
+                search_type=search_type,
+                requested_url="https://example.test/missing",
+                message="未找到",
+            )
+
+    monkeypatch.setattr(pie_dialog_module, "default_nist_webbook_client", lambda: FakeClient())
+    results = PIESpeciesFitDialog._query_ie_requests_sync([
+        {"cache_key": "no", "species": "Nitric oxide", "formula": "NO", "mz": 30},
+        {"cache_key": "missing", "species": "Unknown species", "formula": "", "mz": 30},
+    ])
+
+    assert results[0]["status"] == "available"
+    assert results[0]["value"] == 9.2642
+    assert results[0]["source"] == "NIST WebBook"
+    assert results[1]["status"] == "not_found"
+    assert results[1]["value"] is None
+
+
+def test_ie_lookup_result_updates_candidate_and_existing_fit(pie_dialog, monkeypatch):
+    pie_dialog.database = [
+        {
+            "id": 72,
+            "mz": 30,
+            "species": "Nitric oxide",
+            "formula": "NO",
+            "ie": None,
+            "ionization_energy": None,
+            "energies": np.array([9.0, 10.0, 11.0]),
+            "cross_sections": np.array([0.0, 1.0, 2.0]),
+        }
+    ]
+    pie_dialog.current_mz = 30
+    monkeypatch.setattr(pie_dialog, "_start_ie_lookup_worker", lambda: None)
+    pie_dialog._populate_candidate_table(30)
+    assert pie_dialog.species_table.item(0, 2).text() == "查询中…"
+
+    pie_dialog.current_fit = {
+        "species": [
+            {
+                "ids": [72],
+                "mz": 30,
+                "species": "Nitric oxide",
+                "formula": "NO",
+                "ie": None,
+            }
+        ]
+    }
+    pie_dialog._apply_ie_lookup_result({
+        "cache_key": pie_dialog._species_ie_cache_key(pie_dialog.database[0]),
+        "value": 9.2642,
+        "status": "available",
+        "source": "NIST WebBook",
+        "message": "evaluated IE",
+    })
+
+    assert pie_dialog.database[0]["ie"] == 9.2642
+    assert pie_dialog.current_fit["species"][0]["ie"] == 9.2642
+    assert pie_dialog.species_table.item(0, 2).text() == "9.2642"
 
 
 def test_pie_source_scope_defaults_to_temporary_without_project(pie_dialog):
@@ -95,6 +186,66 @@ def test_project_settings_sync_respects_temporary_source_scope(pie_dialog, tmp_p
 
     assert pie_dialog.pie_source_scope == "temporary"
     assert pie_dialog.folder_edit.text() == str(temporary_folder)
+
+
+def test_analysis_and_fit_actions_follow_real_prerequisites(pie_dialog, tmp_path):
+    assert not pie_dialog.analyze_button.isEnabled()
+    assert not pie_dialog.fit_button.isEnabled()
+
+    source = tmp_path / "pie"
+    source.mkdir()
+    pie_dialog.folder_edit.setText(str(source))
+    assert pie_dialog.analyze_button.isEnabled()
+
+    pie_dialog.curves = {
+        30: {
+            "mz": 30,
+            "energies": np.array([9.0, 10.0]),
+            "intensities": np.array([0.0, 1.0]),
+            "rows": pd.DataFrame({
+                "energy": [9.0, 10.0],
+                "integration_method": ["sum_counts", "sum_counts"],
+                "raw_area": [0.0, 1.0],
+                "photon_normalized_intensity": [0.0, 1.0],
+                "normalized_intensity": [0.0, 1.0],
+            }),
+        }
+    }
+    pie_dialog.database = [
+        {
+            "id": 1,
+            "mz": 30,
+            "species": "NO",
+            "ie": 9.264,
+            "ionization_energy": 9.264,
+            "energies": np.array([9.0, 10.0]),
+            "cross_sections": np.array([0.0, 1.0]),
+        }
+    ]
+    pie_dialog.populate_mz_list()
+    pie_dialog.mz_list.setCurrentRow(0)
+    assert pie_dialog.fit_button.isEnabled()
+
+    pie_dialog.fitting_control_widget._set_all_rows_checked(False)
+    assert not pie_dialog.fit_button.isEnabled()
+    assert "至少启用一个" in pie_dialog.fit_button.toolTip()
+
+
+def test_selected_fit_jobs_keep_candidates_scoped_to_each_mz(pie_dialog):
+    pie_dialog.current_mz = None
+    pie_dialog.curves = {
+        30: {"mz": 30, "energies": [9.0, 10.0], "intensities": [0.0, 1.0]},
+        44: {"mz": 44, "energies": [9.0, 10.0], "intensities": [0.0, 1.0]},
+    }
+    pie_dialog.database = [
+        {"id": 1, "mz": 30, "species": "NO", "energies": [9.0, 10.0], "cross_sections": [0.0, 1.0]},
+        {"id": 2, "mz": 44, "species": "CO2", "energies": [9.0, 10.0], "cross_sections": [0.0, 1.0]},
+    ]
+
+    jobs = pie_dialog._build_selected_fit_jobs([30, 44])
+
+    assert [item["species"] for item in jobs[30]["selected_species"]] == ["NO"]
+    assert [item["species"] for item in jobs[44]["selected_species"]] == ["CO2"]
 
 
 class TestPerM_zConfiguration:

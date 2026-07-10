@@ -17,11 +17,15 @@ from bl03u_masstool.core.isotope import (
     parse_formula,
 )
 from bl03u_masstool.core.nist_webbook import (
+    NistCompoundIonization,
+    NistIonizationEnergy,
     NistWebBookClient,
+    NistWebBookResult,
     infer_nist_search_type,
     parse_ionization_energy_determinations,
     parse_ionization_energy_summary,
     pick_evaluated_ie,
+    select_species_ionization_energy,
 )
 from bl03u_masstool.core.normalization import extract_light_intensity
 from bl03u_masstool.core import peak_detection as peak_detection_module
@@ -289,3 +293,50 @@ def test_nist_webbook_formula_query_includes_local_mz_candidates(tmp_path):
     assert result.compounds[1].best_ie.source == "local_mz_candidate"
     assert result.compounds[2].name == "Methane"
     assert result.compounds[2].best_ie.source == "evaluated"
+
+
+def test_select_species_ie_requires_an_unambiguous_species_match():
+    benzene = NistCompoundIonization(
+        nist_id="C71432",
+        name="Benzene",
+        formula="C6H6",
+        cas_rn="71-43-2",
+        url=None,
+        ion_energetics_url=None,
+        evaluated_ie=NistIonizationEnergy(9.24378),
+    )
+    other_isomer = NistCompoundIonization(
+        nist_id="C278121",
+        name="Dewar benzene",
+        formula="C6H6",
+        cas_rn=None,
+        url=None,
+        ion_energetics_url=None,
+        evaluated_ie=NistIonizationEnergy(9.1),
+    )
+    result = NistWebBookResult(
+        query="C6H6",
+        search_type="formula",
+        requested_url="https://example.test",
+        compounds=(benzene, other_isomer),
+    )
+
+    selected = select_species_ionization_energy(result, species_name="Benzene", formula="C6H6")
+    assert selected is not None
+    assert selected[0].name == "Benzene"
+    assert selected[1].value == 9.24378
+
+    ambiguous = select_species_ionization_energy(result, species_name="C6H6", formula="C6H6")
+    assert ambiguous is None
+
+    fuzzy_local_result = NistWebBookResult(
+        query="Ethyl",
+        search_type="local_database",
+        requested_url="local://species",
+        compounds=(other_isomer,),
+        selected_compound=other_isomer,
+    )
+    assert select_species_ionization_energy(
+        fuzzy_local_result,
+        species_name="Ethyl",
+    ) is None
