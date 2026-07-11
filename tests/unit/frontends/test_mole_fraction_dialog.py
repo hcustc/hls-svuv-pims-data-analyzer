@@ -262,6 +262,32 @@ def test_project_parent_mz_is_shown_as_unconfirmed_project_preset(qapp):
         dialog.deleteLater()
 
 
+def test_manual_parent_mz_change_requires_confirmation(qapp):
+    dialog = MoleFractionDialog(Calibration(a=0.0, b=1.0, c=0.0), None)
+    try:
+        dialog.temperature_scan_data = {
+            10.0: {
+                650.0: {
+                    "precomputed_signals": {112: 50.0},
+                    "peaks_info": [{"mz_rounded": 112}],
+                }
+            }
+        }
+
+        dialog.spin_parent_mz.setValue(112)
+
+        assert dialog._parent_mz_confirmed is False
+        assert "请确认" in dialog.lbl_parent_mz_status.text()
+        assert dialog.btn_calc_parent.isEnabled() is False
+
+        dialog._confirm_parent_mz()
+
+        assert dialog._parent_mz_confirmed is True
+        assert dialog.btn_calc_parent.isEnabled() is True
+    finally:
+        dialog.deleteLater()
+
+
 def test_low_energy_reference_tab_follows_parent_mole_fraction(qapp):
     dialog = MoleFractionDialog(Calibration(a=0.0, b=1.0, c=0.0), None)
     try:

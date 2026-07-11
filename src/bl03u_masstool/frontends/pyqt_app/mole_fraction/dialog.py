@@ -894,7 +894,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.settings.parent_mz = self.spin_parent_mz.value()
         if not self._setting_parent_mz:
             self._parent_mz_origin = "manual" if self.spin_parent_mz.value() > 0 else "unset"
-            self._parent_mz_confirmed = self.spin_parent_mz.value() > 0
+            self._parent_mz_confirmed = False
         self._update_parent_species_list()
         self._refresh_energy_parent_table()
         self._refresh_parent_selection_state()
