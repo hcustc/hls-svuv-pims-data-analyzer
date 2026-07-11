@@ -7,7 +7,12 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 pytest.importorskip("PyQt6")
-from PyQt6 import QtWidgets
+try:
+    from PyQt6 import QtWidgets
+except ImportError as e:
+    pytest.skip(f"PyQt6 display libraries not available: {e}", allow_module_level=True)
+
+pytestmark = pytest.mark.gui
 
 from bl03u_masstool.core.project_settings import ProjectSettings
 from bl03u_masstool.frontends.pyqt_app.isotope.dialog import IsotopeAbundanceDialog
