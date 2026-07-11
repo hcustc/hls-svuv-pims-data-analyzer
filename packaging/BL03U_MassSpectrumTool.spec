@@ -1,6 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 from pathlib import Path
+import runpy
 import sys
 
 
@@ -8,6 +9,9 @@ ROOT = Path.cwd().resolve()
 APP_NAME = "BL03U-MassSpectrumTool"
 ICON_ICO = ROOT / "icons" / "icon.ico"
 ICON_ICNS = ROOT / "icons" / "icon.icns"
+APP_VERSION = runpy.run_path(
+    str(ROOT / "src" / "bl03u_masstool" / "_version.py")
+)["__version__"]
 
 datas = [
     (str(ROOT / "icons"), "icons"),
@@ -61,6 +65,7 @@ if sys.platform == "darwin":
     app = BUNDLE(
         coll,
         name=f"{APP_NAME}.app",
+        version=APP_VERSION,
         bundle_identifier="cn.ihep.bl03u.mass-spectrum-tool",
         icon=str(ICON_ICNS),
     )

@@ -82,6 +82,24 @@ def test_generate_formula_candidates_from_mass_and_element_ranges():
     assert abs(candidates[0]["error_ppm"]) < 20
 
 
+def test_generate_formula_candidates_supports_integer_nominal_mass():
+    candidates = generate_formula_candidates(
+        128,
+        tolerance=0,
+        tolerance_unit="Da",
+        element_ranges=parse_element_count_ranges("C:0-12,H:0-30,N:0-4,O:0-6"),
+        max_results=100,
+        mass_mode="nominal",
+        apply_chemical_rules=True,
+    )
+
+    formulas = {item["formula"] for item in candidates}
+    assert "C10H8" in formulas
+    assert all(item["nominal_mass"] == 128 for item in candidates)
+    assert all(item["dbe"] is None or item["dbe"] >= 0 for item in candidates)
+    assert "C2H26NO4" not in formulas
+
+
 NIST_IE_HTML = """
 <html><body>
 <h2 id="Ion-Energetics">Gas phase ion energetics data</h2>

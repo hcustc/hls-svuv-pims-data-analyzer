@@ -22,6 +22,7 @@ from bl03u_masstool.core.project_lifecycle import (
     create_project_snapshot,
     export_project_archive,
     import_project_source,
+    materialize_project_data_sources,
     scan_project_artifacts,
 )
 
@@ -244,6 +245,34 @@ class ImportWorker(ProjectWorker):
         """Clean up any partial imports."""
         # The core function handles cleanup on exception
         pass
+
+
+class MaterializeProjectSourcesWorker(ProjectWorker):
+    """Copy all registered external project sources outside the GUI thread."""
+
+    def __init__(self, settings: ProjectSettings, *, mode: str = "copy"):
+        super().__init__()
+        self.settings = settings
+        self.mode = mode
+
+    def run(self):
+        try:
+            self.progress.emit(5, "正在准备项目数据源...")
+            self._check_cancelled()
+            results = materialize_project_data_sources(self.settings, mode=self.mode)
+            self._check_cancelled()
+            self.progress.emit(95, "正在完成项目配置...")
+            self.finished.emit(
+                {
+                    "success": True,
+                    "count": len(results),
+                    "destinations": [str(result.destination) for result in results],
+                }
+            )
+        except OperationCancelledError:
+            self.cancelled.emit()
+        except Exception as exc:
+            self.error.emit(f"导入项目数据源失败: {exc}")
 
 
 class ScanWorker(ProjectWorker):

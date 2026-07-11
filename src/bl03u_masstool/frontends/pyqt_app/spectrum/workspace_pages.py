@@ -18,6 +18,7 @@ from bl03u_masstool.core.project_lifecycle import (
     DataSourceValidationStatus,
     WorkflowProfile,
     analyze_workflow_capabilities,
+    build_project_stage_statuses,
     collect_project_files,
     ensure_project_structure,
     get_data_source_validation_status,
@@ -33,6 +34,7 @@ from bl03u_masstool.frontends.pyqt_app.isotope.dialog import IsotopeAbundanceDia
 from bl03u_masstool.frontends.pyqt_app.progress_dialog import ProgressDialog
 from bl03u_masstool.frontends.pyqt_app.worker import (
     ImportWorker,
+    MaterializeProjectSourcesWorker,
 )
 from bl03u_masstool.frontends.pyqt_app.worker_manager import WorkerManager
 from bl03u_masstool.frontends.pyqt_app.mole_fraction.dialog import MoleFractionDialog
@@ -94,6 +96,7 @@ class WorkspacePagesMixin:
         self.mole_fraction_page.set_project_settings(self.project_settings_manager.get())
         self.ionization_page = IonizationEnergyLookupWidget(self.workspace_stack)
         self.isotope_page = IsotopeAbundanceDialog(self.workspace_stack)
+        self.isotope_page.set_project_settings(self.project_settings_manager.get())
         self.pics_page = PICSCalculatorDialog(
             self.current_calibration(),
             self.normalization_settings,
@@ -101,6 +104,9 @@ class WorkspacePagesMixin:
         )
         self.pics_page.set_project_settings(self.project_settings_manager.get())
         self.pics_import_page = PICSImportWidget(self.workspace_stack)
+        self.pics_import_page.import_completed.connect(
+            lambda _result: self.pics_page.refresh_database()
+        )
         self.project_page = QtWidgets.QWidget(self.workspace_stack)
         self.project_page.setObjectName("ProjectPage")
         self._build_project_page()
@@ -114,8 +120,19 @@ class WorkspacePagesMixin:
             ("pics", "PICS计算", self.pics_page),
             ("pics_import", "PICS导入", self.pics_import_page),
             ("ionization", "IE查询", self.ionization_page),
-            ("isotope", "分子/同位素", self.isotope_page),
+            ("isotope", "分子式与质量分析", self.isotope_page),
         ]
+        page_descriptions = {
+            "project": "管理项目、数据源、共享参数和分析进度",
+            "spectrum": "查看质谱、标定、寻峰和维护峰范围",
+            "temperature": "生成并比较不同能量下的温度响应曲线",
+            "pie": "拟合 PIE 曲线并识别候选物种",
+            "mole_fraction": "基于温扫和 PIE 结果计算物种摩尔分数",
+            "pics": "计算物种光电离截面",
+            "pics_import": "导入外部 PICS 数据",
+            "ionization": "查询物种电离能",
+            "isotope": "由分子式计算质量与同位素，或由质量搜索候选分子式",
+        }
         # Pages that get a separator inserted AFTER them in the nav bar
         _nav_separators_after = {"project", "mole_fraction"}
 
@@ -131,6 +148,10 @@ class WorkspacePagesMixin:
             button.setCheckable(True)
             button.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextOnly)
             button.setMinimumHeight(32)
+            shortcut_text = f"Ctrl+{index + 1}"
+            button.setToolTip(f"{page_descriptions[page_name]}（{shortcut_text}）")
+            button.setAccessibleName(label)
+            button.setAccessibleDescription(page_descriptions[page_name])
             button.setSizePolicy(
                 QtWidgets.QSizePolicy.Policy.Preferred,
                 QtWidgets.QSizePolicy.Policy.Fixed,
@@ -139,6 +160,9 @@ class WorkspacePagesMixin:
             self.page_button_group.addButton(button, index)
             self.page_buttons[page_name] = button
             nav_layout.addWidget(button)
+            shortcut = QtGui.QShortcut(QtGui.QKeySequence(shortcut_text), self)
+            shortcut.setContext(QtCore.Qt.ShortcutContext.ApplicationShortcut)
+            shortcut.activated.connect(lambda name=page_name: self.switch_workspace_page(name))
             if page_name in _nav_separators_after:
                 sep = QtWidgets.QFrame(self.page_nav)
                 sep.setFrameShape(QtWidgets.QFrame.Shape.VLine)
@@ -183,8 +207,10 @@ class WorkspacePagesMixin:
         identity_layout.setSpacing(10)
 
         self._build_project_identity_card(self.project_identity_page)
+        self._build_project_workflow_card(self.project_identity_page)
         self._build_datasource_card(self.project_identity_page)
         identity_layout.addWidget(self.project_identity_card)
+        identity_layout.addWidget(self.project_workflow_card)
         identity_layout.addWidget(self.datasource_card)
 
         settings_scroll.setWidget(settings_content)
@@ -208,11 +234,12 @@ class WorkspacePagesMixin:
         from bl03u_masstool.frontends.pyqt_app.normalization.widget import FunctionDefaultsWidget
         self.project_function_defaults_widget = FunctionDefaultsWidget(self.project_tabs)
         self.project_function_defaults_widget.settings_saved.connect(self.on_project_common_parameters_saved)
+        self.project_function_defaults_widget.navigate_requested.connect(self.switch_workspace_page)
         self.project_function_defaults_widget.set_project_settings(ProjectSettingsManager().get())
 
-        self.project_tabs.addTab(self.project_identity_page, "项目设置")
-        self.project_tabs.addTab(self.project_common_parameters_widget, "通用参数")
-        self.project_tabs.addTab(self.project_function_defaults_widget, "功能默认参数")
+        self.project_tabs.addTab(self.project_identity_page, "项目与数据")
+        self.project_tabs.addTab(self.project_common_parameters_widget, "共享参数")
+        self.project_tabs.addTab(self.project_function_defaults_widget, "分析默认值")
         self.project_tabs.currentChanged.connect(self._on_project_tab_changed)
         page_layout.addWidget(self.project_tabs, stretch=1)
 
@@ -247,7 +274,7 @@ class WorkspacePagesMixin:
         self.project_status_label = QtWidgets.QLabel("", hero)
         self.project_status_label.setObjectName("ProjectStatus")
         self.project_status_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
-        hint = QtWidgets.QLabel("集中管理项目信息、数据源路径、通用参数和功能默认值。", hero)
+        hint = QtWidgets.QLabel("创建或打开项目，并统一管理项目目录和数据来源。", hero)
         hint.setObjectName("ProjectHint")
         hint.setWordWrap(True)
         title_column.addWidget(title)
@@ -263,25 +290,9 @@ class WorkspacePagesMixin:
 
         # 新建项目按钮（突出显示）
         self.project_new_button = QPushButton("新建项目", action_bar)
-        self.project_new_button.setObjectName("PrimaryButton")
+        self.project_new_button.setObjectName("BrowseButton")
         self.project_new_button.setToolTip("清空当前表单，开始创建新项目")
         self.project_new_button.setFixedHeight(32)
-        self.project_new_button.setStyleSheet("""
-            QPushButton#PrimaryButton {
-                background-color: #4CAF50;
-                color: white;
-                border: none;
-                border-radius: 4px;
-                padding: 0px 16px;
-                font-weight: bold;
-            }
-            QPushButton#PrimaryButton:hover {
-                background-color: #45a049;
-            }
-            QPushButton#PrimaryButton:pressed {
-                background-color: #3d8b40;
-            }
-        """)
         action_layout.addWidget(self.project_new_button)
 
         # 打开项目按钮
@@ -307,7 +318,7 @@ class WorkspacePagesMixin:
         self.project_save_and_apply_button.setFixedHeight(28)
         action_layout.addWidget(self.project_save_and_apply_button)
 
-        self.project_save_and_apply_button.setObjectName("BrowseButton")
+        self.project_save_and_apply_button.setObjectName("PrimaryButton")
         hero_layout.addWidget(action_bar)
         card_layout.addWidget(hero)
 
@@ -351,6 +362,62 @@ class WorkspacePagesMixin:
             self.select_project_output_parent_folder
         )
 
+    def _build_project_workflow_card(self, parent) -> None:
+        self.project_workflow_card = QtWidgets.QFrame(parent)
+        self.project_workflow_card.setObjectName("ProjectCard")
+        card_layout = QVBoxLayout(self.project_workflow_card)
+        card_layout.setContentsMargins(10, 8, 10, 10)
+        card_layout.setSpacing(8)
+
+        header = QHBoxLayout()
+        title_column = QVBoxLayout()
+        title_column.setSpacing(2)
+        title = QtWidgets.QLabel("项目工作流", self.project_workflow_card)
+        title.setObjectName("ProjectTitle")
+        self.project_next_action_label = QtWidgets.QLabel("创建或打开项目后显示建议步骤", self.project_workflow_card)
+        self.project_next_action_label.setObjectName("ProjectHint")
+        self.project_next_action_label.setWordWrap(True)
+        title_column.addWidget(title)
+        title_column.addWidget(self.project_next_action_label)
+        header.addLayout(title_column, 1)
+
+        self.project_continue_button = QPushButton("继续下一步", self.project_workflow_card)
+        self.project_continue_button.setObjectName("PrimaryButton")
+        self.project_continue_button.setToolTip("保存当前项目设置并打开尚未完成的下一阶段")
+        self.project_continue_button.clicked.connect(self.continue_next_project_stage)
+        header.addWidget(self.project_continue_button)
+        card_layout.addLayout(header)
+
+        stages_row = QHBoxLayout()
+        stages_row.setSpacing(6)
+        self.project_stage_buttons: dict[str, QtWidgets.QToolButton] = {}
+        for stage in build_project_stage_statuses(ProjectSettings()):
+            button = QtWidgets.QToolButton(self.project_workflow_card)
+            button.setObjectName("ProjectStageButton")
+            button.setText(stage.label)
+            button.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextOnly)
+            button.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Expanding,
+                QtWidgets.QSizePolicy.Policy.Fixed,
+            )
+            button.clicked.connect(
+                lambda checked=False, page=stage.nav_page, key=stage.key: self._open_project_stage(page, key)
+            )
+            self.project_stage_buttons[stage.key] = button
+            stages_row.addWidget(button)
+        card_layout.addLayout(stages_row)
+
+    def _open_project_stage(self, page_name: str, stage_key: str) -> None:
+        if page_name == "project":
+            self.switch_workspace_page("project")
+            self.project_tabs.setCurrentWidget(self.project_identity_page)
+            if stage_key == "raw_data":
+                self.datasource_card.setFocus(QtCore.Qt.FocusReason.OtherFocusReason)
+            else:
+                self.project_name_edit.setFocus(QtCore.Qt.FocusReason.OtherFocusReason)
+            return
+        self.switch_workspace_page(page_name)
+
     # ── Project data sources ─────────────────────────────────────────────
 
     def _build_datasource_card(self, parent):
@@ -373,7 +440,7 @@ class WorkspacePagesMixin:
         datasource_title = QtWidgets.QLabel("项目数据源", self.datasource_card)
         datasource_title.setObjectName("ProjectTitle")
         datasource_hint = QtWidgets.QLabel(
-            "原始实验目录由项目管理接管；单谱/累计谱是质谱工作台从项目内数据中选择的查看来源。",
+            "选择温度扫描、PIE 扫描目录，或使用导入向导整理项目数据。",
             self.datasource_card,
         )
         datasource_hint.setObjectName("ProjectHint")
@@ -926,6 +993,8 @@ class WorkspacePagesMixin:
             self.pics_page.normalization_settings = self.normalization_settings
             self.pics_page.calibration = calibration
             self.pics_page.set_project_settings(ps)
+        if hasattr(self, "isotope_page"):
+            self.isotope_page.set_project_settings(ps)
 
     def new_project(self) -> None:
         """清空表单，准备创建新项目"""
@@ -1066,38 +1135,80 @@ class WorkspacePagesMixin:
             QtWidgets.QMessageBox.critical(self, "初始化项目失败", str(exc))
             return
 
-        # Step 2: Bring registered raw data sources under the managed project folder.
-        try:
-            materialize_project_data_sources(ps, mode="copy")
-        except Exception as exc:
-            QtWidgets.QMessageBox.critical(self, "导入项目数据源失败", str(exc))
-            return
+        self._materialize_project_sources_async(ps, sync_tools=True)
 
-        # Step 3: Set project config path (before saving)
+    def _materialize_project_sources_async(self, ps: ProjectSettings, *, sync_tools: bool) -> None:
+        """Copy external project sources in a worker, then finalize on the UI thread."""
+        self._pending_materialize_settings = ps
+        self._pending_materialize_sync_tools = sync_tools
+        if not hasattr(self, "_materialize_worker_manager"):
+            self._materialize_worker_manager = WorkerManager(self)
+
+        worker = MaterializeProjectSourcesWorker(ps, mode="copy")
+        worker.progress.connect(self._on_materialize_progress)
+        worker.finished.connect(self._on_materialize_finished)
+        worker.error.connect(self._on_materialize_error)
+        worker.cancelled.connect(self._on_materialize_cancelled)
+
+        self._materialize_progress_dialog = ProgressDialog(self, "导入项目数据")
+        self._materialize_progress_dialog.rejected.connect(self._materialize_worker_manager.cancel)
+        self._materialize_progress_dialog.show()
+        self.project_save_and_apply_button.setEnabled(False)
+        self.statusbar.showMessage("正在后台导入项目数据源...")
+        self._materialize_worker_manager.run_worker(worker)
+
+    def _on_materialize_progress(self, percent: int, message: str) -> None:
+        if hasattr(self, "_materialize_progress_dialog"):
+            self._materialize_progress_dialog.update(percent, message)
+
+    def _on_materialize_finished(self, _result: dict) -> None:
+        if hasattr(self, "_materialize_progress_dialog"):
+            self._materialize_progress_dialog.close()
+        self.project_save_and_apply_button.setEnabled(True)
+        ps = self._pending_materialize_settings
+        sync_tools = bool(self._pending_materialize_sync_tools)
+        self._finalize_project_settings(ps, sync_tools=sync_tools)
+
+    def _on_materialize_error(self, message: str) -> None:
+        if hasattr(self, "_materialize_progress_dialog"):
+            self._materialize_progress_dialog.close()
+        self.project_save_and_apply_button.setEnabled(True)
+        QtWidgets.QMessageBox.critical(self, "导入项目数据源失败", message)
+        self.statusbar.showMessage("项目数据导入失败", 5000)
+
+    def _on_materialize_cancelled(self) -> None:
+        if hasattr(self, "_materialize_progress_dialog"):
+            self._materialize_progress_dialog.close()
+        self.project_save_and_apply_button.setEnabled(True)
+        self.statusbar.showMessage("项目数据导入已取消", 3000)
+
+    def _finalize_project_settings(self, ps: ProjectSettings, *, sync_tools: bool) -> None:
+        # Set project config path (before saving)
         from pathlib import Path
         self.project_settings_manager.set_project_path(Path(ps.output_dir))
 
-        # Step 4: Save configuration to project-specific location
+        # Save configuration to project-specific location
         self.project_settings_manager.set(ps)
         self.project_settings_manager.save()
         self._creating_new_project = False
         self._opened_project_root = Path(ps.output_dir).resolve()
 
-        # Step 5: Read settings back to UI
+        # Read settings back to UI
         self._read_project_settings_to_ui(ps)
         self._load_project_settings_to_parameter_widgets(ps)
         self._apply_project_runtime_settings(ps)
 
-        # Step 6: Sync to tools
-        self._apply_settings_to_tools(ps)
+        if sync_tools:
+            self._apply_settings_to_tools(ps)
 
-        # Step 7: Refresh UI
+        # Refresh UI
         self.update_project_title()
         if hasattr(self, "project_close_button"):
             self.project_close_button.setEnabled(True)
         self.refresh_project_lifecycle(ps)
         self.refresh_project_parameter_summary()
-        self.statusbar.showMessage("[成功] 项目已保存、初始化并应用到工具", 3000)
+        message = "[成功] 项目已保存、初始化并应用到工具" if sync_tools else f"✓ 项目已初始化：{project_root(ps)}"
+        self.statusbar.showMessage(message, 3000)
 
     def initialize_project_structure(self) -> None:
         """Initialize project structure only (create folders, save config).
@@ -1117,34 +1228,7 @@ class WorkspacePagesMixin:
             QtWidgets.QMessageBox.critical(self, "初始化项目失败", str(exc))
             return
 
-        try:
-            materialize_project_data_sources(ps, mode="copy")
-        except Exception as exc:
-            QtWidgets.QMessageBox.critical(self, "导入项目数据源失败", str(exc))
-            return
-
-        # Set project config path (before saving)
-        from pathlib import Path
-        self.project_settings_manager.set_project_path(Path(ps.output_dir))
-
-        # Save configuration to project-specific location
-        self.project_settings_manager.set(ps)
-        self.project_settings_manager.save()
-        self._creating_new_project = False
-        self._opened_project_root = Path(ps.output_dir).resolve()
-
-        # Read settings back to UI
-        self._read_project_settings_to_ui(ps)
-        self._load_project_settings_to_parameter_widgets(ps)
-        self._apply_project_runtime_settings(ps)
-
-        # Refresh UI (but don't sync to tools)
-        self.update_project_title()
-        if hasattr(self, "project_close_button"):
-            self.project_close_button.setEnabled(True)
-        self.refresh_project_lifecycle(ps)
-        self.refresh_project_parameter_summary()
-        self.statusbar.showMessage(f"✓ 项目已初始化：{project_root(ps)}", 3000)
+        self._materialize_project_sources_async(ps, sync_tools=False)
 
     def apply_project_settings_to_tools(self) -> None:
         """Sync project settings to tool pages (light version, no save/init)."""
@@ -1157,27 +1241,26 @@ class WorkspacePagesMixin:
         self._apply_project_runtime_settings(ps)
         if hasattr(self, "apply_project_spectrum_paths"):
             self.apply_project_spectrum_paths(ps, activate=True)
-        # Temperature page and PIE page are now read-only parameter displays
-        # No need to manually set folder_edit - parameters come from ProjectSettings
-        if hasattr(self, "temperature_page"):
-            self.temperature_page.set_project_settings(ps, activate_project_scope=True)
-        if hasattr(self, "pie_page"):
-            self.pie_page.set_project_settings(ps, activate_project_scope=True)
-            if ps.pics_database_path and os.path.exists(ps.pics_database_path):
-                self.pie_page.load_database(show_message=False)
-        self._sync_project_settings_to_tool_pages(ps)
+        self._sync_project_settings_to_tool_pages(ps, activate_project_scope=True)
+        if hasattr(self, "pie_page") and ps.pics_database_path and os.path.exists(ps.pics_database_path):
+            self.pie_page.load_database(show_message=False)
 
-    def _sync_project_settings_to_tool_pages(self, ps: ProjectSettings) -> None:
+    def _sync_project_settings_to_tool_pages(
+        self,
+        ps: ProjectSettings,
+        *,
+        activate_project_scope: bool | None = None,
+    ) -> None:
         """Sync project settings to all tool pages (temperature, PIE, etc.)."""
         calibration = self.current_calibration()
         if hasattr(self, "temperature_page"):
             self.temperature_page.normalization_settings = self.normalization_settings
             self.temperature_page.calibration = calibration
-            self.temperature_page.set_project_settings(ps)
+            self.temperature_page.set_project_settings(ps, activate_project_scope=activate_project_scope)
         if hasattr(self, "pie_page"):
             self.pie_page.normalization_settings = self.normalization_settings
             self.pie_page.calibration = calibration
-            self.pie_page.set_project_settings(ps)
+            self.pie_page.set_project_settings(ps, activate_project_scope=activate_project_scope)
         if hasattr(self, "mole_fraction_page"):
             self.mole_fraction_page.normalization_settings = self.normalization_settings
             self.mole_fraction_page.calibration = calibration
@@ -1186,6 +1269,8 @@ class WorkspacePagesMixin:
             self.pics_page.normalization_settings = self.normalization_settings
             self.pics_page.calibration = calibration
             self.pics_page.set_project_settings(ps)
+        if hasattr(self, "isotope_page"):
+            self.isotope_page.set_project_settings(ps)
 
     def save_function_params(self) -> None:
         """Save function parameters from the current project page."""
@@ -1645,7 +1730,61 @@ class WorkspacePagesMixin:
         self.statusbar.showMessage("项目导出已取消", 3000)
 
     def refresh_project_lifecycle(self, ps: ProjectSettings | None = None) -> None:
-        pass
+        if not hasattr(self, "project_stage_buttons"):
+            return
+        ps = ps or self.project_settings_manager.get()
+        statuses = build_project_stage_statuses(ps)
+        completed_indexes = [index for index, status in enumerate(statuses) if status.completed and not status.warning]
+        furthest_completed_index = max(completed_indexes, default=-1)
+
+        def _effectively_completed(index: int, status) -> bool:
+            # A recorded downstream result implies its prerequisites were usable,
+            # even when an older project did not preserve every intermediate file.
+            return status.completed or (index < furthest_completed_index and not status.warning)
+
+        next_status = next(
+            (
+                status
+                for index, status in enumerate(statuses)
+                if not _effectively_completed(index, status)
+            ),
+            None,
+        )
+
+        for index, status in enumerate(statuses):
+            button = self.project_stage_buttons.get(status.key)
+            if button is None:
+                continue
+            inferred_complete = not status.completed and index < furthest_completed_index and not status.warning
+            if _effectively_completed(index, status):
+                state = "complete"
+                prefix = "✓"
+            elif status.warning:
+                state = "warning"
+                prefix = "!"
+            elif next_status is not None and status.key == next_status.key:
+                state = "active"
+                prefix = "→"
+            else:
+                state = "pending"
+                prefix = "○"
+            button.setText(f"{prefix} {status.label}")
+            detail = status.detail or status.next_action
+            if inferred_complete:
+                detail = f"已由后续分析结果推断完成；{detail}"
+            button.setToolTip(detail)
+            button.setProperty("stageState", state)
+            button.style().unpolish(button)
+            button.style().polish(button)
+
+        if next_status is None:
+            self.project_next_action_label.setText("所有核心分析阶段均已有项目记录，可检查产物或创建项目备份。")
+            self.project_continue_button.setText("查看项目数据")
+            self.project_continue_button.setEnabled(True)
+        else:
+            self.project_next_action_label.setText(f"建议下一步：{next_status.next_action}")
+            self.project_continue_button.setText(f"继续：{next_status.label}")
+            self.project_continue_button.setEnabled(True)
 
     def _format_file_size(self, size_bytes: int) -> str:
         size = float(size_bytes)
@@ -1745,6 +1884,8 @@ class WorkspacePagesMixin:
             self.pics_page.normalization_settings = self.normalization_settings
             self.pics_page.calibration = calibration
             self.pics_page.set_project_settings(ps)
+        if hasattr(self, "isotope_page"):
+            self.isotope_page.set_project_settings(ps)
         self.refresh_project_parameter_summary()
         self.statusbar.showMessage("通用参数已保存并同步到各工具", 3000)
 

@@ -46,25 +46,106 @@ def gaussian(x, amplitude: float, mean: float, std_dev: float, baseline: float):
     return amplitude * np.exp(-((x - mean) ** 2) / (2 * std_dev**2)) + baseline
 
 
-def fit_gaussian(y_data: Iterable[float], center_idx: int, window_size: int = 20) -> GaussianFit | None:
+def fit_gaussian(
+    y_data: Iterable[float],
+    center_idx: int,
+    window_size: int = 20,
+    *,
+    constrained: bool = True,
+) -> GaussianFit | None:
+    """Fit a local Gaussian without allowing the optimizer to leave the peak.
+
+    The old unconstrained fit could return negative amplitudes, extremely wide
+    peaks, or centers hundreds of samples away from ``center_idx`` on sloping
+    baselines.  Those values then contaminated calibration, clustering, and
+    integration.  The bounds below intentionally describe only a *local* peak.
+    """
     data = np.asarray(y_data, dtype=float)
     if data.size == 0:
         return None
+    data = np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
+    center_idx = max(0, min(int(center_idx), data.size - 1))
+    window_size = max(2, int(window_size))
     start_idx = max(0, int(center_idx) - int(window_size))
     end_idx = min(len(data), int(center_idx) + int(window_size) + 1)
     x = np.arange(start_idx, end_idx, dtype=float)
     y = data[start_idx:end_idx]
     if len(x) < 5:
         return None
+    if not constrained:
+        # Historical BL03U behavior retained only for the explicit legacy
+        # detector so old projects and published integrations remain
+        # reproducible.  New detectors use the validated local fit below.
+        try:
+            initial = [float(np.max(y)), float(center_idx), 3.0, float(np.min(y))]
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", OptimizeWarning)
+                params, _ = curve_fit(gaussian, x, y, p0=initial, maxfev=10000)
+            amplitude, mean, std_dev, baseline = [float(v) for v in params]
+            if std_dev <= 0:
+                return None
+            fwhm = float(2 * np.sqrt(2 * np.log(2)) * std_dev)
+            return GaussianFit(amplitude=amplitude, mean=mean, std_dev=std_dev, fwhm=fwhm, baseline=baseline)
+        except Exception:
+            return None
+    edge_count = max(1, min(5, len(y) // 4))
+    edge_values = np.concatenate((y[:edge_count], y[-edge_count:]))
+    baseline_initial = float(np.median(edge_values))
+    amplitude_initial = float(np.max(y) - baseline_initial)
+    data_range = float(np.ptp(y))
+    if not np.isfinite(amplitude_initial) or amplitude_initial <= max(np.finfo(float).eps, data_range * 1e-6):
+        return None
+    local_max_pos = int(np.argmax(y))
+    support_level = baseline_initial + 0.10 * amplitude_initial
+    if (
+        0 < local_max_pos < len(y) - 1
+        and y[local_max_pos - 1] < support_level
+        and y[local_max_pos + 1] < support_level
+    ):
+        return None
+
+    half_height = baseline_initial + amplitude_initial * 0.5
+    above_half = np.flatnonzero(y >= half_height)
+    if above_half.size >= 2:
+        std_initial = max(0.5, float(above_half[-1] - above_half[0]) / 2.354820045)
+    else:
+        std_initial = min(3.0, max(0.5, window_size / 3.0))
+
+    max_center_shift = max(1.5, min(float(window_size) * 0.5, 8.0))
+    mean_lower = max(float(start_idx), float(center_idx) - max_center_shift)
+    mean_upper = min(float(end_idx - 1), float(center_idx) + max_center_shift)
+    std_upper = max(1.0, min(float(window_size), float(len(y) - 1) / 2.0))
+    baseline_margin = max(data_range, abs(baseline_initial) * 0.5, 1.0)
     try:
-        initial = [float(np.max(y)), float(center_idx), 3.0, float(np.min(y))]
+        initial = [amplitude_initial, float(center_idx), min(std_initial, std_upper), baseline_initial]
+        lower_bounds = [0.0, mean_lower, 0.35, float(np.min(y) - baseline_margin)]
+        upper_bounds = [
+            max(amplitude_initial * 5.0, data_range * 5.0, 1.0),
+            mean_upper,
+            std_upper,
+            float(np.max(y) + baseline_margin),
+        ]
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", OptimizeWarning)
-            params, _ = curve_fit(gaussian, x, y, p0=initial, maxfev=10000)
+            params, _ = curve_fit(
+                gaussian,
+                x,
+                y,
+                p0=initial,
+                bounds=(lower_bounds, upper_bounds),
+                maxfev=10000,
+            )
         amplitude, mean, std_dev, baseline = [float(v) for v in params]
-        if std_dev <= 0:
+        if amplitude <= 0 or std_dev <= 0 or abs(mean - center_idx) > max_center_shift + 1e-6:
+            return None
+        fitted = gaussian(x, amplitude, mean, std_dev, baseline)
+        residual_error = float(np.sum((y - fitted) ** 2))
+        flat_error = float(np.sum((y - np.mean(y)) ** 2))
+        if not np.all(np.isfinite(fitted)) or flat_error <= 0 or residual_error >= flat_error * 0.98:
             return None
         fwhm = float(2 * np.sqrt(2 * np.log(2)) * std_dev)
+        if fwhm > 2.0 * window_size:
+            return None
         return GaussianFit(amplitude=amplitude, mean=mean, std_dev=std_dev, fwhm=fwhm, baseline=baseline)
     except Exception:
         return None
@@ -94,6 +175,18 @@ def _rolling_percentile_baseline(data: np.ndarray, window_size: int, percentile:
         window_size += 1
     percentile = max(0.0, min(float(percentile), 100.0))
     return percentile_filter(data, percentile=percentile, size=window_size, mode="nearest")
+
+
+def _estimate_noise_sigma(data: np.ndarray) -> float:
+    """Robustly estimate point noise while being insensitive to broad peaks."""
+    values = np.asarray(data, dtype=float)
+    values = values[np.isfinite(values)]
+    if values.size < 3:
+        return 0.0
+    differences = np.diff(values)
+    median = float(np.median(differences))
+    mad = float(np.median(np.abs(differences - median)))
+    return mad / (0.67448975 * np.sqrt(2.0)) if mad > 0 else 0.0
 
 
 def _sanitize_peak_bounds(
@@ -185,10 +278,27 @@ def detect_peaks_prominence(
     if corrected_max <= 0:
         return []
 
+    noise_sigma = _estimate_noise_sigma(segment - smoothed)
+    if noise_sigma <= 0:
+        noise_sigma = _estimate_noise_sigma(corrected)
+    # A rolling high percentile supplies a local scale.  Unlike a fraction of
+    # the spectrum-wide maximum, it does not hide a weak peak merely because a
+    # much stronger mass exists elsewhere in the acquisition.
+    local_reference = percentile_filter(
+        corrected,
+        percentile=95.0,
+        size=max(11, int(baseline_window) | 1),
+        mode="nearest",
+    )
+    prominence_threshold = np.maximum(
+        max(0.0, 3.0 * noise_sigma),
+        max(0.0, float(prominence_ratio)) * local_reference,
+    )
+
     peak_indices, _ = find_peaks(
         corrected,
         height=max(0.0, float(min_intensity)),
-        prominence=max(0.0, float(prominence_ratio)) * corrected_max,
+        prominence=prominence_threshold,
         distance=duplicate_window,
         width=(min_peak_width, max_peak_width),
     )
@@ -350,7 +460,12 @@ def detect_peaks_in_range(
         while right < end_idx - 1 and data[right] >= threshold_end:
             right += 1
 
-        fit = fit_gaussian(data, max_idx, min(gaussian_window_max, right - left + 5))
+        fit = fit_gaussian(
+            data,
+            max_idx,
+            min(gaussian_window_max, right - left + 5),
+            constrained=False,
+        )
         if fit is not None:
             center = fit.mean
             fwhm = fit.fwhm
@@ -589,7 +704,7 @@ def _cluster_peaks_by_mz(
     current_cluster = [sorted_peaks[0]]
 
     for peak in sorted_peaks[1:]:
-        if peak.mz - current_cluster[-1].mz <= tolerance:
+        if peak.mz - current_cluster[0].mz <= tolerance:
             current_cluster.append(peak)
         else:
             clusters.append(current_cluster)
@@ -614,7 +729,10 @@ def _cluster_algorithm_peaks_by_mz(
     current_cluster = [sorted_peaks[0]]
 
     for item in sorted_peaks[1:]:
-        if item[1].mz - current_cluster[-1][1].mz <= tolerance:
+        # Compare with the cluster's first member, not only the previous peak.
+        # This prevents chain-link merging such as 10.0, 10.15, 10.30 with a
+        # tolerance of 0.2, where the endpoints are different physical peaks.
+        if item[1].mz - current_cluster[0][1].mz <= tolerance:
             current_cluster.append(item)
         else:
             clusters.append(current_cluster)
@@ -627,33 +745,36 @@ def _cluster_algorithm_peaks_by_mz(
 
 
 def _merge_cluster_peaks(cluster: list[Peak]) -> Peak:
-    """合并一个聚类中的多个峰。选择m/z加权均值，强度取最大值，边界取最强峰。"""
+    """Merge repeated estimates of one peak using a robust consensus center."""
     if not cluster:
         raise ValueError("cluster must not be empty")
 
     if len(cluster) == 1:
         return cluster[0]
 
-    # m/z按强度加权均值
-    total_intensity = sum(p.intensity for p in cluster)
-    if total_intensity > 0:
-        weighted_mz = sum(p.mz * p.intensity for p in cluster) / total_intensity
-    else:
-        weighted_mz = np.mean([p.mz for p in cluster])
-
-    # time按强度加权均值
-    weighted_time = sum(p.time * p.intensity for p in cluster) / total_intensity if total_intensity > 0 else np.mean([p.time for p in cluster])
+    # All algorithms sample the same raw intensity, so intensity weighting does
+    # not represent confidence.  The median is stable when one fit is shifted.
+    consensus_mz = float(np.median([p.mz for p in cluster]))
+    consensus_time = float(np.median([p.time for p in cluster]))
 
     # intensity取最大值
     max_intensity = max(p.intensity for p in cluster)
 
-    # 选择最强的峰作为主峰
-    max_peak = max(cluster, key=lambda p: p.intensity)
+    # Prefer a validated Gaussian closest to consensus for its integration
+    # bounds; otherwise use the closest detector estimate.
+    max_peak = min(
+        cluster,
+        key=lambda p: (
+            p.gaussian_params is None,
+            abs(p.time - consensus_time),
+            -p.intensity,
+        ),
+    )
 
     return Peak(
         index=max_peak.index,
-        time=weighted_time,
-        mz=weighted_mz,
+        time=consensus_time,
+        mz=consensus_mz,
         intensity=max_intensity,
         fwhm=max_peak.fwhm,
         left_bound=max_peak.left_bound,
@@ -662,6 +783,56 @@ def _merge_cluster_peaks(cluster: list[Peak]) -> Peak:
         gaussian_params=max_peak.gaussian_params,
         species=max_peak.species,
     )
+
+
+def _single_vote_peak_is_plausible(
+    data: np.ndarray,
+    peak: Peak,
+    *,
+    min_intensity: float,
+    local_window: int,
+) -> bool:
+    """Reject isolated one-sample artifacts from the permissive 1-vote path."""
+    if peak.intensity < min_intensity or data.size < 3:
+        return False
+    center = max(1, min(int(round(peak.index)), data.size - 2))
+    radius = max(3, min(int(local_window), 15))
+    left = max(0, center - radius)
+    right = min(data.size, center + radius + 1)
+    region = data[left:right]
+    if region.size < 3:
+        return False
+    baseline = float(np.percentile(region, 20.0))
+    signal = float(data[center] - baseline)
+    noise = _estimate_noise_sigma(region)
+    if signal <= max(0.0, 3.0 * noise):
+        return False
+    left_min = float(np.min(data[left : center + 1]))
+    right_min = float(np.min(data[center:right]))
+    local_prominence = float(data[center] - max(left_min, right_min))
+    if local_prominence < max(3.0 * noise, 0.10 * signal):
+        return False
+    support_level = baseline + 0.12 * signal
+    return bool(data[center - 1] >= support_level and data[center + 1] >= support_level)
+
+
+def _is_consistent_impulse_artifact(data: np.ndarray, peak: Peak, *, local_window: int) -> bool:
+    """Identify a one-sample detector/electronic spike at a voted peak."""
+    if data.size < 3:
+        return False
+    center = max(1, min(int(round(peak.index)), data.size - 2))
+    # Do not interfere with mocked/externally supplied Peak objects whose
+    # reported intensity clearly does not describe this data array.
+    if not np.isclose(data[center], peak.intensity, rtol=0.2, atol=1e-9):
+        return False
+    radius = max(3, min(int(local_window), 15))
+    region = data[max(0, center - radius) : min(data.size, center + radius + 1)]
+    baseline = float(np.percentile(region, 20.0))
+    signal = float(data[center] - baseline)
+    if signal <= 0:
+        return False
+    support_level = baseline + 0.12 * signal
+    return bool(data[center - 1] < support_level and data[center + 1] < support_level)
 
 
 def detect_peaks_ensemble(
@@ -725,7 +896,10 @@ def detect_peaks_ensemble(
         融合后的峰列表，按time排序
     """
     data = np.asarray(y_data, dtype=float)
-    if data.size == 0 or np.max(data) <= 0:
+    if data.size == 0:
+        return []
+    data = np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
+    if np.max(data) <= 0:
         return []
 
     # 统计启用的算法数
@@ -738,7 +912,7 @@ def detect_peaks_ensemble(
 
     if use_legacy:
         peaks_by_algo["legacy"] = detect_peaks_in_range(
-            y_data,
+            data,
             calibration=calibration,
             start_idx=start_idx,
             end_idx=end_idx,
@@ -759,7 +933,7 @@ def detect_peaks_ensemble(
 
     if use_prominence:
         peaks_by_algo["prominence"] = detect_peaks_prominence(
-            y_data,
+            data,
             calibration=calibration,
             start_idx=start_idx,
             end_idx=end_idx,
@@ -782,7 +956,7 @@ def detect_peaks_ensemble(
 
     if use_cwt:
         peaks_by_algo["cwt"] = detect_peaks_by_algorithm(
-            y_data,
+            data,
             algorithm="cwt",
             calibration=calibration,
             start_idx=start_idx,
@@ -825,11 +999,17 @@ def detect_peaks_ensemble(
         # 规则1：足够的投票 → 保留
         if (vote_count / enabled_algorithms) + vote_threshold_tolerance >= vote_threshold_value:
             merged = _merge_cluster_peaks(cluster_peaks)
-            final_peaks.append(merged)
+            if not _is_consistent_impulse_artifact(data, merged, local_window=duplicate_window):
+                final_peaks.append(merged)
         # 规则2：单个算法检出但强度足够 → 保留
         elif vote_count == 1:
             peak = max(cluster_peaks, key=lambda item: item.intensity)
-            if peak.intensity >= min_intensity_for_single_vote:
+            if _single_vote_peak_is_plausible(
+                data,
+                peak,
+                min_intensity=float(min_intensity_for_single_vote),
+                local_window=duplicate_window,
+            ):
                 final_peaks.append(peak)
 
     return sorted(final_peaks, key=lambda peak: peak.time)

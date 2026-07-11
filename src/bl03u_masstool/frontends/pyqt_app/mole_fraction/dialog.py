@@ -83,6 +83,9 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self._loaded_database_path: str | None = None
         self._project_data_restore_key: tuple | None = None
         self._restoring_project_data = False
+        self._setting_parent_mz = False
+        self._parent_mz_origin = "saved" if self.settings.parent_mz > 0 else "unset"
+        self._parent_mz_confirmed = False
         self._init_ui()
         self._auto_load_database()
 
@@ -184,7 +187,11 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         # 卡峰范围由项目管理统一维护，在此自动加载
         self._load_peak_ranges_from_project()
         if hasattr(self, "spin_parent_mz"):
+            self._setting_parent_mz = True
             self.spin_parent_mz.setValue(ps.mf_parent_mz)
+            self._setting_parent_mz = False
+            self._parent_mz_origin = "project" if ps.mf_parent_mz > 0 else "unset"
+            self._parent_mz_confirmed = False
         if hasattr(self, "spin_parent_mf0"):
             self.spin_parent_mf0.setValue(ps.mf_parent_initial_mf)
         if hasattr(self, "spin_parent_energy"):
@@ -225,6 +232,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 Path(ps.pie_identification_result_file).name if has_pie_result else "项目未登记PIE结果"
             )
         self._restore_project_managed_data(ps)
+        self._refresh_parent_selection_state()
 
     def _path_restore_signature(self, value: str | Path | None) -> tuple:
         path_text = str(value or "").strip()
@@ -272,6 +280,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
         if restored and hasattr(self, "status_label"):
             self.status_label.setText("已从项目自动恢复: " + "；".join(restored))
+        self._refresh_parent_selection_state()
 
     def _loaded_data_has_mz(self, mz: int) -> bool:
         if mz <= 0:
@@ -307,7 +316,11 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             return False
         if not self.temperature_scan_data and not self.pie_species_data:
             return False
+        self._setting_parent_mz = True
         self.spin_parent_mz.setValue(0)
+        self._setting_parent_mz = False
+        self._parent_mz_origin = "unset"
+        self._parent_mz_confirmed = False
         return True
 
     def _restore_project_temperature_data(self, ps: ProjectSettings) -> str | None:
@@ -329,16 +342,11 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         folders = self._discover_energy_folders(root)
         if not folders:
             return None
-        self._load_peak_ranges_from_project()
-        added = self._load_energy_folders(
-            folders,
-            source_label=f"项目原始目录: {root.name}",
-            show_message=False,
-            confirm_overwrite=False,
-            replace_all=True,
-        )
-        if added > 0:
-            return f"温度扫描原始目录 {len(self.available_energies)} 个能量"
+        # Raw-folder analysis is intentionally user-triggered. Parsing every
+        # spectrum while opening a project blocks the GUI and duplicates the
+        # Temperature page cache workflow.
+        if hasattr(self, "lbl_ts_folder"):
+            self.lbl_ts_folder.setText(f"项目原始目录已就绪：{root.name}（点击“项目原始目录”加载）")
         return None
 
     def _restore_project_pie_data(self, ps: ProjectSettings) -> str | None:
@@ -440,24 +448,29 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         ts_row = QtWidgets.QHBoxLayout()
         ts_row.setSpacing(6)
         self.btn_load_project_ts_folder = QtWidgets.QPushButton("项目原始目录")
+        self.btn_load_project_ts_folder.setObjectName("PrimaryButton")
         self.btn_load_project_ts_folder.setToolTip("从项目管理配置的温度扫描根目录自动载入各能量子文件夹")
         self.btn_load_project_ts_folder.clicked.connect(self._load_project_temperature_scan_folder)
         self.btn_load_project_ts_folder.setEnabled(False)
         ts_row.addWidget(self.btn_load_project_ts_folder)
         self.btn_load_project_ts_result = QtWidgets.QPushButton("项目结果")
+        self.btn_load_project_ts_result.setObjectName("BrowseButton")
         self.btn_load_project_ts_result.setToolTip("读取项目管理中登记的温度扫描结果文件")
         self.btn_load_project_ts_result.clicked.connect(self._load_project_temperature_result)
         self.btn_load_project_ts_result.setEnabled(False)
         ts_row.addWidget(self.btn_load_project_ts_result)
         btn_load_ts_result = QtWidgets.QPushButton("选择结果文件")
+        btn_load_ts_result.setObjectName("BrowseButton")
         btn_load_ts_result.setToolTip("选择温度扫描导出的xlsx/csv结果文件")
         btn_load_ts_result.clicked.connect(self._load_temperature_result_file)
         ts_row.addWidget(btn_load_ts_result)
         btn_add_folder = QtWidgets.QPushButton("添加能量文件夹")
+        btn_add_folder.setObjectName("BrowseButton")
         btn_add_folder.setToolTip("备用入口：添加包含温度扫描txt文件的能量文件夹并重新分析")
         btn_add_folder.clicked.connect(self._add_energy_folder)
         ts_row.addWidget(btn_add_folder)
         btn_clear = QtWidgets.QPushButton("清空")
+        btn_clear.setObjectName("WarningButton")
         btn_clear.setToolTip("清空所有已加载的温度扫描数据")
         btn_clear.clicked.connect(self._clear_temperature_scan)
         ts_row.addWidget(btn_clear)
@@ -468,7 +481,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.combo_energy_select.setMinimumWidth(120)
         ts_row.addWidget(self.combo_energy_select)
         self.lbl_energy_count = QtWidgets.QLabel("")
-        self.lbl_energy_count.setStyleSheet("color: #6495ed;")
+        self.lbl_energy_count.setObjectName("InlineStatusLabel")
         ts_row.addWidget(self.lbl_energy_count)
         self.btn_remove_energy = QtWidgets.QPushButton("移除选中能量")
         self.btn_remove_energy.clicked.connect(self._remove_selected_energy)
@@ -477,10 +490,10 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         ts_row.addWidget(self.btn_remove_energy)
         ts_row.addSpacing(12)
         self.lbl_ts_folder = QtWidgets.QLabel("未选择文件夹")
-        self.lbl_ts_folder.setStyleSheet("color: rgba(232, 232, 232, 0.6);")
+        self.lbl_ts_folder.setObjectName("ProjectHint")
         ts_row.addWidget(self.lbl_ts_folder, 1)
         self.lbl_ts_project_artifact = QtWidgets.QLabel("项目未登记温度结果")
-        self.lbl_ts_project_artifact.setStyleSheet("color: rgba(232, 232, 232, 0.6);")
+        self.lbl_ts_project_artifact.setObjectName("ProjectHint")
         ts_row.addWidget(self.lbl_ts_project_artifact)
         ts_card_layout.addLayout(ts_row)
 
@@ -488,7 +501,6 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.ts_table_group = QtWidgets.QGroupBox("数据详情")
         self.ts_table_group.setCheckable(True)
         self.ts_table_group.setChecked(False)
-        self.ts_table_group.setStyleSheet("QGroupBox::title { subcontrol-position: left top; }")
         ts_table_layout = QtWidgets.QVBoxLayout(self.ts_table_group)
         ts_table_layout.setContentsMargins(4, 4, 4, 4)
         self.ts_data_table = QtWidgets.QTableWidget()
@@ -510,19 +522,21 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         pie_row = QtWidgets.QHBoxLayout()
         pie_row.setSpacing(6)
         self.btn_load_project_pie_result = QtWidgets.QPushButton("从项目载入")
+        self.btn_load_project_pie_result.setObjectName("PrimaryButton")
         self.btn_load_project_pie_result.setToolTip("读取项目管理中登记的PIE鉴定结果文件")
         self.btn_load_project_pie_result.clicked.connect(self._load_project_pie_results)
         self.btn_load_project_pie_result.setEnabled(False)
         pie_row.addWidget(self.btn_load_project_pie_result)
         btn_load_pie = QtWidgets.QPushButton("加载PIE鉴定结果")
+        btn_load_pie.setObjectName("BrowseButton")
         btn_load_pie.clicked.connect(self._load_pie_results)
         pie_row.addWidget(btn_load_pie)
         pie_row.addSpacing(12)
         self.lbl_pie_status = QtWidgets.QLabel("未加载")
-        self.lbl_pie_status.setStyleSheet("color: rgba(232, 232, 232, 0.6);")
+        self.lbl_pie_status.setObjectName("ProjectHint")
         pie_row.addWidget(self.lbl_pie_status, 1)
         self.lbl_pie_project_artifact = QtWidgets.QLabel("项目未登记PIE结果")
-        self.lbl_pie_project_artifact.setStyleSheet("color: rgba(232, 232, 232, 0.6);")
+        self.lbl_pie_project_artifact.setObjectName("ProjectHint")
         pie_row.addWidget(self.lbl_pie_project_artifact)
         pie_card_layout.addLayout(pie_row)
 
@@ -530,7 +544,6 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.pie_table_group = QtWidgets.QGroupBox("物种列表")
         self.pie_table_group.setCheckable(True)
         self.pie_table_group.setChecked(False)
-        self.pie_table_group.setStyleSheet("QGroupBox::title { subcontrol-position: left top; }")
         pie_table_layout = QtWidgets.QVBoxLayout(self.pie_table_group)
         pie_table_layout.setContentsMargins(4, 4, 4, 4)
         self.pie_species_table = QtWidgets.QTableWidget()
@@ -553,20 +566,23 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
         top_layout = QtWidgets.QHBoxLayout()
         btn_refresh = QtWidgets.QPushButton("刷新可用能量")
+        btn_refresh.setObjectName("BrowseButton")
         btn_refresh.setToolTip("根据已加载温度扫描数据刷新可设置替代参考物种的能量行")
         btn_refresh.clicked.connect(self._refresh_energy_parent_table)
         top_layout.addWidget(btn_refresh)
 
         btn_reset = QtWidgets.QPushButton("清除替代参考")
+        btn_reset.setObjectName("WarningButton")
         btn_reset.clicked.connect(self._reset_energy_parent_config)
         top_layout.addWidget(btn_reset)
 
         btn_apply = QtWidgets.QPushButton("应用替代参考")
+        btn_apply.setObjectName("PrimaryButton")
         btn_apply.clicked.connect(self._apply_energy_parent_config)
         top_layout.addWidget(btn_apply)
 
         self.lbl_energy_parent_status = QtWidgets.QLabel("未加载温度扫描能量")
-        self.lbl_energy_parent_status.setStyleSheet("color: #6495ed;")
+        self.lbl_energy_parent_status.setObjectName("InlineStatusLabel")
         top_layout.addWidget(self.lbl_energy_parent_status, 1)
         layout.addLayout(top_layout)
 
@@ -581,54 +597,100 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
     def _create_parent_tab(self):
         widget = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(widget)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
 
         cfg_group = QtWidgets.QGroupBox("母体参数设置")
         cfg_layout = QtWidgets.QGridLayout(cfg_group)
-        cfg_layout.addWidget(QtWidgets.QLabel("母体质量数 m/z:"), 0, 0)
+        cfg_layout.setHorizontalSpacing(10)
+        cfg_layout.setVerticalSpacing(8)
+
+        self.parent_selection_banner = QtWidgets.QFrame(cfg_group)
+        self.parent_selection_banner.setObjectName("ParentSelectionBanner")
+        banner_layout = QtWidgets.QVBoxLayout(self.parent_selection_banner)
+        banner_layout.setContentsMargins(10, 7, 10, 7)
+        banner_layout.setSpacing(2)
+        banner_title = QtWidgets.QLabel("先确认母体分子离子", self.parent_selection_banner)
+        banner_title.setObjectName("ProjectBoundaryTitle")
+        banner_text = QtWidgets.QLabel(
+            "母体 m/z 应对应反应物的分子离子峰。项目中的数值只是上次保存的预设，不是软件通用默认值。",
+            self.parent_selection_banner,
+        )
+        banner_text.setObjectName("ProjectBoundaryText")
+        banner_text.setWordWrap(True)
+        banner_layout.addWidget(banner_title)
+        banner_layout.addWidget(banner_text)
+        cfg_layout.addWidget(self.parent_selection_banner, 0, 0, 1, 6)
+
+        cfg_layout.addWidget(QtWidgets.QLabel("母体分子离子 m/z:"), 1, 0)
         self.spin_parent_mz = QtWidgets.QSpinBox()
-        self.spin_parent_mz.setToolTip("母体物种（反应物）的质量数")
+        self.spin_parent_mz.setToolTip("母体反应物的分子离子质量数；0 表示尚未设置")
         self.spin_parent_mz.setRange(0, 500)
         self.spin_parent_mz.setSpecialValueText("未设置")
         self.spin_parent_mz.setValue(self.settings.parent_mz)
         self.spin_parent_mz.valueChanged.connect(self._on_parent_mz_changed)
-        cfg_layout.addWidget(self.spin_parent_mz, 0, 1)
-        cfg_layout.addWidget(QtWidgets.QLabel("母体物种:"), 1, 0)
+        cfg_layout.addWidget(self.spin_parent_mz, 1, 1)
+
+        self.btn_select_parent_mz = QtWidgets.QPushButton("从数据选择")
+        self.btn_select_parent_mz.setObjectName("BrowseButton")
+        self.btn_select_parent_mz.setToolTip("列出温度扫描或 PIE 结果中实际出现的 m/z")
+        self.btn_select_parent_mz.clicked.connect(self._select_parent_mz_from_data)
+        cfg_layout.addWidget(self.btn_select_parent_mz, 1, 2)
+
+        self.btn_confirm_parent_mz = QtWidgets.QPushButton("确认母体")
+        self.btn_confirm_parent_mz.setObjectName("PrimaryButton")
+        self.btn_confirm_parent_mz.clicked.connect(self._confirm_parent_mz)
+        cfg_layout.addWidget(self.btn_confirm_parent_mz, 1, 3)
+
+        self.lbl_parent_mz_status = QtWidgets.QLabel("")
+        self.lbl_parent_mz_status.setObjectName("ParentSelectionStatus")
+        self.lbl_parent_mz_status.setWordWrap(True)
+        cfg_layout.addWidget(self.lbl_parent_mz_status, 1, 4, 1, 2)
+
+        cfg_layout.addWidget(QtWidgets.QLabel("母体物种:"), 2, 0)
         self.combo_parent_species = QtWidgets.QComboBox()
         self.combo_parent_species.setToolTip("在当前母体质量数下选择具体参考母体物种")
         self.combo_parent_species.currentIndexChanged.connect(self._on_parent_species_changed)
-        cfg_layout.addWidget(self.combo_parent_species, 1, 1)
+        cfg_layout.addWidget(self.combo_parent_species, 2, 1, 1, 2)
         self.lbl_parent_info = QtWidgets.QLabel("")
-        self.lbl_parent_info.setStyleSheet("color: #6495ed;")
-        cfg_layout.addWidget(self.lbl_parent_info, 1, 2, 1, 2)
+        self.lbl_parent_info.setObjectName("ProjectHint")
+        cfg_layout.addWidget(self.lbl_parent_info, 2, 3, 1, 3)
 
-        cfg_layout.addWidget(QtWidgets.QLabel("参考温度 T₀ (°C):"), 2, 0)
+        cfg_layout.addWidget(QtWidgets.QLabel("参考温度 T₀ (°C):"), 3, 0)
         self.spin_parent_t0 = QtWidgets.QSpinBox()
         self.spin_parent_t0.setToolTip("选定一个参考温度点，用于计算母体摩尔分数的基准")
         self.spin_parent_t0.setRange(0, 2000)
         self.spin_parent_t0.setValue(int(self.settings.reference_temperature or 550))
-        cfg_layout.addWidget(self.spin_parent_t0, 2, 1)
-        cfg_layout.addWidget(QtWidgets.QLabel("初始摩尔分数 X(T₀):"), 3, 0)
+        cfg_layout.addWidget(self.spin_parent_t0, 3, 1)
+        cfg_layout.addWidget(QtWidgets.QLabel("初始摩尔分数 X(T₀):"), 3, 2)
         self.spin_parent_mf0 = QtWidgets.QDoubleSpinBox()
         self.spin_parent_mf0.setToolTip("母体物种在参考温度T₀处的摩尔分数（已知或假设值）")
         self.spin_parent_mf0.setRange(0.0, 1.0)
         self.spin_parent_mf0.setDecimals(6)
         self.spin_parent_mf0.setValue(self.settings.parent_initial_mf)
         self.spin_parent_mf0.setSingleStep(0.0001)
-        cfg_layout.addWidget(self.spin_parent_mf0, 3, 1)
-        cfg_layout.addWidget(QtWidgets.QLabel("光子能量 E (eV):"), 4, 0)
+        cfg_layout.addWidget(self.spin_parent_mf0, 3, 3)
+        cfg_layout.addWidget(QtWidgets.QLabel("光子能量 E (eV):"), 3, 4)
         self.spin_parent_energy = QtWidgets.QDoubleSpinBox()
         self.spin_parent_energy.setToolTip("实验使用的VUV光子能量 (eV)，用于查找物种在此能量下的光电离截面")
         self.spin_parent_energy.setRange(0.0, 30.0)
         self.spin_parent_energy.setDecimals(2)
         self.spin_parent_energy.setValue(self.settings.photon_energy)
         self.spin_parent_energy.setSingleStep(0.5)
-        cfg_layout.addWidget(self.spin_parent_energy, 4, 1)
-        cfg_layout.setColumnStretch(2, 1)
+        cfg_layout.addWidget(self.spin_parent_energy, 3, 5)
+        for column in (1, 3, 5):
+            cfg_layout.setColumnStretch(column, 1)
         layout.addWidget(cfg_group)
 
-        btn_calc_parent = QtWidgets.QPushButton("开始计算")
-        btn_calc_parent.clicked.connect(self._calc_parent_mole_fraction)
-        layout.addWidget(btn_calc_parent)
+        action_row = QtWidgets.QHBoxLayout()
+        self.lbl_parent_calc_hint = QtWidgets.QLabel("请先确认母体 m/z")
+        self.lbl_parent_calc_hint.setObjectName("ProjectHint")
+        action_row.addWidget(self.lbl_parent_calc_hint, 1)
+        self.btn_calc_parent = QtWidgets.QPushButton("计算母体摩尔分数")
+        self.btn_calc_parent.setObjectName("PrimaryButton")
+        self.btn_calc_parent.clicked.connect(self._calc_parent_mole_fraction)
+        action_row.addWidget(self.btn_calc_parent)
+        layout.addLayout(action_row)
 
         self.parent_result_table = QtWidgets.QTableWidget()
         self.parent_result_table.setColumnCount(4)
@@ -637,7 +699,115 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         layout.addWidget(self.parent_result_table, 1)
 
         self._update_parent_species_list()
+        self._refresh_parent_selection_state()
         return widget
+
+    def _select_parent_mz_from_data(self) -> None:
+        values = self._detected_parent_mz_values()
+        if not values:
+            QtWidgets.QMessageBox.information(self, "尚无候选", "请先在“数据加载”中载入温度扫描或 PIE 结果。")
+            return
+        labels = [str(value) for value in values]
+        current = int(self.spin_parent_mz.value())
+        initial = values.index(current) if current in values else 0
+        selected, accepted = QtWidgets.QInputDialog.getItem(
+            self,
+            "选择母体分子离子",
+            "数据中出现的 m/z：",
+            labels,
+            initial,
+            False,
+        )
+        if not accepted or not selected:
+            return
+        self.spin_parent_mz.setValue(int(selected))
+
+    def _detected_parent_mz_values(self) -> list[int]:
+        values: set[int] = set()
+        for species in self.pie_species_data:
+            try:
+                mz = int(species.get("mz"))
+            except (TypeError, ValueError):
+                continue
+            if mz > 0:
+                values.add(mz)
+        for energy_data in self.temperature_scan_data.values():
+            for info in energy_data.values():
+                for mz in (info.get("precomputed_signals", {}) or {}).keys():
+                    try:
+                        value = int(mz)
+                    except (TypeError, ValueError):
+                        continue
+                    if value > 0:
+                        values.add(value)
+                for peak in info.get("peaks_info", []) or []:
+                    try:
+                        value = int(peak.get("mz_rounded"))
+                    except (TypeError, ValueError):
+                        continue
+                    if value > 0:
+                        values.add(value)
+        return sorted(values)
+
+    def _confirm_parent_mz(self) -> None:
+        mz = int(self.spin_parent_mz.value())
+        if mz <= 0:
+            QtWidgets.QMessageBox.warning(self, "尚未设置", "请先输入母体分子离子 m/z，或从已加载数据中选择。")
+            return
+        has_loaded_data = bool(self.temperature_scan_data or self.pie_species_data)
+        if has_loaded_data and not self._loaded_data_has_mz(mz):
+            QtWidgets.QMessageBox.warning(self, "数据中未找到", f"已加载数据中没有检测到 m/z {mz}，请检查母体设置。")
+            return
+        self._parent_mz_confirmed = True
+        self._refresh_parent_selection_state()
+
+    def _refresh_parent_selection_state(self) -> None:
+        if not hasattr(self, "spin_parent_mz") or not hasattr(self, "lbl_parent_mz_status"):
+            return
+        mz = int(self.spin_parent_mz.value())
+        has_loaded_data = bool(self.temperature_scan_data or self.pie_species_data)
+        exists_in_data = self._loaded_data_has_mz(mz) if has_loaded_data and mz > 0 else False
+        origin_label = {
+            "project": "项目预设",
+            "manual": "本页设置",
+            "saved": "历史设置",
+            "unset": "未设置",
+        }.get(self._parent_mz_origin, "本页设置")
+
+        if mz <= 0:
+            state = "pending"
+            text = "未设置：请从数据选择或手动输入"
+        elif has_loaded_data and not exists_in_data:
+            state = "warning"
+            text = f"{origin_label} m/z {mz}：当前数据中未找到"
+            self._parent_mz_confirmed = False
+        elif not has_loaded_data:
+            state = "pending"
+            text = f"{origin_label} m/z {mz}：加载数据后验证"
+        elif self._parent_mz_confirmed:
+            state = "complete"
+            text = f"已确认 m/z {mz}，数据中存在"
+        else:
+            state = "active"
+            text = f"{origin_label} m/z {mz}，数据中存在，请确认"
+
+        self.lbl_parent_mz_status.setText(text)
+        self.lbl_parent_mz_status.setProperty("selectionState", state)
+        self.lbl_parent_mz_status.style().unpolish(self.lbl_parent_mz_status)
+        self.lbl_parent_mz_status.style().polish(self.lbl_parent_mz_status)
+        self.btn_select_parent_mz.setEnabled(bool(self._detected_parent_mz_values()))
+        self.btn_confirm_parent_mz.setEnabled(mz > 0 and (not has_loaded_data or exists_in_data))
+        can_calculate = mz > 0 and self._parent_mz_confirmed and has_loaded_data and exists_in_data
+        self.btn_calc_parent.setEnabled(can_calculate)
+        if can_calculate:
+            calc_hint = "母体已确认，可按当前参考温度和初始摩尔分数计算"
+        elif has_loaded_data and exists_in_data:
+            calc_hint = "数据已加载，请确认母体分子离子 m/z"
+        elif has_loaded_data:
+            calc_hint = "当前母体 m/z 不在已加载数据中，请重新选择"
+        else:
+            calc_hint = "请先加载数据，再选择母体分子离子 m/z"
+        self.lbl_parent_calc_hint.setText(calc_hint)
 
     def _available_parent_mz_values(self) -> list[int]:
         mz_values: set[int] = set()
@@ -722,8 +892,12 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
     def _on_parent_mz_changed(self):
         self.settings.parent_mz = self.spin_parent_mz.value()
+        if not self._setting_parent_mz:
+            self._parent_mz_origin = "manual" if self.spin_parent_mz.value() > 0 else "unset"
+            self._parent_mz_confirmed = False
         self._update_parent_species_list()
         self._refresh_energy_parent_table()
+        self._refresh_parent_selection_state()
 
     def _on_parent_species_changed(self):
         selected = self._selected_parent_species_name()
@@ -751,6 +925,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self._populate_parent_species_combo(self.combo_parent_species, mz, include_auto=True)
         self._set_combo_current_data(self.combo_parent_species, previous)
         self._on_parent_species_changed()
+        self._refresh_parent_selection_state()
 
     def _refresh_energy_parent_table(self):
         if not hasattr(self, "energy_parent_table"):
@@ -938,6 +1113,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         ctrl_layout.setContentsMargins(10, 8, 10, 8)
         ctrl_layout.setSpacing(8)
         btn_calc_auto = QtWidgets.QPushButton("开始计算")
+        btn_calc_auto.setObjectName("PrimaryButton")
         btn_calc_auto.clicked.connect(self._calculate_auto_mf)
         ctrl_layout.addWidget(btn_calc_auto)
         ctrl_layout.addWidget(QtWidgets.QLabel("曲线显示:"))
@@ -949,7 +1125,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.combo_auto_plot_scope.currentIndexChanged.connect(self._plot_all_auto_mf)
         ctrl_layout.addWidget(self.combo_auto_plot_scope)
         self.lbl_auto_status = QtWidgets.QLabel("未计算")
-        self.lbl_auto_status.setStyleSheet("color: rgba(232, 232, 232, 0.6);")
+        self.lbl_auto_status.setObjectName("ProjectHint")
         ctrl_layout.addWidget(self.lbl_auto_status, 1)
         layout.addWidget(ctrl_bar)
 
@@ -999,16 +1175,19 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
         btn_layout = QtWidgets.QHBoxLayout()
         btn_export = QtWidgets.QPushButton("导出结果 (Excel/CSV)")
+        btn_export.setObjectName("ExportButton")
         btn_export.clicked.connect(self._export_results)
         btn_layout.addWidget(btn_export)
         btn_export_plot = QtWidgets.QPushButton("导出图表 (PNG/PDF)")
+        btn_export_plot.setObjectName("ExportButton")
         btn_export_plot.clicked.connect(self._export_plot)
         btn_layout.addWidget(btn_export_plot)
         btn_refresh_results = QtWidgets.QPushButton("刷新结果")
+        btn_refresh_results.setObjectName("BrowseButton")
         btn_refresh_results.clicked.connect(self._refresh_results_view)
         btn_layout.addWidget(btn_refresh_results)
         self.lbl_results_status = QtWidgets.QLabel("暂无结果")
-        self.lbl_results_status.setStyleSheet("color: rgba(232, 232, 232, 0.6);")
+        self.lbl_results_status.setObjectName("ProjectHint")
         btn_layout.addWidget(self.lbl_results_status, 1)
         btn_layout.addStretch()
         layout.addLayout(btn_layout)
@@ -2255,6 +2434,9 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
     def _calc_parent_mole_fraction(self):
         if not self.expansion_coefficients:
             QtWidgets.QMessageBox.warning(self, "提示", "请先在参数设置中计算膨胀系数")
+            return
+        if not self._parent_mz_confirmed:
+            QtWidgets.QMessageBox.warning(self, "提示", "请先确认母体分子离子 m/z，再开始计算。")
             return
         self.set_busy(True, "正在计算母体摩尔分数...")
         try:

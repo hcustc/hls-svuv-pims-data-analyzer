@@ -157,18 +157,7 @@ class IonizationEnergyLookupWidget(QtWidgets.QWidget, DataFrameTableMixin):
         tables_splitter.addWidget(determination_group)
         tables_splitter.setStretchFactor(0, 1)
         tables_splitter.setStretchFactor(1, 1)
-        layout.addWidget(tables_splitter, stretch=2)
-
-        prediction_group = QtWidgets.QGroupBox("IE预测模型输出")
-        prediction_layout = QtWidgets.QVBoxLayout(prediction_group)
-        prediction_layout.setContentsMargins(8, 8, 8, 8)
-        self.model_prediction_table = QtWidgets.QTableWidget()
-        self.model_prediction_table.setWordWrap(False)
-        self.model_prediction_table.setAlternatingRowColors(True)
-        self.model_prediction_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
-        prediction_layout.addWidget(self.model_prediction_table)
-        layout.addWidget(prediction_group, stretch=1)
-        self.set_model_prediction_rows([])
+        layout.addWidget(tables_splitter, stretch=1)
 
     def set_busy(self, busy: bool, message: str) -> None:
         self.query_button.setDisabled(busy)
@@ -230,15 +219,6 @@ class IonizationEnergyLookupWidget(QtWidgets.QWidget, DataFrameTableMixin):
 
     def on_query_failed(self, message: str) -> None:
         QtWidgets.QMessageBox.warning(self, "错误", message)
-
-    def set_model_prediction_rows(self, rows: list[dict]) -> None:
-        self.set_dataframe(
-            self.model_prediction_table,
-            pd.DataFrame(
-                rows,
-                columns=["模型", "预测IE(eV)", "不确定度", "适用域", "输入", "备注"],
-            ),
-        )
 
     def on_candidate_selection_changed(self) -> None:
         row = self.candidate_table.currentRow()

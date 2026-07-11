@@ -84,7 +84,7 @@ class CoreToolsDialog(QtWidgets.QDialog):
             "pics": self.tabs.addTab(PICSCalculatorDialog(calibration, self.normalization_settings, self), "PICS计算"),
             "pics_import": self.tabs.addTab(PICSImportWidget(self), "PICS导入"),
             "ionization": self.tabs.addTab(IonizationEnergyLookupWidget(self), "电离能查询"),
-            "isotope": self.tabs.addTab(IsotopeAbundanceDialog(self), "分子/同位素"),
+            "isotope": self.tabs.addTab(IsotopeAbundanceDialog(self), "分子式与质量分析"),
         }
         self.tabs.setCurrentIndex(tab_indexes.get(initial_tab, 0))
         layout.addWidget(self.tabs)

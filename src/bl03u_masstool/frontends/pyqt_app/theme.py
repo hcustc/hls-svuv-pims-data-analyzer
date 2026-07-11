@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from PyQt6 import QtWidgets
+from PyQt6 import QtGui, QtWidgets
 
 
 @dataclass(frozen=True)
@@ -70,6 +70,22 @@ QWidget {{
 QMainWindow, QDialog {{
     background: {t.app_bg};
 }}
+
+QToolTip {{
+    background: {t.text_primary};
+    color: {t.text_inverse};
+    border: 1px solid {t.text_primary};
+    border-radius: 4px;
+    padding: 4px 7px;
+}}
+
+QStatusBar {{
+    background: {t.panel_bg};
+    color: {t.text_secondary};
+    border-top: 1px solid {t.border};
+}}
+
+QStatusBar::item {{ border: 0; }}
 
 QLabel,
 QCheckBox {{
@@ -308,6 +324,44 @@ QLabel#ProjectParamSummary {{
     padding: 4px 7px;
 }}
 
+QLabel#ProjectBoundaryTitle {{
+    background: transparent;
+    color: {t.primary_hover};
+    font-weight: 700;
+}}
+
+QFrame#ParentSelectionBanner {{
+    background: {t.panel_subtle};
+    border: 1px solid {t.border};
+    border-radius: 6px;
+}}
+
+QLabel#ParentSelectionStatus {{
+    background: {t.panel_subtle};
+    border: 1px solid {t.border};
+    border-radius: 5px;
+    color: {t.text_secondary};
+    padding: 4px 7px;
+}}
+
+QLabel#ParentSelectionStatus[selectionState="complete"] {{
+    background: #ecfdf5;
+    border-color: #a7f3d0;
+    color: #047857;
+}}
+
+QLabel#ParentSelectionStatus[selectionState="active"] {{
+    background: {t.primary_soft};
+    border-color: {t.primary_border};
+    color: {t.primary_hover};
+}}
+
+QLabel#ParentSelectionStatus[selectionState="warning"] {{
+    background: {t.warning_bg};
+    border-color: {t.warning_border};
+    color: #a16207;
+}}
+
 QWidget#PageNav {{
     background: {t.panel_bg};
     border: 1px solid {t.border};
@@ -395,6 +449,17 @@ QGroupBox {{
     border-radius: 6px;
     margin-top: 8px;
     padding: 8px;
+    background: {t.panel_bg};
+    font-weight: 600;
+}}
+
+QGroupBox::title {{
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    left: 8px;
+    padding: 0 4px;
+    color: {t.text_primary};
+    background: {t.panel_bg};
 }}
 
 QFrame#PanelFrame {{
@@ -404,20 +469,27 @@ QFrame#PanelFrame {{
 }}
 
 QPushButton {{
-    background: {t.primary};
-    color: {t.text_inverse};
-    border: 1px solid {t.primary_hover};
+    background: {t.panel_bg};
+    color: {t.text_body};
+    border: 1px solid {t.border};
     border-radius: 5px;
     padding: 4px 10px;
     min-height: 20px;
 }}
 
 QPushButton:hover {{
-    background: {t.primary_hover};
+    background: {t.primary_soft};
+    color: {t.primary_hover};
+    border-color: {t.primary_border};
 }}
 
 QPushButton:pressed {{
-    background: {t.primary_pressed};
+    background: {t.primary_softer};
+}}
+
+QPushButton:focus,
+QToolButton:focus {{
+    border: 2px solid {t.border_focus};
 }}
 
 QPushButton:disabled {{
@@ -462,6 +534,24 @@ QPushButton#PrimaryToolbarButton {{
     padding: 4px 12px;
     min-height: 20px;
     font-weight: 600;
+}}
+
+QPushButton#PrimaryButton {{
+    background: {t.primary};
+    color: {t.text_inverse};
+    border-color: {t.primary_hover};
+    padding: 4px 12px;
+    font-weight: 700;
+}}
+
+QPushButton#PrimaryButton:hover {{
+    background: {t.primary_hover};
+}}
+
+QPushButton#PrimaryButton:disabled {{
+    background: {t.disabled_bg};
+    border-color: {t.disabled_bg};
+    color: {t.disabled_text};
 }}
 
 QPushButton#PrimaryToolbarButton:hover {{
@@ -548,6 +638,39 @@ QToolButton#PageCard {{
     font-weight: 700;
 }}
 
+QToolButton#ProjectStageButton {{
+    background: {t.panel_subtle};
+    color: {t.text_secondary};
+    border: 1px solid {t.border};
+    border-radius: 6px;
+    padding: 6px 8px;
+    min-height: 24px;
+    font-weight: 600;
+}}
+
+QToolButton#ProjectStageButton[stageState="complete"] {{
+    background: #ecfdf5;
+    color: #047857;
+    border-color: #a7f3d0;
+}}
+
+QToolButton#ProjectStageButton[stageState="active"] {{
+    background: {t.primary_soft};
+    color: {t.primary_hover};
+    border-color: {t.primary_border};
+    font-weight: 700;
+}}
+
+QToolButton#ProjectStageButton[stageState="warning"] {{
+    background: {t.warning_bg};
+    color: #a16207;
+    border-color: {t.warning_border};
+}}
+
+QToolButton#ProjectStageButton:hover {{
+    border-color: {t.primary};
+}}
+
 QToolButton#WorkspaceTab:hover,
 QToolButton#PageCard:hover {{
     background: {t.primary_soft};
@@ -587,6 +710,7 @@ QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {{
 
 QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {{
     border-color: {t.border_focus};
+    background: #ffffff;
 }}
 
 QLineEdit#CurveSearch {{
@@ -599,7 +723,13 @@ QTableWidget, QListWidget, QTreeWidget {{
     border: 1px solid {t.border};
     border-radius: 5px;
     gridline-color: {t.gridline};
+    selection-background-color: {t.selection};
+    selection-color: {t.text_primary};
+    outline: 0;
 }}
+
+QTableWidget::item {{ padding: 4px 6px; }}
+QTableWidget::item:selected {{ background: {t.selection}; color: {t.text_primary}; }}
 
 QTreeWidget::item, QListWidget::item {{
     padding: 4px 6px;
@@ -650,6 +780,31 @@ QHeaderView::section {{
     padding: 4px;
     font-weight: 600;
 }}
+
+QScrollArea {{ border: 0; background: transparent; }}
+
+QScrollBar:vertical {{ background: transparent; width: 11px; margin: 2px; }}
+QScrollBar::handle:vertical {{ background: #cbd5e1; border-radius: 4px; min-height: 28px; }}
+QScrollBar::handle:vertical:hover {{ background: #94a3b8; }}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: transparent; }}
+
+QScrollBar:horizontal {{ background: transparent; height: 11px; margin: 2px; }}
+QScrollBar::handle:horizontal {{ background: #cbd5e1; border-radius: 4px; min-width: 28px; }}
+QScrollBar::handle:horizontal:hover {{ background: #94a3b8; }}
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0; }}
+QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{ background: transparent; }}
+
+QProgressBar {{
+    background: {t.panel_alt};
+    border: 1px solid {t.border};
+    border-radius: 5px;
+    text-align: center;
+    color: {t.text_primary};
+    min-height: 18px;
+}}
+
+QProgressBar::chunk {{ background: {t.primary}; border-radius: 4px; }}
 
 QTabWidget::pane {{
     border: 1px solid {t.border};
@@ -726,4 +881,7 @@ APP_QSS = _build_qss(LIGHT_THEME)
 
 def apply_application_theme(app: QtWidgets.QApplication) -> None:
     app.setStyle("Fusion")
+    font = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.SystemFont.GeneralFont)
+    font.setPointSizeF(10.0)
+    app.setFont(font)
     app.setStyleSheet(APP_QSS)

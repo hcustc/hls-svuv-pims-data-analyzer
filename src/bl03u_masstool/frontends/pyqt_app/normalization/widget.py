@@ -1368,6 +1368,10 @@ class FunctionDefaultsWidget(QtWidgets.QWidget):
     - PIE 拟合、温度扫描、PICS 计算、摩尔分数等功能的默认参数
     """
     settings_saved = QtCore.pyqtSignal()
+    navigate_requested = QtCore.pyqtSignal(str)
+
+    _PAGE_BY_TAB = ("spectrum", "temperature", "pie", "pics", "mole_fraction")
+    _PAGE_LABEL_BY_TAB = ("质谱工作台", "温度扫描", "PIE 拟合", "PICS 计算", "摩尔分数")
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1376,7 +1380,17 @@ class FunctionDefaultsWidget(QtWidgets.QWidget):
 
         root = QtWidgets.QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
+        root.setSpacing(6)
+
+        action_row = QtWidgets.QHBoxLayout()
+        action_row.setContentsMargins(0, 0, 0, 0)
+        action_row.addStretch(1)
+        self.open_function_page_button = QtWidgets.QPushButton(self)
+        self.open_function_page_button.setObjectName("BrowseButton")
+        self.open_function_page_button.setToolTip("打开当前默认值对应的功能页面")
+        self.open_function_page_button.clicked.connect(self._request_current_function_page)
+        action_row.addWidget(self.open_function_page_button)
+        root.addLayout(action_row)
 
         # 使用标签页组织功能参数
         self.tabs = QtWidgets.QTabWidget()
@@ -1385,6 +1399,7 @@ class FunctionDefaultsWidget(QtWidgets.QWidget):
         self.tabs.addTab(self._build_pie_fitting_tab(), "PIE 拟合")
         self.tabs.addTab(self._build_pics_tab(), "PICS 计算")
         self.tabs.addTab(self._build_mole_fraction_tab(), "摩尔分数")
+        self.tabs.currentChanged.connect(self._refresh_function_page_button)
         root.addWidget(self.tabs, 1)
 
         # 底部工具栏
@@ -1392,7 +1407,8 @@ class FunctionDefaultsWidget(QtWidgets.QWidget):
         bl = QtWidgets.QHBoxLayout(bottom_bar)
         bl.setContentsMargins(8, 4, 8, 4)
         bl.setSpacing(8)
-        self.save_button = QtWidgets.QPushButton("💾  保存功能默认参数")
+        self.save_button = QtWidgets.QPushButton("保存为项目默认值")
+        self.save_button.setObjectName("PrimaryButton")
         self.save_button.setFixedHeight(30)
         self.save_button.clicked.connect(self.save_settings)
         self.status_label = QtWidgets.QLabel("")
@@ -1401,7 +1417,18 @@ class FunctionDefaultsWidget(QtWidgets.QWidget):
         bl.addWidget(self.status_label, 1)
         root.addWidget(bottom_bar)
 
+        self._refresh_function_page_button(0)
         self.load_from_settings()
+
+    def _refresh_function_page_button(self, index: int) -> None:
+        if not 0 <= index < len(self._PAGE_LABEL_BY_TAB):
+            return
+        self.open_function_page_button.setText(f"前往{self._PAGE_LABEL_BY_TAB[index]}")
+
+    def _request_current_function_page(self) -> None:
+        index = self.tabs.currentIndex()
+        if 0 <= index < len(self._PAGE_BY_TAB):
+            self.navigate_requested.emit(self._PAGE_BY_TAB[index])
 
     def _build_peak_detection_tab(self) -> QtWidgets.QWidget:
         """寻峰积分参数标签页"""
@@ -1847,5 +1874,5 @@ class FunctionDefaultsWidget(QtWidgets.QWidget):
         if self.project_settings:
             ProjectSettingsManager().set(self.project_settings)
             ProjectSettingsManager().save()
-        self.status_label.setText("功能默认参数已保存")
+        self.status_label.setText("项目默认值已保存，并同步到功能页")
         self.settings_saved.emit()
