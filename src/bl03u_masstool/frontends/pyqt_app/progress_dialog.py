@@ -39,33 +39,19 @@ class ProgressDialog(QtWidgets.QDialog):
         self.progress_bar.setMinimum(0)
         self.progress_bar.setMaximum(100)
         self.progress_bar.setValue(0)
-        self.progress_bar.setStyleSheet(
-            """
-            QProgressBar {
-                border: 1px solid #ccc;
-                border-radius: 5px;
-                text-align: center;
-                background-color: #f0f0f0;
-            }
-            QProgressBar::chunk {
-                background-color: #4CAF50;
-                border-radius: 4px;
-            }
-            """
-        )
         layout.addWidget(self.progress_bar)
 
         # Message label
         self.message_label = QtWidgets.QLabel("")
         self.message_label.setWordWrap(True)
-        self.message_label.setStyleSheet("color: #333; font-size: 12px;")
+        self.message_label.setObjectName("ProjectHint")
         layout.addWidget(self.message_label)
 
         # Spacer
         layout.addStretch()
 
         # Cancel button
-        cancel_button = QtWidgets.QPushButton("Cancel")
+        cancel_button = QtWidgets.QPushButton("取消")
         cancel_button.setMaximumWidth(100)
         cancel_button.clicked.connect(self.reject)
         layout.addWidget(cancel_button, alignment=Qt.AlignmentFlag.AlignRight)

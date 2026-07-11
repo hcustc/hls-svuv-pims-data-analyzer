@@ -84,9 +84,11 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
         self.database: list[dict] = []
         self.mz_index: dict[int, list[int]] = {}
+        self.data_worker: WorkerThread | None = None
         self._load_database()
 
         self._init_ui()
+        self._load_no_cross_sections()
 
     def set_project_settings(self, ps: ProjectSettings) -> None:
         """Apply ProjectSettings defaults to PICSCalculatorDialog controls."""
@@ -120,6 +122,8 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
     def _init_ui(self):
         layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
 
         # 摘要栏
         self.summary_bar = QtWidgets.QWidget()
@@ -138,28 +142,63 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
         summary_layout.addWidget(self.summary_project_label)
         summary_layout.addWidget(self.summary_system_label)
         summary_layout.addWidget(self.summary_data_label)
+        summary_layout.addStretch(1)
+        self.summary_import_button = QtWidgets.QPushButton("导入 PICS 数据")
+        self.summary_import_button.setObjectName("BrowseButton")
+        self.summary_import_button.setToolTip("打开 PICS 导入页面，向本地截面数据库添加外部数据")
+        self.summary_import_button.clicked.connect(self._open_pics_import)
+        summary_layout.addWidget(self.summary_import_button)
         self.summary_open_project_btn = QtWidgets.QPushButton("项目管理")
-        self.summary_open_project_btn.setObjectName("WorkflowButton")
+        self.summary_open_project_btn.setObjectName("BrowseButton")
         self.summary_open_project_btn.clicked.connect(self._open_project_settings)
         summary_layout.addWidget(self.summary_open_project_btn)
-        summary_layout.addStretch()
         layout.addWidget(self.summary_bar)
 
         self.tabs = QtWidgets.QTabWidget()
-        self.tabs.addTab(self._create_species_tab(), "1. 物种信息")
-        self.tabs.addTab(self._create_data_tab(), "2. 信号数据")
-        self.tabs.addTab(self._create_params_tab(), "3. 参数设置")
-        self.tabs.addTab(self._create_results_tab(), "4. 计算结果")
-        layout.addWidget(self.tabs)
+        self.tabs.addTab(self._create_species_tab(), "1. 物种与参考")
+        self.tabs.addTab(self._create_data_tab(), "2. PIE 信号")
+        self.tabs.addTab(self._create_params_tab(), "3. 计算设置")
+        self.tabs.addTab(self._create_results_tab(), "4. 结果")
+        self.tabs.currentChanged.connect(self._refresh_workflow_status)
+        layout.addWidget(self.tabs, 1)
 
-        self.status_label = QtWidgets.QLabel("就绪")
-        self.status_label.setObjectName("ProjectStatus")
-        layout.addWidget(self.status_label)
+        status_bar = QtWidgets.QWidget(self)
+        status_bar.setObjectName("ProjectActionBar")
+        status_layout = QtWidgets.QHBoxLayout(status_bar)
+        status_layout.setContentsMargins(10, 6, 10, 6)
+        self.workflow_stage_label = QtWidgets.QLabel("步骤 1/4 · 填写物种与参考信息")
+        self.workflow_stage_label.setObjectName("ReadoutValue")
+        status_layout.addWidget(self.workflow_stage_label)
+        self.status_label = QtWidgets.QLabel("请填写待计算物种信息")
+        self.status_label.setObjectName("InlineStatusLabel")
+        status_layout.addWidget(self.status_label, 1)
+        layout.addWidget(status_bar)
 
     def set_busy(self, busy: bool, message: str) -> None:
         """Disable UI during long-running computation."""
-        self.status_label.setText(message)
+        self._set_status(message, "busy" if busy else "")
         self.tabs.setDisabled(busy)
+
+    def _set_status(self, message: str, status: str = "") -> None:
+        self.status_label.setText(message)
+        self.status_label.setProperty("status", status)
+        self.status_label.style().unpolish(self.status_label)
+        self.status_label.style().polish(self.status_label)
+
+    def _open_pics_import(self) -> None:
+        win = self.window()
+        if hasattr(win, "switch_workspace_page"):
+            win.switch_workspace_page("pics_import")
+
+    def _refresh_workflow_status(self, index: int) -> None:
+        labels = (
+            "步骤 1/4 · 填写物种与参考信息",
+            "步骤 2/4 · 加载并检查 PIE 信号",
+            "步骤 3/4 · 确认计算设置",
+            "步骤 4/4 · 计算并导出结果",
+        )
+        if 0 <= index < len(labels):
+            self.workflow_stage_label.setText(labels[index])
 
     def _create_species_tab(self):
         widget = QtWidgets.QWidget()
@@ -175,6 +214,10 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
     def _create_species_basics_tab(self):
         widget = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(widget)
+        layout.setSpacing(8)
+
+        top_row = QtWidgets.QHBoxLayout()
+        top_row.setSpacing(8)
 
         new_group = QtWidgets.QGroupBox("新物种信息")
         new_layout = QtWidgets.QFormLayout(new_group)
@@ -202,7 +245,7 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.double_new_ie.setSpecialValueText("未知")
         new_layout.addRow("电离能 (eV):", self.double_new_ie)
 
-        layout.addWidget(new_group)
+        top_row.addWidget(new_group, 2)
 
         no_group = QtWidgets.QGroupBox("参考物种 NO")
         no_layout = QtWidgets.QFormLayout(no_group)
@@ -218,7 +261,8 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.spin_no_mz.setEnabled(False)
         no_layout.addRow("质量数 m/z:", self.spin_no_mz)
 
-        layout.addWidget(no_group)
+        top_row.addWidget(no_group, 1)
+        layout.addLayout(top_row)
 
         mf_group = QtWidgets.QGroupBox("摩尔分数 (输入量比例)")
         mf_layout = QtWidgets.QFormLayout(mf_group)
@@ -239,10 +283,14 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
         layout.addWidget(mf_group)
 
-        btn_update = QtWidgets.QPushButton("更新参数")
-        btn_update.setToolTip("将当前设置的参数应用到计算中")
-        btn_update.clicked.connect(self._update_parameters)
-        layout.addWidget(btn_update)
+        self.species_continue_button = QtWidgets.QPushButton("保存物种信息并继续")
+        self.species_continue_button.setObjectName("PrimaryButton")
+        self.species_continue_button.setToolTip("检查当前输入并前往 PIE 信号加载")
+        self.species_continue_button.clicked.connect(self._confirm_species_and_continue)
+        action_row = QtWidgets.QHBoxLayout()
+        action_row.addStretch(1)
+        action_row.addWidget(self.species_continue_button)
+        layout.addLayout(action_row)
         layout.addStretch()
 
         return widget
@@ -260,14 +308,15 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.no_cs_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
         no_cs_layout.addWidget(self.no_cs_table)
 
-        self.lbl_no_cs_status = QtWidgets.QLabel("")
-        self.lbl_no_cs_status.setStyleSheet("color: #6495ed;")
+        self.lbl_no_cs_status = QtWidgets.QLabel("正在读取数据库…")
+        self.lbl_no_cs_status.setObjectName("InlineStatusLabel")
         no_cs_layout.addWidget(self.lbl_no_cs_status)
 
-        btn_load_no_cs = QtWidgets.QPushButton("从数据库加载NO光电离截面")
-        btn_load_no_cs.setToolTip("从PICS截面数据库加载NO在不同光子能量下的光电离截面数据")
-        btn_load_no_cs.clicked.connect(self._load_no_cross_sections)
-        no_cs_layout.addWidget(btn_load_no_cs)
+        self.btn_load_no_cs = QtWidgets.QPushButton("刷新 NO 截面数据")
+        self.btn_load_no_cs.setObjectName("BrowseButton")
+        self.btn_load_no_cs.setToolTip("重新读取本地 PICS 数据库中的 NO 截面")
+        self.btn_load_no_cs.clicked.connect(self.refresh_database)
+        no_cs_layout.addWidget(self.btn_load_no_cs)
 
         layout.addWidget(no_cs_group)
 
@@ -283,16 +332,20 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
         folder_top = QtWidgets.QHBoxLayout()
         self.txt_folder_path = QtWidgets.QLineEdit()
         self.txt_folder_path.setReadOnly(True)
+        self.txt_folder_path.setPlaceholderText("选择包含 PIE 光谱文件的目录")
         folder_top.addWidget(self.txt_folder_path)
-        btn_browse = QtWidgets.QPushButton("浏览")
-        btn_browse.clicked.connect(self._browse_pie_folder)
-        folder_top.addWidget(btn_browse)
-        btn_load_data = QtWidgets.QPushButton("加载PIE数据")
-        btn_load_data.clicked.connect(self._load_pie_data)
-        folder_top.addWidget(btn_load_data)
+        self.btn_browse = QtWidgets.QPushButton("选择目录")
+        self.btn_browse.setObjectName("BrowseButton")
+        self.btn_browse.clicked.connect(self._browse_pie_folder)
+        folder_top.addWidget(self.btn_browse)
+        self.btn_load_data = QtWidgets.QPushButton("加载并提取信号")
+        self.btn_load_data.setObjectName("PrimaryButton")
+        self.btn_load_data.clicked.connect(self._load_pie_data)
+        folder_top.addWidget(self.btn_load_data)
         folder_layout.addLayout(folder_top)
 
-        self.lbl_folder_status = QtWidgets.QLabel("")
+        self.lbl_folder_status = QtWidgets.QLabel("尚未加载 PIE 数据")
+        self.lbl_folder_status.setObjectName("InlineStatusLabel")
         folder_layout.addWidget(self.lbl_folder_status)
 
         layout.addWidget(folder_group)
@@ -304,6 +357,9 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.signal_table.setColumnCount(5)
         self.signal_table.setHorizontalHeaderLabels(["光子能量(eV)", f"{self.new_species_name}信号", "NO信号", "光电流(nA)", "温度(°C)"])
         self.signal_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
+        self.signal_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.signal_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.signal_table.setAlternatingRowColors(True)
         signal_layout.addWidget(self.signal_table)
 
         layout.addWidget(signal_group)
@@ -339,15 +395,17 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.chk_enable_io_correction.setChecked(True)
         io_layout.addWidget(self.chk_enable_io_correction)
 
-        io_note = QtWidgets.QLabel("说明：如果光谱文件中包含光电流(IO)数据，程序会自动用其进行信号校正。\n校正公式：S_校正 = S_原始 / IO")
-        io_note.setStyleSheet("color: #6495ed;")
+        io_note = QtWidgets.QLabel("光谱包含 IO 时，物种与 NO 信号将同时除以 IO；信号比本身保持不变。")
+        io_note.setObjectName("HintLabel")
+        io_note.setWordWrap(True)
         io_layout.addWidget(io_note)
 
         layout.addWidget(io_group)
 
-        note_label = QtWidgets.QLabel("注意：由于PIE数据是在相同温度条件下采集的，因此不需要设置膨胀系数。")
-        note_label.setStyleSheet("color: #6495ed;")
+        note_label = QtWidgets.QLabel("PIE 数据按相同温度条件处理，因此这里不应用温度膨胀系数。")
+        note_label.setObjectName("HintLabel")
         layout.addWidget(note_label)
+        layout.addStretch(1)
 
         return widget
 
@@ -355,14 +413,21 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
         widget = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(widget)
 
-        calc_btn = QtWidgets.QPushButton("开始计算")
-        calc_btn.clicked.connect(self._calculate_pics)
-        layout.addWidget(calc_btn)
+        result_actions = QtWidgets.QHBoxLayout()
+        self.calc_btn = QtWidgets.QPushButton("计算 PICS")
+        self.calc_btn.setObjectName("PrimaryButton")
+        self.calc_btn.clicked.connect(self._calculate_pics)
+        result_actions.addWidget(self.calc_btn)
+        result_actions.addStretch(1)
+        layout.addLayout(result_actions)
 
         self.result_table = QtWidgets.QTableWidget()
         self.result_table.setColumnCount(4)
         self.result_table.setHorizontalHeaderLabels(["光子能量(eV)", "温度(°C)", "PICS (Mb)", "误差 (Mb)"])
         self.result_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
+        self.result_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.result_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.result_table.setAlternatingRowColors(True)
         layout.addWidget(self.result_table)
 
         stats_group = QtWidgets.QGroupBox("统计结果")
@@ -382,22 +447,38 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
         export_group = QtWidgets.QGroupBox("导出结果")
         export_layout = QtWidgets.QHBoxLayout(export_group)
 
-        btn_export_csv = QtWidgets.QPushButton("导出CSV")
-        btn_export_csv.clicked.connect(self._export_results_csv)
-        export_layout.addWidget(btn_export_csv)
+        self.btn_export_csv = QtWidgets.QPushButton("导出 CSV")
+        self.btn_export_csv.setObjectName("ExportButton")
+        self.btn_export_csv.setEnabled(False)
+        self.btn_export_csv.clicked.connect(self._export_results_csv)
+        export_layout.addWidget(self.btn_export_csv)
 
-        btn_export_database = QtWidgets.QPushButton("导出到数据库")
-        btn_export_database.clicked.connect(self._export_to_database)
-        export_layout.addWidget(btn_export_database)
+        self.btn_export_database = QtWidgets.QPushButton("保存到 PICS 数据库")
+        self.btn_export_database.setObjectName("PrimaryButton")
+        self.btn_export_database.setEnabled(False)
+        self.btn_export_database.clicked.connect(self._export_to_database)
+        export_layout.addWidget(self.btn_export_database)
 
         export_layout.addStretch()
         layout.addWidget(export_group)
 
         return widget
 
-    def _update_parameters(self):
+    def _update_parameters(self) -> bool:
         self.new_species_name = self.txt_new_name.text().strip()
         self.new_species_formula = self.txt_new_formula.text().strip()
+        if not self.new_species_name:
+            self.tabs.setCurrentIndex(0)
+            self.species_tabs.setCurrentIndex(0)
+            self.txt_new_name.setFocus()
+            self._set_status("请填写待计算物种名称", "error")
+            return False
+        if not self.new_species_formula:
+            self.tabs.setCurrentIndex(0)
+            self.species_tabs.setCurrentIndex(0)
+            self.txt_new_formula.setFocus()
+            self._set_status("请填写待计算物种分子式", "error")
+            return False
         self.new_species_mz = self.spin_new_mz.value()
         self.new_species_mf = self.double_new_mf.value()
         self.no_mf = self.double_no_mf.value()
@@ -409,6 +490,12 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
             "光电流(nA)",
             "温度(°C)"
         ])
+        return True
+
+    def _confirm_species_and_continue(self) -> None:
+        if self._update_parameters():
+            self._set_status(f"已保存 {self.new_species_name}（m/z {self.new_species_mz}）的计算信息", "success")
+            self.tabs.setCurrentIndex(1)
 
     def _browse_pie_folder(self):
         folder = QtWidgets.QFileDialog.getExistingDirectory(self, "选择PIE数据文件夹")
@@ -418,52 +505,47 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
     def _load_pie_data(self):
         folder_path = self.txt_folder_path.text().strip()
         if not folder_path:
-            QtWidgets.QMessageBox.warning(self, "警告", "请先选择PIE数据文件夹")
+            self._set_label_status(self.lbl_folder_status, "请先选择 PIE 数据文件夹", "error")
+            self._set_status("PIE 数据目录尚未选择", "error")
+            return
+        if not self._update_parameters():
             return
 
-        try:
+        species_mz = self.new_species_mz
+        no_mz = self.spin_no_mz.value()
+        a, b, c = self.calibration.a, self.calibration.b, self.calibration.c
+        if abs(a) < 1e-10 or abs(b) < 1e-10:
+            a, b, c = 0.0, 0.07, -48.0
+
+        self.btn_browse.setDisabled(True)
+        self.btn_load_data.setDisabled(True)
+        self._set_label_status(self.lbl_folder_status, "正在读取光谱并提取信号…", "busy")
+        self._set_status("正在后台加载 PIE 数据", "busy")
+
+        def _load() -> dict:
             from bl03u_masstool.core.spectrum_io import read_spectrum
             from bl03u_masstool.core.pie_analysis import extract_photon_energy
 
-            self.signal_table.setRowCount(0)
-
-            import os
-            files = sorted([f for f in os.listdir(folder_path) if f.endswith('.txt')])
-
+            folder = Path(folder_path)
+            files = sorted(folder.glob("*.txt"))
             if not files:
-                self.lbl_folder_status.setText("未找到txt文件")
-                self.lbl_folder_status.setStyleSheet("color: #ff6b6b;")
-                return
+                raise ValueError("所选目录中未找到 .txt 光谱文件")
 
-            species_mz = self.spin_new_mz.value()
-            no_mz = self.spin_no_mz.value()
-
-            a, b, c = self.calibration.a, self.calibration.b, self.calibration.c
-
-            if abs(a) < 1e-10 or abs(b) < 1e-10:
-                a, b, c = 0.0, 0.07, -48
-
-            import numpy as np
-
-            loaded_count = 0
-
-            for filename in files:
-                filepath = os.path.join(folder_path, filename)
+            rows = []
+            skipped = []
+            for filepath in files:
                 try:
-                    spectrum = read_spectrum(filepath, header_lines=10, trim_start=0)
+                    spectrum = read_spectrum(str(filepath), header_lines=10, trim_start=0)
                     if len(spectrum.y) == 0:
+                        skipped.append(filepath.name)
                         continue
 
-                    energy = extract_photon_energy(spectrum.metadata_lines, filepath, fallback=0.0)
+                    energy = extract_photon_energy(spectrum.metadata_lines, str(filepath), fallback=0.0)
                     temp = self._extract_temperature(spectrum.metadata_lines)
                     io_current = self._extract_io_current(spectrum.metadata_lines)
 
                     if energy <= 0:
-                        continue
-
-                    spectrum_data = spectrum.y
-
-                    if len(spectrum_data) == 0:
+                        skipped.append(filepath.name)
                         continue
 
                     mz_values = tof_to_mz(spectrum.x, a, b, c)
@@ -472,33 +554,63 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
                     species_indices = np.where(rounded_mz == species_mz)[0]
                     no_indices = np.where(rounded_mz == no_mz)[0]
 
-                    species_signal = 0.0
-                    if len(species_indices) > 0:
-                        species_signal = float(np.max(spectrum_data[species_indices]))
-
-                    no_signal = 0.0
-                    if len(no_indices) > 0:
-                        no_signal = float(np.max(spectrum_data[no_indices]))
+                    species_signal = float(np.max(spectrum.y[species_indices])) if len(species_indices) else 0.0
+                    no_signal = float(np.max(spectrum.y[no_indices])) if len(no_indices) else 0.0
 
                     if species_signal > 0 or no_signal > 0:
-                        row_count = self.signal_table.rowCount()
-                        self.signal_table.insertRow(row_count)
-                        self.signal_table.setItem(row_count, 0, QtWidgets.QTableWidgetItem(f"{energy:.2f}"))
-                        self.signal_table.setItem(row_count, 1, QtWidgets.QTableWidgetItem(f"{species_signal:.2f}"))
-                        self.signal_table.setItem(row_count, 2, QtWidgets.QTableWidgetItem(f"{no_signal:.2f}"))
-                        self.signal_table.setItem(row_count, 3, QtWidgets.QTableWidgetItem(f"{io_current:.6g}" if io_current is not None else "N/A"))
-                        self.signal_table.setItem(row_count, 4, QtWidgets.QTableWidgetItem(f"{temp:.1f}"))
-                        loaded_count += 1
-                except Exception as e:
-                    continue
+                        rows.append((float(energy), species_signal, no_signal, io_current, float(temp)))
+                    else:
+                        skipped.append(filepath.name)
+                except Exception:
+                    skipped.append(filepath.name)
+            rows.sort(key=lambda row: row[0])
+            return {"rows": rows, "file_count": len(files), "skipped": skipped}
 
-            self.lbl_folder_status.setText(f"已加载 {loaded_count} 个数据文件")
-            self.lbl_folder_status.setStyleSheet("color: #4ecdc4;")
+        self.data_worker = WorkerThread(_load, self)
+        self.data_worker.finished_with_result.connect(self._show_loaded_pie_data)
+        self.data_worker.failed.connect(self._show_pie_load_error)
+        self.data_worker.start()
 
-        except Exception as e:
-            QtWidgets.QMessageBox.warning(self, "错误", f"加载数据失败: {str(e)}")
-            self.lbl_folder_status.setText("加载失败")
-            self.lbl_folder_status.setStyleSheet("color: #ff6b6b;")
+    @staticmethod
+    def _set_label_status(label: QtWidgets.QLabel, message: str, status: str = "") -> None:
+        label.setText(message)
+        label.setProperty("status", status)
+        label.style().unpolish(label)
+        label.style().polish(label)
+
+    def _show_loaded_pie_data(self, result: object) -> None:
+        values = dict(result if isinstance(result, dict) else {})
+        rows = list(values.get("rows", []))
+        skipped = list(values.get("skipped", []))
+        self.signal_table.setRowCount(len(rows))
+        for row_index, (energy, species_signal, no_signal, io_current, temp) in enumerate(rows):
+            display = (
+                f"{energy:.2f}",
+                f"{species_signal:.2f}",
+                f"{no_signal:.2f}",
+                f"{io_current:.6g}" if io_current is not None else "N/A",
+                f"{temp:.1f}",
+            )
+            for column, value in enumerate(display):
+                self.signal_table.setItem(row_index, column, QtWidgets.QTableWidgetItem(value))
+        self.btn_browse.setEnabled(True)
+        self.btn_load_data.setEnabled(True)
+        if not rows:
+            self._set_label_status(self.lbl_folder_status, "未提取到目标物种或 NO 的有效信号", "error")
+            self._set_status("请检查 m/z、标定参数和数据目录", "error")
+            return
+        detail = f"已提取 {len(rows)}/{values.get('file_count', len(rows))} 个光谱"
+        if skipped:
+            detail += f"，跳过 {len(skipped)} 个"
+        self._set_label_status(self.lbl_folder_status, detail, "success")
+        self._set_status("PIE 信号已加载，请确认计算设置", "success")
+        self.tabs.setCurrentIndex(2)
+
+    def _show_pie_load_error(self, message: str) -> None:
+        self.btn_browse.setEnabled(True)
+        self.btn_load_data.setEnabled(True)
+        self._set_label_status(self.lbl_folder_status, f"加载失败：{message}", "error")
+        self._set_status("PIE 数据加载失败", "error")
 
     def _extract_temperature(self, metadata_lines):
         for line in metadata_lines:
@@ -511,7 +623,7 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
                         if 'c' in value:
                             value = value.replace('c', '').strip()
                         return float(value)
-                except:
+                except (TypeError, ValueError):
                     pass
         return 200.0
 
@@ -526,7 +638,7 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
                         if 'na' in value.lower():
                             value = value.lower().replace('na', '').strip()
                         return float(value)
-                except:
+                except (TypeError, ValueError):
                     pass
         return None
 
@@ -541,6 +653,11 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 self.database, self.mz_index = load_species_database(str(db_path))
         except Exception:
             pass
+
+    def refresh_database(self) -> None:
+        """Reload the local PICS database after an import or manual refresh."""
+        self._load_database()
+        self._load_no_cross_sections()
 
     def _load_no_cross_sections(self):
         self.no_cs_table.setRowCount(0)
@@ -581,10 +698,17 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.no_cs_table.setItem(row_count, 1, QtWidgets.QTableWidgetItem(f"{avg_cs:.4f}"))
 
         if self.no_cross_sections:
-            self.lbl_no_cs_status.setText(f"已加载 {len(self.no_cross_sections)} 个能量点的NO光电离截面（已去重）")
+            self._set_label_status(
+                self.lbl_no_cs_status,
+                f"已加载 {len(self.no_cross_sections)} 个能量点的 NO 光电离截面（重复能量已取平均）",
+                "success",
+            )
         else:
-            self.lbl_no_cs_status.setText("数据库中未找到NO的光电离截面数据")
-            self.lbl_no_cs_status.setStyleSheet("color: #ff6b6b;")
+            self._set_label_status(
+                self.lbl_no_cs_status,
+                "数据库中未找到 NO 截面；请先通过 PICS 导入页面添加参考数据",
+                "error",
+            )
 
     def _get_no_cross_section_at_energy(self, energy: float) -> float:
         if not self.no_cross_sections:
@@ -610,10 +734,23 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
         return 5.0
 
     def _calculate_pics(self):
-        self._update_parameters()
-        self.set_busy(True, "正在计算PICS...")
+        if not self._update_parameters():
+            return
+        if self.signal_table.rowCount() == 0:
+            self.tabs.setCurrentIndex(1)
+            self._set_status("请先加载 PIE 数据并检查信号表", "error")
+            return
+        if not self.no_cross_sections:
+            self.tabs.setCurrentIndex(0)
+            self.species_tabs.setCurrentIndex(1)
+            self._set_status("缺少 NO 参考截面，无法进行 PICS 计算", "error")
+            return
+
+        self.set_busy(True, "正在计算 PICS…")
         self.result_table.setRowCount(0)
         self.pics_results = {}
+        self.btn_export_csv.setEnabled(False)
+        self.btn_export_database.setEnabled(False)
 
         species_mz = self.spin_new_mz.value()
         no_mz = self.spin_no_mz.value()
@@ -640,7 +777,7 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 if io_current_text and io_current_text != "N/A":
                     try:
                         io_current = float(io_current_text)
-                    except:
+                    except (TypeError, ValueError):
                         io_current = None
 
                 corrected_species = species_signal
@@ -676,12 +813,12 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
                 self.pics_results[(energy, temp)] = pics
 
-            except (ValueError, AttributeError) as e:
+            except (ValueError, AttributeError, TypeError):
                 continue
 
         if not results:
-            QtWidgets.QMessageBox.warning(self, "警告", "没有有效的数据可以计算")
-            self.set_busy(False, "就绪")
+            self.set_busy(False, "没有可计算的数据点；请确认物种和 NO 信号均大于 0")
+            self._set_status("没有可计算的数据点；请确认物种和 NO 信号均大于 0", "error")
             return
 
         pics_values = [r[2] for r in results]
@@ -691,12 +828,15 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.lbl_max_pics.setText(f"{max(pics_values):.4f} Mb")
 
         status = "已启用光强校正" if enable_io_correction else "未启用光强校正"
-        QtWidgets.QMessageBox.information(self, "计算完成", f"已完成 {len(results)} 个数据点的PICS计算（{status}）")
-        self.set_busy(False, "就绪")
+        self.set_busy(False, "")
+        self.btn_export_csv.setEnabled(True)
+        self.btn_export_database.setEnabled(True)
+        self._set_status(f"计算完成：{len(results)} 个数据点，{status}", "success")
+        self.tabs.setCurrentIndex(3)
 
     def _export_results_csv(self):
         if not self.pics_results:
-            QtWidgets.QMessageBox.warning(self, "警告", "没有可导出的数据")
+            self._set_status("当前没有可导出的 PICS 结果", "error")
             return
 
         file_path, _ = QtWidgets.QFileDialog.getSaveFileName(
@@ -717,16 +857,16 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
             df = pd.DataFrame(rows)
             df.to_csv(file_path, index=False, encoding="utf-8-sig")
-            QtWidgets.QMessageBox.information(self, "提示", "导出成功")
+            self._set_status(f"结果已导出到 {file_path}", "success")
 
     def _export_to_database(self):
         if not self.pics_results:
-            QtWidgets.QMessageBox.warning(self, "警告", "没有可导出的数据")
+            self._set_status("当前没有可保存的 PICS 结果", "error")
             return
 
         db_path = species_database_path()
         if not db_path.exists():
-            QtWidgets.QMessageBox.warning(self, "警告", "数据库文件不存在")
+            self._set_status("PICS 数据库文件不存在", "error")
             return
 
         ie_value = self.double_new_ie.value()
@@ -749,13 +889,11 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 "cross_sections": cross_sections,
             }
             result = write_pics_records([record], db_path, mode="upsert")
-            self._load_database()
-            msg = (
-                f"成功写入数据库\n"
-                f"写入物种: {result['inserted_species']}，"
-                f"替换旧记录: {result['replaced_species']}，"
-                f"数据点: {result['inserted_points']}"
+            self.refresh_database()
+            self._set_status(
+                f"已保存到数据库：写入 {result['inserted_species']} 个物种，"
+                f"更新 {result['replaced_species']} 条记录，{result['inserted_points']} 个数据点",
+                "success",
             )
-            QtWidgets.QMessageBox.information(self, "提示", msg)
         except Exception as e:
-            QtWidgets.QMessageBox.warning(self, "错误", f"写入数据库失败: {e}")
+            self._set_status(f"写入数据库失败：{e}", "error")

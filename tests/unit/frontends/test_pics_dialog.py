@@ -32,6 +32,12 @@ def qapp():
 def test_species_page_splits_reference_and_import_tools_into_inner_tabs(qapp):
     dialog = PICSCalculatorDialog(Calibration(a=0.0, b=1.0, c=0.0), None)
     try:
+        assert [dialog.tabs.tabText(i) for i in range(dialog.tabs.count())] == [
+            "1. 物种与参考",
+            "2. PIE 信号",
+            "3. 计算设置",
+            "4. 结果",
+        ]
         assert dialog.species_tabs.count() == 2
         assert [dialog.species_tabs.tabText(i) for i in range(2)] == ["基础参数", "NO截面库"]
 
@@ -40,6 +46,27 @@ def test_species_page_splits_reference_and_import_tools_into_inner_tabs(qapp):
 
         assert basics_tab.findChildren(QtWidgets.QTableWidget) == []
         assert dialog.no_cs_table in reference_tab.findChildren(QtWidgets.QTableWidget)
+        assert not dialog.btn_export_csv.isEnabled()
+        assert not dialog.btn_export_database.isEnabled()
+    finally:
+        dialog.deleteLater()
+
+
+def test_species_continue_validates_and_advances(qapp):
+    dialog = PICSCalculatorDialog(Calibration(a=0.0, b=1.0, c=0.0), None)
+    try:
+        dialog.species_continue_button.click()
+        assert dialog.tabs.currentIndex() == 0
+        assert dialog.status_label.property("status") == "error"
+
+        dialog.txt_new_name.setText("test species")
+        dialog.txt_new_formula.setText("CH4")
+        dialog.spin_new_mz.setValue(16)
+        dialog.species_continue_button.click()
+
+        assert dialog.tabs.currentIndex() == 1
+        assert dialog.new_species_mz == 16
+        assert dialog.status_label.property("status") == "success"
     finally:
         dialog.deleteLater()
 
@@ -53,6 +80,26 @@ def test_pics_import_widget_initializes(qapp):
         # Check that preview table exists
         tables = widget.findChildren(QtWidgets.QTableWidget)
         assert len(tables) > 0
+        assert not widget.confirm_import_button.isEnabled()
+        assert [widget.import_mode_combo.itemData(i) for i in range(widget.import_mode_combo.count())] == [
+            "upsert",
+            "append",
+        ]
+    finally:
+        widget.deleteLater()
+
+
+def test_pics_import_preview_requires_explicit_confirmation(qapp):
+    widget = PICSImportWidget()
+    records = [{"species": "NO", "mz": 30, "ie": 9.264, "energies": [10.0, 11.0], "cross_sections": [1.0, 2.0]}]
+    try:
+        widget._show_preview(records)
+
+        assert widget.preview_table.rowCount() == 1
+        assert widget.preview_table.item(0, 0).text() == "NO"
+        assert widget.preview_table.item(0, 3).text() == "10.000–11.000"
+        assert widget.confirm_import_button.isEnabled()
+        assert widget.result_label.text() == "请检查预览后确认导入"
     finally:
         widget.deleteLater()
 
@@ -68,6 +115,21 @@ def test_workspace_pics_import_switches_to_import_page(qapp):
         assert window.workspace_stack.currentWidget() is window.pics_import_page
         assert window.workspace_stack.currentWidget() is not window.pics_page
         assert window.page_buttons["pics_import"].isChecked()
+    finally:
+        window.deleteLater()
+
+
+def test_pics_import_navigation_and_completion_refresh_calculator(qapp, monkeypatch):
+    window = MainWindow()
+    refreshed = []
+    try:
+        monkeypatch.setattr(window.pics_page, "refresh_database", lambda: refreshed.append(True))
+        window.switch_workspace_page("pics_import")
+        window.pics_import_page.open_calculator_button.click()
+        assert window.workspace_stack.currentWidget() is window.pics_page
+
+        window.pics_import_page.import_completed.emit({"inserted_species": 1})
+        assert refreshed == [True]
     finally:
         window.deleteLater()
 

@@ -465,13 +465,13 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
 
         source_stack = QtWidgets.QStackedWidget(source_panel)
         source_stack.setObjectName("SourceStack")
-        source_stack.setMinimumHeight(30)
-        source_stack.setMaximumHeight(32)
+        source_stack.setMinimumHeight(34)
+        source_stack.setMaximumHeight(36)
         self.sourceStack = source_stack
 
         single_page = QtWidgets.QWidget(source_stack)
         single_layout = QHBoxLayout(single_page)
-        single_layout.setContentsMargins(0, 0, 0, 0)
+        single_layout.setContentsMargins(0, 1, 0, 2)
         single_layout.setSpacing(6)
         self.label.setText("文件")
         single_layout.addWidget(self.label)
@@ -486,7 +486,7 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
 
         sum_page = QtWidgets.QWidget(source_stack)
         sum_layout = QHBoxLayout(sum_page)
-        sum_layout.setContentsMargins(0, 0, 0, 0)
+        sum_layout.setContentsMargins(0, 1, 0, 2)
         sum_layout.setSpacing(6)
         self.label_18.setText("文件夹")
         sum_layout.addWidget(self.label_18)
@@ -512,6 +512,8 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         for path_edit in (self.lineEdit, self.folder_path):
             path_edit.setMinimumWidth(280)
             path_edit.setMaximumWidth(16777215)
+            path_edit.setMinimumHeight(28)
+            path_edit.setMaximumHeight(30)
             path_edit.setSizePolicy(
                 QtWidgets.QSizePolicy.Policy.Expanding,
                 QtWidgets.QSizePolicy.Policy.Fixed,

@@ -1,4 +1,4 @@
-"""PICS Import Widget - Standalone tab for importing PICS data from external files."""
+"""Standalone workflow for previewing and importing external PICS tables."""
 
 from __future__ import annotations
 
@@ -7,120 +7,136 @@ from pathlib import Path
 from PyQt6 import QtCore, QtWidgets
 
 from bl03u_masstool.core.config import species_database_path
+from bl03u_masstool.frontends.pyqt_app.workers import WorkerThread
 
 
 class PICSImportWidget(QtWidgets.QWidget):
-    """Standalone widget for importing external PICS data into the species database.
+    """Parse, preview, and explicitly confirm PICS database imports."""
 
-    Supports CSV, XLSX, and other tabular formats. Provides file selection,
-    preview, and upsert mode writing to the local species database.
-    """
+    import_completed = QtCore.pyqtSignal(dict)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("PICSImportPage")
+        self._records: list[dict] = []
+        self._selected_path = ""
+        self._worker: WorkerThread | None = None
         self._init_ui()
 
-    def _init_ui(self):
-        """Initialize the import interface."""
-        main_layout = QtWidgets.QVBoxLayout(self)
-        main_layout.setContentsMargins(16, 16, 16, 16)
-        main_layout.setSpacing(12)
+    @staticmethod
+    def _set_status(label: QtWidgets.QLabel, text: str, status: str = "") -> None:
+        label.setText(text)
+        label.setProperty("status", status)
+        label.style().unpolish(label)
+        label.style().polish(label)
 
-        # ========== Header Section ==========
-        header = QtWidgets.QWidget()
-        header_layout = QtWidgets.QVBoxLayout(header)
+    def _init_ui(self) -> None:
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(10)
+
+        header = QtWidgets.QWidget(self)
+        header_layout = QtWidgets.QHBoxLayout(header)
         header_layout.setContentsMargins(0, 0, 0, 0)
-        header_layout.setSpacing(6)
-
-        title = QtWidgets.QLabel("PICS 数据库导入工具")
+        title_column = QtWidgets.QVBoxLayout()
+        title = QtWidgets.QLabel("导入外部 PICS 数据", header)
         title.setObjectName("ProjectTitle")
-        title.setStyleSheet("font-size: 14px; font-weight: bold;")
-        header_layout.addWidget(title)
-
-        subtitle = QtWidgets.QLabel(
-            "导入外部光电离截面 (PICS) 数据到本地PICS截面数据库，支持 CSV、XLSX 等格式"
-        )
+        subtitle = QtWidgets.QLabel("选择表格并检查解析结果，确认后写入本地 PICS 数据库。", header)
         subtitle.setObjectName("ProjectHint")
-        subtitle.setWordWrap(True)
-        header_layout.addWidget(subtitle)
+        title_column.addWidget(title)
+        title_column.addWidget(subtitle)
+        header_layout.addLayout(title_column, 1)
+        self.open_calculator_button = QtWidgets.QPushButton("前往 PICS 计算", header)
+        self.open_calculator_button.setObjectName("BrowseButton")
+        self.open_calculator_button.clicked.connect(self._open_calculator)
+        header_layout.addWidget(self.open_calculator_button)
+        root.addWidget(header)
 
-        main_layout.addWidget(header)
-
-        # ========== Divider ==========
-        divider1 = QtWidgets.QFrame()
-        divider1.setFrameShape(QtWidgets.QFrame.Shape.HLine)
-        divider1.setObjectName("NavSeparator")
-        main_layout.addWidget(divider1)
-
-        # ========== File Selection Section ==========
-        file_group = QtWidgets.QGroupBox("[1] 选择数据文件")
-        file_group.setObjectName("ImportSection")
-        file_layout = QtWidgets.QVBoxLayout(file_group)
-
-        file_info = QtWidgets.QLabel(
-            "支持格式：\n"
-            "  • 宽表：每行一物种，能量值作为列名（如 10.5 eV、11.0 eV）\n"
-            "  • 长表：每行一个能量点，包含 mz、name、energy_ev、cross_section 列"
+        file_group = QtWidgets.QGroupBox("1. 选择并解析文件", self)
+        file_layout = QtWidgets.QGridLayout(file_group)
+        file_layout.setHorizontalSpacing(8)
+        file_layout.setVerticalSpacing(6)
+        self.file_path_edit = QtWidgets.QLineEdit(file_group)
+        self.file_path_edit.setReadOnly(True)
+        self.file_path_edit.setPlaceholderText("选择 CSV、TSV、TXT、XLSX 或 XLS 文件")
+        self.choose_file_button = QtWidgets.QPushButton("选择文件", file_group)
+        self.choose_file_button.setObjectName("PrimaryButton")
+        self.choose_file_button.clicked.connect(self._import_pics_from_file)
+        file_layout.addWidget(QtWidgets.QLabel("数据文件"), 0, 0)
+        file_layout.addWidget(self.file_path_edit, 0, 1)
+        file_layout.addWidget(self.choose_file_button, 0, 2)
+        format_hint = QtWidgets.QLabel(
+            "支持长表（mz、name、energy_ev、cross_section）和宽表（能量作为列名）；每个物种至少需要 2 个能量点。",
+            file_group,
         )
-        file_info.setWordWrap(True)
-        file_info.setStyleSheet("color: #6495ed; background-color: #f0f7ff; padding: 8px; border-radius: 4px;")
-        file_layout.addWidget(file_info)
+        format_hint.setObjectName("HintLabel")
+        format_hint.setWordWrap(True)
+        file_layout.addWidget(format_hint, 1, 1, 1, 2)
+        file_layout.setColumnStretch(1, 1)
+        root.addWidget(file_group)
 
-        btn_import = QtWidgets.QPushButton("📂 选择 XLSX / CSV / TSV 文件…")
-        btn_import.setObjectName("WorkflowButton")
-        btn_import.setFixedHeight(36)
-        btn_import.setToolTip("打开文件选择对话框")
-        btn_import.clicked.connect(self._import_pics_from_file)
-        file_layout.addWidget(btn_import)
-
-        main_layout.addWidget(file_group)
-
-        # ========== Preview Section ==========
-        preview_group = QtWidgets.QGroupBox("[2] 导入预览与确认")
-        preview_group.setObjectName("ImportSection")
+        preview_group = QtWidgets.QGroupBox("2. 检查导入内容", self)
         preview_layout = QtWidgets.QVBoxLayout(preview_group)
+        preview_toolbar = QtWidgets.QHBoxLayout()
+        preview_toolbar.addWidget(QtWidgets.QLabel("写入方式"))
+        self.import_mode_combo = QtWidgets.QComboBox(preview_group)
+        self.import_mode_combo.addItem("更新相同物种，保留其他记录（推荐）", "upsert")
+        self.import_mode_combo.addItem("全部追加为新记录", "append")
+        self.import_mode_combo.currentIndexChanged.connect(self._refresh_mode_hint)
+        preview_toolbar.addWidget(self.import_mode_combo)
+        self.mode_hint_label = QtWidgets.QLabel("", preview_group)
+        self.mode_hint_label.setObjectName("HintLabel")
+        preview_toolbar.addWidget(self.mode_hint_label, 1)
+        self.confirm_import_button = QtWidgets.QPushButton("确认导入数据库", preview_group)
+        self.confirm_import_button.setObjectName("PrimaryButton")
+        self.confirm_import_button.setEnabled(False)
+        self.confirm_import_button.clicked.connect(self._write_preview_records)
+        preview_toolbar.addWidget(self.confirm_import_button)
+        preview_layout.addLayout(preview_toolbar)
 
-        preview_note = QtWidgets.QLabel(
-            "导入时使用 upsert 模式：\n"
-            "  • 相同物种 + 相同 m/z 的记录将被更新\n"
-            "  • 其他现有记录保留不变"
-        )
-        preview_note.setWordWrap(True)
-        preview_note.setStyleSheet("color: #6495ed; background-color: #f0f7ff; padding: 8px; border-radius: 4px;")
-        preview_layout.addWidget(preview_note)
-
-        self.preview_table = QtWidgets.QTableWidget()
-        self.preview_table.setColumnCount(3)
-        self.preview_table.setHorizontalHeaderLabels(["物种", "m/z", "能量点数"])
-        self.preview_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
-        self.preview_table.setMaximumHeight(150)
-        self.preview_table.setVisible(False)
-        preview_layout.addWidget(self.preview_table)
-
-        self.preview_status = QtWidgets.QLabel("等待文件选择…")
-        self.preview_status.setWordWrap(True)
+        self.preview_status = QtWidgets.QLabel("尚未选择文件", preview_group)
+        self.preview_status.setObjectName("InlineStatusLabel")
         preview_layout.addWidget(self.preview_status)
+        self.preview_table = QtWidgets.QTableWidget(0, 5, preview_group)
+        self.preview_table.setHorizontalHeaderLabels(["物种", "m/z", "电离能 (eV)", "能量范围 (eV)", "数据点"])
+        self.preview_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.preview_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.preview_table.setAlternatingRowColors(True)
+        header_view = self.preview_table.horizontalHeader()
+        header_view.setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        header_view.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        preview_layout.addWidget(self.preview_table, 1)
+        root.addWidget(preview_group, 1)
 
-        main_layout.addWidget(preview_group)
+        result_bar = QtWidgets.QWidget(self)
+        result_bar.setObjectName("ProjectActionBar")
+        result_layout = QtWidgets.QHBoxLayout(result_bar)
+        result_layout.setContentsMargins(10, 7, 10, 7)
+        result_layout.addWidget(QtWidgets.QLabel("导入状态"))
+        self.result_label = QtWidgets.QLabel("等待导入", result_bar)
+        self.result_label.setObjectName("InlineStatusLabel")
+        result_layout.addWidget(self.result_label, 1)
+        root.addWidget(result_bar)
+        self._refresh_mode_hint()
 
-        # ========== Import Result Section ==========
-        result_group = QtWidgets.QGroupBox("[3] 导入结果")
-        result_group.setObjectName("ImportSection")
-        result_layout = QtWidgets.QVBoxLayout(result_group)
+    def _refresh_mode_hint(self) -> None:
+        if self.import_mode_combo.currentData() == "append":
+            self.mode_hint_label.setText("相同物种也会新增一份记录")
+        else:
+            self.mode_hint_label.setText("按物种名称、m/z 和电离能匹配并替换")
 
-        self.result_label = QtWidgets.QLabel("暂无导入记录")
-        self.result_label.setWordWrap(True)
-        self.result_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignTop)
-        result_layout.addWidget(self.result_label)
+    def _open_calculator(self) -> None:
+        window = self.window()
+        if hasattr(window, "switch_workspace_page"):
+            window.switch_workspace_page("pics")
 
-        main_layout.addWidget(result_group)
+    def _set_busy(self, busy: bool, message: str) -> None:
+        self.choose_file_button.setDisabled(busy)
+        self.import_mode_combo.setDisabled(busy)
+        self.confirm_import_button.setDisabled(busy or not self._records)
+        self._set_status(self.preview_status, message, "busy" if busy else "")
 
-        # ========== Stretch ==========
-        main_layout.addStretch()
-
-    def _import_pics_from_file(self):
-        """Handle PICS file import workflow."""
+    def _import_pics_from_file(self) -> None:
         file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
             self,
             "选择 PICS 数据文件",
@@ -129,86 +145,87 @@ class PICSImportWidget(QtWidgets.QWidget):
         )
         if not file_path:
             return
+        self._selected_path = file_path
+        self.file_path_edit.setText(file_path)
+        self._records = []
+        self.preview_table.setRowCount(0)
+        self._set_busy(True, "正在解析文件…")
 
-        # Parse file
-        try:
-            from bl03u_masstool.core.pics_import import parse_pics_upload, write_pics_records
+        def _parse() -> list[dict]:
+            from bl03u_masstool.core.pics_import import parse_pics_upload
 
-            self.preview_status.setText(f"解析中…")
-            self.preview_status.setStyleSheet("color: #6495ed;")
+            path = Path(file_path)
+            return parse_pics_upload(path.read_bytes(), path.name)
 
-            content = Path(file_path).read_bytes()
-            records = parse_pics_upload(content, Path(file_path).name)
+        self._worker = WorkerThread(_parse, self)
+        self._worker.finished_with_result.connect(self._show_preview)
+        self._worker.failed.connect(self._show_parse_error)
+        self._worker.start()
 
-            # Show preview table
-            self.preview_table.setRowCount(0)
-            for r in records[:20]:
-                row = self.preview_table.rowCount()
-                self.preview_table.insertRow(row)
-                self.preview_table.setItem(row, 0, QtWidgets.QTableWidgetItem(r["species"]))
-                self.preview_table.setItem(row, 1, QtWidgets.QTableWidgetItem(str(r["mz"])))
-                self.preview_table.setItem(row, 2, QtWidgets.QTableWidgetItem(str(len(r["energies"]))))
-
-            self.preview_table.setVisible(True)
-
-            if len(records) > 20:
-                preview_text = f"解析到 {len(records)} 个物种（显示前20个），还有 {len(records) - 20} 个…"
-            else:
-                preview_text = f"解析到 {len(records)} 个物种"
-
-            self.preview_status.setText(preview_text)
-            self.preview_status.setStyleSheet("color: #4ecdc4;")
-
-        except Exception as e:
-            self.preview_status.setText(f"[错误] 文件解析失败：{str(e)}")
-            self.preview_status.setStyleSheet("color: #ff6b6b;")
-            self.preview_table.setVisible(False)
-            QtWidgets.QMessageBox.warning(self, "解析失败", f"无法解析文件：\n{e}")
-            return
-
-        # Show confirmation dialog
-        lines = [f"即将导入 {len(records)} 个物种\n"]
-        for r in records[:15]:
-            ie_str = f"IE={r['ie']} eV" if r['ie'] else "IE 未知"
-            lines.append(f"  m/z={r['mz']}  {r['species']}  {ie_str}  ({len(r['energies'])} 点)")
-        if len(records) > 15:
-            lines.append(f"  … 还有 {len(records) - 15} 个物种")
-        lines.append("\n[提示] 相同物种和 m/z 的现有记录将被替换")
-        lines.append("是否继续导入？")
-
-        reply = QtWidgets.QMessageBox.question(
-            self,
-            "确认导入 PICS 数据",
-            "\n".join(lines),
-            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+    def _show_preview(self, records: object) -> None:
+        self._records = list(records if isinstance(records, list) else [])
+        self.preview_table.setRowCount(len(self._records))
+        total_points = 0
+        for row, record in enumerate(self._records):
+            energies = [float(value) for value in record.get("energies", [])]
+            total_points += len(energies)
+            energy_range = "—" if not energies else f"{min(energies):.3f}–{max(energies):.3f}"
+            values = (
+                str(record.get("species", "")),
+                str(record.get("mz", "")),
+                "—" if record.get("ie") is None else f"{float(record['ie']):.4f}",
+                energy_range,
+                str(len(energies)),
+            )
+            for column, value in enumerate(values):
+                self.preview_table.setItem(row, column, QtWidgets.QTableWidgetItem(value))
+        self._set_busy(False, "")
+        self.confirm_import_button.setEnabled(bool(self._records))
+        self._set_status(
+            self.preview_status,
+            f"解析完成：{len(self._records)} 个物种，{total_points} 个截面数据点",
+            "success",
         )
-        if reply != QtWidgets.QMessageBox.StandardButton.Yes:
-            self.preview_status.setText("导入已取消")
-            self.preview_status.setStyleSheet("color: #6495ed;")
+        self._set_status(self.result_label, "请检查预览后确认导入")
+
+    def _show_parse_error(self, message: str) -> None:
+        self._records = []
+        self._set_busy(False, "")
+        self.confirm_import_button.setEnabled(False)
+        self._set_status(self.preview_status, f"文件解析失败：{message}", "error")
+        self._set_status(self.result_label, "未写入数据库", "error")
+
+    def _write_preview_records(self) -> None:
+        if not self._records:
+            self._set_status(self.result_label, "请先选择并成功解析数据文件", "error")
             return
+        records = list(self._records)
+        mode = str(self.import_mode_combo.currentData())
+        self._set_busy(True, "正在写入数据库…")
 
-        # Write to database
-        try:
-            db_path = species_database_path()
-            result = write_pics_records(records, db_path, mode="upsert")
+        def _write() -> dict:
+            from bl03u_masstool.core.pics_import import write_pics_records
 
-            result_text = (
-                f"[成功] 导入成功\n\n"
-                f"新增物种: {result['inserted_species']}\n"
-                f"更新物种: {result['replaced_species']}\n"
-                f"总数据点: {result['inserted_points']}"
-            )
-            self.result_label.setText(result_text)
-            self.result_label.setStyleSheet("color: #4ecdc4; background-color: #f0fff7; padding: 12px; border-radius: 4px;")
+            return write_pics_records(records, species_database_path(), mode=mode)
 
-            QtWidgets.QMessageBox.information(
-                self,
-                "[成功] 导入完成",
-                result_text,
-            )
-        except Exception as e:
-            result_text = f"[错误] 导入失败：{str(e)}"
-            self.result_label.setText(result_text)
-            self.result_label.setStyleSheet("color: #ff6b6b; background-color: #fff0f5; padding: 12px; border-radius: 4px;")
-            QtWidgets.QMessageBox.warning(self, "导入失败", f"写入数据库失败：\n{e}")
+        self._worker = WorkerThread(_write, self)
+        self._worker.finished_with_result.connect(self._show_import_result)
+        self._worker.failed.connect(self._show_import_error)
+        self._worker.start()
 
+    def _show_import_result(self, result: object) -> None:
+        values = dict(result if isinstance(result, dict) else {})
+        self._set_busy(False, "")
+        message = (
+            f"导入完成：写入 {values.get('inserted_species', 0)} 个物种，"
+            f"更新 {values.get('replaced_species', 0)} 条旧记录，"
+            f"共 {values.get('inserted_points', 0)} 个数据点"
+        )
+        self._set_status(self.preview_status, "当前预览已写入数据库", "success")
+        self._set_status(self.result_label, message, "success")
+        self.import_completed.emit(values)
+
+    def _show_import_error(self, message: str) -> None:
+        self._set_busy(False, "")
+        self._set_status(self.preview_status, "数据库写入失败", "error")
+        self._set_status(self.result_label, f"导入失败：{message}", "error")

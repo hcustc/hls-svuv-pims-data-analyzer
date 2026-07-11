@@ -25,7 +25,14 @@ from bl03u_masstool.core.nist_webbook import (
 )
 from bl03u_masstool.core.normalization import extract_light_intensity
 from bl03u_masstool.core import peak_detection as peak_detection_module
-from bl03u_masstool.core.peak_detection import GaussianFit, Peak, detect_peaks_ensemble, detect_peaks_in_range, detect_peaks_prominence
+from bl03u_masstool.core.peak_detection import (
+    GaussianFit,
+    Peak,
+    detect_peaks_ensemble,
+    detect_peaks_in_range,
+    detect_peaks_prominence,
+    fit_gaussian,
+)
 from bl03u_masstool.core.peak_ranges import load_peak_ranges
 from bl03u_masstool.core.pie_analysis import (
     analyze_pie_folder,
@@ -144,6 +151,44 @@ def test_prominence_peak_detection_handles_baseline_and_noise():
     assert peaks[0].mz == peaks[0].time
 
 
+def test_gaussian_fit_stays_local_on_sloped_baseline():
+    x = np.arange(160, dtype=float)
+    y = 20.0 + 0.2 * x + 35.0 * np.exp(-0.5 * ((x - 80.0) / 4.0) ** 2)
+
+    fit = fit_gaussian(y, center_idx=80, window_size=25)
+
+    assert fit is not None
+    assert abs(fit.mean - 80.0) < 1.0
+    assert fit.amplitude > 0
+    assert 5.0 < fit.fwhm < 15.0
+
+
+def test_prominence_keeps_weak_peak_when_another_peak_is_much_stronger():
+    x = np.arange(500, dtype=float)
+    y = (
+        3.0
+        + 1200.0 * np.exp(-0.5 * ((x - 130.0) / 4.0) ** 2)
+        + 8.0 * np.exp(-0.5 * ((x - 370.0) / 4.0) ** 2)
+    )
+
+    peaks = detect_peaks_prominence(
+        y,
+        calibration=Calibration(a=0, b=1, c=0),
+        detection_min_idx=0,
+        min_intensity=2.0,
+        prominence_ratio=0.02,
+        baseline_window=101,
+        smoothing_window=5,
+        duplicate_window=10,
+        min_peak_width=1,
+        max_peak_width=30,
+    )
+
+    assert len(peaks) == 2
+    assert peaks[0].time == pytest.approx(130.0, abs=0.5)
+    assert peaks[1].time == pytest.approx(370.0, abs=0.5)
+
+
 def test_ensemble_votes_count_distinct_algorithms(monkeypatch):
     duplicate_peaks = [
         Peak(index=22, time=22.0, mz=22.0, intensity=10.0, fwhm=2.0, left_bound=21, right_bound=23),
@@ -193,6 +238,39 @@ def test_ensemble_default_vote_threshold_means_two_of_three(monkeypatch):
 
     assert len(peaks) == 1
     assert peaks[0].mz == pytest.approx(22.0)
+
+
+def test_ensemble_clustering_does_not_chain_distant_endpoints():
+    labelled = [
+        ("legacy", Peak(10, 10.0, 10.0, 10.0, 2.0, 9, 11)),
+        ("prominence", Peak(10, 10.0, 10.15, 10.0, 2.0, 9, 11)),
+        ("cwt", Peak(10, 10.0, 10.30, 10.0, 2.0, 9, 11)),
+    ]
+
+    clusters = peak_detection_module._cluster_algorithm_peaks_by_mz(labelled, tolerance=0.2)
+
+    assert [len(cluster) for cluster in clusters] == [2, 1]
+
+
+def test_ensemble_rejects_one_sample_spike_even_with_multiple_votes(monkeypatch):
+    y = np.ones(60, dtype=float)
+    y[30] = 50.0
+    spike = Peak(index=30, time=30.0, mz=30.0, intensity=50.0, fwhm=1.0, left_bound=29, right_bound=31)
+
+    monkeypatch.setattr(peak_detection_module, "detect_peaks_in_range", lambda *args, **kwargs: [spike])
+    monkeypatch.setattr(peak_detection_module, "detect_peaks_prominence", lambda *args, **kwargs: [spike])
+
+    peaks = detect_peaks_ensemble(
+        y,
+        calibration=Calibration(a=0, b=1, c=0),
+        detection_min_idx=0,
+        use_legacy=True,
+        use_prominence=True,
+        use_cwt=False,
+        vote_threshold=1.0,
+    )
+
+    assert peaks == []
 
 
 def test_cwt_peak_detection_handles_multiscale_peaks():

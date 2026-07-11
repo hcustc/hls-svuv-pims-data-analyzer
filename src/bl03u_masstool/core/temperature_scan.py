@@ -831,48 +831,40 @@ def build_temperature_curves(
         else "off"
     )
     area_agg = "mean" if replicate_mode != "sum" else "sum"
-    for mz, group in working.groupby("mz_rounded"):
-        group = group.copy()
-        group["file_count"] = group.groupby("temperature")["file"].transform("nunique")
-        fallback_replicates = pd.Series(dtype=int)
-        if replicate_mode != "off":
-            fallback_replicates = (
-                group.groupby("temperature")["file"]
-                .nunique()
-                .loc[lambda counts: counts > 1]
+    group_keys = ["mz_rounded", "temperature"]
+    working["file_count"] = working.groupby(group_keys)["file"].transform("nunique")
+    if replicate_mode != "off":
+        fallback_mask = (
+            (working["file_count"] > 1)
+            & (working["replicate_grouping"].astype(str) != "filename")
+        )
+        working.loc[fallback_mask, "replicate_warning"] = (
+            "未识别到文件名末尾采集序号，已退回按温度分组的旧逻辑处理重复文件。"
+        )
+        prepared = (
+            working.groupby(group_keys, as_index=False)
+            .agg(
+                area=("area", area_agg),
+                raw_area=("raw_area", area_agg),
+                integration_method=("integration_method", _summarize_integration_methods),
+                photon_normalized_area=("photon_normalized_area", area_agg),
+                expansion_lambda=("expansion_lambda", "first"),
+                species=("species", "first"),
+                photon_energy=("photon_energy", "first"),
+                mz=("mz", "mean"),
+                file_count=("file", "nunique"),
+                replicate_mode=("replicate_mode", "first"),
+                replicate_grouping=("replicate_grouping", lambda values: "filename" if (values.astype(str) == "filename").any() else "temperature"),
+                replicate_warning=("replicate_warning", lambda values: "; ".join(sorted({str(v) for v in values if str(v)}))),
+                reference_temperature=("reference_temperature", "first"),
             )
-        if replicate_mode != "off" and not fallback_replicates.empty:
-            for temperature in fallback_replicates.index:
-                mask = (
-                    (group["temperature"] == temperature)
-                    & (group["replicate_grouping"].astype(str) != "filename")
-                )
-                if mask.any():
-                    group.loc[mask, "replicate_warning"] = (
-                        "未识别到文件名末尾采集序号，已退回按温度分组的旧逻辑处理重复文件。"
-                    )
-        if replicate_mode == "off":
-            ordered = group.sort_values(["temperature", "file"]).reset_index(drop=True)
-        else:
-            ordered = (
-                group.groupby("temperature", as_index=False)
-                .agg(
-                    area=("area", area_agg),
-                    raw_area=("raw_area", area_agg),
-                    integration_method=("integration_method", _summarize_integration_methods),
-                    photon_normalized_area=("photon_normalized_area", area_agg),
-                    expansion_lambda=("expansion_lambda", "first"),
-                    species=("species", "first"),
-                    photon_energy=("photon_energy", "first"),
-                    mz=("mz", "mean"),
-                    file_count=("file", "nunique"),
-                    replicate_mode=("replicate_mode", "first"),
-                    replicate_grouping=("replicate_grouping", lambda values: "filename" if (values.astype(str) == "filename").any() else "temperature"),
-                    replicate_warning=("replicate_warning", lambda values: "; ".join(sorted({str(v) for v in values if str(v)}))),
-                    reference_temperature=("reference_temperature", "first"),
-                )
-                .sort_values("temperature")
-            )
+            .sort_values(["mz_rounded", "temperature"])
+        )
+    else:
+        prepared = working.sort_values(["mz_rounded", "temperature", "file"])
+
+    for mz, group in prepared.groupby("mz_rounded", sort=False):
+        ordered = group.drop(columns=["mz_rounded"]).reset_index(drop=True)
         classification = classify_temperature_curve(
             ordered["temperature"],
             ordered["area"],

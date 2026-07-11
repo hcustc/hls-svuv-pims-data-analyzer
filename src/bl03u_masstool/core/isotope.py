@@ -348,6 +348,23 @@ def _tolerance_to_da(target_mass: float, tolerance: float, tolerance_unit: str) 
     raise ValueError("tolerance_unit must be 'Da' or 'ppm'")
 
 
+def formula_double_bond_equivalent(composition: Mapping[str, int]) -> float | None:
+    """Return the basic CHN/halogen double-bond equivalent when applicable."""
+    supported = {"C", "H", "N", "O", "F", "P", "S", "Cl", "Br", "I"}
+    if any(element not in supported for element, count in composition.items() if int(count) > 0):
+        return None
+    carbon = int(composition.get("C", 0))
+    hydrogen = int(composition.get("H", 0))
+    nitrogen = int(composition.get("N", 0))
+    halogens = sum(int(composition.get(element, 0)) for element in ("F", "Cl", "Br", "I"))
+    return float((2 * carbon + 2 + nitrogen - hydrogen - halogens) / 2.0)
+
+
+def _passes_basic_formula_rules(composition: Mapping[str, int]) -> bool:
+    dbe = formula_double_bond_equivalent(composition)
+    return dbe is None or dbe >= 0
+
+
 def generate_formula_candidates(
     target_mass: float,
     *,
@@ -355,18 +372,32 @@ def generate_formula_candidates(
     tolerance_unit: str = "Da",
     element_ranges: Mapping[str, tuple[int, int]],
     max_results: int = 200,
+    mass_mode: str = "monoisotopic",
+    apply_chemical_rules: bool = False,
 ) -> list[dict]:
-    """Generate formula candidates from mass and explicit element count ranges."""
+    """Generate formula candidates from nominal or monoisotopic mass.
+
+    ``mass_mode="nominal"`` is intended for an integer mass number from a
+    unit-mass spectrum.  The default ``"monoisotopic"`` mode preserves the
+    historical exact-mass search behavior.
+    """
+    mass_mode = str(mass_mode or "monoisotopic").strip().lower()
+    if mass_mode not in {"nominal", "monoisotopic"}:
+        raise ValueError("mass_mode must be 'nominal' or 'monoisotopic'")
     tolerance_da = _tolerance_to_da(target_mass, tolerance, tolerance_unit)
     lower = float(target_mass) - tolerance_da
     upper = float(target_mass) + tolerance_da
     max_results = max(1, min(int(max_results), 10_000))
     scan_limit = max_results * 20
 
-    elements = [
-        (element, int(bounds[0]), int(bounds[1]), MONOISOTOPIC_MASSES[element])
-        for element, bounds in element_ranges.items()
-    ]
+    elements = []
+    for element, bounds in element_ranges.items():
+        search_mass = (
+            float(max(ISOTOPES[element], key=lambda item: item[1])[0])
+            if mass_mode == "nominal"
+            else MONOISOTOPIC_MASSES[element]
+        )
+        elements.append((element, int(bounds[0]), int(bounds[1]), search_mass))
     for element, min_count, max_count, _ in elements:
         if min_count < 0 or max_count < 0 or min_count > max_count:
             raise ValueError(f"invalid element range for {element}")
@@ -385,13 +416,21 @@ def generate_formula_candidates(
             return
         if index == len(elements):
             if lower <= current_mass <= upper and any(value > 0 for value in current.values()):
+                if apply_chemical_rules and not _passes_basic_formula_rules(current):
+                    return
                 formula = formula_to_string(current)
+                nominal_mass = composition_nominal_mass(current)
+                monoisotopic_mass = composition_monoisotopic_mass(current)
+                dbe = formula_double_bond_equivalent(current)
                 error_da = current_mass - float(target_mass)
                 results.append(
                     {
                         "formula": formula,
-                        "nominal_mass": composition_nominal_mass(current),
-                        "monoisotopic_mass": float(current_mass),
+                        "nominal_mass": nominal_mass,
+                        "monoisotopic_mass": monoisotopic_mass,
+                        "matched_mass": float(current_mass),
+                        "mass_mode": mass_mode,
+                        "dbe": dbe,
                         "error_da": float(error_da),
                         "error_ppm": float(error_da / float(target_mass) * 1_000_000),
                         "composition": {key: value for key, value in current.items() if value > 0},

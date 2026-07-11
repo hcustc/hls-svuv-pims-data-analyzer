@@ -28,6 +28,23 @@ from bl03u_masstool.frontends.pyqt_app.normalization.widget import FunctionDefau
 from bl03u_masstool.frontends.pyqt_app.spectrum.workbench import MainWindow
 
 
+def _wait_for_project_materialization(qapp, window: MainWindow, timeout_ms: int = 5000) -> None:
+    timer = QtCore.QElapsedTimer()
+    timer.start()
+    while (
+        hasattr(window, "_materialize_worker_manager")
+        and window._materialize_worker_manager.is_running()
+        and timer.elapsed() < timeout_ms
+    ):
+        qapp.processEvents()
+        QtCore.QThread.msleep(5)
+    qapp.processEvents()
+    assert not (
+        hasattr(window, "_materialize_worker_manager")
+        and window._materialize_worker_manager.is_running()
+    )
+
+
 @pytest.fixture(autouse=True)
 def isolated_project_settings(tmp_path, monkeypatch):
     import bl03u_masstool.core.config as core_config
@@ -203,6 +220,96 @@ def test_function_defaults_apply_to_project_settings(qapp):
         widget.deleteLater()
 
 
+def test_function_defaults_routes_users_to_corresponding_function_page(qapp):
+    widget = FunctionDefaultsWidget()
+    requested_pages: list[str] = []
+    widget.navigate_requested.connect(requested_pages.append)
+    try:
+        widget.tabs.setCurrentIndex(2)
+        assert widget.open_function_page_button.text() == "前往PIE 拟合"
+
+        widget.open_function_page_button.click()
+
+        assert requested_pages == ["pie"]
+    finally:
+        widget.deleteLater()
+
+
+def test_project_parameter_pages_do_not_show_internal_ownership_banners(qapp):
+    window = MainWindow()
+    widget = FunctionDefaultsWidget()
+    try:
+        assert window.project_page.findChild(QtWidgets.QFrame, "ProjectBoundaryBanner") is None
+        assert widget.findChild(QtWidgets.QFrame, "ProjectBoundaryBanner") is None
+        assert "参数管理原则" not in " ".join(label.text() for label in window.project_page.findChildren(QtWidgets.QLabel))
+    finally:
+        widget.deleteLater()
+        window.deleteLater()
+
+
+def test_spectrum_source_path_edit_has_bottom_painting_clearance(qapp):
+    window = MainWindow()
+    try:
+        window.resize(1600, 900)
+        window.show()
+        qapp.processEvents()
+
+        for mode_button, path_edit in (
+            (window.singleModeButton, window.lineEdit),
+            (window.sumModeButton, window.folder_path),
+        ):
+            mode_button.click()
+            qapp.processEvents()
+            assert window.sourceStack.height() >= 34
+            assert path_edit.height() <= 30
+            assert path_edit.geometry().bottom() < window.sourceStack.contentsRect().bottom()
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_project_page_exposes_workflow_progress_and_next_action(qapp, tmp_path):
+    window = MainWindow()
+    try:
+        ps = ProjectSettings(
+            project_name="Workflow UI",
+            system="Test",
+            output_dir=str(tmp_path / "Workflow_UI"),
+        )
+        window.project_settings_manager.set(ps)
+        window._read_project_settings_to_ui(ps)
+        window.refresh_project_lifecycle(ps)
+
+        assert "项目初始化" in window.project_stage_buttons["project_setup"].text()
+        assert window.project_stage_buttons["project_setup"].property("stageState") == "active"
+        assert window.project_continue_button.text().startswith("继续：")
+        assert "建议下一步" in window.project_next_action_label.text()
+    finally:
+        window.project_settings_manager.clear_project_path()
+        window.deleteLater()
+
+
+def test_project_workflow_infers_prerequisites_from_downstream_result(qapp, tmp_path):
+    window = MainWindow()
+    result_file = tmp_path / "temperature_result.csv"
+    result_file.write_text("mz,temperature,signal\n29,650,1\n", encoding="utf-8")
+    try:
+        ps = ProjectSettings(
+            project_name="Legacy Workflow",
+            system="Test",
+            output_dir=str(tmp_path / "Legacy_Workflow"),
+            temperature_scan_result_file=str(result_file),
+        )
+        window.project_settings_manager.set(ps)
+        window.refresh_project_lifecycle(ps)
+
+        assert window.project_stage_buttons["calibration"].property("stageState") == "complete"
+        assert "PIE拟合" in window.project_continue_button.text()
+    finally:
+        window.project_settings_manager.clear_project_path()
+        window.deleteLater()
+
+
 def test_common_parameters_apply_to_project_settings(qapp):
     from bl03u_masstool.core.calibration import Calibration
     from bl03u_masstool.core.normalization import NormalizationSettings
@@ -319,7 +426,7 @@ def test_temperature_page_lists_energy_subfolders_for_project_source(qapp, tmp_p
         assert widget.temperature_source_scope == "project"
         assert widget.scan_folder_combo.count() == 4
         assert [widget.scan_folder_combo.itemText(i) for i in range(widget.scan_folder_combo.count())] == [
-            "全部能量",
+            "全部能量 (3)",
             "8eV",
             "9.5eV",
             "14.6-14.8eV",
@@ -792,6 +899,7 @@ def test_save_and_apply_uses_selected_parent_directory_for_new_project(qapp, tmp
         window.project_output_dir_edit.setText(str(downloads_dir))
 
         window.save_and_apply_project_settings()
+        _wait_for_project_materialization(qapp, window)
 
         project_dir = downloads_dir / "test"
         assert project_dir.exists()
@@ -835,6 +943,20 @@ def test_empty_state_placeholders_do_not_use_specific_system_examples(qapp):
         window.deleteLater()
 
 
+def test_ie_lookup_hides_unavailable_prediction_model_ui(qapp):
+    window = MainWindow()
+    try:
+        group_titles = [group.title() for group in window.ionization_page.findChildren(QtWidgets.QGroupBox)]
+
+        assert "IE预测模型输出" not in group_titles
+        assert not hasattr(window.ionization_page, "model_prediction_table")
+        assert "查询结果" in group_titles
+        assert "IE测定记录" in group_titles
+    finally:
+        window.project_settings_manager.clear_project_path()
+        window.deleteLater()
+
+
 def test_new_project_uses_parent_directory_even_if_parent_contains_old_project_files(qapp, tmp_path, monkeypatch):
     downloads_dir = tmp_path / "Downloads"
     (downloads_dir / "config").mkdir(parents=True)
@@ -851,6 +973,7 @@ def test_new_project_uses_parent_directory_even_if_parent_contains_old_project_f
         window.project_output_dir_edit.setText(str(downloads_dir))
 
         window.save_and_apply_project_settings()
+        _wait_for_project_materialization(qapp, window)
 
         project_dir = downloads_dir / "hhh"
         assert project_dir.exists()
@@ -885,6 +1008,7 @@ def test_save_new_project_ignores_stale_opened_parent_project_root(qapp, tmp_pat
         window.project_output_dir_edit.setText(str(downloads_dir))
 
         window.save_and_apply_project_settings()
+        _wait_for_project_materialization(qapp, window)
 
         project_dir = downloads_dir / "aaa"
         assert (project_dir / "config" / "project.yaml").exists()
@@ -917,6 +1041,7 @@ def test_save_project_name_into_active_stale_parent_creates_child_project(qapp, 
         window.project_output_dir_edit.setText(str(downloads_dir))
 
         window.save_and_apply_project_settings()
+        _wait_for_project_materialization(qapp, window)
 
         project_dir = downloads_dir / "aaa"
         assert (project_dir / "analysis").exists()
@@ -955,6 +1080,7 @@ def test_save_and_apply_materializes_project_data_sources(qapp, tmp_path, monkey
         window.project_common_parameters_widget.kr_peak_file_edit.setText(str(kr_peak_source))
 
         window.save_and_apply_project_settings()
+        _wait_for_project_materialization(qapp, window)
 
         project_dir = downloads_dir / "managed"
         managed_temp = project_dir / "raw_data" / "temperature_scan" / "温度扫描"
@@ -1272,6 +1398,7 @@ def test_save_and_apply_persists_common_parameters_to_project_file(qapp, tmp_pat
         window.project_common_parameters_widget.mf_mass_disc_exponent_edit.setValue(0.76155)
 
         window.save_and_apply_project_settings()
+        _wait_for_project_materialization(qapp, window)
 
         saved = load_project_settings(project_dir / "config" / "project.yaml")
         saved_yaml = yaml.safe_load((project_dir / "config" / "project.yaml").read_text(encoding="utf-8"))

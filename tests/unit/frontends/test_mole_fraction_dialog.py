@@ -140,6 +140,10 @@ def test_project_temperature_scan_folder_loads_energy_subfolders(qapp, tmp_path,
         dialog.set_project_settings(ProjectSettings(temperature_scan_folder=str(root)))
 
         assert dialog.btn_load_project_ts_folder.isEnabled()
+        assert dialog.available_energies == []
+
+        dialog._load_project_temperature_scan_folder()
+
         assert dialog.available_energies == [8.0, 9.5]
         assert "项目原始目录" in dialog.lbl_ts_folder.text()
 
@@ -226,6 +230,34 @@ def test_stale_legacy_parent_mz_128_is_cleared_when_data_lacks_128(qapp):
 
         assert dialog._clear_stale_legacy_parent_mz()
         assert dialog.spin_parent_mz.value() == 0
+    finally:
+        dialog.deleteLater()
+
+
+def test_project_parent_mz_is_shown_as_unconfirmed_project_preset(qapp):
+    dialog = MoleFractionDialog(Calibration(a=0.0, b=1.0, c=0.0), None)
+    try:
+        dialog.temperature_scan_data = {
+            10.0: {
+                650.0: {
+                    "precomputed_signals": {128: 100.0, 112: 50.0},
+                    "peaks_info": [{"mz_rounded": 128}, {"mz_rounded": 112}],
+                }
+            }
+        }
+
+        dialog.set_project_settings(ProjectSettings(mf_parent_mz=128))
+
+        assert dialog.spin_parent_mz.value() == 128
+        assert "项目预设 m/z 128" in dialog.lbl_parent_mz_status.text()
+        assert "请确认" in dialog.lbl_parent_mz_status.text()
+        assert dialog.btn_calc_parent.isEnabled() is False
+
+        dialog._confirm_parent_mz()
+
+        assert dialog._parent_mz_confirmed is True
+        assert "已确认 m/z 128" in dialog.lbl_parent_mz_status.text()
+        assert dialog.btn_calc_parent.isEnabled() is True
     finally:
         dialog.deleteLater()
 
