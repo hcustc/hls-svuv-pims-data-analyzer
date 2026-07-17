@@ -7,6 +7,13 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 pytest.importorskip("PyQt6")
+try:
+    from PyQt6 import QtCore, QtWidgets
+except ImportError as e:
+    pytest.skip(f"PyQt6 display libraries not available: {e}", allow_module_level=True)
+
+pytestmark = pytest.mark.gui
+
 pytest.importorskip("matplotlib")
 
 from bl03u_masstool.frontends.pyqt_app.common import static_plot
