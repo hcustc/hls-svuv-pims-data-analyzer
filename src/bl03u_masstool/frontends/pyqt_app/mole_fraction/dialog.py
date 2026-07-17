@@ -14,6 +14,7 @@ from bl03u_masstool.core.config import (
     load_peak_detection_config,
     save_calibration_config,
     save_peak_detection_config,
+    resolve_species_database_path,
     species_database_path,
 )
 from bl03u_masstool.core.isotope import (
@@ -361,31 +362,37 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             return f"PIE结果 {len(self.pie_species_data)} 条"
         return None
 
-    def _load_project_database_from_settings(self) -> None:
-        """Load the project-owned PICS database when project settings provide one."""
+    def _load_project_database_from_settings(self, *, force: bool = False) -> None:
+        """Rebuild the database from defaults plus the current project override."""
         ps = self.project_settings
-        db_value = str(getattr(ps, "pics_database_path", "") or "").strip() if ps is not None else ""
-        if not db_value:
-            return
-        db_path = Path(db_value)
-        if not db_path.exists() or not db_path.is_file():
-            return
+        db_value = getattr(ps, "pics_database_path", "") if ps is not None else ""
+        db_path = resolve_species_database_path(db_value)
         resolved = str(db_path)
-        if self._loaded_database_path == resolved:
+        if not force and self._loaded_database_path == resolved:
             return
         try:
-            project_database, _ = load_species_database(resolved)
-            self._merge_species_database(project_database)
+            default_path = species_database_path()
+            default_database, _ = load_species_database(str(default_path))
+            self.database = []
+            self.mz_index = {}
+            self._merge_species_database(default_database)
+            if db_path != default_path:
+                project_database, _ = load_species_database(resolved)
+                self._merge_species_database(project_database)
             self._loaded_database_path = resolved
             if hasattr(self, "_update_parent_species_list"):
                 self._update_parent_species_list()
             if hasattr(self, "energy_parent_table"):
                 self._refresh_energy_parent_table()
             if hasattr(self, "status_label"):
-                self.status_label.setText(f"已加载项目PICS数据库: {db_path.name}")
+                scope = "项目" if db_path != default_path else "默认"
+                self.status_label.setText(f"已加载{scope}PICS数据库: {db_path.name}")
         except Exception as exc:
             if hasattr(self, "status_label"):
-                self.status_label.setText(f"项目PICS数据库加载失败: {exc}")
+                self.status_label.setText(f"PICS数据库加载失败: {exc}")
+
+    def refresh_database(self) -> None:
+        self._load_project_database_from_settings(force=True)
 
     def _merge_species_database(self, records: list[dict]) -> None:
         """Merge project PICS records over the bundled database without losing fallbacks."""

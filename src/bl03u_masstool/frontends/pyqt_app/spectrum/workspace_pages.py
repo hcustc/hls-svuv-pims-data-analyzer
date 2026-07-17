@@ -8,6 +8,7 @@ from PyQt6.QtWidgets import QFileDialog, QHBoxLayout, QLineEdit, QPushButton, QV
 
 from bl03u_masstool.core.config import (
     PeakDetectionConfig,
+    resolve_species_database_path,
     save_peak_detection_config,
     species_database_path,
 )
@@ -95,6 +96,7 @@ class WorkspacePagesMixin:
         )
         self.mole_fraction_page.set_project_settings(self.project_settings_manager.get())
         self.ionization_page = IonizationEnergyLookupWidget(self.workspace_stack)
+        self.ionization_page.set_project_settings(self.project_settings_manager.get())
         self.isotope_page = IsotopeAbundanceDialog(self.workspace_stack)
         self.isotope_page.set_project_settings(self.project_settings_manager.get())
         self.pics_page = PICSCalculatorDialog(
@@ -104,8 +106,9 @@ class WorkspacePagesMixin:
         )
         self.pics_page.set_project_settings(self.project_settings_manager.get())
         self.pics_import_page = PICSImportWidget(self.workspace_stack)
+        self.pics_import_page.set_project_settings(self.project_settings_manager.get())
         self.pics_import_page.import_completed.connect(
-            lambda _result: self.pics_page.refresh_database()
+            lambda _result: self._refresh_pics_database_consumers()
         )
         self.project_page = QtWidgets.QWidget(self.workspace_stack)
         self.project_page.setObjectName("ProjectPage")
@@ -993,8 +996,23 @@ class WorkspacePagesMixin:
             self.pics_page.normalization_settings = self.normalization_settings
             self.pics_page.calibration = calibration
             self.pics_page.set_project_settings(ps)
+        if hasattr(self, "pics_import_page"):
+            self.pics_import_page.set_project_settings(ps)
+        if hasattr(self, "ionization_page"):
+            self.ionization_page.set_project_settings(ps)
         if hasattr(self, "isotope_page"):
             self.isotope_page.set_project_settings(ps)
+
+    def _refresh_pics_database_consumers(self) -> None:
+        """Reload every desktop consumer after PICS records are imported."""
+        ps = self.project_settings_manager.get()
+        database_path = resolve_species_database_path(ps.pics_database_path)
+        if hasattr(self, "pics_page"):
+            self.pics_page.refresh_database()
+        if hasattr(self, "pie_page"):
+            self.pie_page.load_database(str(database_path), show_message=False)
+        if hasattr(self, "mole_fraction_page"):
+            self.mole_fraction_page.refresh_database()
 
     def new_project(self) -> None:
         """清空表单，准备创建新项目"""
@@ -1242,8 +1260,6 @@ class WorkspacePagesMixin:
         if hasattr(self, "apply_project_spectrum_paths"):
             self.apply_project_spectrum_paths(ps, activate=True)
         self._sync_project_settings_to_tool_pages(ps, activate_project_scope=True)
-        if hasattr(self, "pie_page") and ps.pics_database_path and os.path.exists(ps.pics_database_path):
-            self.pie_page.load_database(show_message=False)
 
     def _sync_project_settings_to_tool_pages(
         self,
@@ -1269,6 +1285,10 @@ class WorkspacePagesMixin:
             self.pics_page.normalization_settings = self.normalization_settings
             self.pics_page.calibration = calibration
             self.pics_page.set_project_settings(ps)
+        if hasattr(self, "pics_import_page"):
+            self.pics_import_page.set_project_settings(ps)
+        if hasattr(self, "ionization_page"):
+            self.ionization_page.set_project_settings(ps)
         if hasattr(self, "isotope_page"):
             self.isotope_page.set_project_settings(ps)
 
@@ -1884,6 +1904,10 @@ class WorkspacePagesMixin:
             self.pics_page.normalization_settings = self.normalization_settings
             self.pics_page.calibration = calibration
             self.pics_page.set_project_settings(ps)
+        if hasattr(self, "pics_import_page"):
+            self.pics_import_page.set_project_settings(ps)
+        if hasattr(self, "ionization_page"):
+            self.ionization_page.set_project_settings(ps)
         if hasattr(self, "isotope_page"):
             self.isotope_page.set_project_settings(ps)
         self.refresh_project_parameter_summary()

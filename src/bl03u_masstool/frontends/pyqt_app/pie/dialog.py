@@ -18,6 +18,7 @@ from bl03u_masstool.core.config import (
     load_peak_detection_config,
     save_calibration_config,
     save_peak_detection_config,
+    resolve_species_database_path,
     species_database_path,
 )
 from bl03u_masstool.core.isotope import (
@@ -29,6 +30,7 @@ from bl03u_masstool.core.isotope import (
     parse_formula,
 )
 from bl03u_masstool.core.nist_webbook import (
+    NistWebBookClient,
     default_nist_webbook_client,
     select_species_ionization_energy,
 )
@@ -125,6 +127,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self._ie_lookup_inflight: set[str] = set()
         self._ie_lookup_active_requests: list[dict] = []
         self.pie_folders: list[str] = []
+        self._loaded_database_path = ""
         self._busy = False
         self._fit_preview_active = False
         # Per-m/z 配置存储（Phase 1）+ 版本管理（Phase 2）
@@ -765,8 +768,10 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.fitting_control_widget._updating = False
         self.fitting_control_widget._refresh_candidate_summary()
 
-    def load_database(self, show_message: bool = True):
-        path = self.database_edit.text().strip() if hasattr(self, "database_edit") else ""
+    def load_database(self, path: str | os.PathLike[str] | None = None, show_message: bool = True):
+        path = str(path or "").strip()
+        if not path and hasattr(self, "database_edit"):
+            path = self.database_edit.text().strip()
         if not path:
             path, _ = QtWidgets.QFileDialog.getOpenFileName(
                 self,
@@ -780,6 +785,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 self.database_edit.setText(path)
         try:
             self.database, _ = load_species_database(path)
+            self._loaded_database_path = str(Path(path))
             self.status_label.setText(f"已加载PICS截面数据库: {len(self.database)} 个物种")
             if show_message:
                 QtWidgets.QMessageBox.information(self, "完成", f"已加载 {len(self.database)} 个物种")
@@ -792,6 +798,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             db_path = species_database_path()
             if db_path.exists():
                 self.database, _ = load_species_database(str(db_path))
+                self._loaded_database_path = str(db_path)
         except Exception:
             pass
 
@@ -1063,6 +1070,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 "species": species_name,
                 "formula": str(species.get("formula") or "").strip(),
                 "mz": int(species.get("mz", mz)),
+                "database_path": self._loaded_database_path,
             }
             self._ie_lookup_pending[cache_key] = request
             self._apply_ie_state(
@@ -1094,9 +1102,19 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
     @staticmethod
     def _query_ie_requests_sync(requests: list[dict]) -> list[dict]:
-        client = default_nist_webbook_client()
+        clients: dict[str, NistWebBookClient] = {}
         results: list[dict] = []
         for request in requests:
+            database_path = str(request.get("database_path") or "")
+            if database_path:
+                client = clients.setdefault(
+                    database_path,
+                    NistWebBookClient(local_db_path=database_path),
+                )
+            else:
+                if "" not in clients:
+                    clients[""] = default_nist_webbook_client()
+                client = clients[""]
             query = str(request.get("species") or request.get("formula") or "").strip()
             try:
                 query_result = client.query_ionization_energy(query, search_type="auto")
@@ -2088,6 +2106,10 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             activate_project_scope = (self._has_project_scope() or bool(self.project_dir)) and has_project_context
         previous_project_dir = self.project_dir
         self.project_settings = ps
+        database_path = resolve_species_database_path(ps.pics_database_path)
+        normalized_database_path = str(database_path)
+        if normalized_database_path != self._loaded_database_path:
+            self.load_database(normalized_database_path, show_message=False)
         self.integration_method_label.setText(f"积分方式: {self._integration_method_label(ps.pie_integration_method)}")
 
         project_name = ps.project_name or "---"

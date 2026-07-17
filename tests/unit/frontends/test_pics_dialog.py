@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 
+import numpy as np
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -15,6 +16,8 @@ except ImportError as e:
 pytestmark = pytest.mark.gui
 
 from bl03u_masstool.core.calibration import Calibration
+from bl03u_masstool.core.pie_analysis import save_species_database_sqlite
+from bl03u_masstool.core.project_settings import ProjectSettings
 from bl03u_masstool.frontends.pyqt_app.core_tools.dialog import CoreToolsDialog
 from bl03u_masstool.frontends.pyqt_app.pics.dialog import PICSCalculatorDialog
 from bl03u_masstool.frontends.pyqt_app.pics.import_widget import PICSImportWidget
@@ -87,6 +90,35 @@ def test_pics_import_widget_initializes(qapp):
         ]
     finally:
         widget.deleteLater()
+
+
+def test_pics_calculator_and_import_use_project_database(qapp, tmp_path):
+    database_path = tmp_path / "project.sqlite"
+    save_species_database_sqlite(
+        [
+            {
+                "mz": 30,
+                "species": "ProjectNO",
+                "ie": 9.2,
+                "energies": np.array([10.0, 11.0]),
+                "cross_sections": np.array([1.0, 2.0]),
+            }
+        ],
+        database_path,
+    )
+    settings = ProjectSettings(pics_database_path=str(database_path))
+    calculator = PICSCalculatorDialog(Calibration(), None)
+    importer = PICSImportWidget()
+    try:
+        calculator.set_project_settings(settings)
+        importer.set_project_settings(settings)
+
+        assert calculator._loaded_database_path == str(database_path)
+        assert any(item["species"] == "ProjectNO" for item in calculator.database)
+        assert importer.database_path() == database_path
+    finally:
+        calculator.deleteLater()
+        importer.deleteLater()
 
 
 def test_pics_import_preview_requires_explicit_confirmation(qapp):

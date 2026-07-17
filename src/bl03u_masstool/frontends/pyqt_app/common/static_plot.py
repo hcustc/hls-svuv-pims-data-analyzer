@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import tempfile
 from pathlib import Path
 from typing import Iterable
@@ -16,10 +17,11 @@ _font_cache_dir.mkdir(parents=True, exist_ok=True)
 os.environ.setdefault("XDG_CACHE_HOME", str(_font_cache_dir))
 
 try:
-    from matplotlib import rcParams
+    from matplotlib import font_manager, rcParams
     from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
     from matplotlib.figure import Figure
 except Exception:  # pragma: no cover - exercised only when the optional runtime is absent
+    font_manager = None
     rcParams = None
     FigureCanvas = None
     Figure = None
@@ -31,6 +33,55 @@ def _mpl_color(color):
     if isinstance(color, tuple) and color and max(color) > 1:
         return tuple(channel / 255 for channel in color)
     return color
+
+
+_CJK_FONT_FAMILIES = [
+    "Microsoft YaHei",
+    "Microsoft YaHei UI",
+    "SimHei",
+    "SimSun",
+    "PingFang SC",
+    "Noto Sans CJK SC",
+    "Source Han Sans SC",
+    "Arial Unicode MS",
+]
+
+
+def configure_matplotlib_fonts(
+    *,
+    platform_name: str | None = None,
+    windows_dir: str | os.PathLike[str] | None = None,
+) -> str:
+    """Select a real CJK-capable Matplotlib font, including in frozen Windows builds."""
+    if rcParams is None or font_manager is None:
+        return ""
+
+    platform_name = platform_name or sys.platform
+    if platform_name == "win32":
+        font_root = Path(windows_dir or os.environ.get("WINDIR", r"C:\Windows")) / "Fonts"
+        # PyInstaller launches can inherit an incomplete/stale Matplotlib font cache.
+        # Explicit registration makes the system fonts available for this process.
+        for filename in ("msyh.ttc", "msyhbd.ttc", "simhei.ttf", "simsun.ttc"):
+            font_path = font_root / filename
+            if font_path.is_file():
+                try:
+                    font_manager.fontManager.addfont(str(font_path))
+                except (OSError, RuntimeError):
+                    continue
+
+    installed_families = {entry.name for entry in font_manager.fontManager.ttflist}
+    selected_family = next(
+        (family for family in _CJK_FONT_FAMILIES if family in installed_families),
+        "DejaVu Sans",
+    )
+    rcParams["font.family"] = "sans-serif"
+    rcParams["font.sans-serif"] = [
+        selected_family,
+        *[family for family in _CJK_FONT_FAMILIES if family != selected_family],
+        "DejaVu Sans",
+    ]
+    rcParams["axes.unicode_minus"] = False
+    return selected_family
 
 
 class StaticCurvePlot(QtWidgets.QWidget):
@@ -58,14 +109,7 @@ class StaticCurvePlot(QtWidgets.QWidget):
             layout.addWidget(self._placeholder)
             return
 
-        rcParams["font.sans-serif"] = [
-            "PingFang SC",
-            "Microsoft YaHei UI",
-            "Noto Sans CJK SC",
-            "Arial Unicode MS",
-            "DejaVu Sans",
-        ]
-        rcParams["axes.unicode_minus"] = False
+        configure_matplotlib_fonts()
 
         self.figure = Figure(figsize=(7.2, 4.2), dpi=110, facecolor=self._plot_theme.background, constrained_layout=True)
         self.canvas = FigureCanvas(self.figure)

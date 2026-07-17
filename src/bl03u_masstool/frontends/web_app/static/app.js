@@ -723,6 +723,11 @@ function handleMissingPicsLibrary(error, writer = log) {
   return true;
 }
 
+function configuredPicsDatabasePath() {
+  if (state.picsLibraryId) return "";
+  return String(state.projectSettings?.data_sources?.pics_database_path || "").trim();
+}
+
 function payloadFromForm() {
   state.projectSettings = collectProjectSettingsFromForms();
   const settings = state.projectSettings;
@@ -730,6 +735,7 @@ function payloadFromForm() {
   return {
     folder: settings.data_sources.pie_scan_folder.trim(),
     library_id: state.picsLibraryId || null,
+    database: configuredPicsDatabasePath() || null,
     peak_source: peakSource,
     manual_peak_path: peakSource === "manual" ? settings.data_sources.manual_peak_file.trim() || null : null,
     target_mz: $("target-mz").value.trim() || null,
@@ -871,6 +877,8 @@ async function uploadPieCurve(event) {
     setProgress(18, "读取上传文件", "running");
     const params = new URLSearchParams({ filename: file.name });
     if (state.picsLibraryId) params.set("library_id", state.picsLibraryId);
+    const database = configuredPicsDatabasePath();
+    if (database) params.set("database", database);
     const data = await fetchJson(`/api/pie/upload_curve?${params.toString()}`, {
       method: "POST",
       headers: { "Content-Type": "application/octet-stream" },
@@ -1512,6 +1520,8 @@ function picsSearchParams() {
   const ieMax = $("pics-ie-max").value.trim();
   params.set("limit", $("pics-limit").value.trim() || "100");
   if (state.picsLibraryId) params.set("library_id", state.picsLibraryId);
+  const database = configuredPicsDatabasePath();
+  if (database) params.set("database", database);
   if (mz) params.set("mz", mz);
   if (tolerance) params.set("tolerance", tolerance);
   if (name) params.set("name", name);
@@ -1569,6 +1579,8 @@ function renderPicsSummary() {
 async function loadPicsSpecies(speciesId) {
   const params = new URLSearchParams();
   if (state.picsLibraryId) params.set("library_id", state.picsLibraryId);
+  const database = configuredPicsDatabasePath();
+  if (database) params.set("database", database);
   const suffix = params.toString() ? `?${params.toString()}` : "";
   let data;
   try {

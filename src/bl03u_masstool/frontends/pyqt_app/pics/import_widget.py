@@ -6,7 +6,8 @@ from pathlib import Path
 
 from PyQt6 import QtCore, QtWidgets
 
-from bl03u_masstool.core.config import species_database_path
+from bl03u_masstool.core.config import resolve_species_database_path
+from bl03u_masstool.core.project_settings import ProjectSettings
 from bl03u_masstool.frontends.pyqt_app.workers import WorkerThread
 
 
@@ -21,7 +22,19 @@ class PICSImportWidget(QtWidgets.QWidget):
         self._records: list[dict] = []
         self._selected_path = ""
         self._worker: WorkerThread | None = None
+        self.project_settings: ProjectSettings | None = None
         self._init_ui()
+
+    def set_project_settings(self, project_settings: ProjectSettings) -> None:
+        self.project_settings = project_settings
+
+    def database_path(self) -> Path:
+        configured_path = (
+            self.project_settings.pics_database_path
+            if self.project_settings is not None
+            else None
+        )
+        return resolve_species_database_path(configured_path)
 
     @staticmethod
     def _set_status(label: QtWidgets.QLabel, text: str, status: str = "") -> None:
@@ -201,12 +214,13 @@ class PICSImportWidget(QtWidgets.QWidget):
             return
         records = list(self._records)
         mode = str(self.import_mode_combo.currentData())
+        database_path = self.database_path()
         self._set_busy(True, "正在写入数据库…")
 
         def _write() -> dict:
             from bl03u_masstool.core.pics_import import write_pics_records
 
-            return write_pics_records(records, species_database_path(), mode=mode)
+            return write_pics_records(records, database_path, mode=mode)
 
         self._worker = WorkerThread(_write, self)
         self._worker.finished_with_result.connect(self._show_import_result)

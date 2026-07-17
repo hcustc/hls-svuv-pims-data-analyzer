@@ -14,7 +14,7 @@ from bl03u_masstool.core.config import (
     load_peak_detection_config,
     save_calibration_config,
     save_peak_detection_config,
-    species_database_path,
+    resolve_species_database_path,
 )
 from bl03u_masstool.core.isotope import (
     calculate_isotope_distribution,
@@ -24,7 +24,7 @@ from bl03u_masstool.core.isotope import (
     parse_element_count_ranges,
     parse_formula,
 )
-from bl03u_masstool.core.nist_webbook import default_nist_webbook_client
+from bl03u_masstool.core.nist_webbook import NistWebBookClient
 from bl03u_masstool.core.output_paths import ensure_output_dir
 from bl03u_masstool.core.pie_analysis import analyze_pie_folder, build_pie_curves, identify_species_for_mz_with_curve, load_species_database, analyze_multiple_pie_folders, merge_pie_segments
 from bl03u_masstool.core.pics_calculator import calc_pics_single_energy
@@ -66,6 +66,7 @@ class IonizationEnergyLookupWidget(QtWidgets.QWidget, DataFrameTableMixin):
         super().__init__(parent)
         self.worker: WorkerThread | None = None
         self.current_compounds = []
+        self.project_settings: ProjectSettings | None = None
         self.setWindowTitle("电离能查询")
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
@@ -159,6 +160,9 @@ class IonizationEnergyLookupWidget(QtWidgets.QWidget, DataFrameTableMixin):
         tables_splitter.setStretchFactor(1, 1)
         layout.addWidget(tables_splitter, stretch=1)
 
+    def set_project_settings(self, project_settings: ProjectSettings) -> None:
+        self.project_settings = project_settings
+
     def set_busy(self, busy: bool, message: str) -> None:
         self.query_button.setDisabled(busy)
         self.query_edit.setDisabled(busy)
@@ -172,8 +176,16 @@ class IonizationEnergyLookupWidget(QtWidgets.QWidget, DataFrameTableMixin):
             return
         search_type = str(self.search_type_combo.currentData())
         self.set_busy(True, "正在查询本地物种库 / NIST WebBook...")
+        database_path = resolve_species_database_path(
+            self.project_settings.pics_database_path
+            if self.project_settings is not None
+            else None
+        )
         self.worker = WorkerThread(
-            lambda: default_nist_webbook_client().query_ionization_energy(query, search_type=search_type),
+            lambda: NistWebBookClient(local_db_path=database_path).query_ionization_energy(
+                query,
+                search_type=search_type,
+            ),
             self,
         )
         self.worker.finished_with_result.connect(self.on_query_complete)
