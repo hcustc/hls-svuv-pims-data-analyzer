@@ -15,7 +15,7 @@ from bl03u_masstool.core.config import (
     load_peak_detection_config,
     save_calibration_config,
     save_peak_detection_config,
-    species_database_path,
+    resolve_species_database_path,
 )
 from bl03u_masstool.core.isotope import (
     calculate_isotope_distribution,
@@ -1074,8 +1074,11 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
     def _preview_mf_mass_discrimination(self) -> None:
         from bl03u_masstool.core.mole_fraction import calc_mass_discrimination
         from bl03u_masstool.core.pie_analysis import load_species_database
-        from bl03u_masstool.core.config import species_database_path
-        db_path = species_database_path()
+        db_path = resolve_species_database_path(
+            self.project_settings.pics_database_path
+            if self.project_settings is not None
+            else None
+        )
         if not db_path.exists():
             QtWidgets.QMessageBox.warning(self, "提示", "物种数据库未找到，请先在PIE鉴定中导入PICS")
             return

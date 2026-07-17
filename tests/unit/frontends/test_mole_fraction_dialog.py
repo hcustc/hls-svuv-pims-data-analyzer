@@ -85,6 +85,45 @@ def test_project_settings_loads_project_pics_database(qapp, tmp_path):
         dialog.deleteLater()
 
 
+def test_switching_or_closing_project_drops_previous_pics_records(qapp, tmp_path):
+    first_path = tmp_path / "first.sqlite"
+    second_path = tmp_path / "second.sqlite"
+    for path, name, mz in (
+        (first_path, "OnlyInFirstProject", 151),
+        (second_path, "OnlyInSecondProject", 152),
+    ):
+        save_species_database_sqlite(
+            [
+                {
+                    "mz": mz,
+                    "species": name,
+                    "ie": 9.8,
+                    "smiles": "",
+                    "energies": np.array([10.0]),
+                    "cross_sections": np.array([1.5]),
+                }
+            ],
+            path,
+        )
+
+    dialog = MoleFractionDialog(Calibration(), None)
+    try:
+        dialog.set_project_settings(ProjectSettings(pics_database_path=str(first_path)))
+        assert any(item["species"] == "OnlyInFirstProject" for item in dialog.database)
+
+        dialog.set_project_settings(ProjectSettings(pics_database_path=str(second_path)))
+        names = {item["species"] for item in dialog.database}
+        assert "OnlyInFirstProject" not in names
+        assert "OnlyInSecondProject" in names
+
+        dialog.set_project_settings(ProjectSettings())
+        names = {item["species"] for item in dialog.database}
+        assert "OnlyInFirstProject" not in names
+        assert "OnlyInSecondProject" not in names
+    finally:
+        dialog.deleteLater()
+
+
 def test_data_loading_uses_switchable_data_views(qapp):
     dialog = MoleFractionDialog(Calibration(a=0.0, b=1.0, c=0.0), None)
     try:

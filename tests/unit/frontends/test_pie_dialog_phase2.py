@@ -28,6 +28,8 @@ except ImportError as e:
 pytestmark = pytest.mark.gui
 
 from bl03u_masstool.core.calibration import Calibration
+from bl03u_masstool.core.pie_analysis import save_species_database_sqlite
+from bl03u_masstool.core.project_settings import ProjectSettings
 from bl03u_masstool.frontends.pyqt_app.pie.dialog import PIESpeciesFitDialog
 
 
@@ -46,6 +48,57 @@ def pie_dialog(qapp):
     dialog.show()
     yield dialog
     dialog.deleteLater()
+
+
+def test_temporary_data_uses_project_pics_database(pie_dialog, tmp_path):
+    database_path = tmp_path / "project_species.sqlite"
+    save_species_database_sqlite(
+        [
+            {
+                "mz": 31,
+                "species": "TemporaryDataCandidate",
+                "ie": 10.1,
+                "smiles": "",
+                "energies": np.array([10.5, 11.0]),
+                "cross_sections": np.array([0.5, 1.0]),
+            }
+        ],
+        database_path,
+    )
+
+    pie_dialog.set_pie_source_scope("temporary")
+    pie_dialog.set_project_settings(
+        ProjectSettings(pics_database_path=str(database_path)),
+        activate_project_scope=False,
+    )
+
+    assert pie_dialog.pie_source_scope == "temporary"
+    assert pie_dialog._loaded_database_path == str(database_path)
+    assert any(item["species"] == "TemporaryDataCandidate" for item in pie_dialog.database)
+
+
+def test_closing_project_restores_default_pics_database(pie_dialog, tmp_path):
+    database_path = tmp_path / "project_species.sqlite"
+    save_species_database_sqlite(
+        [
+            {
+                "mz": 131,
+                "species": "ProjectOnlyCandidate",
+                "ie": 10.1,
+                "smiles": "",
+                "energies": np.array([10.5, 11.0]),
+                "cross_sections": np.array([0.5, 1.0]),
+            }
+        ],
+        database_path,
+    )
+    pie_dialog.set_project_settings(ProjectSettings(pics_database_path=str(database_path)))
+    assert any(item["species"] == "ProjectOnlyCandidate" for item in pie_dialog.database)
+
+    pie_dialog.set_project_settings(ProjectSettings(), activate_project_scope=False)
+
+    assert pie_dialog._loaded_database_path != str(database_path)
+    assert not any(item["species"] == "ProjectOnlyCandidate" for item in pie_dialog.database)
 
 
 class TestHashStability:

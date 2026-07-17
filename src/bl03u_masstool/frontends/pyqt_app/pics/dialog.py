@@ -14,7 +14,7 @@ from bl03u_masstool.core.config import (
     load_peak_detection_config,
     save_calibration_config,
     save_peak_detection_config,
-    species_database_path,
+    resolve_species_database_path,
 )
 from bl03u_masstool.core.isotope import (
     calculate_isotope_distribution,
@@ -84,6 +84,8 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
         self.database: list[dict] = []
         self.mz_index: dict[int, list[int]] = {}
+        self._loaded_database_path = ""
+        self.project_settings: ProjectSettings | None = None
         self.data_worker: WorkerThread | None = None
         self._load_database()
 
@@ -93,6 +95,7 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
     def set_project_settings(self, ps: ProjectSettings) -> None:
         """Apply ProjectSettings defaults to PICSCalculatorDialog controls."""
         self.project_settings = ps
+        self._load_database()
         if ps.pie_scan_folder and hasattr(self, "txt_folder_path"):
             self.txt_folder_path.setText(ps.pie_scan_folder)
         if hasattr(self, "spin_no_mz"):
@@ -113,6 +116,8 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.summary_system_label.setText(f"体系: {system}")
             data_path = ps.pie_scan_folder or "---"
             self.summary_data_label.setText(f"数据源: {data_path}")
+        if hasattr(self, "no_cs_table"):
+            self._load_no_cross_sections()
 
     def _open_project_settings(self):
         """跳转到项目管理页面。"""
@@ -648,9 +653,15 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
     def _load_database(self):
         try:
-            db_path = species_database_path()
+            configured_path = (
+                self.project_settings.pics_database_path
+                if self.project_settings is not None
+                else None
+            )
+            db_path = resolve_species_database_path(configured_path)
             if db_path.exists():
                 self.database, self.mz_index = load_species_database(str(db_path))
+                self._loaded_database_path = str(db_path)
         except Exception:
             pass
 
@@ -670,8 +681,8 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
         for idx in indices:
             spec = self.database[idx]
-            species_name = spec.get("species", "").lower()
-            formula = spec.get("formula", "").lower()
+            species_name = str(spec.get("species") or "").lower()
+            formula = str(spec.get("formula") or "").lower()
             if species_name == "no" or species_name == "nitric oxide" or formula == "no":
                 energies = spec.get("energies", [])
                 cross_sections = spec.get("cross_sections", [])
@@ -864,7 +875,11 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self._set_status("当前没有可保存的 PICS 结果", "error")
             return
 
-        db_path = species_database_path()
+        db_path = resolve_species_database_path(
+            self.project_settings.pics_database_path
+            if self.project_settings is not None
+            else None
+        )
         if not db_path.exists():
             self._set_status("PICS 数据库文件不存在", "error")
             return

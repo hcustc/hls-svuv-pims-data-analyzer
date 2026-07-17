@@ -94,6 +94,16 @@ def species_database_path() -> Path:
     return path
 
 
+def resolve_species_database_path(configured_path: str | Path | None = None) -> Path:
+    """Return an existing project PICS database, or the maintained default database."""
+    value = str(configured_path or "").strip()
+    if value:
+        candidate = Path(value).expanduser()
+        if candidate.is_file():
+            return candidate
+    return species_database_path()
+
+
 def load_calibration_config(path: str | Path | None = None) -> Calibration:
     app = load_app_config()
     config_path = path or app.get("config", {}).get("calibration", "config/calibration.yaml")
