@@ -71,6 +71,54 @@ def integrate_peak_with_method(
     return summed_counts_area(y_data, peak.left_bound, peak.right_bound), "sum_counts"
 
 
+def integrate_peaks_with_method(
+    y_data: Iterable[float],
+    peaks: Iterable[Peak],
+    *,
+    prefer_gaussian: bool = True,
+    integration_method: str | None = None,
+) -> list[tuple[float, str]]:
+    """Integrate one spectrum against many peak windows with stable semantics.
+
+    Sum and baseline modes convert the spectrum to an array once.  Temperature
+    scans commonly integrate hundreds of reference peaks for every spectrum,
+    so avoiding repeated dispatch and bounds normalization reduces overhead
+    without changing the NumPy operations or their order.
+    """
+    data = np.asarray(y_data, dtype=float)
+    peak_list = list(peaks)
+    method = integration_method or ("gaussian" if prefer_gaussian else "sum_counts")
+    method = method if method in {"sum_counts", "baseline", "gaussian"} else "sum_counts"
+    if prefer_gaussian:
+        method = "gaussian"
+    if method == "gaussian":
+        return [
+            integrate_peak_with_method(
+                data,
+                peak,
+                prefer_gaussian=True,
+                integration_method="gaussian",
+            )
+            for peak in peak_list
+        ]
+
+    results: list[tuple[float, str]] = []
+    data_size = int(data.size)
+    for peak in peak_list:
+        left = max(0, int(peak.left_bound))
+        right = min(data_size - 1, int(peak.right_bound))
+        if left > right or data_size == 0:
+            results.append((0.0, method))
+            continue
+        segment = data[left : right + 1]
+        if method == "baseline":
+            area = 0.0 if segment.size == 0 else float(_np_trapezoid(segment - np.min(segment)))
+        else:
+            area = float(np.sum(segment))
+        results.append((area, method))
+    return results
+
+
 def integrate_peaks(y_data: Iterable[float], peaks: Iterable[Peak], *, prefer_gaussian: bool = True) -> list[dict]:
     return [
         {

@@ -82,6 +82,81 @@ def qapp():
     return app
 
 
+def test_project_data_source_ui_round_trips_multiple_pie_folders(qapp, tmp_path):
+    low_folder = tmp_path / "pie_low"
+    high_folder = tmp_path / "pie_high"
+    low_folder.mkdir()
+    high_folder.mkdir()
+    ps = ProjectSettings(
+        project_name="Multi PIE Project",
+        output_dir=str(tmp_path / "project"),
+        pie_scan_folder=str(low_folder),
+        pie_scan_folders=[str(low_folder), str(high_folder)],
+        pie_multi_folder_mode=True,
+    )
+    window = MainWindow()
+    try:
+        window.project_settings_manager.set(ps)
+        window._read_project_settings_to_ui(ps)
+
+        assert window.project_pie_folders_list.count() == 2
+        assert window.project_pie_folder_edit.text() == str(low_folder)
+
+        collected = window._collect_project_settings_from_ui()
+        assert collected.pie_scan_folder == str(low_folder)
+        assert collected.pie_scan_folders == [str(low_folder), str(high_folder)]
+        assert collected.pie_multi_folder_mode is True
+    finally:
+        window.project_settings_manager.clear_project_path()
+        window.deleteLater()
+
+
+def test_project_data_source_adds_pie_segment_folder_without_mode_switch(
+    qapp,
+    tmp_path,
+    monkeypatch,
+):
+    low_folder = tmp_path / "pie_low"
+    high_folder = tmp_path / "pie_high"
+    low_folder.mkdir()
+    high_folder.mkdir()
+    window = MainWindow()
+    monkeypatch.setattr(
+        QtWidgets.QFileDialog,
+        "getExistingDirectory",
+        lambda *args, **kwargs: str(high_folder),
+    )
+    monkeypatch.setattr(window, "_auto_save_datasource", lambda: None)
+    try:
+        window._set_project_pie_folders([str(low_folder)])
+
+        window.add_project_pie_folder()
+
+        assert window._project_pie_folders_from_ui() == [
+            str(low_folder),
+            str(high_folder),
+        ]
+        assert not hasattr(window.project_function_defaults_widget, "pie_multi_folder_check")
+    finally:
+        window.project_settings_manager.clear_project_path()
+        window.deleteLater()
+
+
+def test_pie_manage_segments_action_opens_project_data_tab(qapp):
+    window = MainWindow()
+    try:
+        window.switch_workspace_page("pie")
+        window.project_tabs.setCurrentWidget(window.project_common_parameters_widget)
+
+        window.pie_page._open_project_settings()
+
+        assert window.workspace_stack.currentWidget() is window.project_page
+        assert window.project_tabs.currentWidget() is window.project_identity_page
+    finally:
+        window.project_settings_manager.clear_project_path()
+        window.deleteLater()
+
+
 def test_calibration_spinboxes_accept_command_v_paste(qapp):
     from bl03u_masstool.core.calibration import Calibration
     from bl03u_masstool.core.normalization import NormalizationSettings
@@ -154,7 +229,11 @@ def test_kr_energy_selection_updates_displayed_lambda_values(qapp, monkeypatch):
 def test_function_defaults_apply_to_project_settings(qapp):
     widget = FunctionDefaultsWidget()
     try:
-        ps = ProjectSettings(peak_algorithm="legacy", detection_min_idx=111)
+        ps = ProjectSettings(
+            peak_algorithm="legacy",
+            detection_min_idx=111,
+            pie_scan_folders=["pie-low", "pie-high"],
+        )
         widget.set_project_settings(ps)
 
         index = widget.peak_algorithm_combo.findData("cwt")
@@ -180,7 +259,6 @@ def test_function_defaults_apply_to_project_settings(qapp):
         integration_index = widget.pie_integration_method_combo.findData("baseline")
         assert integration_index >= 0
         widget.pie_integration_method_combo.setCurrentIndex(integration_index)
-        widget.pie_multi_folder_check.setChecked(True)
         widget.pie_merge_method_combo.setCurrentIndex(merge_index)
         widget.pics_no_mz_edit.setValue(31)
         widget.pics_no_formula_edit.setText("15NO")
@@ -704,6 +782,57 @@ def test_temperature_analysis_cache_reuses_integrated_results(qapp, tmp_path):
         widget.deleteLater()
 
 
+def test_temperature_multi_folder_analysis_reuses_curves_and_preserves_order(qapp, tmp_path):
+    from bl03u_masstool.core.calibration import Calibration
+    from bl03u_masstool.core.temperature_scan import build_temperature_curves
+    from bl03u_masstool.frontends.pyqt_app.temperature.dialog import TemperatureScanDialog
+
+    folders = []
+    for energy in (8.0, 9.0, 10.0):
+        folder = tmp_path / f"{energy:.1f}eV"
+        folder.mkdir()
+        folders.append((energy, str(folder)))
+
+    widget = TemperatureScanDialog(Calibration())
+    try:
+        analysis_order = []
+
+        def fake_analyze(folder, _params):
+            energy = float(Path(folder).name.removesuffix("eV"))
+            analysis_order.append(energy)
+            result = pd.DataFrame(
+                {
+                    "temperature": [650.0, 750.0],
+                    "file": ["a.txt", "b.txt"],
+                    "mz": [70.0, 70.0],
+                    "area": [energy, energy + 1.0],
+                    "curve_class": ["formation", "formation"],
+                    "curve_class_label": ["生成(升高)", "生成(升高)"],
+                    "curve_class_reason": ["测试", "测试"],
+                    "reference_temperature": [750.0, 750.0],
+                }
+            )
+            result.attrs["_bl03u_temperature_curves"] = build_temperature_curves(result)
+            return result
+
+        widget._analyze_temperature_folder_with_params = fake_analyze
+        output = widget._analyze_temperature_folders_with_params(folders, {})
+
+        assert analysis_order == [8.0, 9.0, 10.0]
+        assert [item["energy"] for item in output["energy_results"]] == [8.0, 9.0, 10.0]
+        assert [item["folder_label"] for item in output["energy_results"]] == [
+            "8.0eV",
+            "9.0eV",
+            "10.0eV",
+        ]
+        for item in output["energy_results"]:
+            curve_rows = item["curves"][70]["rows"]
+            assert curve_rows["scan_folder"].nunique() == 1
+            assert curve_rows["scan_energy"].iloc[0] == item["energy"]
+    finally:
+        widget.deleteLater()
+
+
 def test_temperature_project_open_autoloads_cached_curves(qapp, tmp_path):
     from bl03u_masstool.core.calibration import Calibration
     from bl03u_masstool.frontends.pyqt_app.temperature.dialog import TemperatureScanDialog
@@ -1192,9 +1321,11 @@ def test_open_project_restores_data_sources_and_applies_to_tools(qapp, tmp_path,
         assert window.temperature_page.calibration.a == pytest.approx(9.1e-7)
         assert window.pie_page.project_settings.pie_scan_folder == str(pie_folder)
         assert window.pie_page.pie_source_scope == "project"
-        assert window.pie_page.project_source_button.text() == "项目数据"
+        assert window.pie_page.project_source_button.text() == "项目管理"
         assert window.pie_page.temporary_source_button.text() == "临时数据"
-        assert window.pie_page.select_folder_button.isHidden()
+        assert not window.pie_page.select_folder_button.isHidden()
+        assert window.pie_page.select_folder_button.text() == "管理能段..."
+        assert window.pie_page.temporary_segments_button.isHidden()
         assert window.pie_page.normalization_settings.mass_discrimination == pytest.approx(1.0)
         assert window.mole_fraction_page.project_settings.mf_md_preset == "30 Torr (Catalysis)"
         assert window.datasource_row_status_labels["temperature_scan"].text().startswith("✓")
@@ -2091,11 +2222,17 @@ def test_workbench_peak_navigation_y_scale_prioritizes_selected_peak(qapp):
 def test_function_default_edits_sync_when_switching_to_tools(qapp, tmp_path):
     project_dir = tmp_path / "Project_Function_Default_Sync"
     project_dir.mkdir(parents=True)
+    pie_low = tmp_path / "pie_low"
+    pie_high = tmp_path / "pie_high"
+    pie_low.mkdir()
+    pie_high.mkdir()
 
     ps = ProjectSettings(
         project_name="Function Default Sync",
         system="C6H6",
         output_dir=str(project_dir),
+        pie_scan_folder=str(pie_low),
+        pie_scan_folders=[str(pie_low), str(pie_high)],
         pie_energy_decimals=1,
         pie_recursive=True,
         pie_prefer_gaussian=True,
@@ -2152,7 +2289,6 @@ def test_function_default_edits_sync_when_switching_to_tools(qapp, tmp_path):
         integration_index = widget.pie_integration_method_combo.findData("baseline")
         assert integration_index >= 0
         widget.pie_integration_method_combo.setCurrentIndex(integration_index)
-        widget.pie_multi_folder_check.setChecked(True)
         widget.pie_merge_method_combo.setCurrentIndex(merge_index)
         widget.pie_replicate_mode_combo.setCurrentIndex(pie_replicate_index)
         widget.pics_no_mz_edit.setValue(31)
@@ -2205,8 +2341,10 @@ def test_function_default_edits_sync_when_switching_to_tools(qapp, tmp_path):
         assert window.temperature_page.project_settings.temp_reference_mode == "individual"
         assert window.temperature_page.project_settings.kr_mz == 84
         assert window.pie_page.project_settings.pie_energy_decimals == 4
-        assert window.pie_page.use_multi_folders.isChecked()
-        assert window.pie_page.merge_method_combo.currentData() == "first_segment_dominant"
+        assert not hasattr(window.pie_page, "use_multi_folders")
+        assert not hasattr(window.pie_page, "merge_method_combo")
+        assert window.pie_page.project_settings.pie_merge_method == "first_segment_dominant"
+        assert window.pie_page.folder_edit.text() == "项目管理已登记 2 个 PIE 能段目录"
         assert window.pics_page.spin_no_mz.value() == 31
         assert window.pics_page.txt_no_formula.text() == "15NO"
         assert window.pics_page.double_no_mf.value() == pytest.approx(0.021)

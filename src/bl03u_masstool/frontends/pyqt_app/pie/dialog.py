@@ -35,7 +35,17 @@ from bl03u_masstool.core.nist_webbook import (
     select_species_ionization_energy,
 )
 from bl03u_masstool.core.output_paths import ensure_output_dir
-from bl03u_masstool.core.pie_analysis import analyze_pie_folder, build_pie_curves, identify_species_for_mz_with_curve, load_species_database, analyze_multiple_pie_folders, merge_pie_segments
+from bl03u_masstool.core.pie_analysis import (
+    PieSegmentSummary,
+    analyze_multiple_pie_folders,
+    analyze_pie_folder,
+    build_pie_curves,
+    discover_pie_segment_folders,
+    identify_species_for_mz_with_curve,
+    inspect_pie_source_segments,
+    load_species_database,
+    merge_pie_segments,
+)
 from bl03u_masstool.core.pie_state import PieStateManager
 from bl03u_masstool.core.pics_calculator import calc_pics_single_energy
 from bl03u_masstool.core.elements import get_all_elements_from_database, filter_species_by_elements, COMMON_ELEMENTS, parse_formula as parse_formula_elements, get_elements_from_formula
@@ -65,7 +75,11 @@ from bl03u_masstool.core.mole_fraction import (
 from bl03u_masstool.frontends.pyqt_app.workers import WorkerThread
 from bl03u_masstool.frontends.pyqt_app.project_artifacts import record_project_artifact
 
-from bl03u_masstool.frontends.pyqt_app.common.widgets import DataFrameTableMixin, FlowLayout
+from bl03u_masstool.frontends.pyqt_app.common.widgets import (
+    AnalysisEmptyState,
+    DataFrameTableMixin,
+    FlowLayout,
+)
 from bl03u_masstool.frontends.pyqt_app.common.static_plot import StaticCurvePlot
 from bl03u_masstool.frontends.pyqt_app.normalization.widget import CommonParametersDialog
 from bl03u_masstool.frontends.pyqt_app.pie.fitting_control_widget import FittingControlWidget
@@ -112,7 +126,12 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.pie_state_dirty = False  # Phase 3 Step 2: dirty flag for unsaved config changes
         self.pie_source_scope = "temporary"
         self._temporary_pie_folder = ""
-        self._temporary_pie_folders: list[str] = []
+        self._temporary_segment_root = ""
+        self._temporary_segment_summaries: list[PieSegmentSummary] = []
+        self._temporary_selected_segment_folders: list[str] = []
+        self._segment_scan_worker: WorkerThread | None = None
+        self._segment_scan_generation = 0
+        self._segment_scan_pending = False
         self.peak_detection = load_peak_detection_config()
         self.database: list[dict] = []
         self.analysis_df = pd.DataFrame()
@@ -126,7 +145,6 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self._ie_lookup_pending: dict[str, dict] = {}
         self._ie_lookup_inflight: set[str] = set()
         self._ie_lookup_active_requests: list[dict] = []
-        self.pie_folders: list[str] = []
         self._loaded_database_path = ""
         self._busy = False
         self._fit_preview_active = False
@@ -145,15 +163,8 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         # Auto-load PICS database (built-in, not user-selectable)
         self._auto_load_database()
 
-        self.use_multi_folders = QtWidgets.QToolButton()
-        self.use_multi_folders.setText("多文件夹")
-        self.use_multi_folders.setCheckable(True)
-        self.use_multi_folders.setChecked(False)
-        self.use_multi_folders.setObjectName("ModeToggle")
-        self.use_multi_folders.toggled.connect(self.toggle_multi_folder_mode)
-
         self.project_source_button = QtWidgets.QToolButton()
-        self.project_source_button.setText("项目数据")
+        self.project_source_button.setText("项目管理")
         self.project_source_button.setObjectName("ModeToggle")
         self.project_source_button.setCheckable(True)
         self.project_source_button.setToolTip("使用项目管理中登记的 PIE 数据源和项目拟合状态")
@@ -161,7 +172,10 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.temporary_source_button.setText("临时数据")
         self.temporary_source_button.setObjectName("ModeToggle")
         self.temporary_source_button.setCheckable(True)
-        self.temporary_source_button.setToolTip("只为本次 PIE 物种鉴别选择数据，不写回项目配置")
+        self.temporary_source_button.setToolTip(
+            "只为本次 PIE 物种鉴别选择数据，不写回项目配置；"
+            "总目录内若有多个 PIE 能段子目录，会自动识别并缩放拼接"
+        )
         self.source_scope_group = QtWidgets.QButtonGroup(self)
         self.source_scope_group.setExclusive(True)
         self.source_scope_group.addButton(self.project_source_button, 0)
@@ -176,20 +190,11 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.select_folder_button = QtWidgets.QPushButton("浏览...")
         self.select_folder_button.setToolTip("选择PIE扫描文件夹")
         self.select_folder_button.clicked.connect(self.select_folder)
-
-        self.folder_list = QtWidgets.QListWidget()
-        self.folder_list.setMaximumHeight(100)
-        self.add_folder_button = QtWidgets.QPushButton("添加文件夹")
-        self.add_folder_button.clicked.connect(self.add_folder)
-        self.remove_folder_button = QtWidgets.QPushButton("移除选中")
-        self.remove_folder_button.clicked.connect(self.remove_folder)
-        self.clear_folders_button = QtWidgets.QPushButton("清空列表")
-        self.clear_folders_button.clicked.connect(self.clear_folders)
-
-        self.merge_method_combo = QtWidgets.QComboBox()
-        self.merge_method_combo.addItem("低能段为主 (推荐)", "low_energy_dominant")
-        self.merge_method_combo.addItem("第一组为主", "first_segment_dominant")
-        self.merge_method_combo.addItem("简单拼接 (不缩放)", "mean")
+        self.temporary_segments_button = QtWidgets.QPushButton("选择能段...")
+        self.temporary_segments_button.setObjectName("BrowseButton")
+        self.temporary_segments_button.setToolTip("识别并选择临时数据目录中的 PIE 能段子文件夹")
+        self.temporary_segments_button.clicked.connect(self._show_temporary_segment_selector)
+        self.folder_edit.editingFinished.connect(self._scan_temporary_segments_from_editor)
 
         self.analyze_button = QtWidgets.QPushButton("生成曲线")
         self.analyze_button.setObjectName("WorkflowButton")
@@ -209,7 +214,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.common_params_button.setObjectName("BrowseButton")
         self.common_params_button.setToolTip("打开通用参数设置")
         self.common_params_button.clicked.connect(self.open_common_parameters)
-        self.summary_open_project_btn = QtWidgets.QPushButton("项目管理")
+        self.summary_open_project_btn = QtWidgets.QPushButton("编辑项目")
         self.summary_open_project_btn.setObjectName("BrowseButton")
         self.summary_open_project_btn.setToolTip("修改项目名、体系、数据源等")
         self.summary_open_project_btn.clicked.connect(self._open_project_settings)
@@ -250,7 +255,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
         folder_row = QtWidgets.QHBoxLayout()
         folder_row.setSpacing(6)
-        folder_label = QtWidgets.QLabel("PIE数据")
+        folder_label = QtWidgets.QLabel("数据来源")
         folder_label.setObjectName("ReadoutLabel")
         folder_row.addWidget(folder_label)
         source_scope_panel = QtWidgets.QWidget()
@@ -261,9 +266,9 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         source_scope_layout.addWidget(self.project_source_button)
         source_scope_layout.addWidget(self.temporary_source_button)
         folder_row.addWidget(source_scope_panel)
-        folder_row.addWidget(self.use_multi_folders)
         folder_row.addWidget(self.folder_edit, stretch=1)
         folder_row.addWidget(self.select_folder_button)
+        folder_row.addWidget(self.temporary_segments_button)
         folder_row.addWidget(self.analyze_button)
         data_layout.addLayout(folder_row)
 
@@ -294,22 +299,6 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         analysis_options_row.addWidget(self.status_label)
         data_layout.addLayout(analysis_options_row)
 
-        # 多文件夹列表区域 (只在多文件夹模式显示)
-        self.multi_folder_section = QtWidgets.QGroupBox("多段PIE文件夹 (按能量顺序添加)")
-        multi_layout = QtWidgets.QVBoxLayout(self.multi_folder_section)
-        multi_layout.setContentsMargins(5, 5, 5, 5)
-        multi_layout.addWidget(self.folder_list)
-        folder_btn_row = QtWidgets.QHBoxLayout()
-        folder_btn_row.addWidget(self.add_folder_button)
-        folder_btn_row.addWidget(self.remove_folder_button)
-        folder_btn_row.addWidget(self.clear_folders_button)
-        folder_btn_row.addWidget(QtWidgets.QLabel("合并:"))
-        folder_btn_row.addWidget(self.merge_method_combo)
-        folder_btn_row.addStretch()
-        multi_layout.addLayout(folder_btn_row)
-        self.multi_folder_section.setVisible(False)
-        data_layout.addWidget(self.multi_folder_section)
-
         layout.addWidget(source_panel)
 
         # ── 曲线列表区拟合控制 ──
@@ -330,11 +319,13 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
         # 初始化UI状态
         self.set_pie_source_scope("temporary", restore_saved=False)
-        self.toggle_multi_folder_mode(0)
 
         # ---- 主工作区 ----
         splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
         splitter.setObjectName("MainSplitter")
+        # Keep an ergonomic drag target while the theme paints it as a single
+        # divider inside one continuous analysis workspace.
+        splitter.setHandleWidth(7)
 
         left_panel = QtWidgets.QWidget()
         left_panel.setObjectName("SidePanel")
@@ -435,15 +426,16 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         # Plot stack: empty state + actual plot
         self._plot_stack = QtWidgets.QStackedLayout()
 
-        # Empty state
-        self._empty_state = QtWidgets.QWidget()
-        empty_layout = QtWidgets.QVBoxLayout(self._empty_state)
-        empty_layout.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        empty_msg = QtWidgets.QLabel('尚未生成PIE曲线\n\n选择包含PIE数据的文件夹后，点击"生成曲线"')
-        empty_msg.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        empty_msg.setObjectName("ProjectHint")
-        empty_msg.setWordWrap(True)
-        empty_layout.addWidget(empty_msg)
+        # Empty state: a visual workflow preview instead of a large text-only area.
+        self._empty_state = AnalysisEmptyState(
+            variant="pie",
+            eyebrow="PIE 曲线工作区",
+            title="从能段数据生成 PIE 曲线",
+            description="载入单段或多段 PIE 数据，检查能段后即可生成可拟合的 m/z 曲线。",
+            steps=("选择数据", "确认能段", "生成曲线"),
+            action_text="选择 PIE 数据",
+        )
+        self._empty_state.browse_requested.connect(self.select_folder)
         self._plot_stack.addWidget(self._empty_state)
 
         self.plot_widget = StaticCurvePlot("Photon Energy (eV)", "Normalized Intensity", min_height=280)
@@ -552,10 +544,14 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.candidate_table = self.species_table
 
     def _open_project_settings(self):
-        """跳转到项目管理页面。"""
+        """跳转到项目管理的 PIE 能段目录。"""
         win = self.window()
         if hasattr(win, "switch_workspace_page"):
             win.switch_workspace_page("project")
+        if hasattr(win, "project_tabs") and hasattr(win, "project_identity_page"):
+            win.project_tabs.setCurrentWidget(win.project_identity_page)
+        if hasattr(win, "project_pie_folders_list"):
+            win.project_pie_folders_list.setFocus(QtCore.Qt.FocusReason.OtherFocusReason)
 
     def _goto_pics_import(self):
         """跳转到 PICS 导入页面（处理 pics_import_requested 信号）。"""
@@ -1926,7 +1922,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             return False
         return bool(
             self.project_settings.project_name
-            or self.project_settings.pie_scan_folder
+            or self.project_settings.effective_pie_scan_folders()
             or (self.project_settings.output_dir and self.project_settings.output_dir != "output")
         )
 
@@ -1934,10 +1930,17 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         if self.pie_source_scope != "temporary":
             return
         self._temporary_pie_folder = self.folder_edit.text().strip()
-        self._temporary_pie_folders = list(self.pie_folders)
 
     def _on_source_path_changed(self, _text: str | None = None) -> None:
         self._remember_temporary_source(_text)
+        if self.pie_source_scope == "temporary":
+            folder = self.folder_edit.text().strip()
+            if folder != self._temporary_segment_root:
+                self._segment_scan_generation += 1
+                self._segment_scan_pending = False
+                self._temporary_segment_summaries = []
+                self._temporary_selected_segment_folders = []
+                self._update_temporary_segment_button()
         if hasattr(self, "fit_button"):
             self._update_action_state()
 
@@ -1969,8 +1972,6 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.current_fit = None
             self.current_mz = None
             self.folder_edit.setText(self._temporary_pie_folder)
-            self.pie_folders = list(self._temporary_pie_folders)
-            self._refresh_folder_list()
             self._update_fit_stats(0, 0, None)
 
         self._refresh_pie_source_controls()
@@ -1979,7 +1980,9 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
     def _refresh_pie_source_controls(self) -> None:
         use_project = self._has_project_scope()
-        has_project_path = bool(self.project_settings and self.project_settings.pie_scan_folder)
+        has_project_path = bool(
+            self.project_settings and self.project_settings.effective_pie_scan_folders()
+        )
         busy = getattr(self, "_busy", False)
         if hasattr(self, "project_source_button"):
             self.project_source_button.setChecked(use_project)
@@ -1987,20 +1990,311 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         if hasattr(self, "temporary_source_button"):
             self.temporary_source_button.setChecked(not use_project)
             self.temporary_source_button.setEnabled(not busy)
+        self.folder_edit.setEnabled(not busy)
         self.folder_edit.setReadOnly(use_project)
         self.folder_edit.setClearButtonEnabled(not use_project)
         self.folder_edit.setPlaceholderText(
             "项目未登记 PIE 数据源" if use_project else "选择包含PIE扫描质谱文件的文件夹"
         )
-        self.select_folder_button.setText("浏览...")
-        self.select_folder_button.setVisible(not use_project)
+        if not use_project:
+            self.folder_edit.setToolTip(self.folder_edit.text().strip())
+        self.select_folder_button.setText("管理能段..." if use_project else "浏览...")
+        self.select_folder_button.setToolTip(
+            "前往项目管理添加、移除一段或多段 PIE 能区目录"
+            if use_project
+            else "选择单段 PIE 目录，或包含多个 PIE 能段子目录的总目录"
+        )
+        self.select_folder_button.setEnabled(not busy)
+        self.select_folder_button.setVisible(True)
+        self.temporary_segments_button.setVisible(not use_project)
+        self.temporary_segments_button.setEnabled(
+            not use_project
+            and not busy
+            and not self._segment_scan_pending
+            and bool(self.folder_edit.text().strip())
+        )
+        self._update_temporary_segment_button()
         if use_project and not has_project_path:
             self.status_label.setText("项目未登记 PIE 数据源")
 
-    def _refresh_folder_list(self) -> None:
-        self.folder_list.clear()
-        for folder in self.pie_folders:
-            self.folder_list.addItem(Path(folder).name + f" ({folder})")
+    @staticmethod
+    def _segment_energy_range_text(summary: PieSegmentSummary) -> str:
+        if summary.min_energy is None or summary.max_energy is None:
+            return "未识别"
+        if abs(summary.max_energy - summary.min_energy) < 1e-9:
+            return f"{summary.min_energy:.3f} eV"
+        return f"{summary.min_energy:.3f}–{summary.max_energy:.3f} eV"
+
+    def _update_temporary_segment_button(self) -> None:
+        if not hasattr(self, "temporary_segments_button"):
+            return
+        summaries = self._temporary_segment_summaries
+        if self._segment_scan_pending:
+            self.temporary_segments_button.setText("能段: 识别中...")
+            self.temporary_segments_button.setToolTip("正在识别 PIE 能段子文件夹及其能量范围")
+            return
+        if not summaries:
+            self.temporary_segments_button.setText("选择能段...")
+            self.temporary_segments_button.setToolTip(
+                "识别并选择临时数据目录中的 PIE 能段子文件夹"
+            )
+            return
+
+        selected = set(self._temporary_selected_segment_folders)
+        if len(summaries) == 1:
+            self.temporary_segments_button.setText("能段: 单段")
+        else:
+            self.temporary_segments_button.setText(
+                f"能段: {len(selected)}/{len(summaries)}..."
+            )
+        tooltip_lines = ["点击选择本次分析使用的临时 PIE 能段："]
+        for summary in summaries:
+            mark = "✓" if str(summary.folder) in selected else "○"
+            tooltip_lines.append(
+                f"{mark} {summary.folder.name} · "
+                f"{self._segment_energy_range_text(summary)} · {summary.file_count} 个谱文件"
+            )
+        self.temporary_segments_button.setToolTip("\n".join(tooltip_lines))
+
+    def _scan_temporary_segments_from_editor(self) -> None:
+        if self._has_project_scope():
+            return
+        folder = self.folder_edit.text().strip()
+        if folder and folder != self._temporary_segment_root:
+            self._start_temporary_segment_scan(folder)
+
+    def _start_temporary_segment_scan(
+        self,
+        folder: str | None = None,
+        *,
+        open_selector: bool = False,
+    ) -> None:
+        if self._has_project_scope():
+            return
+        root = (folder or self.folder_edit.text()).strip()
+        if not root:
+            return
+
+        self._segment_scan_generation += 1
+        generation = self._segment_scan_generation
+        self._segment_scan_pending = True
+        self._update_temporary_segment_button()
+        self._refresh_pie_source_controls()
+        self._update_action_state()
+        self.status_label.setText("正在识别临时 PIE 能段...")
+        self._segment_scan_worker = WorkerThread(
+            lambda: {
+                "generation": generation,
+                "root": root,
+                "summaries": inspect_pie_source_segments(root),
+                "open_selector": open_selector,
+            },
+            self,
+        )
+        self._segment_scan_worker.finished_with_result.connect(
+            self._on_temporary_segment_scan_complete
+        )
+        self._segment_scan_worker.failed.connect(
+            lambda message, token=generation: self._on_temporary_segment_scan_failed(
+                token, message
+            )
+        )
+        self._segment_scan_worker.start()
+
+    def _on_temporary_segment_scan_complete(self, result: object) -> None:
+        if not isinstance(result, dict):
+            return
+        generation = int(result.get("generation", -1))
+        root = str(result.get("root", ""))
+        if generation != self._segment_scan_generation:
+            return
+        if root != self.folder_edit.text().strip() and not self._has_project_scope():
+            return
+
+        summaries = [
+            item
+            for item in result.get("summaries", [])
+            if isinstance(item, PieSegmentSummary)
+        ]
+        previous_selected = set(self._temporary_selected_segment_folders)
+        available = {str(item.folder) for item in summaries}
+        selected = [
+            str(item.folder)
+            for item in summaries
+            if str(item.folder) in previous_selected
+        ]
+        if not selected:
+            selected = [str(item.folder) for item in summaries]
+
+        self._segment_scan_pending = False
+        self._temporary_segment_root = root
+        self._temporary_segment_summaries = summaries
+        self._temporary_selected_segment_folders = [
+            folder for folder in selected if folder in available
+        ]
+        self._update_temporary_segment_button()
+        self._refresh_pie_source_controls()
+        self._update_action_state()
+        if len(summaries) > 1:
+            self.status_label.setText(
+                f"识别到 {len(summaries)} 个临时 PIE 能段，默认已全选；可点击能段按钮调整"
+            )
+            if bool(result.get("open_selector")) and not self._has_project_scope():
+                self._show_temporary_segment_selector()
+        elif summaries:
+            self.status_label.setText("识别为单段临时 PIE 数据")
+        else:
+            self.status_label.setText("所选目录中未识别到 PIE 谱文件")
+
+    def _on_temporary_segment_scan_failed(self, generation: int, message: str) -> None:
+        if generation != self._segment_scan_generation:
+            return
+        self._segment_scan_pending = False
+        self._temporary_segment_root = ""
+        self._temporary_segment_summaries = []
+        self._temporary_selected_segment_folders = []
+        self._update_temporary_segment_button()
+        self._refresh_pie_source_controls()
+        self._update_action_state()
+        self.status_label.setText(f"能段识别失败，可直接生成曲线: {message}")
+
+    def _set_temporary_segment_selection(self, folders: list[str]) -> None:
+        available = {
+            str(summary.folder) for summary in self._temporary_segment_summaries
+        }
+        self._temporary_selected_segment_folders = [
+            str(folder) for folder in folders if str(folder) in available
+        ]
+        self._update_temporary_segment_button()
+        self._update_action_state()
+        if hasattr(self, "summary_data_label") and self._temporary_segment_summaries:
+            self.summary_data_label.setText(
+                f"临时数据: {self._temporary_segment_root} · "
+                f"已选 {len(self._temporary_selected_segment_folders)}/"
+                f"{len(self._temporary_segment_summaries)} 段"
+            )
+
+    def _show_temporary_segment_selector(self) -> None:
+        if self._has_project_scope():
+            return
+        root = self.folder_edit.text().strip()
+        if not root:
+            QtWidgets.QMessageBox.warning(self, "提示", "请先选择临时 PIE 数据目录")
+            return
+        if root != self._temporary_segment_root or not self._temporary_segment_summaries:
+            self._start_temporary_segment_scan(root, open_selector=True)
+            return
+
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("选择临时 PIE 能段")
+        dialog.setModal(True)
+        dialog.resize(760, 340)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        prompt = QtWidgets.QLabel(
+            "选择本次生成曲线要使用的能段。多段将按重叠能点自动缩放拼接。"
+        )
+        prompt.setWordWrap(True)
+        layout.addWidget(prompt)
+        root_label = QtWidgets.QLabel(f"总目录: {root}")
+        root_label.setObjectName("HintLabel")
+        root_label.setTextInteractionFlags(
+            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        layout.addWidget(root_label)
+
+        table = QtWidgets.QTableWidget(0, 4, dialog)
+        table.setHorizontalHeaderLabels(["使用", "能段文件夹", "能量范围", "谱文件数"])
+        table.setSelectionBehavior(
+            QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        table.setEditTriggers(
+            QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers
+        )
+        table.verticalHeader().setVisible(False)
+        table.horizontalHeader().setSectionResizeMode(
+            0, QtWidgets.QHeaderView.ResizeMode.ResizeToContents
+        )
+        table.horizontalHeader().setSectionResizeMode(
+            1, QtWidgets.QHeaderView.ResizeMode.Stretch
+        )
+        table.horizontalHeader().setSectionResizeMode(
+            2, QtWidgets.QHeaderView.ResizeMode.ResizeToContents
+        )
+        table.horizontalHeader().setSectionResizeMode(
+            3, QtWidgets.QHeaderView.ResizeMode.ResizeToContents
+        )
+        selected = set(self._temporary_selected_segment_folders)
+        for summary in self._temporary_segment_summaries:
+            row = table.rowCount()
+            table.insertRow(row)
+            use_item = QtWidgets.QTableWidgetItem()
+            use_item.setFlags(
+                QtCore.Qt.ItemFlag.ItemIsEnabled
+                | QtCore.Qt.ItemFlag.ItemIsUserCheckable
+            )
+            use_item.setCheckState(
+                QtCore.Qt.CheckState.Checked
+                if str(summary.folder) in selected
+                else QtCore.Qt.CheckState.Unchecked
+            )
+            use_item.setData(QtCore.Qt.ItemDataRole.UserRole, str(summary.folder))
+            table.setItem(row, 0, use_item)
+            folder_item = QtWidgets.QTableWidgetItem(summary.folder.name)
+            folder_item.setToolTip(str(summary.folder))
+            table.setItem(row, 1, folder_item)
+            table.setItem(
+                row,
+                2,
+                QtWidgets.QTableWidgetItem(
+                    self._segment_energy_range_text(summary)
+                ),
+            )
+            table.setItem(
+                row, 3, QtWidgets.QTableWidgetItem(str(summary.file_count))
+            )
+        layout.addWidget(table, stretch=1)
+
+        button_row = QtWidgets.QHBoxLayout()
+        select_all_button = QtWidgets.QPushButton("全选")
+        clear_button = QtWidgets.QPushButton("清空")
+        button_row.addWidget(select_all_button)
+        button_row.addWidget(clear_button)
+        button_row.addStretch()
+        cancel_button = QtWidgets.QPushButton("取消")
+        apply_button = QtWidgets.QPushButton("应用选择")
+        apply_button.setObjectName("PrimaryButton")
+        button_row.addWidget(cancel_button)
+        button_row.addWidget(apply_button)
+        layout.addLayout(button_row)
+
+        def set_all(check_state: QtCore.Qt.CheckState) -> None:
+            for row in range(table.rowCount()):
+                table.item(row, 0).setCheckState(check_state)
+
+        select_all_button.clicked.connect(
+            lambda: set_all(QtCore.Qt.CheckState.Checked)
+        )
+        clear_button.clicked.connect(
+            lambda: set_all(QtCore.Qt.CheckState.Unchecked)
+        )
+        cancel_button.clicked.connect(dialog.reject)
+
+        def apply_selection() -> None:
+            folders = [
+                str(table.item(row, 0).data(QtCore.Qt.ItemDataRole.UserRole))
+                for row in range(table.rowCount())
+                if table.item(row, 0).checkState() == QtCore.Qt.CheckState.Checked
+            ]
+            if not folders:
+                QtWidgets.QMessageBox.warning(
+                    dialog, "提示", "请至少选择一个 PIE 能段"
+                )
+                return
+            self._set_temporary_segment_selection(folders)
+            dialog.accept()
+
+        apply_button.clicked.connect(apply_selection)
+        dialog.exec()
 
     def _apply_project_pie_source(self, ps: ProjectSettings, *, reset_state: bool = False) -> None:
         self.project_dir = str(project_root(ps))
@@ -2009,7 +2303,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.all_fit_results = {}
             self.current_fit = None
             self.current_mz = None
-        self.use_multi_folders.setChecked(ps.pie_multi_folder_mode)
+        project_folders = ps.effective_pie_scan_folders()
         self.integration_method_label.setText(f"积分方式: {self._integration_method_label(ps.pie_integration_method)}")
         mode = ps.pie_replicate_mode if ps.pie_replicate_mode in {"mean", "sum"} else "off"
         self.replicate_enabled_check.setChecked(mode != "off")
@@ -2017,12 +2311,12 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         if idx_mode >= 0:
             self.replicate_mode_combo.setCurrentIndex(idx_mode)
         self._on_replicate_enabled_changed(mode != "off")
-        idx = self.merge_method_combo.findData(ps.pie_merge_method)
-        if idx >= 0:
-            self.merge_method_combo.setCurrentIndex(idx)
-        self.pie_folders = []
-        self._refresh_folder_list()
-        self.folder_edit.setText(ps.pie_scan_folder or "")
+        if len(project_folders) > 1:
+            self.folder_edit.setText(f"项目管理已登记 {len(project_folders)} 个 PIE 能段目录")
+            self.folder_edit.setToolTip("\n".join(project_folders))
+        else:
+            self.folder_edit.setText(project_folders[0] if project_folders else "")
+            self.folder_edit.setToolTip(project_folders[0] if project_folders else "")
         if reset_state:
             self._load_per_mz_configs()
 
@@ -2042,54 +2336,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         folder = QtWidgets.QFileDialog.getExistingDirectory(self, "选择PIE扫描文件夹")
         if folder:
             self.folder_edit.setText(folder)
-
-    def toggle_multi_folder_mode(self, checked: bool):
-        """切换多文件夹模式"""
-        busy = getattr(self, "_busy", False)
-        use_project = self._has_project_scope()
-        self.folder_edit.setEnabled(not checked and not busy)
-        self.folder_edit.setReadOnly(use_project)
-        self.select_folder_button.setEnabled((not checked or use_project) and not busy)
-        self.add_folder_button.setEnabled(checked and not busy and not use_project)
-        self.remove_folder_button.setEnabled(checked and not busy and not use_project)
-        self.clear_folders_button.setEnabled(checked and not busy and not use_project)
-        self.merge_method_combo.setEnabled(checked and not busy)
-        self.multi_folder_section.setVisible(checked)
-        self._refresh_pie_source_controls()
-        if hasattr(self, "fit_button"):
-            self._update_action_state()
-
-    def add_folder(self):
-        """添加文件夹到列表"""
-        if self._has_project_scope():
-            self._open_project_settings()
-            return
-        folder = QtWidgets.QFileDialog.getExistingDirectory(self, "选择PIE扫描文件夹")
-        if folder:
-            self.pie_folders.append(folder)
-            self.folder_list.addItem(Path(folder).name + f" ({folder})")
-            self._remember_temporary_source()
-            self._update_action_state()
-
-    def remove_folder(self):
-        """移除选中的文件夹"""
-        if self._has_project_scope():
-            return
-        current_row = self.folder_list.currentRow()
-        if current_row >= 0:
-            self.folder_list.takeItem(current_row)
-            self.pie_folders.pop(current_row)
-            self._remember_temporary_source()
-            self._update_action_state()
-
-    def clear_folders(self):
-        """清空文件夹列表"""
-        if self._has_project_scope():
-            return
-        self.folder_list.clear()
-        self.pie_folders.clear()
-        self._remember_temporary_source()
-        self._update_action_state()
+            self._start_temporary_segment_scan(folder, open_selector=True)
 
     def set_project_settings(self, ps: ProjectSettings, *, activate_project_scope: bool | None = None) -> None:
         """Apply ProjectSettings defaults to summary bar and folder controls.
@@ -2099,7 +2346,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         """
         has_project_context = bool(
             ps.project_name
-            or ps.pie_scan_folder
+            or ps.effective_pie_scan_folders()
             or (ps.output_dir and ps.output_dir != "output")
         )
         if activate_project_scope is None:
@@ -2124,13 +2371,19 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             reset_state = previous_project_dir != new_project_dir
             self._apply_project_pie_source(ps, reset_state=reset_state)
 
-        pie_path = ps.pie_scan_folder if self._has_project_scope() else self.folder_edit.text().strip()
-        if not pie_path:
-            pie_path = "---"
+        if self._has_project_scope():
+            project_folders = ps.effective_pie_scan_folders()
+            pie_path = (
+                f"{len(project_folders)} 段 · {project_folders[0]}"
+                if len(project_folders) > 1
+                else (project_folders[0] if project_folders else "---")
+            )
+        else:
+            pie_path = self.folder_edit.text().strip() or "---"
         self.summary_project_label.setText(f"项目: {project_name}")
         self.summary_system_label.setText(f"体系: {system}")
         self.summary_data_label.setText(
-            f"{'项目PIE' if self._has_project_scope() else '临时PIE'}: {pie_path}"
+            f"{'项目管理' if self._has_project_scope() else '临时数据'}: {pie_path}"
         )
         if hasattr(self, "photon_correction_check"):
             self.photon_correction_check.setChecked(ps.pie_photon_mode != "off")
@@ -2323,31 +2576,27 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.calibration = load_calibration_config()
 
     def run_analysis(self):
-        use_multi = self.use_multi_folders.isChecked() and not self._has_project_scope()
-
+        folders, merge_method = self._analysis_source_selection()
         if self._has_project_scope():
-            folder = (self.project_settings.pie_scan_folder if self.project_settings else "").strip()
-            if not folder:
+            if not folders:
                 QtWidgets.QMessageBox.warning(self, "提示", "请先在项目管理中登记 PIE 数据源")
                 return
-            folders = [folder]
-            merge_method = None
-            message = "正在生成项目 PIE 曲线..."
-        elif use_multi:
-            if not self.pie_folders:
-                QtWidgets.QMessageBox.warning(self, "提示", "请先添加至少一个PIE扫描文件夹")
-                return
-            folders = self.pie_folders
-            merge_method = self.merge_method_combo.currentData()
-            message = f"正在合并{len(folders)}段PIE数据..."
+            message = (
+                f"正在合并项目中的 {len(folders)} 段 PIE 数据..."
+                if len(folders) > 1
+                else "正在生成项目 PIE 曲线..."
+            )
         else:
-            folder = self.folder_edit.text().strip()
-            if not folder:
-                QtWidgets.QMessageBox.warning(self, "提示", "请先选择PIE扫描文件夹")
+            if not folders:
+                QtWidgets.QMessageBox.warning(
+                    self, "提示", "请先选择PIE扫描文件夹，并至少保留一个能段"
+                )
                 return
-            folders = [folder]
-            merge_method = None
-            message = "正在生成PIE曲线..."
+            message = (
+                f"正在合并选择的 {len(folders)} 段临时 PIE 数据..."
+                if len(folders) > 1
+                else "正在生成临时 PIE 曲线..."
+            )
 
         ps = self.project_settings or ProjectSettings()
         energy_decimals = ps.pie_energy_decimals
@@ -2406,6 +2655,15 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 vote_threshold=peak_config.vote_threshold,
                 min_intensity_for_single_vote=peak_config.min_intensity_for_single_vote,
                 mz_tolerance=peak_config.mz_tolerance,
+                auto_discover_segments=(
+                    not self._has_project_scope()
+                    and not self._temporary_segment_selection_ready()
+                ),
+                source_scope="project" if self._has_project_scope() else "temporary",
+                selection_explicit=(
+                    not self._has_project_scope()
+                    and self._temporary_segment_selection_ready()
+                ),
             ),
             self,
         )
@@ -2413,6 +2671,33 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.worker.failed.connect(self.on_analysis_failed)
         self.worker.finished.connect(lambda: self.set_busy(False, self.status_label.text()))
         self.worker.start()
+
+    def _analysis_source_selection(self) -> tuple[list[str], str | None]:
+        """Resolve the active source scope without exposing segment mode in this page."""
+        if self._has_project_scope():
+            folders = (
+                self.project_settings.effective_pie_scan_folders()
+                if self.project_settings
+                else []
+            )
+            merge_method = (
+                self.project_settings.pie_merge_method
+                if self.project_settings and len(folders) > 1
+                else None
+            )
+            return folders, merge_method
+
+        folder = self.folder_edit.text().strip()
+        if self._temporary_segment_selection_ready():
+            folders = list(self._temporary_selected_segment_folders)
+            return folders, "low_energy_dominant" if len(folders) > 1 else None
+        return ([folder] if folder else []), None
+
+    def _temporary_segment_selection_ready(self) -> bool:
+        return bool(
+            self._temporary_segment_summaries
+            and self._temporary_segment_root == self.folder_edit.text().strip()
+        )
 
     def _save_project_analysis_switches(self) -> None:
         if not self._has_project_scope() or self.project_settings is None:
@@ -2435,20 +2720,23 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.status_label.setText(message)
         self.analyze_button.setEnabled(not busy)
         self.common_params_button.setEnabled(not busy)
-        self.use_multi_folders.setEnabled(not busy)
         self.summary_open_project_btn.setEnabled(not busy)
         self.mz_list.setEnabled(not busy)
         self.mz_filter_edit.setEnabled(not busy)
         self.mz_status_filter_combo.setEnabled(not busy)
         self.fitting_control_widget.setEnabled(not busy)
-        self.toggle_multi_folder_mode(self.use_multi_folders.isChecked())
+        self._refresh_pie_source_controls()
         self._update_action_state()
 
     def _has_analysis_source(self) -> bool:
         if self._has_project_scope():
-            return bool(self.project_settings and self.project_settings.pie_scan_folder.strip())
-        if self.use_multi_folders.isChecked():
-            return bool(self.pie_folders)
+            return bool(
+                self.project_settings and self.project_settings.effective_pie_scan_folders()
+            )
+        if self._segment_scan_pending:
+            return False
+        if self._temporary_segment_selection_ready():
+            return bool(self._temporary_selected_segment_folders)
         return bool(self.folder_edit.text().strip())
 
     def _has_fit_candidates_for_mz(self, mz: int) -> bool:
@@ -2569,8 +2857,18 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         vote_threshold: float = 0.667,
         min_intensity_for_single_vote: float = 5.0,
         mz_tolerance: float = 0.2,
-    ) -> tuple[pd.DataFrame, dict[int, dict]]:
+        auto_discover_segments: bool = False,
+        source_scope: str = "temporary",
+        selection_explicit: bool = False,
+    ) -> tuple[pd.DataFrame, dict[int, dict], dict[str, object]]:
 
+        auto_discovered = False
+        if auto_discover_segments and len(folders) == 1:
+            discovered = discover_pie_segment_folders(folders[0])
+            if len(discovered) > 1:
+                folders = [str(folder) for folder in discovered]
+                merge_method = "low_energy_dominant"
+                auto_discovered = True
         if merge_method is not None and len(folders) > 1:
             analysis_df = analyze_multiple_pie_folders(
                 folders,
@@ -2646,10 +2944,23 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 min_intensity_for_single_vote=min_intensity_for_single_vote,
                 mz_tolerance=mz_tolerance,
             )
-        return analysis_df, build_pie_curves(analysis_df)
+        source_info: dict[str, object] = {
+            "folder_count": len(folders),
+            "auto_discovered": auto_discovered,
+            "merge_method": merge_method,
+            "folders": list(folders),
+            "source_scope": source_scope,
+            "selection_explicit": selection_explicit,
+        }
+        return analysis_df, build_pie_curves(analysis_df), source_info
 
     def on_analysis_complete(self, result: object) -> None:
-        self.analysis_df, self.curves = result
+        if isinstance(result, tuple) and len(result) == 3:
+            self.analysis_df, self.curves, source_info = result
+        else:
+            self.analysis_df, self.curves = result
+            source_info = {}
+        self._last_analysis_source_info = dict(source_info or {})
         self._fit_preview_active = False
         self.current_fit = None
         self.all_fit_results = {}  # 重置拟合结果
@@ -2660,8 +2971,33 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         energy_count = self.analysis_df["energy"].nunique() if not self.analysis_df.empty else 0
         replicate_note = self._replicate_status_text(self.analysis_df)
         integration_note = self._integration_status_text(self.analysis_df)
-        self.summary_label.setText(f"{len(self.curves)} 条 · {energy_count} 能量点")
+        folder_count = int(self._last_analysis_source_info.get("folder_count", 1) or 1)
+        auto_discovered = bool(self._last_analysis_source_info.get("auto_discovered", False))
+        source_scope = str(
+            self._last_analysis_source_info.get("source_scope", self.pie_source_scope)
+        )
+        selection_explicit = bool(
+            self._last_analysis_source_info.get("selection_explicit", False)
+        )
+        if source_scope == "temporary":
+            if selection_explicit:
+                source_description = "临时数据已选择"
+            elif auto_discovered:
+                source_description = "临时数据自动识别"
+            else:
+                source_description = "临时数据"
+        else:
+            source_description = "项目管理登记"
+        segment_summary = f" · {folder_count} 段已拼接" if folder_count > 1 else ""
+        self.summary_label.setText(
+            f"{len(self.curves)} 条 · {energy_count} 能量点{segment_summary}"
+        )
         summary_details = [f"{len(self.curves)} 条 m/z 曲线", f"{energy_count} 个能量点"]
+        if folder_count > 1:
+            summary_details.append(
+                f"{source_description} {folder_count} 个 PIE 能段，"
+                "已按重叠能点缩放拼接"
+            )
         if replicate_note:
             summary_details.append(replicate_note)
         if integration_note:
@@ -2676,6 +3012,9 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 message = f"{message}\n{replicate_note}"
             if integration_note:
                 message = f"{message}\n{integration_note}"
+            if folder_count > 1:
+                source_note = f"{source_description} {folder_count} 个 PIE 能段"
+                message = f"{source_note}，并按重叠能点缩放拼接。\n{message}"
             self.status_label.setText(message.replace("\n", " · "))
 
     @staticmethod

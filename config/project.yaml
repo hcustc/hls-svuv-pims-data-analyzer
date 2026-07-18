@@ -8,6 +8,7 @@ data_sources:
   sum_spectrum_folder: ''
   temperature_scan_folder: ''
   pie_scan_folder: ''
+  pie_scan_folders: []
   pics_database_path: ''
   manual_peak_file: ''
 analysis_artifacts:

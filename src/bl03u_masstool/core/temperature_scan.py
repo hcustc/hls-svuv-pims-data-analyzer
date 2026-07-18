@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 
 from .calibration import Calibration
-from .integration import integrate_peak_with_method
+from .integration import integrate_peaks_with_method
 from .normalization import extract_light_intensity
 from .peak_ranges import load_peak_ranges, peak_ranges_to_peaks
 from .peak_detection import detect_peaks_by_algorithm
@@ -154,6 +154,7 @@ def analyze_temperature_folder(
     temp_curve_class_change_threshold: float = 0.25,
     temp_curve_class_peak_fraction: float = 0.65,
     replicate_mode: str = "off",
+    cache_curves: bool = False,
 ) -> pd.DataFrame:
     files = _iter_temperature_files(folder, (".txt",))
     replicate_mode = "sum" if replicate_mode == "sum" else "mean" if replicate_mode == "mean" else "off"
@@ -238,13 +239,13 @@ def analyze_temperature_folder(
     )
     rows = []
     for temperature, path, spectrum, io_current, photon_energy, uses_filename_grouping in spectra:
-        for peak in reference_peaks:
-            raw_area, actual_integration_method = integrate_peak_with_method(
-                spectrum.y,
-                peak,
-                prefer_gaussian=prefer_gaussian,
-                integration_method=configured_integration_method,
-            )
+        integrated_peaks = integrate_peaks_with_method(
+            spectrum.y,
+            reference_peaks,
+            prefer_gaussian=prefer_gaussian,
+            integration_method=configured_integration_method,
+        )
+        for peak, (raw_area, actual_integration_method) in zip(reference_peaks, integrated_peaks):
             photon_area = raw_area / io_current if photon_normalize and io_current > 0 else raw_area
             rows.append(
                 {
@@ -290,11 +291,31 @@ def analyze_temperature_folder(
         normalized.loc[fallback_mask, "replicate_warning"] = (
             "未识别到文件名末尾采集序号，已退回按温度分组的旧逻辑处理重复文件。"
         )
-    return annotate_temperature_curve_groups(
+    curves = build_temperature_curves(
         normalized,
         relative_change_threshold=temp_curve_class_change_threshold,
         endpoint_peak_fraction=temp_curve_class_peak_fraction,
     )
+    annotated = annotate_temperature_curve_groups(
+        normalized,
+        relative_change_threshold=temp_curve_class_change_threshold,
+        endpoint_peak_fraction=temp_curve_class_peak_fraction,
+        curves=curves,
+    )
+    if cache_curves:
+        # The PyQt workflow consumes the same curves immediately after analysis.
+        # DataFrame attrs keep this transient cache out of exported columns.
+        for curve in curves.values():
+            curve_rows = curve.get("rows")
+            if not isinstance(curve_rows, pd.DataFrame):
+                continue
+            curve_rows = curve_rows.copy()
+            curve_rows["curve_class"] = curve["curve_class"]
+            curve_rows["curve_class_label"] = curve["curve_class_label"]
+            curve_rows["curve_class_reason"] = curve["curve_class_reason"]
+            curve["rows"] = curve_rows
+        annotated.attrs["_bl03u_temperature_curves"] = curves
+    return annotated
 
 
 def _iter_temperature_files(folder: str | Path, suffixes: tuple[str, ...]) -> list[Path]:
@@ -530,6 +551,7 @@ def annotate_temperature_curve_groups(
     *,
     relative_change_threshold: float = 0.25,
     endpoint_peak_fraction: float = 0.65,
+    curves: dict[int, dict] | None = None,
 ) -> pd.DataFrame:
     """Add curve classification columns to temperature scan rows."""
     result = result_df.copy()
@@ -539,11 +561,12 @@ def annotate_temperature_curve_groups(
                 result[column] = []
         return result
 
-    curves = build_temperature_curves(
-        result,
-        relative_change_threshold=relative_change_threshold,
-        endpoint_peak_fraction=endpoint_peak_fraction,
-    )
+    if curves is None:
+        curves = build_temperature_curves(
+            result,
+            relative_change_threshold=relative_change_threshold,
+            endpoint_peak_fraction=endpoint_peak_fraction,
+        )
     class_by_mz = {
         mz: (
             curve["curve_class"],

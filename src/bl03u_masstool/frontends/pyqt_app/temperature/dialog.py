@@ -61,7 +61,10 @@ from bl03u_masstool.core.mole_fraction import (
 from bl03u_masstool.frontends.pyqt_app.workers import WorkerThread
 from bl03u_masstool.frontends.pyqt_app.project_artifacts import record_project_artifact
 
-from bl03u_masstool.frontends.pyqt_app.common.widgets import DataFrameTableMixin
+from bl03u_masstool.frontends.pyqt_app.common.widgets import (
+    AnalysisEmptyState,
+    DataFrameTableMixin,
+)
 from bl03u_masstool.frontends.pyqt_app.common.static_plot import StaticCurvePlot
 
 
@@ -359,19 +362,16 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self._plot_container.setObjectName("PlotPanel")
         plot_stack = QtWidgets.QStackedLayout(self._plot_container)
 
-        # Empty state widget
-        self._empty_state = QtWidgets.QWidget()
-        empty_layout = QtWidgets.QVBoxLayout(self._empty_state)
-        empty_layout.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        empty_icon = QtWidgets.QLabel("[数据]")
-        empty_icon.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        empty_icon.setStyleSheet("font-size: 48px;")
-        empty_msg = QtWidgets.QLabel('尚未生成温度扫描曲线\n\n确认数据源和参数后，点击"生成曲线"')
-        empty_msg.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        empty_msg.setObjectName("ProjectHint")
-        empty_msg.setWordWrap(True)
-        empty_layout.addWidget(empty_icon)
-        empty_layout.addWidget(empty_msg)
+        # Empty state widget: preview the result shape and the three-step workflow.
+        self._empty_state = AnalysisEmptyState(
+            variant="temperature",
+            eyebrow="温度扫描工作区",
+            title="从扫描数据识别温度变化趋势",
+            description="选择温度扫描目录，程序会汇总温度点并生成分类后的 m/z 趋势曲线。",
+            steps=("选择扫描目录", "确认能量范围", "生成趋势曲线"),
+            action_text="选择温度扫描数据",
+        )
+        self._empty_state.browse_requested.connect(self.select_folder)
         plot_stack.addWidget(self._empty_state)
 
         self.plot_widget = StaticCurvePlot("温度 / °C", "归一化信号")
@@ -942,6 +942,7 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
             temp_curve_class_change_threshold=ps.temp_curve_class_change_threshold,
             temp_curve_class_peak_fraction=ps.temp_curve_class_peak_fraction,
             replicate_mode=params["replicate_mode"],
+            cache_curves=True,
         )
 
     def _analyze_temperature_folders_with_params(
@@ -951,20 +952,46 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
     ) -> dict:
         energy_results: list[dict] = []
         frames: list[pd.DataFrame] = []
+
+        # Peak fitting relies on SciPy optimizers whose warning/solver state is
+        # not stable when several energy folders are fitted in Python threads.
+        # Keep folder analysis deterministic; the safe speedup below comes from
+        # reusing each folder's already-built curves instead of grouping twice.
         for energy, folder in folders:
             result_df = self._analyze_temperature_folder_with_params(folder, params)
+            cached_curves = result_df.attrs.pop(
+                "_bl03u_temperature_curves",
+                None,
+            )
+            folder_label = Path(folder).name
+            scan_energy = float(energy) if energy is not None else np.nan
             if not result_df.empty:
                 result_df = result_df.copy()
-                result_df["scan_folder"] = Path(folder).name
-                result_df["scan_energy"] = float(energy) if energy is not None else np.nan
+                result_df["scan_folder"] = folder_label
+                result_df["scan_energy"] = scan_energy
                 frames.append(result_df)
+                if isinstance(cached_curves, dict):
+                    # Match the previous GUI-built curve rows exactly: those rows
+                    # were created after scan provenance columns were attached.
+                    for curve in cached_curves.values():
+                        curve_rows = curve.get("rows")
+                        if not isinstance(curve_rows, pd.DataFrame):
+                            continue
+                        curve_rows = curve_rows.copy()
+                        curve_rows["scan_folder"] = folder_label
+                        curve_rows["scan_energy"] = scan_energy
+                        curve["rows"] = curve_rows
             energy_results.append(
                 {
                     "energy": float(energy) if energy is not None else self._infer_energy_from_result(result_df),
                     "folder": folder,
-                    "folder_label": Path(folder).name,
+                    "folder_label": folder_label,
                     "result_df": result_df,
-                    "curves": build_temperature_curves(result_df),
+                    "curves": (
+                        cached_curves
+                        if isinstance(cached_curves, dict)
+                        else build_temperature_curves(result_df)
+                    ),
                 }
             )
         combined = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()

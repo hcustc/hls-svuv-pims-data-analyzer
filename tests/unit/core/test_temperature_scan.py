@@ -7,7 +7,12 @@ import pytest
 from bl03u_masstool.core.calibration import Calibration, fit_quadratic_calibration
 from bl03u_masstool.core.cwt_peak_detection import CwtPeakDetectionConfig, detect_peaks_cwt
 from bl03u_masstool.core.config import load_calibration_config, load_calibration_points, species_database_path
-from bl03u_masstool.core.integration import integrate_peak, load_peak_config
+from bl03u_masstool.core.integration import (
+    integrate_peak,
+    integrate_peak_with_method,
+    integrate_peaks_with_method,
+    load_peak_config,
+)
 from bl03u_masstool.core.isotope import (
     calculate_isotope_distribution,
     formula_monoisotopic_mass,
@@ -55,6 +60,33 @@ def test_build_temperature_curves_groups_by_rounded_mz():
     assert list(curves) == [18]
     assert curves[18]["temperatures"] == [800.0, 825.0]
     assert curves[18]["areas"] == [10.0, 15.0]
+
+
+@pytest.mark.parametrize("method", ["sum_counts", "baseline"])
+def test_batch_peak_integration_matches_individual_integration_exactly(method):
+    y = np.asarray([0.0, 1.0, 4.0, 2.0, 0.0, 3.0, 7.0, 1.0, 0.0])
+    peaks = [
+        Peak(index=2, time=2.0, mz=2.0, intensity=4.0, fwhm=1.0, left_bound=1, right_bound=3),
+        Peak(index=6, time=6.0, mz=6.0, intensity=7.0, fwhm=1.0, left_bound=5, right_bound=7),
+    ]
+
+    individual = [
+        integrate_peak_with_method(
+            y,
+            peak,
+            prefer_gaussian=False,
+            integration_method=method,
+        )
+        for peak in peaks
+    ]
+    batched = integrate_peaks_with_method(
+        y,
+        peaks,
+        prefer_gaussian=False,
+        integration_method=method,
+    )
+
+    assert batched == individual
 
 
 def test_temperature_filename_replicates_can_average_or_sum(tmp_path):
@@ -107,6 +139,47 @@ def test_temperature_filename_replicates_can_average_or_sum(tmp_path):
     )
     sum_curves = build_temperature_curves(sum_df)
     assert sum_curves[22]["areas"] == [30.0]
+
+
+def test_temperature_analysis_can_cache_the_exact_annotated_curves(tmp_path):
+    peak_file = tmp_path / "peaks.csv"
+    peak_file.write_text("mz,peak,start,end\n22,22,21,23\n", encoding="utf-8")
+    y = [0.0] * 50
+    y[22] = 10.0
+    header = [
+        "Energy:12.0 eV",
+        "IO:10 nA",
+        "Beam Current:1mA",
+        "Undulator Offset:0mm",
+        "Time:1 s",
+        "Burner Position:0 mm",
+        "Temperature:400 C",
+        "DIFF PRESSURE:1Pa",
+        "ION PRESSURE:1Pa",
+        "TOF PRESSURE:1Pa",
+    ]
+    (tmp_path / "400C.txt").write_text(
+        "\n".join(header + [str(value) for value in y]),
+        encoding="utf-8",
+    )
+
+    result = analyze_temperature_folder(
+        tmp_path,
+        calibration=Calibration(a=0, b=1, c=0),
+        manual_peak_path=peak_file,
+        prefer_gaussian=False,
+        photon_normalize=False,
+        cache_curves=True,
+    )
+    cached = result.attrs["_bl03u_temperature_curves"]
+    rebuilt = build_temperature_curves(result)
+
+    assert cached.keys() == rebuilt.keys()
+    for mz in cached:
+        assert cached[mz]["temperatures"] == rebuilt[mz]["temperatures"]
+        assert cached[mz]["areas"] == rebuilt[mz]["areas"]
+        assert cached[mz]["curve_class"] == rebuilt[mz]["curve_class"]
+        pd.testing.assert_frame_equal(cached[mz]["rows"], rebuilt[mz]["rows"])
 
 
 def test_temperature_root_with_energy_subfolders_is_discovered(tmp_path):

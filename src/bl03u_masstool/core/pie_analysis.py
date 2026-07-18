@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 import logging
 import re
@@ -19,6 +20,17 @@ from .spectrum_io import Spectrum, extract_first_number, find_filename_replicate
 logger = logging.getLogger(__name__)
 
 EV_RE = re.compile(r"([-+]?\d+(?:\.\d+)?)\s*eV", re.IGNORECASE)
+
+
+@dataclass(frozen=True)
+class PieSegmentSummary:
+    """Lightweight description used by the PIE source selector."""
+
+    folder: Path
+    file_count: int
+    min_energy: float | None = None
+    max_energy: float | None = None
+
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS species (
@@ -180,6 +192,128 @@ def _iter_pie_files(folder: str | Path, suffixes: tuple[str, ...], recursive: bo
     folder = Path(folder)
     iterator = folder.rglob("*") if recursive else folder.iterdir()
     return sorted(p for p in iterator if p.is_file() and p.suffix.lower() in suffixes)
+
+
+def _looks_like_single_energy_directory(name: str) -> bool:
+    """Return whether a directory label represents one energy point, not a segment range."""
+    if re.fullmatch(r"\s*[-+]?\d+(?:\.\d+)?\s*(?:eV)?\s*", name, re.IGNORECASE):
+        return True
+    if "ev" not in name.lower():
+        return False
+    return len(re.findall(r"[-+]?\d+(?:\.\d+)?", name)) == 1
+
+
+def discover_pie_segment_folders(
+    folder: str | Path,
+    *,
+    suffixes: tuple[str, ...] = (".txt", ".asc", ".888"),
+) -> list[Path]:
+    """Resolve a temporary PIE source into one dataset or several segment folders.
+
+    A normal PIE dataset often contains one child directory per energy point
+    (for example ``8.0eV/`` and ``8.1eV/``). Those must remain one recursive
+    source. A parent whose immediate non-energy children each contain several
+    spectrum files is treated as a multi-segment container.
+    """
+    root = Path(folder).expanduser()
+    if not root.is_dir():
+        return [root]
+
+    direct_files = [
+        path
+        for path in root.iterdir()
+        if path.is_file()
+        and path.suffix.lower() in suffixes
+        and not _is_blank_spectrum_path(path)
+    ]
+    if direct_files:
+        return [root]
+
+    candidates: list[tuple[Path, list[Path]]] = []
+    for child in sorted(
+        (path for path in root.iterdir() if path.is_dir() and not path.name.startswith(".")),
+        key=lambda path: path.name.lower(),
+    ):
+        files = [
+            path
+            for path in _iter_pie_files(child, suffixes, recursive=True)
+            if not _is_blank_spectrum_path(path)
+        ]
+        if files:
+            candidates.append((child, files))
+
+    if len(candidates) < 2:
+        return [root]
+    if all(_looks_like_single_energy_directory(child.name) for child, _files in candidates):
+        return [root]
+    if not all(len(files) >= 2 for _child, files in candidates):
+        return [root]
+    return [child for child, _files in candidates]
+
+
+def _read_spectrum_header_preview(path: Path, *, max_lines: int = 32) -> list[str]:
+    """Read only the header-sized prefix needed for energy-range previews."""
+    last_error: UnicodeDecodeError | None = None
+    for encoding in ("utf-8", "utf-8-sig", "gb18030"):
+        try:
+            lines: list[str] = []
+            with path.open("r", encoding=encoding) as handle:
+                for index, line in enumerate(handle):
+                    if index >= max_lines:
+                        break
+                    lines.append(line.strip())
+            return [line for line in lines if line]
+        except UnicodeDecodeError as exc:
+            last_error = exc
+    if last_error is not None:
+        raise last_error
+    return []
+
+
+def inspect_pie_source_segments(
+    folder: str | Path,
+    *,
+    suffixes: tuple[str, ...] = (".txt", ".asc", ".888"),
+) -> list[PieSegmentSummary]:
+    """Discover selectable PIE segments and summarize their energy coverage.
+
+    The operation only reads a short prefix from each spectrum file, so the GUI
+    can show energy ranges without loading full spectra before analysis.
+    """
+    summaries: list[PieSegmentSummary] = []
+    for segment_folder in discover_pie_segment_folders(folder, suffixes=suffixes):
+        files = [
+            path
+            for path in _iter_pie_files(segment_folder, suffixes, recursive=True)
+            if not _is_blank_spectrum_path(path)
+        ]
+        if not files:
+            continue
+        energies: list[float] = []
+        for path in files:
+            try:
+                energies.append(
+                    extract_photon_energy(_read_spectrum_header_preview(path), path)
+                )
+            except (OSError, UnicodeDecodeError, ValueError):
+                continue
+        summaries.append(
+            PieSegmentSummary(
+                folder=segment_folder,
+                file_count=len(files),
+                min_energy=min(energies) if energies else None,
+                max_energy=max(energies) if energies else None,
+            )
+        )
+
+    return sorted(
+        summaries,
+        key=lambda item: (
+            item.min_energy is None,
+            item.min_energy if item.min_energy is not None else float("inf"),
+            item.folder.name.lower(),
+        ),
+    )
 
 
 def _is_blank_spectrum_path(path: Path) -> bool:
@@ -801,16 +935,15 @@ def _empty_pie_dataframe() -> pd.DataFrame:
     ])
 
 
-def _aggregate_segment_by_energy(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
-        return df.copy()
-    seg_df = df.sort_values("energy").reset_index(drop=True).copy()
+def _segment_energy_aggregation_spec(
+    seg_df: pd.DataFrame,
+    *,
+    include_mz_rounded: bool,
+) -> dict[str, tuple[str, object]]:
     if "integration_method" not in seg_df:
         seg_df["integration_method"] = ""
-    seg_df["energy_rounded"] = seg_df["energy"].round(2)
-    agg_spec = {
+    agg_spec: dict[str, tuple[str, object]] = {
         "energy": ("energy", "mean"),
-        "mz_rounded": ("mz_rounded", "first"),
         "normalized_intensity": ("normalized_intensity", "mean"),
         "raw_area": ("raw_area", "mean"),
         "photon_normalized_intensity": ("photon_normalized_intensity", "mean"),
@@ -823,6 +956,12 @@ def _aggregate_segment_by_energy(df: pd.DataFrame) -> pd.DataFrame:
         "left_bound": ("left_bound", "first"),
         "right_bound": ("right_bound", "first"),
     }
+    if include_mz_rounded:
+        agg_spec = {
+            "energy": agg_spec.pop("energy"),
+            "mz_rounded": ("mz_rounded", "first"),
+            **agg_spec,
+        }
     for optional in (
         "source_folder_idx",
         "source_folder",
@@ -833,7 +972,52 @@ def _aggregate_segment_by_energy(df: pd.DataFrame) -> pd.DataFrame:
     ):
         if optional in seg_df.columns:
             agg_spec[optional] = (optional, "first")
+    return agg_spec
+
+
+def _aggregate_segment_by_energy(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df.copy()
+    seg_df = df.sort_values("energy").reset_index(drop=True).copy()
+    seg_df["energy_rounded"] = seg_df["energy"].round(2)
+    agg_spec = _segment_energy_aggregation_spec(
+        seg_df,
+        include_mz_rounded=True,
+    )
     return seg_df.groupby("energy_rounded", as_index=False).agg(**agg_spec)
+
+
+def _aggregate_segments_by_mz_energy(df: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate every m/z-energy group in one Pandas operation.
+
+    ``merge_pie_segments`` historically called ``_aggregate_segment_by_energy``
+    hundreds of times—once per m/z and segment. Grouping by both keys at once is
+    mathematically equivalent and avoids most of the DataFrame construction cost.
+    """
+    if df.empty:
+        return df.copy()
+    seg_df = df.sort_values(["mz_rounded", "energy"]).reset_index(drop=True).copy()
+    seg_df["energy_rounded"] = seg_df["energy"].round(2)
+    agg_spec = _segment_energy_aggregation_spec(
+        seg_df,
+        include_mz_rounded=False,
+    )
+    result = seg_df.groupby(
+        ["mz_rounded", "energy_rounded"],
+        as_index=False,
+        sort=True,
+    ).agg(**agg_spec)
+    ordered_columns = [
+        "energy",
+        "mz_rounded",
+        "energy_rounded",
+        *[
+            column
+            for column in result.columns
+            if column not in {"energy", "mz_rounded", "energy_rounded"}
+        ],
+    ]
+    return result[ordered_columns]
 
 
 def _scale_factor_from_overlap(ref_df: pd.DataFrame, seg_df: pd.DataFrame) -> float | None:
@@ -858,6 +1042,86 @@ def _scale_factor_from_overlap(ref_df: pd.DataFrame, seg_df: pd.DataFrame) -> fl
     return float(np.median(ref_intensities[valid_mask] / seg_intensities[valid_mask]))
 
 
+def _legacy_representative_peak_bounds(
+    analysis_dfs: list[pd.DataFrame],
+    *,
+    merge_method: str,
+) -> pd.DataFrame:
+    """Preserve the historical representative bounds for rounded duplicate peaks.
+
+    Multiple exact peaks can round to the same integer m/z. Their intensities are
+    averaged, while the legacy merge kept the first peak window after its per-m/z
+    energy sort. This lightweight pass reproduces that metadata choice without
+    repeating the expensive full-column aggregations.
+    """
+    required = {"energy", "mz_rounded", "left_bound", "right_bound"}
+    if not any(required.issubset(df.columns) for df in analysis_dfs if not df.empty):
+        return pd.DataFrame()
+
+    all_mz = sorted(
+        {
+            int(value)
+            for df in analysis_dfs
+            if not df.empty and "mz_rounded" in df
+            for value in df["mz_rounded"].dropna().unique()
+        }
+    )
+    bound_frames: list[pd.DataFrame] = []
+    for target_mz in all_mz:
+        mz_segments: list[dict[str, object]] = []
+        for segment_idx, df in enumerate(analysis_dfs):
+            if df.empty or not required.issubset(df.columns):
+                continue
+            rows = df.loc[
+                df["mz_rounded"] == target_mz,
+                ["energy", "left_bound", "right_bound"],
+            ].copy()
+            if rows.empty:
+                continue
+            rows = rows.sort_values("energy").reset_index(drop=True)
+            rows["energy_rounded"] = rows["energy"].round(2)
+            prepared = rows.groupby("energy_rounded", as_index=False).agg(
+                energy=("energy", "mean"),
+                left_bound=("left_bound", "first"),
+                right_bound=("right_bound", "first"),
+            )
+            prepared["segment_idx"] = segment_idx
+            mz_segments.append(
+                {
+                    "df": prepared,
+                    "min_energy": float(prepared["energy"].min()),
+                    "segment_idx": segment_idx,
+                }
+            )
+        if not mz_segments:
+            continue
+
+        mz_segments.sort(key=lambda item: float(item["min_energy"]))
+        if merge_method == "first_segment_dominant":
+            first = next(
+                (item for item in mz_segments if int(item["segment_idx"]) == 0),
+                mz_segments[0],
+            )
+            ordered = [first] + [item for item in mz_segments if item is not first]
+        else:
+            ordered = mz_segments
+        combined = pd.concat(
+            [item["df"] for item in ordered],
+            ignore_index=True,
+        )
+        combined = combined.sort_values("energy").reset_index(drop=True)
+        final = combined.groupby("energy_rounded", as_index=False).agg(
+            left_bound=("left_bound", "first"),
+            right_bound=("right_bound", "first"),
+        )
+        final["mz_rounded"] = target_mz
+        bound_frames.append(final)
+
+    if not bound_frames:
+        return pd.DataFrame()
+    return pd.concat(bound_frames, ignore_index=True)
+
+
 def merge_pie_segments(
     analysis_dfs: list[pd.DataFrame],
     *,
@@ -874,23 +1138,29 @@ def merge_pie_segments(
     if len(analysis_dfs) == 1:
         return analysis_dfs[0].copy()
 
+    representative_bounds = _legacy_representative_peak_bounds(
+        analysis_dfs,
+        merge_method=merge_method,
+    )
+
+    prepared_segments: list[tuple[int, pd.DataFrame]] = []
     all_mz: set[int] = set()
-    for df in analysis_dfs:
-        if not df.empty and "mz_rounded" in df.columns:
-            all_mz.update(df["mz_rounded"].dropna().astype(int).unique())
+    for df_idx, df in enumerate(analysis_dfs):
+        if df.empty or "mz_rounded" not in df.columns:
+            continue
+        prepared = _aggregate_segments_by_mz_energy(df)
+        prepared_segments.append((df_idx, prepared))
+        all_mz.update(prepared["mz_rounded"].dropna().astype(int).unique())
     if not all_mz:
         return _empty_pie_dataframe()
 
-    merged_rows: list[dict] = []
+    merged_frames: list[pd.DataFrame] = []
     for target_mz in sorted(all_mz):
         mz_segments = []
-        for df_idx, df in enumerate(analysis_dfs):
-            if df.empty or "mz_rounded" not in df.columns:
-                continue
-            seg_df = df[df["mz_rounded"] == target_mz].copy()
+        for df_idx, prepared in prepared_segments:
+            seg_df = prepared[prepared["mz_rounded"] == target_mz].copy()
             if seg_df.empty:
                 continue
-            seg_df = _aggregate_segment_by_energy(seg_df)
             mz_segments.append({
                 "df": seg_df,
                 "min_energy": float(seg_df["energy"].min()),
@@ -901,15 +1171,13 @@ def merge_pie_segments(
         if not mz_segments:
             continue
         if len(mz_segments) == 1:
-            merged_rows.extend(mz_segments[0]["df"].drop(columns=["energy_rounded"], errors="ignore").to_dict("records"))
+            merged_frames.append(mz_segments[0]["df"])
             continue
 
         mz_segments.sort(key=lambda x: x["min_energy"])
 
         if merge_method == "mean":
-            combined = pd.concat([s["df"] for s in mz_segments], ignore_index=True)
-            final_combined = _aggregate_segment_by_energy(combined)
-            merged_rows.extend(final_combined.drop(columns=["energy_rounded"], errors="ignore").to_dict("records"))
+            merged_frames.extend(s["df"] for s in mz_segments)
             continue
 
         if merge_method == "first_segment_dominant":
@@ -949,13 +1217,30 @@ def merge_pie_segments(
             seg_df["scale_factor"] = scale_factor
             scaled_segments.append(seg_df)
 
-        combined = pd.concat(scaled_segments, ignore_index=True)
-        final_combined = _aggregate_segment_by_energy(combined)
-        merged_rows.extend(final_combined.drop(columns=["energy_rounded"], errors="ignore").to_dict("records"))
+        merged_frames.extend(scaled_segments)
 
-    if not merged_rows:
+    if not merged_frames:
         return _empty_pie_dataframe()
-    return pd.DataFrame(merged_rows).sort_values(["mz_rounded", "energy"]).reset_index(drop=True)
+    combined = pd.concat(merged_frames, ignore_index=True)
+    final_combined = _aggregate_segments_by_mz_energy(combined)
+    if not representative_bounds.empty:
+        bound_lookup = representative_bounds.set_index(
+            ["mz_rounded", "energy_rounded"]
+        )
+        row_keys = pd.MultiIndex.from_arrays(
+            [
+                final_combined["mz_rounded"].to_numpy(),
+                final_combined["energy_rounded"].to_numpy(),
+            ],
+            names=["mz_rounded", "energy_rounded"],
+        )
+        for column in ("left_bound", "right_bound"):
+            final_combined[column] = bound_lookup[column].reindex(row_keys).to_numpy()
+    return (
+        final_combined.drop(columns=["energy_rounded"], errors="ignore")
+        .sort_values(["mz_rounded", "energy"])
+        .reset_index(drop=True)
+    )
 
 
 def analyze_multiple_pie_folders(

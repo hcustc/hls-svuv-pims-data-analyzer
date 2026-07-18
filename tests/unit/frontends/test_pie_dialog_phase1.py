@@ -25,6 +25,7 @@ from bl03u_masstool.core.nist_webbook import (
     NistIonizationEnergy,
     NistWebBookResult,
 )
+from bl03u_masstool.core.pie_analysis import PieSegmentSummary
 from bl03u_masstool.core.project_settings import ProjectSettings
 from bl03u_masstool.frontends.pyqt_app.pie import dialog as pie_dialog_module
 from bl03u_masstool.frontends.pyqt_app.pie.dialog import PIESpeciesFitDialog
@@ -45,6 +46,23 @@ def pie_dialog(qapp):
     dialog.show()
     yield dialog
     dialog.deleteLater()
+
+
+def test_pie_workspace_columns_share_contiguous_splitter_boundaries(pie_dialog, qapp):
+    pie_dialog.resize(1180, 720)
+    qapp.processEvents()
+
+    splitter = pie_dialog.findChild(QtWidgets.QSplitter, "MainSplitter")
+    assert splitter is not None
+    assert splitter.count() == 3
+    assert splitter.handleWidth() == 7
+
+    for index in (1, 2):
+        previous = splitter.widget(index - 1).geometry()
+        handle = splitter.handle(index).geometry()
+        following = splitter.widget(index).geometry()
+        assert previous.right() + 1 == handle.left()
+        assert handle.right() + 1 == following.left()
 
 
 def test_ie_query_batch_keeps_missing_species_nonfatal(monkeypatch):
@@ -163,6 +181,76 @@ def test_project_scope_applies_project_source_and_restores_temporary_path(pie_di
     assert pie_dialog.temporary_source_button.isChecked()
     assert pie_dialog.folder_edit.text() == str(temporary_folder)
     assert not pie_dialog.folder_edit.isReadOnly()
+
+
+def test_project_scope_restores_all_pie_segment_folders(pie_dialog, tmp_path):
+    low_folder = tmp_path / "pie_low"
+    high_folder = tmp_path / "pie_high"
+    low_folder.mkdir()
+    high_folder.mkdir()
+    ps = ProjectSettings(
+        project_name="Project Multi PIE",
+        output_dir=str(tmp_path / "project"),
+        pie_scan_folder=str(low_folder),
+        pie_scan_folders=[str(low_folder), str(high_folder)],
+        pie_multi_folder_mode=True,
+        pie_merge_method="low_energy_dominant",
+    )
+
+    pie_dialog.set_project_settings(ps, activate_project_scope=True)
+
+    assert pie_dialog.pie_source_scope == "project"
+    assert pie_dialog.project_source_button.text() == "项目管理"
+    assert not hasattr(pie_dialog, "use_multi_folders")
+    assert not hasattr(pie_dialog, "multi_folder_section")
+    assert pie_dialog.folder_edit.text() == "项目管理已登记 2 个 PIE 能段目录"
+    assert pie_dialog.folder_edit.toolTip().splitlines() == [str(low_folder), str(high_folder)]
+    assert pie_dialog.select_folder_button.text() == "管理能段..."
+    assert not pie_dialog.select_folder_button.isHidden()
+    assert pie_dialog.temporary_segments_button.isHidden()
+    assert pie_dialog._has_analysis_source()
+    folders, merge_method = pie_dialog._analysis_source_selection()
+    assert folders == [str(low_folder), str(high_folder)]
+    assert merge_method == "low_energy_dominant"
+
+    pie_dialog.set_pie_source_scope("temporary")
+
+    assert pie_dialog.select_folder_button.text() == "浏览..."
+    assert not pie_dialog.select_folder_button.isHidden()
+    assert not pie_dialog.temporary_segments_button.isHidden()
+
+
+def test_temporary_scope_selects_discovered_segments_inside_pie_page(
+    pie_dialog, tmp_path
+):
+    root = tmp_path / "PIE-total"
+    low_folder = root / "PIE-low"
+    high_folder = root / "PIE-high"
+    low_folder.mkdir(parents=True)
+    high_folder.mkdir()
+    pie_dialog.folder_edit.setText(str(root))
+    pie_dialog._temporary_segment_root = str(root)
+    pie_dialog._temporary_segment_summaries = [
+        PieSegmentSummary(low_folder, 23, 7.0, 8.1),
+        PieSegmentSummary(high_folder, 61, 8.0, 11.0),
+    ]
+    pie_dialog._set_temporary_segment_selection(
+        [str(low_folder), str(high_folder)]
+    )
+
+    assert pie_dialog.temporary_segments_button.text() == "能段: 2/2..."
+    assert "7.000–8.100 eV" in pie_dialog.temporary_segments_button.toolTip()
+    assert "8.000–11.000 eV" in pie_dialog.temporary_segments_button.toolTip()
+    folders, merge_method = pie_dialog._analysis_source_selection()
+    assert folders == [str(low_folder), str(high_folder)]
+    assert merge_method == "low_energy_dominant"
+
+    pie_dialog._set_temporary_segment_selection([str(low_folder)])
+
+    assert pie_dialog.temporary_segments_button.text() == "能段: 1/2..."
+    folders, merge_method = pie_dialog._analysis_source_selection()
+    assert folders == [str(low_folder)]
+    assert merge_method is None
 
 
 def test_project_settings_sync_respects_temporary_source_scope(pie_dialog, tmp_path):

@@ -3,7 +3,12 @@ from __future__ import annotations
 import yaml
 import pytest
 
-from bl03u_masstool.core.project_settings import ProjectSettings, load_project_settings, save_project_settings
+from bl03u_masstool.core.project_settings import (
+    ProjectSettings,
+    ProjectSettingsManager,
+    load_project_settings,
+    save_project_settings,
+)
 
 
 def test_project_settings_default_parent_mz_is_unset():
@@ -21,6 +26,7 @@ def test_project_settings_round_trip_preserves_nested_yaml_fields(tmp_path):
         sum_spectrum_folder="data/sum",
         temperature_scan_folder="data/temp",
         pie_scan_folder="data/pie",
+        pie_scan_folders=["data/pie-low", "data/pie-high"],
         pics_database_path="database/species_database.sqlite",
         manual_peak_file="config/manual.yaml",
         temperature_scan_result_file="output/temperature.xlsx",
@@ -81,6 +87,8 @@ def test_project_settings_round_trip_preserves_nested_yaml_fields(tmp_path):
     assert loaded.sum_spectrum_folder == settings.sum_spectrum_folder
     assert loaded.temperature_scan_folder == settings.temperature_scan_folder
     assert loaded.pie_scan_folder == settings.pie_scan_folder
+    assert loaded.pie_scan_folders == settings.pie_scan_folders
+    assert loaded.effective_pie_scan_folders() == settings.pie_scan_folders
     assert loaded.pics_database_path == settings.pics_database_path
     assert loaded.manual_peak_file == settings.manual_peak_file
     assert loaded.temperature_scan_result_file == settings.temperature_scan_result_file
@@ -130,6 +138,138 @@ def test_project_settings_round_trip_preserves_nested_yaml_fields(tmp_path):
     assert loaded.mf_reference_species_mf_at_tm == settings.mf_reference_species_mf_at_tm
     assert loaded.mf_photon_energy == settings.mf_photon_energy
     assert loaded.mf_kr_data == settings.mf_kr_data
+    assert saved_yaml["data_sources"]["pie_scan_folders"] == ["data/pie-low", "data/pie-high"]
+
+
+def test_project_settings_legacy_single_pie_folder_remains_effective():
+    settings = ProjectSettings(pie_scan_folder="data/legacy-pie")
+
+    assert settings.effective_pie_scan_folders() == ["data/legacy-pie"]
+
+
+def test_project_scoped_settings_store_relative_paths_and_rebase_after_move(tmp_path):
+    original_root = tmp_path / "computer-a" / "Project_Portable"
+    config_path = original_root / "config" / "project.yaml"
+    external_database = tmp_path / "shared" / "species.sqlite"
+    settings = ProjectSettings(
+        project_name="Portable",
+        output_dir=str(original_root),
+        temperature_scan_folder=str(original_root / "raw_data" / "temperature_scan" / "run-1"),
+        pie_scan_folder=str(original_root / "raw_data" / "pie_scan" / "low"),
+        pie_scan_folders=[
+            str(original_root / "raw_data" / "pie_scan" / "low"),
+            str(original_root / "raw_data" / "pie_scan" / "high"),
+        ],
+        pics_database_path=str(external_database),
+        pie_identification_result_file=str(original_root / "analysis" / "pie" / "identification.xlsx"),
+    )
+
+    save_project_settings(settings, config_path)
+
+    saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert saved["project"]["output_dir"] == "."
+    assert saved["data_sources"]["temperature_scan_folder"] == "raw_data/temperature_scan/run-1"
+    assert saved["data_sources"]["pie_scan_folders"] == [
+        "raw_data/pie_scan/low",
+        "raw_data/pie_scan/high",
+    ]
+    assert saved["data_sources"]["pics_database_path"] == str(external_database)
+    assert saved["analysis_artifacts"]["pie_identification_result_file"] == (
+        "analysis/pie/identification.xlsx"
+    )
+
+    moved_root = tmp_path / "computer-b" / "Project_Portable"
+    moved_config = moved_root / "config" / "project.yaml"
+    moved_config.parent.mkdir(parents=True)
+    moved_config.write_text(config_path.read_text(encoding="utf-8"), encoding="utf-8")
+
+    loaded = load_project_settings(moved_config)
+
+    assert loaded.output_dir == str(moved_root)
+    assert loaded.temperature_scan_folder == str(moved_root / "raw_data" / "temperature_scan" / "run-1")
+    assert loaded.pie_scan_folder == str(moved_root / "raw_data" / "pie_scan" / "low")
+    assert loaded.pie_scan_folders == [
+        str(moved_root / "raw_data" / "pie_scan" / "low"),
+        str(moved_root / "raw_data" / "pie_scan" / "high"),
+    ]
+    assert loaded.pics_database_path == str(external_database)
+    assert loaded.pie_identification_result_file == str(
+        moved_root / "analysis" / "pie" / "identification.xlsx"
+    )
+
+
+def test_project_scoped_settings_rebase_legacy_windows_absolute_paths(tmp_path):
+    project_root = tmp_path / "migrated" / "Project_C6H5ClO"
+    config_path = project_root / "config" / "project.yaml"
+    config_path.parent.mkdir(parents=True)
+    old_root = r"C:\Users\Administrator\Desktop\output\Project_C6H5ClO"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "project": {"name": "Legacy", "output_dir": old_root},
+                "data_sources": {
+                    "temperature_scan_folder": old_root + r"\raw_data\temperature_scan\温度扫描",
+                    "pie_scan_folder": old_root + r"\raw_data\pie_scan\PIE_低能段",
+                    "pie_scan_folders": [
+                        old_root + r"\raw_data\pie_scan\PIE_低能段",
+                        old_root + r"\raw_data\pie_scan\PIE_高能段",
+                    ],
+                    "pics_database_path": r"D:\shared\species.sqlite",
+                },
+            },
+            allow_unicode=True,
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = load_project_settings(config_path)
+
+    assert loaded.output_dir == str(project_root)
+    assert loaded.temperature_scan_folder == str(
+        project_root / "raw_data" / "temperature_scan" / "温度扫描"
+    )
+    assert loaded.pie_scan_folders == [
+        str(project_root / "raw_data" / "pie_scan" / "PIE_低能段"),
+        str(project_root / "raw_data" / "pie_scan" / "PIE_高能段"),
+    ]
+    assert loaded.pics_database_path == r"D:\shared\species.sqlite"
+
+    save_project_settings(loaded, config_path)
+    migrated = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert migrated["project"]["output_dir"] == "."
+    assert migrated["data_sources"]["pie_scan_folders"] == [
+        "raw_data/pie_scan/PIE_低能段",
+        "raw_data/pie_scan/PIE_高能段",
+    ]
+    assert migrated["data_sources"]["pics_database_path"] == r"D:\shared\species.sqlite"
+
+
+def test_project_settings_manager_uses_portable_storage_but_absolute_runtime_paths(tmp_path):
+    project_root = tmp_path / "Project_Manager"
+    temperature_folder = project_root / "raw_data" / "temperature_scan" / "run"
+    manager = ProjectSettingsManager()
+    manager.clear_project_path()
+    try:
+        manager.set_project_path(project_root)
+        manager.set(
+            ProjectSettings(
+                project_name="Manager",
+                output_dir=str(project_root),
+                temperature_scan_folder=str(temperature_folder),
+            )
+        )
+
+        config_path = manager.save()
+        saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        reloaded = manager.reload()
+
+        assert saved["project"]["output_dir"] == "."
+        assert saved["data_sources"]["temperature_scan_folder"] == "raw_data/temperature_scan/run"
+        assert reloaded.output_dir == str(project_root)
+        assert reloaded.temperature_scan_folder == str(temperature_folder)
+    finally:
+        manager.clear_project_path()
 
 
 def test_load_project_settings_accepts_saved_yaml_key_names(tmp_path):

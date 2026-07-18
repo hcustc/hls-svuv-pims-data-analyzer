@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field, replace
 import logging
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 import yaml
@@ -15,6 +15,20 @@ from .mole_fraction import MoleFractionSettings, load_mole_fraction_settings
 
 DEFAULT_PROJECT_CONFIG = Path("config/project.yaml")
 logger = logging.getLogger(__name__)
+
+_PROJECT_PATH_FIELDS: tuple[str, ...] = (
+    "single_spectrum_file",
+    "sum_spectrum_folder",
+    "temperature_scan_folder",
+    "pie_scan_folder",
+    "pics_database_path",
+    "manual_peak_file",
+    "temperature_scan_result_file",
+    "pie_identification_result_file",
+    "mole_fraction_result_file",
+    "kr_calibration_folder",
+    "kr_calibration_peak_file",
+)
 
 
 def _optional_float_dict(value):
@@ -48,6 +62,7 @@ class ProjectSettings:
     sum_spectrum_folder: str = ""
     temperature_scan_folder: str = ""
     pie_scan_folder: str = ""
+    pie_scan_folders: list[str] = field(default_factory=list)
     pics_database_path: str = ""
     manual_peak_file: str = ""
 
@@ -140,6 +155,25 @@ class ProjectSettings:
 
     # === Converters ===
 
+    def effective_pie_scan_folders(self) -> list[str]:
+        """Return unique configured PIE segment folders with legacy fallback."""
+        if isinstance(self.pie_scan_folders, str):
+            configured = [self.pie_scan_folders]
+        else:
+            configured = list(self.pie_scan_folders or [])
+        if not configured and self.pie_scan_folder:
+            configured = [self.pie_scan_folder]
+
+        folders: list[str] = []
+        seen: set[str] = set()
+        for value in configured:
+            path = str(value or "").strip()
+            if not path or path in seen:
+                continue
+            seen.add(path)
+            folders.append(path)
+        return folders
+
     def to_calibration(self) -> Calibration:
         return Calibration(a=self.cal_a, b=self.cal_b, c=self.cal_c)
 
@@ -231,6 +265,7 @@ def _nested_to_flat(data: dict) -> dict:
             "sum_spectrum_folder": "sum_spectrum_folder",
             "temperature_scan_folder": "temperature_scan_folder",
             "pie_scan_folder": "pie_scan_folder",
+            "pie_scan_folders": "pie_scan_folders",
             "pics_database_path": "pics_database_path",
             "manual_peak_file": "manual_peak_file",
         },
@@ -471,6 +506,7 @@ def _flat_to_nested(settings: ProjectSettings) -> dict:
             "sum_spectrum_folder": d["sum_spectrum_folder"],
             "temperature_scan_folder": d["temperature_scan_folder"],
             "pie_scan_folder": d["pie_scan_folder"],
+            "pie_scan_folders": d["pie_scan_folders"],
             "pics_database_path": d["pics_database_path"],
             "manual_peak_file": d["manual_peak_file"],
         },
@@ -564,23 +600,219 @@ def _flat_to_nested(settings: ProjectSettings) -> dict:
     }
 
 
-def load_project_settings(path: str | Path = DEFAULT_PROJECT_CONFIG) -> ProjectSettings:
+def _absolute_pure_path(value: str) -> PureWindowsPath | PurePosixPath | None:
+    """Parse an absolute path without assuming the current operating system."""
+    windows_path = PureWindowsPath(value)
+    if windows_path.is_absolute():
+        return windows_path
+    posix_path = PurePosixPath(value)
+    if posix_path.is_absolute():
+        return posix_path
+    return None
+
+
+def _relative_to_root(value: str, root: str | Path) -> PureWindowsPath | PurePosixPath | None:
+    value_path = _absolute_pure_path(value)
+    root_path = _absolute_pure_path(str(root))
+    if value_path is None or root_path is None:
+        return None
+    if isinstance(value_path, PureWindowsPath) != isinstance(root_path, PureWindowsPath):
+        return None
+    try:
+        return value_path.relative_to(root_path)
+    except ValueError:
+        return None
+
+
+def _portable_relative_parts(value: str) -> tuple[str, ...]:
+    """Return path components for a relative path written by either OS."""
+    if "\\" in value:
+        return PureWindowsPath(value).parts
+    return PurePosixPath(value).parts
+
+
+def _resolve_portable_path(
+    value: str,
+    project_root: Path,
+    *,
+    stored_project_root: str,
+) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+
+    absolute_path = _absolute_pure_path(raw)
+    if absolute_path is None:
+        parts = _portable_relative_parts(raw)
+        return str(project_root.joinpath(*parts).resolve())
+
+    legacy_relative = _relative_to_root(raw, stored_project_root)
+    if legacy_relative is not None:
+        return str(project_root.joinpath(*legacy_relative.parts).resolve())
+    return raw
+
+
+def _resolve_project_scoped_paths(settings: ProjectSettings, project_root: str | Path) -> ProjectSettings:
+    """Resolve portable paths for runtime and rebase legacy project-local paths."""
+    root = Path(project_root).expanduser().resolve()
+    stored_project_root = str(settings.output_dir or "").strip()
+    pie_folders = (
+        [settings.pie_scan_folders]
+        if isinstance(settings.pie_scan_folders, str)
+        else list(settings.pie_scan_folders or [])
+    )
+    resolved = replace(settings, pie_scan_folders=pie_folders)
+    resolved.output_dir = str(root)
+
+    for field_name in _PROJECT_PATH_FIELDS:
+        setattr(
+            resolved,
+            field_name,
+            _resolve_portable_path(
+                getattr(settings, field_name),
+                root,
+                stored_project_root=stored_project_root,
+            ),
+        )
+    resolved.pie_scan_folders = [
+        _resolve_portable_path(value, root, stored_project_root=stored_project_root)
+        for value in pie_folders
+        if str(value or "").strip()
+    ]
+    return resolved
+
+
+def _portable_project_path(
+    value: str,
+    project_root: Path,
+    *,
+    runtime_project_root: str = "",
+) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+
+    value_absolute = _absolute_pure_path(raw)
+    if value_absolute is None:
+        return PurePosixPath(*_portable_relative_parts(raw)).as_posix()
+
+    relative = _relative_to_root(raw, project_root)
+    if relative is None and runtime_project_root:
+        relative = _relative_to_root(raw, runtime_project_root)
+    if relative is None:
+        root_absolute = _absolute_pure_path(str(project_root))
+        if root_absolute is None or (
+            isinstance(value_absolute, PureWindowsPath)
+            != isinstance(root_absolute, PureWindowsPath)
+        ):
+            return raw
+        # Resolve local aliases such as /var -> /private/var on macOS.
+        try:
+            relative = PurePosixPath(
+                *Path(raw).expanduser().resolve().relative_to(project_root.resolve()).parts
+            )
+        except (OSError, ValueError):
+            return raw
+    return relative.as_posix() or "."
+
+
+def _project_settings_for_storage(
+    settings: ProjectSettings,
+    project_root: str | Path,
+) -> ProjectSettings:
+    """Create a copy whose project-local paths are portable POSIX relatives."""
+    root = Path(project_root).expanduser().resolve()
+    pie_folders = (
+        [settings.pie_scan_folders]
+        if isinstance(settings.pie_scan_folders, str)
+        else list(settings.pie_scan_folders or [])
+    )
+    portable = replace(settings, pie_scan_folders=pie_folders)
+    runtime_project_root = str(settings.output_dir or "").strip()
+    portable.output_dir = "."
+    for field_name in _PROJECT_PATH_FIELDS:
+        setattr(
+            portable,
+            field_name,
+            _portable_project_path(
+                getattr(settings, field_name),
+                root,
+                runtime_project_root=runtime_project_root,
+            ),
+        )
+    portable.pie_scan_folders = [
+        _portable_project_path(value, root, runtime_project_root=runtime_project_root)
+        for value in pie_folders
+        if str(value or "").strip()
+    ]
+    return portable
+
+
+def portable_project_settings_dict(
+    settings: ProjectSettings,
+    project_root: str | Path,
+) -> dict[str, Any]:
+    """Return a flat, portable settings mapping for project metadata exports."""
+    return asdict(_project_settings_for_storage(settings, project_root))
+
+
+def _inferred_project_root(path: str | Path, config_path: Path) -> Path | None:
+    """Infer ``<root>`` only for explicit ``<root>/config/project.yaml`` paths."""
+    raw_path = Path(path)
+    if raw_path == DEFAULT_PROJECT_CONFIG:
+        return None
+    if len(raw_path.parts) >= 3 and raw_path.parts[-2:] == ("config", "project.yaml"):
+        return config_path.parent.parent
+    return None
+
+
+def load_project_settings(
+    path: str | Path = DEFAULT_PROJECT_CONFIG,
+    *,
+    project_root: str | Path | None = None,
+) -> ProjectSettings:
     config_path = readable_config_path(path)
+    effective_root = (
+        Path(project_root).expanduser().resolve()
+        if project_root
+        else _inferred_project_root(path, config_path)
+    )
     if not config_path.exists():
         logger.warning("Project settings file not found; using defaults: %s", config_path)
-        return ProjectSettings()
+        defaults = ProjectSettings()
+        if effective_root is not None:
+            defaults.output_dir = str(effective_root)
+        return defaults
     with config_path.open("r", encoding="utf-8") as handle:
         data = yaml.safe_load(handle) or {}
     if not isinstance(data, dict):
         raise ValueError(f"project config root must be a mapping: {config_path}")
     flat = _nested_to_flat(data)
-    return ProjectSettings(**{k: v for k, v in flat.items() if k in ProjectSettings.__dataclass_fields__})
+    settings = ProjectSettings(**{k: v for k, v in flat.items() if k in ProjectSettings.__dataclass_fields__})
+    if effective_root is not None:
+        settings = _resolve_project_scoped_paths(settings, effective_root)
+    return settings
 
 
-def save_project_settings(settings: ProjectSettings, path: str | Path = DEFAULT_PROJECT_CONFIG) -> Path:
+def save_project_settings(
+    settings: ProjectSettings,
+    path: str | Path = DEFAULT_PROJECT_CONFIG,
+    *,
+    project_root: str | Path | None = None,
+) -> Path:
     config_path = writable_config_path(path)
+    effective_root = (
+        Path(project_root).expanduser().resolve()
+        if project_root
+        else _inferred_project_root(path, config_path)
+    )
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    nested = _flat_to_nested(settings)
+    stored_settings = (
+        _project_settings_for_storage(settings, effective_root)
+        if effective_root is not None
+        else settings
+    )
+    nested = _flat_to_nested(stored_settings)
     with config_path.open("w", encoding="utf-8") as handle:
         yaml.safe_dump(nested, handle, allow_unicode=True, sort_keys=False)
     return config_path
@@ -675,8 +907,7 @@ class ProjectSettingsManager:
         Args:
             project_root: 项目根目录路径
         """
-        if isinstance(project_root, str):
-            project_root = Path(project_root)
+        project_root = Path(project_root).expanduser().resolve()
         self._project_config_path = project_root / "config" / "project.yaml"
         # 重新加载设置以使用新的项目路径
         self.reload()
@@ -691,25 +922,33 @@ class ProjectSettingsManager:
         """Return True when settings are scoped to an opened project folder."""
         return self._project_config_path is not None
 
+    def _project_root(self) -> Path | None:
+        if self._project_config_path is None:
+            return None
+        return self._project_config_path.parent.parent
+
     def get(self) -> ProjectSettings:
         if self._settings is None:
             config_path = self.get_project_config_path()
-            self._settings = load_project_settings(config_path)
+            project_root = self._project_root()
+            self._settings = load_project_settings(config_path, project_root=project_root)
             if self._is_fresh(config_path):
                 try:
                     self._settings = migrate_from_legacy_configs()
-                    save_project_settings(self._settings, config_path)
+                    if project_root is not None:
+                        self._settings.output_dir = str(project_root.resolve())
+                    save_project_settings(self._settings, config_path, project_root=project_root)
                 except Exception:
                     pass
         return self._settings
 
     def save(self) -> Path:
         config_path = self.get_project_config_path()
-        return save_project_settings(self.get(), config_path)
+        return save_project_settings(self.get(), config_path, project_root=self._project_root())
 
     def reload(self) -> ProjectSettings:
         config_path = self.get_project_config_path()
-        self._settings = load_project_settings(config_path)
+        self._settings = load_project_settings(config_path, project_root=self._project_root())
         return self._settings
 
     def set(self, settings: ProjectSettings) -> None:
