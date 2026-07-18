@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
 import os
@@ -12,7 +12,7 @@ import zipfile
 import yaml
 
 from .config import writable_project_path
-from .project_settings import ProjectSettings
+from .project_settings import ProjectSettings, portable_project_settings_dict
 
 DATA_SOURCE_FILE_COUNT_LIMIT = 5000
 
@@ -495,6 +495,8 @@ def import_project_source(
         raise RuntimeError(f"Failed to import '{source.name}': {str(e)}")
 
     setattr(settings, spec.field_name, str(destination))
+    if source_key == "pie_scan":
+        settings.pie_scan_folders = [str(destination)]
     _write_raw_data_link_manifest(settings, source_key, source, destination, mode)
     return ProjectImportResult(
         source=source,
@@ -519,12 +521,22 @@ def _write_raw_data_link_manifest(
         if isinstance(loaded, dict):
             data = loaded
     sources = data.setdefault("sources", {})
-    sources[source_key] = {
+    entry = {
         "mode": mode,
         "source": str(source),
-        "project_path": str(destination),
+        "project_path": destination.relative_to(project_root(settings)).as_posix(),
         "updated_at": utc_now_iso(),
     }
+    if source_key == "pie_scan" and settings.pie_multi_folder_mode:
+        sources.setdefault(source_key, entry)
+        segments = sources.setdefault("pie_scan_segments", [])
+        if not isinstance(segments, list):
+            segments = []
+            sources["pie_scan_segments"] = segments
+        segments[:] = [item for item in segments if item.get("source") != str(source)]
+        segments.append(entry)
+    else:
+        sources[source_key] = entry
     manifest_path.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
     return manifest_path
 
@@ -574,22 +586,34 @@ def materialize_project_data_sources(
 
     for source_key in source_keys:
         spec = PROJECT_SOURCE_SPECS[source_key]
-        raw_value = str(getattr(settings, spec.field_name, "") or "").strip()
-        if not raw_value:
-            continue
-
-        source = Path(raw_value).expanduser()
-        if not source.exists():
-            raise FileNotFoundError(f"{spec.label}不存在：{source}")
-
-        try:
-            source.resolve().relative_to(root)
-        except ValueError:
-            pass
+        if source_key == "pie_scan":
+            raw_values = settings.effective_pie_scan_folders()
+            settings.pie_multi_folder_mode = len(raw_values) > 1
         else:
+            raw_value = str(getattr(settings, spec.field_name, "") or "").strip()
+            raw_values = [raw_value] if raw_value else []
+        if not raw_values:
             continue
 
-        results.append(import_project_source(settings, source, source_key, mode=mode))
+        materialized_values: list[str] = []
+        for raw_value in raw_values:
+            source = Path(raw_value).expanduser()
+            if not source.exists():
+                raise FileNotFoundError(f"{spec.label}不存在：{source}")
+
+            try:
+                source.resolve().relative_to(root)
+            except ValueError:
+                result = import_project_source(settings, source, source_key, mode=mode)
+                results.append(result)
+                materialized_values.append(str(result.destination))
+            else:
+                materialized_values.append(str(source))
+
+        if source_key == "pie_scan":
+            settings.pie_scan_folders = materialized_values
+            settings.pie_scan_folder = materialized_values[0] if materialized_values else ""
+            settings.pie_multi_folder_mode = len(materialized_values) > 1
 
     return results
 
@@ -752,6 +776,8 @@ def _registered_artifact_fields(settings: ProjectSettings) -> dict[str, str]:
         "pie_identification_result_file": settings.pie_identification_result_file,
         "mole_fraction_result_file": settings.mole_fraction_result_file,
     }
+    for index, folder in enumerate(settings.effective_pie_scan_folders()[1:], start=2):
+        fields[f"pie_scan_folder_{index}"] = folder
     return {key: value for key, value in fields.items() if value}
 
 
@@ -765,6 +791,8 @@ def _registered_artifact_paths(settings: ProjectSettings) -> set[Path]:
 
 
 def _section_for_registered_field(field_name: str) -> ProjectDirectorySpec:
+    if field_name.startswith("pie_scan_folder_"):
+        return directory_spec("raw_data")
     mapping = {
         "single_spectrum_file": "raw_data",
         "sum_spectrum_folder": "raw_data",
@@ -802,7 +830,11 @@ def export_project_archive(
         if include_metadata:
             archive.writestr(
                 f"{root.name}/project_state.yaml",
-                yaml.safe_dump(asdict(settings), allow_unicode=True, sort_keys=False),
+                yaml.safe_dump(
+                    portable_project_settings_dict(settings, root),
+                    allow_unicode=True,
+                    sort_keys=False,
+                ),
             )
         for path in sorted(root.rglob("*")):
             if path.is_symlink():
@@ -859,6 +891,36 @@ def validate_data_source(settings: ProjectSettings, source_key: str) -> DataSour
             file_count=0,
             detail="未知的数据源类型",
         )
+
+    if source_key == "pie_scan":
+        folders = settings.effective_pie_scan_folders()
+        if len(folders) > 1:
+            segment_records = [
+                validate_data_source(
+                    replace(settings, pie_scan_folder=folder, pie_scan_folders=[]),
+                    source_key,
+                )
+                for folder in folders
+            ]
+            invalid = [record for record in segment_records if not record.is_valid]
+            detail = (
+                f"{len(folders)} 段，合计 {sum(record.file_count for record in segment_records)} 个文件"
+                if not invalid
+                else f"{len(invalid)}/{len(folders)} 个能段目录不可用"
+            )
+            return DataSourceValidationRecord(
+                source_key=source_key,
+                source_label=spec.label,
+                path=";".join(folders),
+                exists=all(record.exists for record in segment_records),
+                is_readable=not invalid,
+                file_count=sum(record.file_count for record in segment_records),
+                detail=detail,
+                last_modified=max(
+                    (record.last_modified for record in segment_records),
+                    default="",
+                ),
+            )
 
     field_value = getattr(settings, spec.field_name, None)
     path_str = str(field_value).strip() if field_value else None

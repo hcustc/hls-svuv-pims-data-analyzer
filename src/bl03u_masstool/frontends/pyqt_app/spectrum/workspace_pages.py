@@ -443,7 +443,7 @@ class WorkspacePagesMixin:
         datasource_title = QtWidgets.QLabel("项目数据源", self.datasource_card)
         datasource_title.setObjectName("ProjectTitle")
         datasource_hint = QtWidgets.QLabel(
-            "选择温度扫描、PIE 扫描目录，或使用导入向导整理项目数据。",
+            "选择温度扫描目录，并为 PIE 登记一段或多段能区目录；多段数据将在重叠能区自动缩放拼接。",
             self.datasource_card,
         )
         datasource_hint.setObjectName("ProjectHint")
@@ -472,7 +472,8 @@ class WorkspacePagesMixin:
         self.project_temperature_folder_edit = QLineEdit(self.datasource_card)
         self.project_temperature_folder_edit.setPlaceholderText("选择温度扫描 txt 文件目录")
         self.project_pie_folder_edit = QLineEdit(self.datasource_card)
-        self.project_pie_folder_edit.setPlaceholderText("选择 PIE 扫描目录")
+        self.project_pie_folder_edit.setPlaceholderText("尚未选择 PIE 扫描目录")
+        self.project_pie_folder_edit.setReadOnly(True)
         self.project_manual_peak_edit = QLineEdit(self.datasource_card)
         self.project_manual_peak_edit.setPlaceholderText("可导入旧卡峰文件，或由质谱工作台“保存到项目”生成")
         self.project_manual_peak_edit.setReadOnly(True)
@@ -516,7 +517,39 @@ class WorkspacePagesMixin:
 
         analysis_group, analysis_layout = _path_group("原始扫描目录")
         _add_path_row(analysis_layout, 0, "temperature_scan", "温度扫描目录", self.project_temperature_folder_edit, self.project_temperature_folder_button)
-        _add_path_row(analysis_layout, 1, "pie_scan", "PIE扫描目录", self.project_pie_folder_edit, self.project_pie_folder_button)
+        _add_path_row(analysis_layout, 1, "pie_scan", "PIE主目录", self.project_pie_folder_edit, self.project_pie_folder_button)
+
+        self.project_pie_folders_list = QtWidgets.QListWidget(self.datasource_card)
+        self.project_pie_folders_list.setMaximumHeight(92)
+        self.project_pie_folders_list.setSelectionMode(
+            QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
+        )
+        self.project_pie_folders_list.setToolTip(
+            "项目中的 PIE 能段目录。计算时会按实际光子能量排序，并用重叠能点的中位强度比缩放后续能段。"
+        )
+        pie_segment_label = QtWidgets.QLabel("PIE能段列表", self.datasource_card)
+        pie_segment_label.setFixedWidth(88)
+        analysis_layout.addWidget(pie_segment_label, 2, 0)
+        analysis_layout.addWidget(self.project_pie_folders_list, 2, 1)
+
+        pie_segment_actions = QtWidgets.QWidget(self.datasource_card)
+        pie_segment_actions_layout = QVBoxLayout(pie_segment_actions)
+        pie_segment_actions_layout.setContentsMargins(0, 0, 0, 0)
+        pie_segment_actions_layout.setSpacing(4)
+        self.project_pie_add_folder_button = QPushButton("添加能段", pie_segment_actions)
+        self.project_pie_add_folder_button.setObjectName("BrowseButton")
+        self.project_pie_remove_folder_button = QPushButton("移除", pie_segment_actions)
+        self.project_pie_remove_folder_button.setObjectName("BrowseButton")
+        self.project_pie_clear_folders_button = QPushButton("清空", pie_segment_actions)
+        self.project_pie_clear_folders_button.setObjectName("BrowseButton")
+        for button in (
+            self.project_pie_add_folder_button,
+            self.project_pie_remove_folder_button,
+            self.project_pie_clear_folders_button,
+        ):
+            button.setFixedHeight(24)
+            pie_segment_actions_layout.addWidget(button)
+        analysis_layout.addWidget(pie_segment_actions, 2, 2)
         card_layout.addWidget(analysis_group)
 
         artifact_group, artifact_layout = _path_group("项目产物")
@@ -530,12 +563,14 @@ class WorkspacePagesMixin:
             lambda: self.select_project_folder(self.project_temperature_folder_edit, "选择温度扫描目录")
         )
         self.project_pie_folder_button.clicked.connect(
-            lambda: self.select_project_folder(self.project_pie_folder_edit, "选择PIE扫描目录")
+            self.select_project_pie_primary_folder
         )
+        self.project_pie_add_folder_button.clicked.connect(self.add_project_pie_folder)
+        self.project_pie_remove_folder_button.clicked.connect(self.remove_project_pie_folders)
+        self.project_pie_clear_folders_button.clicked.connect(self.clear_project_pie_folders)
         self.project_manual_peak_button.clicked.connect(self.import_project_manual_peak_file)
         # Auto-save and push project paths when edited
         self.project_temperature_folder_edit.editingFinished.connect(self._auto_save_datasource)
-        self.project_pie_folder_edit.editingFinished.connect(self._auto_save_datasource)
 
     # ── Tab 4: Function Params ───────────────────────────────────────────
 
@@ -571,8 +606,6 @@ class WorkspacePagesMixin:
         self.fp_pie_integration_method.addItem("范围累加", "sum_counts")
         self.fp_pie_integration_method.addItem("扣基线积分", "baseline")
         self.fp_pie_integration_method.addItem("高斯", "gaussian")
-        self.fp_pie_multi_folder = QtWidgets.QCheckBox("多文件夹模式")
-        self.fp_pie_multi_folder.setToolTip("启用后可从多个独立PIE扫描文件夹合并数据，用于不同能段的拼接实验")
         self.fp_pie_merge_method = QtWidgets.QComboBox()
         self.fp_pie_merge_method.setToolTip("低能段为主：以低能段信号为基准缩放其他段；简单拼接：直接按能量排序不缩放")
         self.fp_pie_merge_method.addItem("低能段为主", "low_energy_dominant")
@@ -586,7 +619,6 @@ class WorkspacePagesMixin:
         pie_layout.addWidget(self.fp_pie_integration_method, 0, 4)
         pie_layout.addWidget(QtWidgets.QLabel("合并方法"), 1, 0)
         pie_layout.addWidget(self.fp_pie_merge_method, 1, 1)
-        pie_layout.addWidget(self.fp_pie_multi_folder, 1, 2)
         params_grid.addWidget(pie_group, 0, 0)
 
         # -- Temperature Scan defaults --
@@ -727,7 +759,7 @@ class WorkspacePagesMixin:
         self.project_description_edit.setText(ps.description)
         self.project_output_dir_edit.setText(ps.output_dir)
         self.project_temperature_folder_edit.setText(ps.temperature_scan_folder)
-        self.project_pie_folder_edit.setText(ps.pie_scan_folder)
+        self._set_project_pie_folders(ps.effective_pie_scan_folders())
         self.project_manual_peak_edit.setText(ps.manual_peak_file)
 
     def _collect_project_settings_from_ui(self) -> ProjectSettings:
@@ -738,7 +770,10 @@ class WorkspacePagesMixin:
         ps.description = self.project_description_edit.text().strip()
         ps.output_dir = self.project_output_dir_edit.text().strip() or "output"
         ps.temperature_scan_folder = self.project_temperature_folder_edit.text().strip()
-        ps.pie_scan_folder = self.project_pie_folder_edit.text().strip()
+        pie_folders = self._project_pie_folders_from_ui()
+        ps.pie_scan_folders = pie_folders
+        ps.pie_scan_folder = pie_folders[0] if pie_folders else ""
+        ps.pie_multi_folder_mode = len(pie_folders) > 1
         # PICS database path is never modified from UI (read-only)
         return ps
 
@@ -750,6 +785,7 @@ class WorkspacePagesMixin:
             self.project_function_defaults_widget.apply_to_settings(ps)
         if hasattr(self, "project_peak_detection_widget"):
             self.project_peak_detection_widget.apply_to_settings(ps)
+        ps.pie_multi_folder_mode = len(ps.effective_pie_scan_folders()) > 1
         return ps
 
     def _sync_project_page_edits_to_runtime(
@@ -1026,7 +1062,7 @@ class WorkspacePagesMixin:
         self.project_description_edit.clear()
         self.project_output_dir_edit.clear()
         self.project_temperature_folder_edit.clear()
-        self.project_pie_folder_edit.clear()
+        self._set_project_pie_folders([])
         self.project_manual_peak_edit.clear()
         self._switch_tool_pages_to_standalone(ps)
         self._clear_datasource_row_statuses()
@@ -1091,15 +1127,13 @@ class WorkspacePagesMixin:
         QtWidgets.QApplication.processEvents(QtCore.QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
 
         try:
-            # Load project settings from config file
-            from bl03u_masstool.core.project_settings import load_project_settings
-            ps = load_project_settings(config_file)
             self._creating_new_project = False
             self._opened_project_root = project_path.resolve()
 
-            # Set project path for manager
+            # The selected folder is authoritative: resolve relative paths and
+            # rebase absolute paths from legacy projects to this project root.
             self.project_settings_manager.set_project_path(project_path)
-            self.project_settings_manager.set(ps)
+            ps = self.project_settings_manager.get()
 
             # Display loaded settings in UI, including data-source paths.
             self._read_project_settings_to_ui(ps)
@@ -1413,6 +1447,9 @@ class WorkspacePagesMixin:
         destination = result.get("destination", "")
         if field_name and destination:
             setattr(ps, field_name, destination)
+            if field_name == "pie_scan_folder":
+                ps.pie_scan_folders = [destination]
+                ps.pie_multi_folder_mode = False
         self.project_settings_manager.set(ps)
         self.project_settings_manager.save()
 
@@ -1459,6 +1496,88 @@ class WorkspacePagesMixin:
         if folder:
             target.setText(folder)
             self._auto_save_datasource()
+
+    def _project_pie_folders_from_ui(self) -> list[str]:
+        folders: list[str] = []
+        seen: set[str] = set()
+        if hasattr(self, "project_pie_folders_list"):
+            for row in range(self.project_pie_folders_list.count()):
+                item = self.project_pie_folders_list.item(row)
+                value = str(item.data(QtCore.Qt.ItemDataRole.UserRole) or "").strip()
+                if value and value not in seen:
+                    seen.add(value)
+                    folders.append(value)
+        if not folders:
+            primary = self.project_pie_folder_edit.text().strip()
+            if primary:
+                folders.append(primary)
+        return folders
+
+    def _set_project_pie_folders(self, folders: list[str]) -> None:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for value in folders:
+            path = str(value or "").strip()
+            if not path or path in seen:
+                continue
+            seen.add(path)
+            normalized.append(path)
+
+        self.project_pie_folders_list.clear()
+        for index, path in enumerate(normalized, start=1):
+            item = QtWidgets.QListWidgetItem(f"能段 {index}: {path}")
+            item.setData(QtCore.Qt.ItemDataRole.UserRole, path)
+            self.project_pie_folders_list.addItem(item)
+        self.project_pie_folder_edit.setText(normalized[0] if normalized else "")
+
+    def select_project_pie_primary_folder(self) -> None:
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "选择PIE主扫描目录",
+            self._dialog_start_dir(self.project_pie_folder_edit.text()),
+        )
+        if not folder:
+            return
+        folders = self._project_pie_folders_from_ui()
+        if folders:
+            folders[0] = folder
+        else:
+            folders = [folder]
+        self._set_project_pie_folders(folders)
+        self._auto_save_datasource()
+
+    def add_project_pie_folder(self) -> None:
+        folders = self._project_pie_folders_from_ui()
+        start_path = folders[-1] if folders else self.project_output_dir_edit.text()
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "添加PIE能段目录",
+            self._dialog_start_dir(start_path),
+        )
+        if not folder:
+            return
+        if folder not in folders:
+            folders.append(folder)
+        self._set_project_pie_folders(folders)
+        self._auto_save_datasource()
+
+    def remove_project_pie_folders(self) -> None:
+        selected_rows = {
+            index.row() for index in self.project_pie_folders_list.selectedIndexes()
+        }
+        if not selected_rows:
+            return
+        folders = [
+            folder
+            for index, folder in enumerate(self._project_pie_folders_from_ui())
+            if index not in selected_rows
+        ]
+        self._set_project_pie_folders(folders)
+        self._auto_save_datasource()
+
+    def clear_project_pie_folders(self) -> None:
+        self._set_project_pie_folders([])
+        self._auto_save_datasource()
 
     def select_project_output_parent_folder(self) -> None:
         folder = QFileDialog.getExistingDirectory(

@@ -94,22 +94,27 @@ QCheckBox {{
 
 QWidget#ControlBar {{
     background: {t.panel_bg};
-    border: 1px solid {t.border};
-    border-radius: 8px;
+    border: 1px solid {t.border_light};
+    border-radius: 10px;
 }}
 
-QWidget#PlotPanel,
+QWidget#PlotPanel {{
+    background: {t.panel_bg};
+    border: 1px solid {t.border_light};
+    border-radius: 10px;
+}}
+
 QWidget#SidePanel {{
     background: {t.panel_bg};
     border: 1px solid {t.border};
-    border-radius: 6px;
+    border-radius: 10px;
 }}
 
 QWidget#FittingConfigPanel,
 QWidget#ResultDisplayPanel {{
     background: {t.panel_bg};
     border: 1px solid {t.border};
-    border-radius: 6px;
+    border-radius: 10px;
 }}
 
 QFrame#PanelHeader,
@@ -118,6 +123,12 @@ QFrame#ResultPanelHeader {{
     border: 0;
     border-bottom: 1px solid {t.border_light};
     border-radius: 4px;
+}}
+
+QFrame#PanelSeparator {{
+    background: {t.border_light};
+    border: 0;
+    max-height: 1px;
 }}
 
 QLabel#PieMzBadge,
@@ -188,6 +199,88 @@ QLabel#PieEmptyTitle {{
     color: {t.text_primary};
     font-size: 12pt;
     font-weight: 700;
+}}
+
+QFrame#AnalysisEmptyState {{
+    background: {t.panel_subtle};
+    border: 0;
+    border-radius: 8px;
+}}
+
+QFrame#EmptyStateCard {{
+    background: {t.panel_bg};
+    border: 1px solid {t.border_light};
+    border-radius: 14px;
+}}
+
+QLabel#EmptyStateEyebrow {{
+    background: {t.primary_soft};
+    border: 1px solid {t.primary_border};
+    border-radius: 9px;
+    color: {t.primary_hover};
+    font-size: 8pt;
+    font-weight: 700;
+    letter-spacing: 1px;
+    padding: 3px 9px;
+}}
+
+QLabel#EmptyStateTitle {{
+    background: transparent;
+    color: {t.text_primary};
+    font-size: 15pt;
+    font-weight: 700;
+}}
+
+QLabel#EmptyStateSubtitle {{
+    background: transparent;
+    color: {t.text_muted};
+    font-size: 10pt;
+}}
+
+QFrame#EmptyStateStep {{
+    background: {t.panel_subtle};
+    border: 1px solid {t.border_light};
+    border-radius: 8px;
+}}
+
+QLabel#EmptyStateStepNumber {{
+    background: {t.primary};
+    border: 0;
+    border-radius: 10px;
+    color: {t.text_inverse};
+    font-size: 8pt;
+    font-weight: 700;
+    min-width: 20px;
+    min-height: 20px;
+    max-width: 20px;
+    max-height: 20px;
+}}
+
+QLabel#EmptyStateStepLabel {{
+    background: transparent;
+    color: {t.text_secondary};
+    font-weight: 600;
+}}
+
+QLabel#EmptyStateFooterHint {{
+    background: transparent;
+    color: {t.text_muted};
+    font-size: 9pt;
+}}
+
+QPushButton#EmptyStateAction {{
+    background: {t.primary};
+    border: 1px solid {t.primary};
+    border-radius: 6px;
+    color: {t.text_inverse};
+    font-weight: 700;
+    padding: 5px 14px;
+}}
+
+QPushButton#EmptyStateAction:hover {{
+    background: {t.primary_hover};
+    border-color: {t.primary_hover};
+    color: {t.text_inverse};
 }}
 
 QLabel#ResultStatus {{
@@ -865,13 +958,32 @@ QFrame#NavSeparator {{
     margin: 6px 2px;
 }}
 
-QSplitter#MainSplitter::handle {{
-    background: {t.border};
-    width: 3px;
+QSplitter#MainSplitter {{
+    background: {t.panel_bg};
+    border: 1px solid {t.border};
+    border-radius: 10px;
 }}
 
-QSplitter#MainSplitter::handle:hover {{
-    background: {t.primary_border};
+/* PIE uses one continuous three-column workbench. Repeating rounded cards on
+   each column creates double borders and wide pinched gutters at the splitters. */
+QSplitter#MainSplitter QWidget#SidePanel,
+QSplitter#MainSplitter QWidget#PlotPanel,
+QSplitter#MainSplitter QWidget#FittingConfigPanel,
+QSplitter#MainSplitter QWidget#ResultDisplayPanel {{
+    border: 0;
+    border-radius: 0;
+}}
+
+QSplitter#MainSplitter::handle:horizontal {{
+    background: {t.panel_bg};
+    border: 0;
+    border-left: 1px solid {t.border_light};
+    width: 7px;
+}}
+
+QSplitter#MainSplitter::handle:horizontal:hover {{
+    background: {t.primary_soft};
+    border-left-color: {t.primary_border};
 }}
 """
 

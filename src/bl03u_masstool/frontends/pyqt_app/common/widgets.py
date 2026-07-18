@@ -5,7 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from PyQt6 import QtCore, QtWidgets
+from PyQt6 import QtCore, QtGui, QtWidgets
 
 from bl03u_masstool.core.calibration import Calibration, tof_to_mz
 from bl03u_masstool.core.config import (
@@ -58,6 +58,235 @@ try:
     import pyqtgraph as pg
 except Exception:  # pragma: no cover - only used when optional plotting is unavailable
     pg = None
+
+
+class StateGlyph(QtWidgets.QWidget):
+    """Small painted status glyph that avoids platform-dependent text symbols."""
+
+    def __init__(self, kind: str = "candidate", parent=None):
+        super().__init__(parent)
+        self._kind = kind
+        self.setFixedSize(64, 64)
+        self.setAccessibleName("状态图标")
+
+    def set_kind(self, kind: str) -> None:
+        self._kind = str(kind or "candidate")
+        self.update()
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:
+        del event
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        center = QtCore.QPointF(self.width() / 2, self.height() / 2)
+        warning = self._kind == "warning"
+        accent = QtGui.QColor("#d97706" if warning else "#2563eb")
+        soft = QtGui.QColor("#fff7ed" if warning else "#eff6ff")
+        painter.setPen(QtGui.QPen(QtGui.QColor("#fed7aa" if warning else "#bfdbfe"), 1.2))
+        painter.setBrush(soft)
+        painter.drawEllipse(center, 29, 29)
+
+        if warning:
+            triangle = QtGui.QPolygonF(
+                [
+                    QtCore.QPointF(32, 17),
+                    QtCore.QPointF(48, 45),
+                    QtCore.QPointF(16, 45),
+                ]
+            )
+            painter.setPen(QtGui.QPen(accent, 2.2, QtCore.Qt.PenStyle.SolidLine, QtCore.Qt.PenCapStyle.RoundCap))
+            painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+            painter.drawPolygon(triangle)
+            painter.drawLine(QtCore.QPointF(32, 26), QtCore.QPointF(32, 36))
+            painter.drawPoint(QtCore.QPointF(32, 40))
+            return
+
+        painter.setPen(QtGui.QPen(accent, 2.2, QtCore.Qt.PenStyle.SolidLine, QtCore.Qt.PenCapStyle.RoundCap))
+        for y, width in ((23, 19), (32, 25), (41, 16)):
+            painter.drawEllipse(QtCore.QPointF(20, y), 2.2, 2.2)
+            painter.drawLine(QtCore.QPointF(27, y), QtCore.QPointF(27 + width, y))
+
+
+class CurvePreviewCanvas(QtWidgets.QWidget):
+    """Painted curve preview for analysis empty states."""
+
+    def __init__(self, variant: str = "pie", parent=None):
+        super().__init__(parent)
+        self._variant = variant
+        self.setMinimumHeight(150)
+        self.setMaximumHeight(190)
+        self.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Preferred,
+        )
+        self.setAccessibleName("分析曲线预览示意图")
+
+    def _normalized_points(self) -> list[tuple[float, float]]:
+        if self._variant == "temperature":
+            return [
+                (0.04, 0.78),
+                (0.16, 0.74),
+                (0.28, 0.64),
+                (0.40, 0.48),
+                (0.52, 0.27),
+                (0.64, 0.18),
+                (0.76, 0.34),
+                (0.88, 0.57),
+                (0.96, 0.66),
+            ]
+        return [
+            (0.04, 0.84),
+            (0.16, 0.83),
+            (0.28, 0.79),
+            (0.40, 0.68),
+            (0.52, 0.61),
+            (0.64, 0.45),
+            (0.76, 0.36),
+            (0.88, 0.17),
+            (0.96, 0.09),
+        ]
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:
+        del event
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        outer = QtCore.QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        painter.setPen(QtGui.QPen(QtGui.QColor("#dbe4f0"), 1.0))
+        painter.setBrush(QtGui.QColor("#f8fafc"))
+        painter.drawRoundedRect(outer, 12, 12)
+
+        chart = outer.adjusted(34, 20, -24, -25)
+        grid_pen = QtGui.QPen(QtGui.QColor("#e2e8f0"), 1.0, QtCore.Qt.PenStyle.DotLine)
+        painter.setPen(grid_pen)
+        for index in range(1, 5):
+            x = chart.left() + chart.width() * index / 5
+            painter.drawLine(QtCore.QPointF(x, chart.top()), QtCore.QPointF(x, chart.bottom()))
+        for index in range(1, 4):
+            y = chart.top() + chart.height() * index / 4
+            painter.drawLine(QtCore.QPointF(chart.left(), y), QtCore.QPointF(chart.right(), y))
+
+        axis_pen = QtGui.QPen(QtGui.QColor("#94a3b8"), 1.2)
+        painter.setPen(axis_pen)
+        painter.drawLine(chart.bottomLeft(), chart.bottomRight())
+        painter.drawLine(chart.bottomLeft(), chart.topLeft())
+
+        points = [
+            QtCore.QPointF(
+                chart.left() + x * chart.width(),
+                chart.top() + y * chart.height(),
+            )
+            for x, y in self._normalized_points()
+        ]
+        accent = QtGui.QColor("#0f766e" if self._variant == "temperature" else "#2563eb")
+        fill = QtGui.QColor(accent)
+        fill.setAlpha(28)
+        area = QtGui.QPolygonF(
+            [chart.bottomLeft(), *points, chart.bottomRight()]
+        )
+        painter.setPen(QtCore.Qt.PenStyle.NoPen)
+        painter.setBrush(fill)
+        painter.drawPolygon(area)
+        painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+        painter.setPen(
+            QtGui.QPen(
+                accent,
+                2.6,
+                QtCore.Qt.PenStyle.SolidLine,
+                QtCore.Qt.PenCapStyle.RoundCap,
+                QtCore.Qt.PenJoinStyle.RoundJoin,
+            )
+        )
+        painter.drawPolyline(QtGui.QPolygonF(points))
+        painter.setBrush(QtGui.QColor("#ffffff"))
+        for point in points:
+            painter.drawEllipse(point, 3.2, 3.2)
+
+
+class AnalysisEmptyState(QtWidgets.QFrame):
+    """Reusable, visually structured empty state for analysis workspaces."""
+
+    browse_requested = QtCore.pyqtSignal()
+
+    def __init__(
+        self,
+        *,
+        variant: str,
+        eyebrow: str,
+        title: str,
+        description: str,
+        steps: tuple[str, str, str],
+        action_text: str = "选择数据目录",
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.setObjectName("AnalysisEmptyState")
+        self.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(18, 18, 18, 18)
+
+        card = QtWidgets.QFrame()
+        card.setObjectName("EmptyStateCard")
+        card.setMinimumWidth(420)
+        card.setMaximumWidth(720)
+        card_layout = QtWidgets.QVBoxLayout(card)
+        card_layout.setContentsMargins(24, 20, 24, 20)
+        card_layout.setSpacing(10)
+
+        eyebrow_label = QtWidgets.QLabel(eyebrow)
+        eyebrow_label.setObjectName("EmptyStateEyebrow")
+        eyebrow_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        card_layout.addWidget(eyebrow_label)
+
+        title_label = QtWidgets.QLabel(title)
+        title_label.setObjectName("EmptyStateTitle")
+        title_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        card_layout.addWidget(title_label)
+
+        description_label = QtWidgets.QLabel(description)
+        description_label.setObjectName("EmptyStateSubtitle")
+        description_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        description_label.setWordWrap(True)
+        card_layout.addWidget(description_label)
+
+        card_layout.addWidget(CurvePreviewCanvas(variant, card))
+
+        steps_layout = QtWidgets.QHBoxLayout()
+        steps_layout.setSpacing(8)
+        for index, step in enumerate(steps, start=1):
+            step_frame = QtWidgets.QFrame()
+            step_frame.setObjectName("EmptyStateStep")
+            step_layout = QtWidgets.QHBoxLayout(step_frame)
+            step_layout.setContentsMargins(9, 7, 9, 7)
+            step_layout.setSpacing(7)
+            number = QtWidgets.QLabel(str(index))
+            number.setObjectName("EmptyStateStepNumber")
+            number.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            step_layout.addWidget(number)
+            label = QtWidgets.QLabel(step)
+            label.setObjectName("EmptyStateStepLabel")
+            label.setWordWrap(True)
+            step_layout.addWidget(label, stretch=1)
+            steps_layout.addWidget(step_frame, stretch=1)
+        card_layout.addLayout(steps_layout)
+
+        footer = QtWidgets.QHBoxLayout()
+        footer.addStretch()
+        self.primary_button = QtWidgets.QPushButton(action_text)
+        self.primary_button.setObjectName("EmptyStateAction")
+        self.primary_button.clicked.connect(self.browse_requested.emit)
+        self.primary_button.setAccessibleDescription("从当前分析页面选择数据目录")
+        footer.addWidget(self.primary_button)
+        hint = QtWidgets.QLabel("已有数据源时可直接使用上方“生成曲线”")
+        hint.setObjectName("EmptyStateFooterHint")
+        footer.addWidget(hint)
+        footer.addStretch()
+        card_layout.addLayout(footer)
+
+        outer.addStretch()
+        outer.addWidget(card, alignment=QtCore.Qt.AlignmentFlag.AlignCenter)
+        outer.addStretch()
 
 class DataFrameTableMixin:
     def set_dataframe(self, table: QtWidgets.QTableWidget, df: pd.DataFrame) -> None:

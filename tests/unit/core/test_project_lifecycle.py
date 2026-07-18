@@ -3,6 +3,8 @@ from __future__ import annotations
 import zipfile
 from pathlib import Path
 
+import yaml
+
 from bl03u_masstool.core.project_lifecycle import (
     build_project_stage_statuses,
     collect_project_files,
@@ -113,6 +115,35 @@ def test_project_lifecycle_materializes_registered_raw_sources_by_copy(tmp_path)
     assert second_results == []
 
 
+def test_project_lifecycle_materializes_all_pie_segment_folders(tmp_path):
+    low_source = tmp_path / "external" / "PIE_low"
+    high_source = tmp_path / "external" / "PIE_high"
+    low_source.mkdir(parents=True)
+    high_source.mkdir(parents=True)
+    (low_source / "8.0eV.txt").write_text("low", encoding="utf-8")
+    (high_source / "10.0eV.txt").write_text("high", encoding="utf-8")
+    settings = ProjectSettings(
+        project_name="Multi PIE",
+        output_dir=str(tmp_path / "Project_Multi_PIE"),
+        pie_scan_folder=str(low_source),
+        pie_scan_folders=[str(low_source), str(high_source)],
+        pie_multi_folder_mode=True,
+    )
+
+    results = materialize_project_data_sources(settings, source_keys=("pie_scan",))
+
+    assert len(results) == 2
+    assert len(settings.pie_scan_folders) == 2
+    assert settings.pie_scan_folder == settings.pie_scan_folders[0]
+    assert Path(settings.pie_scan_folders[0]).parent == (
+        tmp_path / "Project_Multi_PIE" / "raw_data" / "pie_scan"
+    )
+    assert (Path(settings.pie_scan_folders[0]) / "8.0eV.txt").read_text(encoding="utf-8") == "low"
+    assert (Path(settings.pie_scan_folders[1]) / "10.0eV.txt").read_text(encoding="utf-8") == "high"
+    assert validate_data_source(settings, "pie_scan").is_valid
+    assert materialize_project_data_sources(settings, source_keys=("pie_scan",)) == []
+
+
 def test_project_lifecycle_collects_registered_outputs_and_exports_archive(tmp_path):
     project_root = tmp_path / "Project_C6F11O2H"
     temp_result = project_root / "analysis" / "temperature_scan" / "temperature.xlsx"
@@ -140,9 +171,14 @@ def test_project_lifecycle_collects_registered_outputs_and_exports_archive(tmp_p
     assert archive_path.exists()
     with zipfile.ZipFile(archive_path) as archive:
         names = set(archive.namelist())
+        project_state = yaml.safe_load(
+            archive.read(f"{project_root.name}/project_state.yaml").decode("utf-8")
+        )
     assert f"{project_root.name}/project_state.yaml" in names
     assert f"{project_root.name}/analysis/temperature_scan/temperature.xlsx" in names
     assert f"{project_root.name}/_registered_external/pie_identification_result_file/pie.xlsx" in names
+    assert project_state["output_dir"] == "."
+    assert project_state["temperature_scan_result_file"] == "analysis/temperature_scan/temperature.xlsx"
 
     snapshot_path = create_project_snapshot(settings, "after pie")
     assert snapshot_path.exists()

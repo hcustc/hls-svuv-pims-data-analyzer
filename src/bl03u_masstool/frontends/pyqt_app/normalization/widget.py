@@ -1325,8 +1325,9 @@ class PeakDetectionWidget(QtWidgets.QWidget):
         peak_detection_path = save_peak_detection_config(self.peak_detection)
         # 也保存到ProjectSettings
         if self.project_settings:
-            from bl03u_masstool.core.project_settings import ProjectSettingsManager, save_project_settings
-            ps = ProjectSettingsManager().get()
+            from bl03u_masstool.core.project_settings import ProjectSettingsManager
+            settings_manager = ProjectSettingsManager()
+            ps = settings_manager.get()
             ps.peak_algorithm = self.project_settings.peak_algorithm
             ps.detection_min_idx = self.project_settings.detection_min_idx
             ps.threshold_end = self.project_settings.threshold_end
@@ -1343,7 +1344,7 @@ class PeakDetectionWidget(QtWidgets.QWidget):
             ps.baseline_percentile = self.project_settings.baseline_percentile
             ps.min_peak_width = self.project_settings.min_peak_width
             ps.max_peak_width = self.project_settings.max_peak_width
-            save_project_settings(ps)
+            settings_manager.save()
         self.status_label.setText(f"已保存: {peak_detection_path}")
         self.settings_saved.emit()
 
@@ -1616,14 +1617,11 @@ class FunctionDefaultsWidget(QtWidgets.QWidget):
         self.pie_integration_method_combo.addItem("高斯", "gaussian")
         self.pie_integration_method_combo.setToolTip("PIE 原始积分信号的默认计算方式；高斯拟合不可用时回退范围累加，并在结果中记录实际方式")
 
-        self.pie_multi_folder_check = QtWidgets.QCheckBox("多文件夹模式")
-        self.pie_multi_folder_check.setToolTip("允许从多个 PIE 扫描目录合并能段")
-
         self.pie_merge_method_combo = QtWidgets.QComboBox()
         self.pie_merge_method_combo.addItem("低能段为主", "low_energy_dominant")
         self.pie_merge_method_combo.addItem("第一组为主", "first_segment_dominant")
         self.pie_merge_method_combo.addItem("简单拼接", "mean")
-        self.pie_merge_method_combo.setToolTip("多文件夹 PIE 数据的合并方式")
+        self.pie_merge_method_combo.setToolTip("项目登记多个 PIE 能段目录时使用的合并方式")
         self.pie_replicate_mode_combo = QtWidgets.QComboBox()
         self.pie_replicate_mode_combo.addItem("不合并重复采集", "off")
         self.pie_replicate_mode_combo.addItem("平均重复采集", "mean")
@@ -1637,7 +1635,6 @@ class FunctionDefaultsWidget(QtWidgets.QWidget):
         form.addWidget(self.pie_integration_method_combo, 0, 4)
         form.addWidget(QtWidgets.QLabel("合并方法"), 1, 0)
         form.addWidget(self.pie_merge_method_combo, 1, 1)
-        form.addWidget(self.pie_multi_folder_check, 1, 2)
         form.addWidget(QtWidgets.QLabel("重复采集"), 2, 0)
         form.addWidget(self.pie_replicate_mode_combo, 2, 1)
         for col in (1, 3):
@@ -1771,7 +1768,6 @@ class FunctionDefaultsWidget(QtWidgets.QWidget):
         self.pie_energy_decimals_edit.setValue(ps.pie_energy_decimals)
         self.pie_recursive_check.setChecked(ps.pie_recursive)
         combo_set_data(self.pie_integration_method_combo, ps.pie_integration_method)
-        self.pie_multi_folder_check.setChecked(ps.pie_multi_folder_mode)
         combo_set_data(self.pie_merge_method_combo, ps.pie_merge_method)
         combo_set_data(self.pie_replicate_mode_combo, ps.pie_replicate_mode)
         self.pics_no_mz_edit.setValue(ps.pics_no_mz)
@@ -1856,7 +1852,7 @@ class FunctionDefaultsWidget(QtWidgets.QWidget):
         target.pie_recursive = self.pie_recursive_check.isChecked()
         target.pie_integration_method = str(self.pie_integration_method_combo.currentData())
         target.pie_prefer_gaussian = target.pie_integration_method == "gaussian"
-        target.pie_multi_folder_mode = self.pie_multi_folder_check.isChecked()
+        target.pie_multi_folder_mode = len(target.effective_pie_scan_folders()) > 1
         target.pie_merge_method = str(self.pie_merge_method_combo.currentData())
         target.pie_replicate_mode = str(self.pie_replicate_mode_combo.currentData())
         target.pics_no_mz = self.pics_no_mz_edit.value()

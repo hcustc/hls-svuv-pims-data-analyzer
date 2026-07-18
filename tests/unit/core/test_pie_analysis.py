@@ -30,8 +30,11 @@ from bl03u_masstool.core.peak_ranges import load_peak_ranges
 from bl03u_masstool.core.pie_analysis import (
     analyze_pie_folder,
     build_pie_curves,
+    discover_pie_segment_folders,
     fit_species_combination_with_curve,
+    inspect_pie_source_segments,
     load_species_database,
+    merge_pie_segments,
     save_species_database_sqlite,
 )
 from bl03u_masstool.core.temperature_scan import (
@@ -76,6 +79,35 @@ def test_analyze_pie_folder_builds_selectable_curves(tmp_path):
     curves = build_pie_curves(df)
     assert 22 in curves
     assert curves[22]["energies"] == [11.0, 12.0]
+
+
+def test_discover_pie_segment_folders_detects_temporary_multi_segment_parent(tmp_path):
+    low_folder = tmp_path / "PIE_low"
+    high_folder = tmp_path / "PIE_high"
+    low_folder.mkdir()
+    high_folder.mkdir()
+    for folder, energies in ((low_folder, (8.0, 9.0)), (high_folder, (9.0, 10.0))):
+        for energy in energies:
+            (folder / f"{energy:.1f}eV.txt").write_text("spectrum", encoding="utf-8")
+
+    assert discover_pie_segment_folders(tmp_path) == [high_folder, low_folder]
+
+    summaries = inspect_pie_source_segments(tmp_path)
+    assert [summary.folder for summary in summaries] == [low_folder, high_folder]
+    assert [summary.file_count for summary in summaries] == [2, 2]
+    assert (summaries[0].min_energy, summaries[0].max_energy) == (8.0, 9.0)
+    assert (summaries[1].min_energy, summaries[1].max_energy) == (9.0, 10.0)
+
+
+@pytest.mark.parametrize("suffix", ["eV", ""])
+def test_discover_pie_segment_folders_keeps_energy_subdirectories_as_one_source(tmp_path, suffix):
+    for energy in (8.0, 9.0):
+        energy_folder = tmp_path / f"{energy:.1f}{suffix}"
+        energy_folder.mkdir()
+        (energy_folder / "spectrum-a.txt").write_text("spectrum", encoding="utf-8")
+        (energy_folder / "spectrum-b.txt").write_text("spectrum", encoding="utf-8")
+
+    assert discover_pie_segment_folders(tmp_path) == [tmp_path]
 
 
 def test_pie_analysis_uses_manual_peak_file_and_direct_io_normalization(tmp_path):
@@ -506,3 +538,37 @@ def test_analyze_pie_folder_uses_asc_files_by_default(tmp_path):
     curves = build_pie_curves(df)
     assert 22 in curves
     assert curves[22]["energies"] == [11.0, 12.0]
+
+
+def test_merge_pie_segments_scales_high_energy_segment_from_overlap_ratio():
+    def segment(energies, intensities):
+        return pd.DataFrame(
+            {
+                "energy": energies,
+                "mz_rounded": [30] * len(energies),
+                "normalized_intensity": intensities,
+                "raw_area": intensities,
+                "photon_normalized_intensity": intensities,
+                "integration_method": ["sum_counts"] * len(energies),
+                "mz": [30.0] * len(energies),
+                "species": [""] * len(energies),
+                "file_count": [1] * len(energies),
+                "io": [1.0] * len(energies),
+                "light_source": ["io"] * len(energies),
+                "left_bound": [29] * len(energies),
+                "right_bound": [31] * len(energies),
+            }
+        )
+
+    low_energy = segment([8.0, 9.0, 10.0], [10.0, 20.0, 30.0])
+    high_energy = segment([9.0, 10.0, 11.0, 12.0], [2.0, 3.0, 4.0, 5.0])
+
+    merged = merge_pie_segments(
+        [low_energy, high_energy],
+        merge_method="low_energy_dominant",
+    ).set_index("energy")
+
+    assert merged.loc[9.0, "normalized_intensity"] == pytest.approx(20.0)
+    assert merged.loc[10.0, "normalized_intensity"] == pytest.approx(30.0)
+    assert merged.loc[11.0, "normalized_intensity"] == pytest.approx(40.0)
+    assert merged.loc[12.0, "normalized_intensity"] == pytest.approx(50.0)

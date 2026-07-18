@@ -28,6 +28,8 @@ FittingControlWidget - 拟合配置面板
 from PyQt6 import QtCore, QtWidgets
 import numpy as np
 
+from bl03u_masstool.frontends.pyqt_app.common.widgets import StateGlyph
+
 
 class FittingControlWidget(QtWidgets.QWidget):
     """拟合配置面板 - 统一的拟合物种配置"""
@@ -106,10 +108,11 @@ class FittingControlWidget(QtWidgets.QWidget):
         empty_layout.setContentsMargins(16, 16, 16, 16)
         empty_layout.setSpacing(12)
 
-        empty_icon = QtWidgets.QLabel("[i]")
-        empty_icon.setObjectName("PieEmptyIcon")
-        empty_icon.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        empty_layout.addWidget(empty_icon)
+        empty_icon = StateGlyph("candidate")
+        empty_layout.addWidget(
+            empty_icon,
+            alignment=QtCore.Qt.AlignmentFlag.AlignCenter,
+        )
         self.empty_icon = empty_icon  # 保存引用以便更新
 
         empty_title = QtWidgets.QLabel("拟合配置")
@@ -200,7 +203,7 @@ class FittingControlWidget(QtWidgets.QWidget):
         # 分隔线
         separator = QtWidgets.QFrame()
         separator.setFrameShape(QtWidgets.QFrame.Shape.HLine)
-        separator.setStyleSheet("color: #e2e8f0;")
+        separator.setObjectName("PanelSeparator")
         main_layout.addWidget(separator)
 
         self.result_section = QtWidgets.QWidget()
@@ -353,7 +356,7 @@ class FittingControlWidget(QtWidgets.QWidget):
         elif self._candidates_loaded:
             # 查询已执行但无结果 → 显示"未找到候选物种"空状态
             self.species_table.setRowCount(0)
-            self.empty_icon.setText("[!]")
+            self.empty_icon.set_kind("warning")
             self.empty_title.setText("当前 m/z 未找到候选物种")
             self.empty_text.setText(
                 "PICS 数据库中尚未收录该质荷比的物种或缺少截面数据。\n"
@@ -365,7 +368,7 @@ class FittingControlWidget(QtWidgets.QWidget):
         else:
             # 前置数据未准备 → 显示"请先生成 PIE 曲线"空状态
             self.species_table.setRowCount(0)
-            self.empty_icon.setText("[i]")
+            self.empty_icon.set_kind("candidate")
             self.empty_title.setText("等待 PIE 曲线")
             self.empty_text.setText(
                 "请先在上方选择数据源并生成 PIE 曲线。\n"
