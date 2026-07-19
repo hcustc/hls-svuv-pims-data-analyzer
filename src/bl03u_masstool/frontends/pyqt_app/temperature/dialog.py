@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import asdict
 from datetime import datetime
 import hashlib
@@ -61,6 +62,12 @@ from bl03u_masstool.core.mole_fraction import (
 )
 from bl03u_masstool.frontends.pyqt_app.workers import WorkerThread
 from bl03u_masstool.frontends.pyqt_app.project_artifacts import record_project_artifact
+from bl03u_masstool.frontends.pyqt_app.temporary_analysis_settings import (
+    TEMPORARY_SETTINGS_SOURCES,
+    TemporaryAnalysisSettingsDialog,
+    build_temporary_settings,
+    temporary_settings_source_label,
+)
 
 from bl03u_masstool.frontends.pyqt_app.common.widgets import (
     AnalysisEmptyState,
@@ -94,7 +101,13 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         super().__init__(parent)
         self.calibration = calibration
         self.normalization_settings = normalization_settings or NormalizationSettings()
+        self._global_calibration = deepcopy(self.calibration)
+        self._global_normalization_settings = deepcopy(self.normalization_settings)
         self.project_settings: ProjectSettings | None = None
+        self.temporary_settings: ProjectSettings | None = None
+        self.temporary_settings_source = "global"
+        self.temporary_settings_modified = False
+        self._temporary_settings_source_explicit = False
         self.temperature_source_scope = "temporary"
         self._temporary_temperature_folder = ""
         self.peak_detection = load_peak_detection_config()
@@ -103,6 +116,7 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.energy_results: list[dict] = []
         self.current_mz: int | None = None
         self.worker: WorkerThread | None = None
+        self._analysis_request_id = 0
         self.energy_interval_result: dict | None = None
         self._busy = False
         self._selected_temperature_folder = ""
@@ -175,6 +189,23 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         source_scope_layout.addWidget(self.project_source_button)
         source_scope_layout.addWidget(self.temporary_source_button)
         source_row.addWidget(source_scope_panel)
+
+        self.temporary_params_label = QtWidgets.QLabel("参数")
+        self.temporary_params_label.setObjectName("ReadoutLabel")
+        self.temporary_params_combo = QtWidgets.QComboBox()
+        for source, label in TEMPORARY_SETTINGS_SOURCES:
+            self.temporary_params_combo.addItem(label, source)
+        self.temporary_params_combo.setCurrentIndex(
+            self.temporary_params_combo.findData(self.temporary_settings_source)
+        )
+        self.temporary_params_combo.setToolTip("选择临时会话参数的初始来源；切换后创建独立副本")
+        self.temporary_params_combo.currentIndexChanged.connect(self._on_temporary_settings_source_changed)
+        self.temporary_params_button = QtWidgets.QPushButton("编辑参数...")
+        self.temporary_params_button.setObjectName("BrowseButton")
+        self.temporary_params_button.clicked.connect(self._edit_temporary_settings)
+        source_row.addWidget(self.temporary_params_label)
+        source_row.addWidget(self.temporary_params_combo)
+        source_row.addWidget(self.temporary_params_button)
 
         self.folder_edit = QtWidgets.QLineEdit()
         self.folder_edit.setPlaceholderText("选择温度扫描数据文件夹")
@@ -507,6 +538,65 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
             or (self.project_settings.output_dir and self.project_settings.output_dir != "output")
         )
 
+    def _ensure_temporary_settings(self) -> ProjectSettings:
+        if self.temporary_settings is None:
+            source = self.temporary_settings_source
+            if source == "project" and self.project_settings is None:
+                source = "global"
+                self.temporary_settings_source = source
+            self.temporary_settings = self._build_temporary_settings_snapshot(source)
+            self.temporary_settings_modified = False
+        return self.temporary_settings
+
+    def _build_temporary_settings_snapshot(self, source: str) -> ProjectSettings:
+        return build_temporary_settings(
+            source,
+            self.project_settings,
+            runtime_calibration=self._global_calibration,
+            runtime_normalization=self._global_normalization_settings,
+        )
+
+    def _effective_analysis_settings(self) -> ProjectSettings:
+        if self._has_project_scope() and self.project_settings is not None:
+            return self.project_settings
+        return self._ensure_temporary_settings()
+
+    def _on_temporary_settings_source_changed(self, _index: int) -> None:
+        if not hasattr(self, "temporary_params_combo"):
+            return
+        source = str(self.temporary_params_combo.currentData() or "default")
+        if source == "project" and not self._has_project_context():
+            source = "global"
+        self.temporary_settings_source = source
+        self._temporary_settings_source_explicit = True
+        self.temporary_settings = self._build_temporary_settings_snapshot(source)
+        self.temporary_settings_modified = False
+        self._apply_temporary_settings_to_controls()
+
+    def _edit_temporary_settings(self) -> None:
+        dialog = TemporaryAnalysisSettingsDialog(
+            self._ensure_temporary_settings(),
+            self.temporary_settings_source,
+            self,
+            initial_tab="function",
+        )
+        if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return
+        self.temporary_settings = dialog.settings()
+        self.temporary_settings_modified = True
+        self._apply_temporary_settings_to_controls()
+
+    def _apply_temporary_settings_to_controls(self) -> None:
+        if self._has_project_scope():
+            return
+        ps = self._ensure_temporary_settings()
+        mode = ps.temp_replicate_mode if ps.temp_replicate_mode in {"mean", "sum"} else "off"
+        self.replicate_enabled_check.setChecked(mode != "off")
+        index = self.replicate_mode_combo.findData(mode if mode != "off" else "mean")
+        if index >= 0:
+            self.replicate_mode_combo.setCurrentIndex(index)
+        self._refresh_normalization_status()
+
     def _remember_temporary_source(self, _text: str | None = None) -> None:
         if self.temperature_source_scope != "temporary":
             return
@@ -646,6 +736,9 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 self.folder_edit.setText(self.project_settings.temperature_scan_folder or "")
         elif previous_scope == "project" and restore_saved:
             self.folder_edit.setText(self._temporary_temperature_folder)
+        if scope == "temporary":
+            self._ensure_temporary_settings()
+            self._apply_temporary_settings_to_controls()
         if refresh:
             self._refresh_temperature_source_controls()
             self._refresh_temperature_folder_options()
@@ -670,6 +763,25 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.select_folder_button.setText("浏览...")
         self.select_folder_button.setVisible(not use_project)
         self.select_folder_button.setEnabled(not busy)
+        self.temporary_params_label.setVisible(not use_project)
+        self.temporary_params_combo.setVisible(not use_project)
+        self.temporary_params_button.setVisible(not use_project)
+        self.temporary_params_combo.setEnabled(not busy)
+        self.temporary_params_button.setEnabled(not busy)
+        project_index = self.temporary_params_combo.findData("project")
+        if project_index >= 0:
+            model_item = self.temporary_params_combo.model().item(project_index)
+            if model_item is not None:
+                model_item.setEnabled(self._has_project_context())
+        self.temporary_params_button.setToolTip(
+            "参数来源：" + temporary_settings_source_label(
+                self.temporary_settings_source,
+                modified=self.temporary_settings_modified,
+            )
+        )
+        self.temporary_params_button.setText(
+            "编辑参数*..." if self.temporary_settings_modified else "编辑参数..."
+        )
         if use_project and not has_project_path:
             self._show_inline_empty("请先在项目管理中配置温度扫描文件夹")
 
@@ -739,8 +851,9 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         )
 
     def _refresh_normalization_status(self) -> None:
-        ps = self.project_settings or ProjectSettings()
-        light_source = "IO" if self.normalization_settings.light_source == "io" else "Beam Current"
+        ps = self._effective_analysis_settings()
+        normalization = ps.to_normalization_settings()
+        light_source = "IO" if normalization.light_source == "io" else "Beam Current"
         self.temperature_photon_check.blockSignals(True)
         self.temperature_photon_check.setChecked(bool(ps.temperature_photon_normalize))
         self.temperature_photon_check.blockSignals(False)
@@ -760,7 +873,7 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         }.get(str(method or "sum_counts"), "范围累加")
 
     def _on_temperature_kr_toggled(self, checked: bool) -> None:
-        if not checked or self.normalization_settings.expansion_factors:
+        if not checked or self._effective_analysis_settings().expansion_factors:
             return
         self.temperature_kr_check.blockSignals(True)
         self.temperature_kr_check.setChecked(False)
@@ -769,6 +882,7 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
     def set_project_settings(self, ps: ProjectSettings, *, activate_project_scope: bool | None = None) -> None:
         """Keep project context visible while project-owned parameters stay in 项目管理."""
+        self._analysis_request_id += 1
         has_project_context = bool(
             ps.project_name
             or ps.temperature_scan_folder
@@ -777,6 +891,26 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         if activate_project_scope is None:
             activate_project_scope = self._has_project_scope() and has_project_context
         self.project_settings = ps
+        if has_project_context and not self._temporary_settings_source_explicit:
+            self.temporary_settings_source = "project"
+            self.temporary_settings = self._build_temporary_settings_snapshot("project")
+            blocker = QtCore.QSignalBlocker(self.temporary_params_combo)
+            self.temporary_params_combo.setCurrentIndex(self.temporary_params_combo.findData("project"))
+            del blocker
+        elif (
+            not has_project_context
+            and activate_project_scope is False
+            and (not self._temporary_settings_source_explicit or self.temporary_settings_source == "project")
+        ):
+            self.temporary_settings_source = "global"
+            self._temporary_settings_source_explicit = False
+            self.temporary_settings_modified = False
+            self.temporary_settings = self._build_temporary_settings_snapshot("global")
+            blocker = QtCore.QSignalBlocker(self.temporary_params_combo)
+            self.temporary_params_combo.setCurrentIndex(self.temporary_params_combo.findData("global"))
+            del blocker
+        elif self.temporary_settings_source == "project" and not self.temporary_settings_modified:
+            self.temporary_settings = self._build_temporary_settings_snapshot("project")
 
         if hasattr(self, "summary_project_label"):
             project_name = ps.project_name or "---"
@@ -794,6 +928,14 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         elif self._has_project_scope() and not has_project_context:
             self.set_temperature_source_scope("temporary", refresh=False)
 
+        # A project-owned temperature analysis must use the calibration stored
+        # in that project, not the global/default object passed at construction.
+        # Do this before cache lookup so the cache fingerprint uses it as well.
+        if self._has_project_scope():
+            self.calibration = ps.to_calibration()
+            self.normalization_settings = ps.to_normalization_settings()
+            self.peak_detection = ps.to_peak_detection_config()
+
         if self._has_project_scope():
             blocker = QtCore.QSignalBlocker(self.folder_edit)
             self.folder_edit.setText(ps.temperature_scan_folder or "")
@@ -808,6 +950,9 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self._on_replicate_enabled_changed(mode != "off")
         self._refresh_normalization_status()
 
+        if not self._has_project_scope():
+            self._apply_temporary_settings_to_controls()
+
         self._refresh_temperature_source_controls()
         self._refresh_temperature_folder_options()
         if not self._current_temperature_folder():
@@ -819,6 +964,8 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         elif not self._try_load_project_temperature_cache_async():
             self._show_inline_empty('项目参数已同步，点击"生成曲线"')
         self._update_action_state()
+        if not has_project_context and activate_project_scope is False:
+            self.project_settings = None
 
     def _show_inline_error(self, msg: str, retry_callback=None):
         self.inline_status_icon.setText("\u26a0\ufe0f")
@@ -868,11 +1015,15 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self._update_action_state()
 
     def open_common_parameters(self):
+        if not self._has_project_scope():
+            self._edit_temporary_settings()
+            return
         self._open_project_settings()
 
     def _analysis_parameters(self) -> dict:
-        ps = self.project_settings or ProjectSettings()
-        peak_config = ps.to_peak_detection_config() if self.project_settings else load_peak_detection_config()
+        ps = self._effective_analysis_settings()
+        peak_config = ps.to_peak_detection_config()
+        normalization = ps.to_normalization_settings()
         integration_method = ps.temp_integration_method
         kr_correct = bool(ps.temperature_kr_correct)
         effective_peak_source = ps.temp_peak_source
@@ -884,6 +1035,8 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
         return {
             "project_settings": ps,
+            "calibration": ps.to_calibration(),
+            "cache_dir": self._temperature_cache_dir(),
             "peak_config": peak_config,
             "threshold_end": peak_config.threshold_end,
             "min_intensity": peak_config.min_intensity,
@@ -896,8 +1049,8 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
             "kr_correct": kr_correct,
             "kr_mz": ps.kr_mz,
             "mass_discrimination": 1.0,
-            "light_source": self.normalization_settings.light_source,
-            "expansion_factors": self.normalization_settings.expansion_factors if kr_correct else None,
+            "light_source": normalization.light_source,
+            "expansion_factors": normalization.expansion_factors if kr_correct else None,
             "replicate_mode": self._current_replicate_mode(),
         }
 
@@ -937,7 +1090,7 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         ps = params["project_settings"]
         return analyze_temperature_folder(
             folder,
-            calibration=self.calibration,
+            calibration=params["calibration"],
             algorithm=peak_config.algorithm,
             threshold_end=params["threshold_end"],
             min_intensity=params["min_intensity"],
@@ -1054,7 +1207,8 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         if progress_callback is not None:
             progress_callback(5, "正在检查已有分析缓存…")
         cache_key = self._temperature_cache_key(folders, params)
-        cached = self._load_temperature_analysis_cache(cache_key)
+        cache_dir = params.get("cache_dir")
+        cached = self._load_temperature_analysis_cache(cache_key, cache_dir=cache_dir)
         if cached is not None:
             if progress_callback is not None:
                 progress_callback(100, "缓存结果已载入，正在显示曲线…")
@@ -1068,7 +1222,7 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         )
         if progress_callback is not None:
             progress_callback(92, "正在保存分析结果缓存…")
-        self._save_temperature_analysis_cache(cache_key, result)
+        self._save_temperature_analysis_cache(cache_key, result, cache_dir=cache_dir)
         result["from_cache"] = False
         if progress_callback is not None:
             progress_callback(100, "温度曲线已生成，正在更新界面…")
@@ -1163,7 +1317,7 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self._update_action_state()
 
     def _temperature_cache_dir(self) -> Path:
-        if self.project_settings is not None and self.project_settings.output_dir:
+        if self._has_project_scope() and self.project_settings is not None and self.project_settings.output_dir:
             root = Path(self.project_settings.output_dir)
             return root / "analysis" / "temperature_scan" / "cache"
         else:
@@ -1216,11 +1370,12 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 }
             else:
                 manual_peak_fingerprint = {"path": str(manual_path), "missing": True}
+        calibration = params["calibration"]
         return {
             "calibration": {
-                "a": float(self.calibration.a),
-                "b": float(self.calibration.b),
-                "c": float(self.calibration.c),
+                "a": float(calibration.a),
+                "b": float(calibration.b),
+                "c": float(calibration.c),
             },
             "peak_config": asdict(peak_config),
             "reference_mode": params["reference_mode"],
@@ -1239,15 +1394,26 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
             "temp_curve_class_peak_fraction": ps.temp_curve_class_peak_fraction,
         }
 
-    def _cache_paths(self, cache_key: str) -> tuple[Path, Path]:
-        cache_dir = self._temperature_cache_dir() / cache_key
-        return cache_dir / "manifest.json", cache_dir / "results.csv"
+    def _cache_paths(
+        self,
+        cache_key: str,
+        *,
+        cache_dir: Path | None = None,
+    ) -> tuple[Path, Path]:
+        scoped_cache_dir = (cache_dir or self._temperature_cache_dir()) / cache_key
+        return scoped_cache_dir / "manifest.json", scoped_cache_dir / "results.csv"
 
-    def _save_temperature_analysis_cache(self, cache_key: str, result: dict) -> None:
+    def _save_temperature_analysis_cache(
+        self,
+        cache_key: str,
+        result: dict,
+        *,
+        cache_dir: Path | None = None,
+    ) -> None:
         result_df = result.get("result_df", pd.DataFrame())
         if not isinstance(result_df, pd.DataFrame) or result_df.empty:
             return
-        manifest_path, result_path = self._cache_paths(cache_key)
+        manifest_path, result_path = self._cache_paths(cache_key, cache_dir=cache_dir)
         try:
             manifest_path.parent.mkdir(parents=True, exist_ok=True)
             result_df.to_csv(result_path, index=False, encoding="utf-8-sig")
@@ -1272,8 +1438,13 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
             logger.exception("Failed to save temperature-scan analysis cache at %s", manifest_path.parent)
             return
 
-    def _load_temperature_analysis_cache(self, cache_key: str) -> dict | None:
-        manifest_path, result_path = self._cache_paths(cache_key)
+    def _load_temperature_analysis_cache(
+        self,
+        cache_key: str,
+        *,
+        cache_dir: Path | None = None,
+    ) -> dict | None:
+        manifest_path, result_path = self._cache_paths(cache_key, cache_dir=cache_dir)
         if not manifest_path.exists() or not result_path.exists():
             return None
         try:
@@ -1438,7 +1609,7 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
     def run_analysis(self):
         # Get parameters from project settings (single source of truth)
-        ps = self.project_settings or ProjectSettings()
+        ps = self._effective_analysis_settings()
 
         # 温度扫描页保存本功能的分析开关；项目管理只维护所需参数/资源。
         if ps:
@@ -1477,6 +1648,8 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
             message = "正在分析温度扫描数据..."
         self.set_busy(True, message)
         self._begin_analysis_progress(message)
+        self._analysis_request_id += 1
+        request_id = self._analysis_request_id
         worker = WorkerThread(
             lambda: self._analyze_temperature_folders_with_cache(
                 folders,
@@ -1488,14 +1661,22 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.worker = worker
         if hasattr(worker, "progress"):
             worker.progress.connect(self._on_analysis_progress)
-        worker.finished_with_result.connect(self.on_analysis_complete)
+        worker.finished_with_result.connect(
+            lambda result, token=request_id: self._on_analysis_result(token, result)
+        )
         worker.failed.connect(self.on_analysis_failed)
         worker.finished.connect(lambda: self.set_busy(False, "就绪"))
         worker.start()
 
+    def _on_analysis_result(self, request_id: int, result: object) -> None:
+        """Ignore results produced for a project context that is no longer active."""
+        if request_id != self._analysis_request_id:
+            return
+        self.on_analysis_complete(result)
+
     def compute_kr_expansion(self):
         # Get parameters from project settings (single source of truth)
-        ps = self.project_settings or ProjectSettings()
+        ps = self._effective_analysis_settings()
         folder = self._current_temperature_folder()
         if not folder:
             QtWidgets.QMessageBox.warning(
@@ -1507,7 +1688,7 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
             )
             return
 
-        peak_config = ps.to_peak_detection_config() if self.project_settings else load_peak_detection_config()
+        peak_config = ps.to_peak_detection_config()
         threshold_end = peak_config.threshold_end
         min_intensity = peak_config.min_intensity
         reference_mode = ps.temp_reference_mode
@@ -1527,14 +1708,14 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 QtWidgets.QMessageBox.warning(self, "提示", "请在项目管理中配置手动卡峰文件")
                 return
 
-        settings = self.normalization_settings
+        settings = ps.to_normalization_settings()
         light_source = settings.light_source
         kr_mz = ps.kr_mz
         self.set_busy(True, "正在计算 Kr 膨胀系数...")
         self.worker = WorkerThread(
             lambda: compute_kr_expansion_factors(
                 folder,
-                calibration=self.calibration,
+                calibration=ps.to_calibration(),
                 kr_mz=kr_mz,
                 manual_peak_path=manual_peak_path,
                 light_source=light_source,
@@ -1561,10 +1742,14 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.worker.start()
 
     def on_kr_compute_complete(self, result: pd.DataFrame) -> None:
-        settings = self.normalization_settings
+        ps = self._effective_analysis_settings()
+        settings = ps.to_normalization_settings()
         expansion_factors = parse_expansion_factors_from_result(result)
         settings.expansion_factors = expansion_factors
-        save_normalization_settings(settings)
+        ps.expansion_factors = dict(expansion_factors)
+        self.normalization_settings = settings
+        if self._has_project_scope():
+            save_normalization_settings(settings)
         if self._has_project_scope() and self.project_settings is not None:
             self.project_settings.expansion_factors = dict(expansion_factors)
             manager = ProjectSettingsManager()
@@ -2225,14 +2410,11 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         temp_curve_class_peak_fraction: float = 0.65,
         replicate_mode: str = "off",
     ) -> pd.DataFrame:
-        peak_config = (
-            self.project_settings.to_peak_detection_config()
-            if self.project_settings
-            else load_peak_detection_config()
-        )
+        ps = self._effective_analysis_settings()
+        peak_config = ps.to_peak_detection_config()
         return analyze_temperature_folder(
             folder,
-            calibration=self.calibration,
+            calibration=ps.to_calibration(),
             threshold_end=threshold_end,
             min_intensity=min_intensity,
             detection_min_idx=peak_config.detection_min_idx,
