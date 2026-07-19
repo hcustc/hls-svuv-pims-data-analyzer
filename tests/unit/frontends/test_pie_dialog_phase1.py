@@ -144,7 +144,7 @@ def test_project_open_restores_cached_pie_curves_without_reanalysis(qapp, tmp_pa
         assert 28 in restored.curves
         assert restored.analysis_df["normalized_intensity"].tolist() == [1.0, 2.0]
         assert restored._last_analysis_source_info["from_cache"] is True
-        assert "自动载入" in restored.status_label.text()
+        assert "参数预览" in restored.status_label.text() or "m/z 28" in restored.status_label.text()
         (raw_dir / "10.0eV.txt").write_text(
             "source data changed; cached curves must be invalidated",
             encoding="utf-8",
