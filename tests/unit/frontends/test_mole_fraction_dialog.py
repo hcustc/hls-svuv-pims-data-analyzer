@@ -58,6 +58,37 @@ def test_mass_discrimination_exponent_falls_back_to_legacy_settings(qapp):
         dialog.deleteLater()
 
 
+def test_project_switch_replaces_mole_fraction_runtime_parameters(qapp):
+    dialog = MoleFractionDialog(Calibration(a=0.0, b=1.0, c=0.0), None)
+    try:
+        first = ProjectSettings(
+            project_name="First",
+            cal_a=7.1e-7,
+            cal_b=2.3e-4,
+            cal_c=0.45,
+            light_source="beam_current",
+            mf_mass_disc_exponent=0.61,
+            mf_reference_temperature=650,
+            expansion_factors={650.0: 1.2},
+        )
+        dialog.set_project_settings(first)
+
+        assert dialog.calibration == first.to_calibration()
+        assert dialog.normalization_settings.light_source == "beam_current"
+        assert dialog.settings.mass_disc_exponent == pytest.approx(0.61)
+        assert dialog.spin_parent_t0.value() == 650
+        assert dialog.expansion_coefficients == {650.0: 1.2}
+
+        second = ProjectSettings(project_name="Second", expansion_factors={})
+        dialog.set_project_settings(second)
+
+        assert dialog.calibration == second.to_calibration()
+        assert dialog.spin_parent_t0.value() == 550
+        assert dialog.expansion_coefficients == {}
+    finally:
+        dialog.deleteLater()
+
+
 def test_project_settings_loads_project_pics_database(qapp, tmp_path):
     dialog = MoleFractionDialog(Calibration(a=0.0, b=1.0, c=0.0), None)
     try:

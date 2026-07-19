@@ -215,6 +215,7 @@ class ProjectSettings:
             mass_discrimination=self.mass_discrimination,
             kr_calibration_folder=self.kr_calibration_folder,
             kr_calibration_peak_file=self.kr_calibration_peak_file,
+            kr_mz=self.kr_mz,
             expansion_factors=dict(self.expansion_factors),
             selected_elements=list(self.selected_elements),
         )
@@ -315,6 +316,7 @@ def _nested_to_flat(data: dict) -> dict:
                 "mass_discrimination": "mass_discrimination",
                 "kr_calibration_folder": "kr_calibration_folder",
                 "kr_calibration_peak_file": "kr_calibration_peak_file",
+                "kr_mz": "kr_mz",
                 "expansion_factors": "expansion_factors",
                 "selected_elements": "selected_elements",
             }
@@ -334,6 +336,7 @@ def _nested_to_flat(data: dict) -> dict:
                 "mass_discrimination": "mass_discrimination",
                 "kr_calibration_folder": "kr_calibration_folder",
                 "kr_calibration_peak_file": "kr_calibration_peak_file",
+                "kr_mz": "kr_mz",
                 "expansion_factors": "expansion_factors",
                 "selected_elements": "selected_elements",
             }
@@ -473,6 +476,11 @@ def _nested_to_flat(data: dict) -> dict:
                 if yaml_key in peak_det and field_name not in flat:
                     flat[field_name] = peak_det[yaml_key]
 
+    # Older project files stored the only Kr mass under the temperature
+    # function defaults.  The common-parameter ``kr_mz`` is now canonical.
+    if "kr_mz" not in flat and "temp_kr_mz" in flat:
+        flat["kr_mz"] = flat["temp_kr_mz"]
+
     for key in ("expansion_factors", "mf_kr_data"):
         if key in flat and isinstance(flat[key], dict):
             flat[key] = _optional_float_dict(flat[key])
@@ -525,6 +533,7 @@ def _flat_to_nested(settings: ProjectSettings) -> dict:
                 "pie_photon_mode": d["pie_photon_mode"],
                 "kr_calibration_folder": d["kr_calibration_folder"],
                 "kr_calibration_peak_file": d["kr_calibration_peak_file"],
+                "kr_mz": d["kr_mz"],
                 "expansion_factors": _optional_float_dict(d["expansion_factors"]),
                 "selected_elements": d["selected_elements"],
             },
@@ -835,6 +844,7 @@ def migrate_from_legacy_configs() -> ProjectSettings:
         s.pie_photon_mode = ns.pie_photon_mode
         s.kr_calibration_folder = ns.kr_calibration_folder
         s.kr_calibration_peak_file = ns.kr_calibration_peak_file
+        s.kr_mz = ns.kr_mz
         s.expansion_factors = dict(ns.expansion_factors)
         if ns.selected_elements:
             s.selected_elements = list(ns.selected_elements)

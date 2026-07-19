@@ -74,6 +74,37 @@ def test_species_continue_validates_and_advances(qapp):
         dialog.deleteLater()
 
 
+def test_pics_project_switch_replaces_runtime_parameters_and_source(qapp, tmp_path):
+    dialog = PICSCalculatorDialog(Calibration(), None)
+    try:
+        first_folder = tmp_path / "first_pie"
+        first_folder.mkdir()
+        first = ProjectSettings(
+            project_name="First",
+            pie_scan_folder=str(first_folder),
+            cal_a=0.0,
+            cal_b=1.25,
+            cal_c=-3.0,
+            light_source="beam_current",
+            mf_mass_disc_exponent=0.63,
+        )
+        dialog.set_project_settings(first)
+
+        assert dialog.calibration == first.to_calibration()
+        assert dialog._calibration_coefficients() == (0.0, 1.25, -3.0)
+        assert dialog.normalization_settings.light_source == "beam_current"
+        assert dialog.spin_md_exponent.value() == pytest.approx(0.63)
+        assert dialog.txt_folder_path.text() == str(first_folder)
+
+        second = ProjectSettings(project_name="Second", pie_scan_folder="")
+        dialog.set_project_settings(second)
+
+        assert dialog.calibration == second.to_calibration()
+        assert dialog.txt_folder_path.text() == ""
+    finally:
+        dialog.deleteLater()
+
+
 def test_pics_import_widget_initializes(qapp):
     widget = PICSImportWidget()
     try:

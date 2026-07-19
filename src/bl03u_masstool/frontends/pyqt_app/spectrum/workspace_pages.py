@@ -98,7 +98,10 @@ class WorkspacePagesMixin:
             self.normalization_settings,
             self.workspace_stack,
         )
-        self.mole_fraction_page.set_project_settings(self.project_settings_manager.get())
+        self.mole_fraction_page.set_project_settings(
+            self.project_settings_manager.get(),
+            activate_project_scope=self.project_settings_manager.has_project_path(),
+        )
         self.ionization_page = IonizationEnergyLookupWidget(self.workspace_stack)
         self.ionization_page.set_project_settings(self.project_settings_manager.get())
         self.isotope_page = IsotopeAbundanceDialog(self.workspace_stack)
@@ -108,7 +111,10 @@ class WorkspacePagesMixin:
             self.normalization_settings,
             self.workspace_stack,
         )
-        self.pics_page.set_project_settings(self.project_settings_manager.get())
+        self.pics_page.set_project_settings(
+            self.project_settings_manager.get(),
+            activate_project_scope=self.project_settings_manager.has_project_path(),
+        )
         self.pics_import_page = PICSImportWidget(self.workspace_stack)
         self.pics_import_page.set_project_settings(self.project_settings_manager.get())
         self.pics_import_page.import_completed.connect(
@@ -875,9 +881,9 @@ class WorkspacePagesMixin:
         self.normalization_settings = ps.to_normalization_settings()
         calibration = ps.to_calibration()
         previous_plot_calibration = getattr(self, "current_plot_calibration", None)
-        self.lineEdit_4.setText(f"{calibration.a:.6e}")
-        self.lineEdit_5.setText(f"{calibration.b:.6e}")
-        self.lineEdit_6.setText(f"{calibration.c:.6e}")
+        self.lineEdit_4.setText(format(calibration.a, ".17g"))
+        self.lineEdit_5.setText(format(calibration.b, ".17g"))
+        self.lineEdit_6.setText(format(calibration.c, ".17g"))
         if hasattr(self, "project_common_parameters_widget"):
             self.project_common_parameters_widget.settings = self.normalization_settings
             self.project_common_parameters_widget.calibration = calibration
@@ -1292,24 +1298,50 @@ class WorkspacePagesMixin:
         calibration: Calibration | None = None,
     ) -> None:
         """Sync project settings to all tool pages (temperature, PIE, etc.)."""
+        runtime_project_scope = (
+            self.project_settings_manager.has_project_path()
+            if activate_project_scope is None
+            else activate_project_scope
+        )
         if calibration is None:
-            calibration = self.current_calibration()
+            # ProjectSettings is authoritative only while a project is active;
+            # standalone tools continue to use the global workbench calibration.
+            calibration = (
+                ps.to_calibration()
+                if runtime_project_scope
+                else self.current_calibration()
+            )
+        source_scope_activation = (
+            activate_project_scope if runtime_project_scope else False
+        )
         if hasattr(self, "temperature_page"):
             self.temperature_page.normalization_settings = self.normalization_settings
             self.temperature_page.calibration = calibration
-            self.temperature_page.set_project_settings(ps, activate_project_scope=activate_project_scope)
+            self.temperature_page.set_project_settings(
+                ps,
+                activate_project_scope=source_scope_activation,
+            )
         if hasattr(self, "pie_page"):
             self.pie_page.normalization_settings = self.normalization_settings
             self.pie_page.calibration = calibration
-            self.pie_page.set_project_settings(ps, activate_project_scope=activate_project_scope)
+            self.pie_page.set_project_settings(
+                ps,
+                activate_project_scope=source_scope_activation,
+            )
         if hasattr(self, "mole_fraction_page"):
             self.mole_fraction_page.normalization_settings = self.normalization_settings
             self.mole_fraction_page.calibration = calibration
-            self.mole_fraction_page.set_project_settings(ps)
+            self.mole_fraction_page.set_project_settings(
+                ps,
+                activate_project_scope=runtime_project_scope,
+            )
         if hasattr(self, "pics_page"):
             self.pics_page.normalization_settings = self.normalization_settings
             self.pics_page.calibration = calibration
-            self.pics_page.set_project_settings(ps)
+            self.pics_page.set_project_settings(
+                ps,
+                activate_project_scope=runtime_project_scope,
+            )
         if hasattr(self, "pics_import_page"):
             self.pics_import_page.set_project_settings(ps)
         if hasattr(self, "ionization_page"):

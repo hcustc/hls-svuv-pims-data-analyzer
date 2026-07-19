@@ -142,6 +142,7 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
         parent=None,
         *,
         show_actions: bool = True,
+        persist_changes: bool = True,
     ):
         super().__init__(parent)
         self.settings = settings
@@ -149,6 +150,7 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
         self.project_settings: ProjectSettings | None = None
         self.worker: WorkerThread | None = None
         self.show_actions = show_actions
+        self.persist_changes = persist_changes
 
         root = QtWidgets.QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8 if show_actions else 0)
@@ -239,7 +241,10 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
 
         for edit in (self.calibration_a_edit, self.calibration_b_edit, self.calibration_c_edit):
             edit.setRange(-1_000_000, 1_000_000)
-            edit.setDecimals(12)
+            # Preserve fitted/project calibration coefficients when they make a
+            # round trip through the project page.  Twelve fixed decimals leave
+            # only about six significant digits for the quadratic coefficient.
+            edit.setDecimals(18)
             edit.setSingleStep(0.000000001)
             edit.setMinimumWidth(120)
             edit.setMaximumWidth(180)
@@ -489,7 +494,7 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
         self.calibration_c_edit = AutoSelectDoubleSpinBox()
         for edit in (self.calibration_a_edit, self.calibration_b_edit, self.calibration_c_edit):
             edit.setRange(-1_000_000, 1_000_000)
-            edit.setDecimals(12)
+            edit.setDecimals(18)
             edit.setSingleStep(0.000000001)
             # 隐藏上下箭头，允许直接修改数值
             edit.setButtonSymbols(QtWidgets.QAbstractSpinBox.ButtonSymbols.NoButtons)
@@ -739,6 +744,8 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
         editingFinished 在 spinbox 失去焦点时（用户点击导航按钮之前）触发，
         因此能在 switch_workspace_page() 之前完成同步。
         """
+        if not self.persist_changes:
+            return
         try:
             calibration = Calibration(
                 a=self.calibration_a_edit.value(),
@@ -940,13 +947,15 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
             msg = f"已计算 {len(self.settings.expansion_factors)} 个温度点的Kr膨胀系数"
 
         self.refresh_factor_table()
-        save_normalization_settings(self.settings)
+        if self.persist_changes:
+            save_normalization_settings(self.settings)
         if self.project_settings:
             self.project_settings.expansion_factors = dict(self.settings.expansion_factors)
-            from bl03u_masstool.core.project_settings import ProjectSettingsManager
-            manager = ProjectSettingsManager()
-            manager.set(self.project_settings)
-            manager.save()
+            if self.persist_changes:
+                from bl03u_masstool.core.project_settings import ProjectSettingsManager
+                manager = ProjectSettingsManager()
+                manager.set(self.project_settings)
+                manager.save()
         self.status_label.setText(msg)
 
     def on_energy_selected(self, index: int) -> None:
@@ -1377,7 +1386,7 @@ class FunctionDefaultsWidget(QtWidgets.QWidget):
     _PAGE_BY_TAB = ("spectrum", "temperature", "pie", "pics", "mole_fraction")
     _PAGE_LABEL_BY_TAB = ("质谱工作台", "温度扫描", "PIE 拟合", "PICS 计算", "摩尔分数")
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, show_actions: bool = True):
         super().__init__(parent)
         self.peak_detection = load_peak_detection_config()
         self.project_settings: ProjectSettings | None = None
@@ -1394,7 +1403,8 @@ class FunctionDefaultsWidget(QtWidgets.QWidget):
         self.open_function_page_button.setToolTip("打开当前默认值对应的功能页面")
         self.open_function_page_button.clicked.connect(self._request_current_function_page)
         action_row.addWidget(self.open_function_page_button)
-        root.addLayout(action_row)
+        if show_actions:
+            root.addLayout(action_row)
 
         # 使用标签页组织功能参数
         self.tabs = QtWidgets.QTabWidget()
@@ -1419,6 +1429,7 @@ class FunctionDefaultsWidget(QtWidgets.QWidget):
         self.status_label.setObjectName("ProjectStatus")
         bl.addWidget(self.save_button)
         bl.addWidget(self.status_label, 1)
+        bottom_bar.setVisible(show_actions)
         root.addWidget(bottom_bar)
 
         self._refresh_function_page_button(0)

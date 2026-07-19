@@ -199,9 +199,9 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
                     calibration = load_calibration_config()
             except Exception:
                 calibration = load_calibration_config()
-            self.lineEdit_4.setText(f"{calibration.a:.6e}")
-            self.lineEdit_5.setText(f"{calibration.b:.6e}")
-            self.lineEdit_6.setText(f"{calibration.c:.6e}")
+            self.lineEdit_4.setText(format(calibration.a, ".17g"))
+            self.lineEdit_5.setText(format(calibration.b, ".17g"))
+            self.lineEdit_6.setText(format(calibration.c, ".17g"))
 
             if calibration_points is None:
                 points = load_calibration_points()
@@ -2081,9 +2081,9 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
             r2 = score_quadratic_calibration(points, calibration)
             
             # 更新界面显示
-            self.lineEdit_4.setText(f"{calibration.a:.6e}")
-            self.lineEdit_5.setText(f"{calibration.b:.6e}")
-            self.lineEdit_6.setText(f"{calibration.c:.6e}")
+            self.lineEdit_4.setText(format(calibration.a, ".17g"))
+            self.lineEdit_5.setText(format(calibration.b, ".17g"))
+            self.lineEdit_6.setText(format(calibration.c, ".17g"))
             
             # 显示结果
             result_text = (

@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+from dataclasses import asdict
+
 import yaml
 import pytest
 
 from bl03u_masstool.core.project_settings import (
     ProjectSettings,
     ProjectSettingsManager,
+    _flat_to_nested,
+    _nested_to_flat,
     load_project_settings,
     save_project_settings,
 )
@@ -13,6 +17,24 @@ from bl03u_masstool.core.project_settings import (
 
 def test_project_settings_default_parent_mz_is_unset():
     assert ProjectSettings().mf_parent_mz == 0
+
+
+def test_project_yaml_mapping_covers_every_non_deprecated_field():
+    settings = ProjectSettings()
+    serialized_fields = set(_nested_to_flat(_flat_to_nested(settings)))
+    deprecated_runtime_fields = {
+        "mass_discrimination",
+        "pie_prefer_gaussian",
+        "temp_prefer_gaussian",
+    }
+
+    assert set(asdict(settings)) - deprecated_runtime_fields <= serialized_fields
+
+
+def test_project_runtime_converters_preserve_common_kr_mass():
+    settings = ProjectSettings(kr_mz=83)
+
+    assert settings.to_normalization_settings().kr_mz == 83
 
 
 def test_project_settings_round_trip_preserves_nested_yaml_fields(tmp_path):
@@ -42,6 +64,7 @@ def test_project_settings_round_trip_preserves_nested_yaml_fields(tmp_path):
         pie_photon_mode="each",
         kr_calibration_folder="data/kr",
         kr_calibration_peak_file="config/peak.yaml",
+        kr_mz=83,
         expansion_factors={14.6: {550.0: 1.0, 600.0: 1.1}, 14.7: {550.0: 1.0, 600.0: 1.2}},
         selected_elements=["C", "H", "O"],
         peak_algorithm="cwt",
@@ -106,6 +129,8 @@ def test_project_settings_round_trip_preserves_nested_yaml_fields(tmp_path):
     assert "mass_discrimination" not in saved_yaml["general_parameters"]["normalization"]
     assert loaded.kr_calibration_folder == settings.kr_calibration_folder
     assert loaded.kr_calibration_peak_file == settings.kr_calibration_peak_file
+    assert loaded.kr_mz == settings.kr_mz
+    assert saved_yaml["general_parameters"]["normalization"]["kr_mz"] == 83
     assert loaded.expansion_factors == settings.expansion_factors
     assert loaded.selected_elements == settings.selected_elements
     assert loaded.peak_algorithm == settings.peak_algorithm
@@ -145,6 +170,22 @@ def test_project_settings_legacy_single_pie_folder_remains_effective():
     settings = ProjectSettings(pie_scan_folder="data/legacy-pie")
 
     assert settings.effective_pie_scan_folders() == ["data/legacy-pie"]
+
+
+def test_legacy_temperature_kr_mz_populates_canonical_common_parameter(tmp_path):
+    path = tmp_path / "project.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            {"function_defaults": {"temperature_scan": {"kr_mz": 86}}},
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = load_project_settings(path)
+
+    assert loaded.temp_kr_mz == 86
+    assert loaded.kr_mz == 86
 
 
 def test_project_scoped_settings_store_relative_paths_and_rebase_after_move(tmp_path):
