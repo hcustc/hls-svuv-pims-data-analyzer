@@ -4,6 +4,7 @@ Phase 1 Tests for PIE Dialog: per-m/z configuration preservation and concurrency
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -26,7 +27,9 @@ from bl03u_masstool.core.nist_webbook import (
     NistWebBookResult,
 )
 from bl03u_masstool.core.pie_analysis import PieSegmentSummary
+from bl03u_masstool.core.pie_state import PieStateManager
 from bl03u_masstool.core.project_settings import ProjectSettings
+from bl03u_masstool.core.project_lifecycle import project_root
 from bl03u_masstool.frontends.pyqt_app.pie import dialog as pie_dialog_module
 from bl03u_masstool.frontends.pyqt_app.pie.dialog import PIESpeciesFitDialog
 
@@ -49,6 +52,10 @@ def pie_dialog(qapp):
 
 
 def test_pie_workspace_columns_share_contiguous_splitter_boundaries(pie_dialog, qapp):
+    pie_dialog.curves = {
+        30: {"mz": 30, "energies": np.array([9.0, 10.0]), "intensities": np.array([0.0, 1.0])}
+    }
+    pie_dialog._update_action_state()
     pie_dialog.resize(1180, 720)
     qapp.processEvents()
 
@@ -63,6 +70,175 @@ def test_pie_workspace_columns_share_contiguous_splitter_boundaries(pie_dialog, 
         following = splitter.widget(index).geometry()
         assert previous.right() + 1 == handle.left()
         assert handle.right() + 1 == following.left()
+
+
+def test_fit_result_selection_signal_is_connected_once(pie_dialog):
+    assert pie_dialog.fit_table.receivers(
+        pie_dialog.fit_table.itemSelectionChanged
+    ) == 1
+
+
+def test_pie_generation_progress_uses_center_plot_workspace(pie_dialog, qapp):
+    pie_dialog._begin_analysis_progress("正在读取 PIE 数据…")
+    pie_dialog._on_analysis_progress(35, "正在识别并积分质谱峰…")
+    qapp.processEvents()
+
+    assert pie_dialog._plot_stack.currentWidget() is pie_dialog._progress_state
+    assert pie_dialog._progress_state.progress_bar.value() == 35
+    assert "积分" in pie_dialog._progress_state.detail_label.text()
+
+    pie_dialog._restore_analysis_workspace()
+    assert pie_dialog._plot_stack.currentWidget() is pie_dialog._empty_state
+
+
+def test_project_open_restores_cached_pie_curves_without_reanalysis(qapp, tmp_path):
+    raw_dir = tmp_path / "raw" / "pie"
+    raw_dir.mkdir(parents=True)
+    (raw_dir / "10.0eV.txt").write_text("cached source fingerprint", encoding="utf-8")
+    project_dir = tmp_path / "Project_PIE_Cache"
+    ps = ProjectSettings(
+        project_name="PIE Cache",
+        system="Test",
+        output_dir=str(project_dir),
+        pie_scan_folder=str(raw_dir),
+        pie_scan_folders=[str(raw_dir)],
+    )
+    analysis_df = pd.DataFrame(
+        {
+            "energy": [9.0, 10.0],
+            "mz_rounded": [28, 28],
+            "mz": [28.01, 28.02],
+            "normalized_intensity": [1.0, 2.0],
+            "raw_area": [10.0, 20.0],
+            "photon_normalized_intensity": [1.0, 2.0],
+            "species": ["CO", "CO"],
+            "integration_method": ["sum_counts", "sum_counts"],
+            "file_count": [1, 1],
+            "io": [1.0, 1.0],
+            "replicate_mode": ["off", "off"],
+        }
+    )
+
+    writer = PIESpeciesFitDialog(Calibration(a=0.0, b=1.0, c=0.0))
+    writer.project_settings = ps
+    writer.project_dir = str(project_root(ps))
+    writer.set_pie_source_scope("project", apply_project=False)
+    writer.photon_correction_check.setChecked(ps.pie_photon_mode != "off")
+    writer.analysis_df = analysis_df
+    cache_key = writer._pie_cache_key([str(raw_dir)], None)
+    writer._save_pie_analysis_cache(
+        cache_key,
+        {"folder_count": 1, "folders": [str(raw_dir)], "source_scope": "project"},
+    )
+    writer.deleteLater()
+
+    restored = PIESpeciesFitDialog(Calibration(a=0.0, b=1.0, c=0.0))
+    try:
+        restored.set_project_settings(ps, activate_project_scope=True)
+        timer = QtCore.QElapsedTimer()
+        timer.start()
+        while timer.elapsed() < 3000 and not restored.curves:
+            qapp.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents, 50)
+
+        assert 28 in restored.curves
+        assert restored.analysis_df["normalized_intensity"].tolist() == [1.0, 2.0]
+        assert restored._last_analysis_source_info["from_cache"] is True
+        assert "自动载入" in restored.status_label.text()
+        (raw_dir / "10.0eV.txt").write_text(
+            "source data changed; cached curves must be invalidated",
+            encoding="utf-8",
+        )
+        assert restored._pie_cache_key([str(raw_dir)], None) != cache_key
+    finally:
+        worker = restored._autoload_worker
+        if worker is not None and worker.isRunning():
+            worker.wait(3000)
+        restored.deleteLater()
+
+
+def test_project_state_restore_rebuilds_live_fit_model(pie_dialog, tmp_path):
+    project_dir = tmp_path / "Project_PIE_State"
+    ps = ProjectSettings(project_name="PIE State", output_dir=str(project_dir))
+    curves = {
+        28: {
+            "mz": 28,
+            "energies": [9.0, 10.0],
+            "intensities": [1.0, 2.0],
+            "species": "CO",
+            "rows": pd.DataFrame(),
+        }
+    }
+    database = [
+        {
+            "id": 1,
+            "species": "CO",
+            "ionization_energy": 9.0,
+            "cross_sections": [1.0, 2.0],
+        }
+    ]
+    config = {
+        28: {
+            "selected_species": [{"id": 1, "species": "CO"}],
+            "coefficients": {1: 1.0},
+            "locked_ids": [],
+        }
+    }
+    config_hash = pie_dialog._compute_config_hash(
+        pie_dialog._build_per_mz_config_payload(config[28])
+    )
+    fit_results = {
+        28: {
+            "success": True,
+            "model": {
+                "r_squared": 0.99,
+                "rmse": 0.01,
+                "mae": 0.01,
+                "species": [
+                    {
+                        "id": 1,
+                        "species": "CO",
+                        "formula": "CO",
+                        "smiles": "[C-]#[O+]",
+                        "coefficient": 1.0,
+                        "contribution_percent": 100.0,
+                        "ie": 9.0,
+                    }
+                ],
+                "fitted_curve": [1.0, 2.0],
+                "component_curves": [[1.0], [2.0]],
+            },
+            "fit_config_hash": config_hash,
+            "global_config_hash": pie_dialog.global_solver_config["config_hash"],
+        }
+    }
+    manager = PieStateManager(str(project_dir))
+    success, error = manager.save_state(
+        curves,
+        database,
+        pie_dialog.calibration,
+        config,
+        fit_results,
+        pie_dialog.global_solver_config["config_hash"],
+    )
+    assert success, error
+
+    pie_dialog.project_settings = ps
+    pie_dialog.project_dir = str(project_dir)
+    pie_dialog.set_pie_source_scope("project", apply_project=False)
+    pie_dialog.curves = curves
+    pie_dialog.database = database
+    pie_dialog._restore_pie_project_state()
+
+    restored = pie_dialog.all_fit_results[28]
+    assert restored["model"]["fitted"] == [1.0, 2.0]
+    assert restored["model"]["species"][0]["component_intensities"] == [1.0, 2.0]
+    assert restored["model"]["species"][0]["formula"] == "CO"
+    assert restored["model"]["species"][0]["smiles"] == "[C-]#[O+]"
+    assert pie_dialog._derive_result_status(
+        restored,
+        pie_dialog._get_per_mz_config_hash(28),
+        pie_dialog.global_solver_config["config_hash"],
+    ) == "COMPLETED"
 
 
 def test_ie_query_batch_keeps_missing_species_nonfatal(monkeypatch):
@@ -183,6 +359,73 @@ def test_project_scope_applies_project_source_and_restores_temporary_path(pie_di
     assert not pie_dialog.folder_edit.isReadOnly()
 
 
+def test_switching_from_project_scope_persists_dirty_results(pie_dialog, tmp_path, monkeypatch):
+    project_folder = tmp_path / "project_pie"
+    project_folder.mkdir()
+    ps = ProjectSettings(
+        project_name="Project PIE",
+        output_dir=str(tmp_path / "project"),
+        pie_scan_folder=str(project_folder),
+    )
+    pie_dialog.set_project_settings(ps, activate_project_scope=True)
+    calls = []
+    monkeypatch.setattr(
+        pie_dialog,
+        "persist_pie_project_state",
+        lambda: (calls.append(True) or True, None),
+    )
+    pie_dialog.pie_state_dirty = True
+
+    pie_dialog.set_pie_source_scope("temporary")
+
+    assert calls == [True]
+    assert pie_dialog.pie_source_scope == "temporary"
+
+
+def test_failed_persistence_keeps_project_scope_and_results(pie_dialog, tmp_path, monkeypatch):
+    project_folder = tmp_path / "project_pie"
+    project_folder.mkdir()
+    ps = ProjectSettings(
+        project_name="Project PIE",
+        output_dir=str(tmp_path / "project"),
+        pie_scan_folder=str(project_folder),
+    )
+    pie_dialog.set_project_settings(ps, activate_project_scope=True)
+    pie_dialog.all_fit_results = {28: {"success": True}}
+    pie_dialog.pie_state_dirty = True
+    warnings = []
+    monkeypatch.setattr(
+        pie_dialog,
+        "persist_pie_project_state",
+        lambda: (False, "disk full"),
+    )
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox,
+        "warning",
+        lambda *args: warnings.append(args),
+    )
+
+    pie_dialog.set_pie_source_scope("temporary")
+
+    assert pie_dialog.pie_source_scope == "project"
+    assert pie_dialog.all_fit_results == {28: {"success": True}}
+    assert warnings
+
+
+def test_unreadable_pie_folder_fingerprint_does_not_abort(pie_dialog, tmp_path, monkeypatch):
+    folder = tmp_path / "pie"
+    folder.mkdir()
+
+    def deny_access(_path):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(Path, "iterdir", deny_access)
+    result = pie_dialog._pie_folder_fingerprints([str(folder)], recursive=False)
+
+    assert result[0]["unreadable"] is True
+    assert result[0]["files"] == []
+
+
 def test_project_scope_restores_all_pie_segment_folders(pie_dialog, tmp_path):
     low_folder = tmp_path / "pie_low"
     high_folder = tmp_path / "pie_high"
@@ -200,7 +443,7 @@ def test_project_scope_restores_all_pie_segment_folders(pie_dialog, tmp_path):
     pie_dialog.set_project_settings(ps, activate_project_scope=True)
 
     assert pie_dialog.pie_source_scope == "project"
-    assert pie_dialog.project_source_button.text() == "项目管理"
+    assert pie_dialog.project_source_button.text() == "项目数据"
     assert not hasattr(pie_dialog, "use_multi_folders")
     assert not hasattr(pie_dialog, "multi_folder_section")
     assert pie_dialog.folder_edit.text() == "项目管理已登记 2 个 PIE 能段目录"
@@ -279,6 +522,11 @@ def test_project_settings_sync_respects_temporary_source_scope(pie_dialog, tmp_p
 def test_analysis_and_fit_actions_follow_real_prerequisites(pie_dialog, tmp_path):
     assert not pie_dialog.analyze_button.isEnabled()
     assert not pie_dialog.fit_button.isEnabled()
+    assert pie_dialog.left_panel.isHidden()
+    assert pie_dialog.fitting_control_widget.isHidden()
+    assert pie_dialog.stats_bar.isHidden()
+    assert pie_dialog.export_button.isHidden()
+    assert pie_dialog.export_plot_button.isHidden()
 
     source = tmp_path / "pie"
     source.mkdir()
@@ -313,6 +561,14 @@ def test_analysis_and_fit_actions_follow_real_prerequisites(pie_dialog, tmp_path
     pie_dialog.populate_mz_list()
     pie_dialog.mz_list.setCurrentRow(0)
     assert pie_dialog.fit_button.isEnabled()
+    assert not pie_dialog.left_panel.isHidden()
+    assert not pie_dialog.fitting_control_widget.isHidden()
+    assert not pie_dialog.stats_bar.isHidden()
+    assert not pie_dialog.export_button.isHidden()
+    assert pie_dialog.export_plot_button.isHidden()
+    assert pie_dialog.export_curve_action.isEnabled()
+    assert pie_dialog.export_plot_action.isEnabled()
+    assert pie_dialog.fitting_control_widget.candidate_controls_widget.isVisible()
 
     pie_dialog.fitting_control_widget._set_all_rows_checked(False)
     assert not pie_dialog.fit_button.isEnabled()

@@ -17,6 +17,21 @@ from .peak_detection import Peak, fit_gaussian
 from .spectrum_io import extract_header_numbers, list_spectrum_files, read_spectrum
 
 
+_INTEGRATION_METHODS = {"sum_counts", "baseline", "gaussian"}
+
+
+def resolve_integration_method(
+    integration_method: str | None,
+    *,
+    prefer_gaussian: bool = True,
+) -> str:
+    """Resolve a method while giving an explicit valid selection precedence."""
+    explicit = str(integration_method or "").strip().lower()
+    if explicit in _INTEGRATION_METHODS:
+        return explicit
+    return "gaussian" if prefer_gaussian else "sum_counts"
+
+
 def baseline_corrected_area(y_data: Iterable[float], left: int, right: int) -> float:
     data = np.asarray(y_data, dtype=float)
     left = max(0, int(left))
@@ -54,10 +69,10 @@ def integrate_peak_with_method(
     prefer_gaussian: bool = True,
     integration_method: str | None = None,
 ) -> tuple[float, str]:
-    method = integration_method or ("gaussian" if prefer_gaussian else "sum_counts")
-    method = method if method in {"sum_counts", "baseline", "gaussian"} else "sum_counts"
-    if prefer_gaussian:
-        method = "gaussian"
+    method = resolve_integration_method(
+        integration_method,
+        prefer_gaussian=prefer_gaussian,
+    )
     if method == "gaussian":
         window_size = max(5, min(30, int(peak.right_bound) - int(peak.left_bound) + 5))
         fit = fit_gaussian(y_data, int(round(peak.index)), window_size)
@@ -87,10 +102,10 @@ def integrate_peaks_with_method(
     """
     data = np.asarray(y_data, dtype=float)
     peak_list = list(peaks)
-    method = integration_method or ("gaussian" if prefer_gaussian else "sum_counts")
-    method = method if method in {"sum_counts", "baseline", "gaussian"} else "sum_counts"
-    if prefer_gaussian:
-        method = "gaussian"
+    method = resolve_integration_method(
+        integration_method,
+        prefer_gaussian=prefer_gaussian,
+    )
     if method == "gaussian":
         return [
             integrate_peak_with_method(

@@ -201,71 +201,38 @@ QLabel#PieEmptyTitle {{
     font-weight: 700;
 }}
 
-QFrame#AnalysisEmptyState {{
+QFrame#AnalysisEmptyState,
+QFrame#AnalysisProgressState {{
     background: {t.panel_subtle};
     border: 0;
     border-radius: 8px;
 }}
 
-QFrame#EmptyStateCard {{
-    background: {t.panel_bg};
-    border: 1px solid {t.border_light};
-    border-radius: 14px;
+QFrame#EmptyStateCard,
+QFrame#ProgressStateCard {{
+    background: transparent;
+    border: 0;
 }}
 
-QLabel#EmptyStateEyebrow {{
-    background: {t.primary_soft};
-    border: 1px solid {t.primary_border};
-    border-radius: 9px;
-    color: {t.primary_hover};
-    font-size: 8pt;
-    font-weight: 700;
-    letter-spacing: 1px;
-    padding: 3px 9px;
-}}
-
-QLabel#EmptyStateTitle {{
+QLabel#EmptyStateTitle,
+QLabel#ProgressStateTitle {{
     background: transparent;
     color: {t.text_primary};
-    font-size: 15pt;
+    font-size: 14pt;
     font-weight: 700;
 }}
 
-QLabel#EmptyStateSubtitle {{
+QLabel#EmptyStateSubtitle,
+QLabel#ProgressStateDetail {{
     background: transparent;
     color: {t.text_muted};
     font-size: 10pt;
 }}
 
-QFrame#EmptyStateStep {{
-    background: {t.panel_subtle};
-    border: 1px solid {t.border_light};
-    border-radius: 8px;
-}}
-
-QLabel#EmptyStateStepNumber {{
-    background: {t.primary};
-    border: 0;
-    border-radius: 10px;
-    color: {t.text_inverse};
+QProgressBar#AnalysisProgressBar {{
+    min-height: 16px;
+    max-height: 16px;
     font-size: 8pt;
-    font-weight: 700;
-    min-width: 20px;
-    min-height: 20px;
-    max-width: 20px;
-    max-height: 20px;
-}}
-
-QLabel#EmptyStateStepLabel {{
-    background: transparent;
-    color: {t.text_secondary};
-    font-weight: 600;
-}}
-
-QLabel#EmptyStateFooterHint {{
-    background: transparent;
-    color: {t.text_muted};
-    font-size: 9pt;
 }}
 
 QPushButton#EmptyStateAction {{
@@ -537,6 +504,14 @@ QLabel#ReadoutValue {{
     padding: 3px 6px;
 }}
 
+QLabel#ContextValue {{
+    background: transparent;
+    border: 0;
+    color: {t.text_secondary};
+    font-weight: 600;
+    padding: 1px 2px;
+}}
+
 QGroupBox {{
     border: 1px solid {t.border};
     border-radius: 6px;
@@ -688,6 +663,28 @@ QToolButton:hover {{
     border-color: {t.primary};
 }}
 
+QToolButton#CommandMenuButton {{
+    background: {t.panel_bg};
+    border: 1px solid {t.border};
+    border-radius: 5px;
+    color: {t.text_secondary};
+    font-weight: 600;
+    padding: 3px 10px;
+    min-height: 22px;
+}}
+
+QToolButton#CommandMenuButton:hover {{
+    background: {t.panel_subtle};
+    border-color: {t.primary_border};
+    color: {t.primary_hover};
+}}
+
+QToolButton#CommandMenuButton:disabled {{
+    background: {t.disabled_bg};
+    border-color: {t.disabled_bg};
+    color: {t.disabled_text};
+}}
+
 QToolButton:checked {{
     background: {t.primary};
     border-color: {t.primary_hover};
@@ -804,6 +801,14 @@ QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {{
 QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {{
     border-color: {t.border_focus};
     background: #ffffff;
+}}
+
+QSpinBox#TableCellEditor,
+QDoubleSpinBox#TableCellEditor,
+QComboBox#TableCellEditor {{
+    border-radius: 3px;
+    padding: 1px 5px;
+    min-height: 0;
 }}
 
 QLineEdit#CurveSearch {{

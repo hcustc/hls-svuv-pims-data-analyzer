@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 from PyQt6.QtWidgets import QFileDialog, QHBoxLayout, QLineEdit, QPushButton, QVBoxLayout
 
+from bl03u_masstool.core.calibration import Calibration
 from bl03u_masstool.core.config import (
     PeakDetectionConfig,
     resolve_species_database_path,
@@ -46,6 +48,8 @@ from bl03u_masstool.frontends.pyqt_app.pics.import_widget import PICSImportWidge
 from bl03u_masstool.frontends.pyqt_app.pie.dialog import PIESpeciesFitDialog
 from bl03u_masstool.frontends.pyqt_app.temperature.dialog import TemperatureScanDialog
 
+
+logger = logging.getLogger(__name__)
 
 
 
@@ -802,8 +806,10 @@ class WorkspacePagesMixin:
         if save_project and self.project_settings_manager.has_project_path():
             try:
                 self.project_settings_manager.save()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.exception("Failed to save project settings while synchronizing the UI")
+                if hasattr(self, "statusbar"):
+                    self.statusbar.showMessage(f"项目设置自动保存失败：{exc}", 8000)
         self._apply_project_runtime_settings(ps)
         if sync_tools:
             self._sync_project_settings_to_tool_pages(ps)
@@ -1016,28 +1022,11 @@ class WorkspacePagesMixin:
             self.set_spectrum_source_scope("custom", apply_project=False)
             self.lineEdit.setText(getattr(self, "_custom_single_spectrum_file", ""))
             self.folder_path.setText(getattr(self, "_custom_sum_spectrum_folder", ""))
-        if hasattr(self, "temperature_page"):
-            self.temperature_page.normalization_settings = self.normalization_settings
-            self.temperature_page.calibration = calibration
-            self.temperature_page.set_project_settings(ps, activate_project_scope=False)
-        if hasattr(self, "pie_page"):
-            self.pie_page.normalization_settings = self.normalization_settings
-            self.pie_page.calibration = calibration
-            self.pie_page.set_project_settings(ps, activate_project_scope=False)
-        if hasattr(self, "mole_fraction_page"):
-            self.mole_fraction_page.normalization_settings = self.normalization_settings
-            self.mole_fraction_page.calibration = calibration
-            self.mole_fraction_page.set_project_settings(ps)
-        if hasattr(self, "pics_page"):
-            self.pics_page.normalization_settings = self.normalization_settings
-            self.pics_page.calibration = calibration
-            self.pics_page.set_project_settings(ps)
-        if hasattr(self, "pics_import_page"):
-            self.pics_import_page.set_project_settings(ps)
-        if hasattr(self, "ionization_page"):
-            self.ionization_page.set_project_settings(ps)
-        if hasattr(self, "isotope_page"):
-            self.isotope_page.set_project_settings(ps)
+        self._sync_project_settings_to_tool_pages(
+            ps,
+            activate_project_scope=False,
+            calibration=calibration,
+        )
 
     def _refresh_pics_database_consumers(self) -> None:
         """Reload every desktop consumer after PICS records are imported."""
@@ -1300,9 +1289,11 @@ class WorkspacePagesMixin:
         ps: ProjectSettings,
         *,
         activate_project_scope: bool | None = None,
+        calibration: Calibration | None = None,
     ) -> None:
         """Sync project settings to all tool pages (temperature, PIE, etc.)."""
-        calibration = self.current_calibration()
+        if calibration is None:
+            calibration = self.current_calibration()
         if hasattr(self, "temperature_page"):
             self.temperature_page.normalization_settings = self.normalization_settings
             self.temperature_page.calibration = calibration
@@ -1448,8 +1439,12 @@ class WorkspacePagesMixin:
         if field_name and destination:
             setattr(ps, field_name, destination)
             if field_name == "pie_scan_folder":
-                ps.pie_scan_folders = [destination]
-                ps.pie_multi_folder_mode = False
+                pie_folders = ps.effective_pie_scan_folders()
+                if destination not in pie_folders:
+                    pie_folders.append(destination)
+                ps.pie_scan_folders = pie_folders
+                ps.pie_scan_folder = pie_folders[0]
+                ps.pie_multi_folder_mode = len(pie_folders) > 1
         self.project_settings_manager.set(ps)
         self.project_settings_manager.save()
 
@@ -2006,29 +2001,7 @@ class WorkspacePagesMixin:
     def on_project_common_parameters_saved(self) -> None:
         ps = self.project_settings_manager.get()
         self._apply_project_runtime_settings(ps)
-        calibration = self.current_calibration()
-        if hasattr(self, "temperature_page"):
-            self.temperature_page.normalization_settings = self.normalization_settings
-            self.temperature_page.calibration = calibration
-            self.temperature_page.set_project_settings(ps)
-        if hasattr(self, "pie_page"):
-            self.pie_page.normalization_settings = self.normalization_settings
-            self.pie_page.calibration = calibration
-            self.pie_page.set_project_settings(ps)
-        if hasattr(self, "mole_fraction_page"):
-            self.mole_fraction_page.normalization_settings = self.normalization_settings
-            self.mole_fraction_page.calibration = calibration
-            self.mole_fraction_page.set_project_settings(ps)
-        if hasattr(self, "pics_page"):
-            self.pics_page.normalization_settings = self.normalization_settings
-            self.pics_page.calibration = calibration
-            self.pics_page.set_project_settings(ps)
-        if hasattr(self, "pics_import_page"):
-            self.pics_import_page.set_project_settings(ps)
-        if hasattr(self, "ionization_page"):
-            self.ionization_page.set_project_settings(ps)
-        if hasattr(self, "isotope_page"):
-            self.isotope_page.set_project_settings(ps)
+        self._sync_project_settings_to_tool_pages(ps)
         self.refresh_project_parameter_summary()
         self.statusbar.showMessage("通用参数已保存并同步到各工具", 3000)
 

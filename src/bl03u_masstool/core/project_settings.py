@@ -212,7 +212,7 @@ class ProjectSettings:
             temperature_photon_normalize=self.temperature_photon_normalize,
             temperature_kr_correct=self.temperature_kr_correct,
             pie_photon_mode=self.pie_photon_mode,
-            mass_discrimination=1.0,
+            mass_discrimination=self.mass_discrimination,
             kr_calibration_folder=self.kr_calibration_folder,
             kr_calibration_peak_file=self.kr_calibration_peak_file,
             expansion_factors=dict(self.expansion_factors),
@@ -345,14 +345,10 @@ def _nested_to_flat(data: dict) -> dict:
     fd = data.get("function_defaults", {})
 
     # Fallback: If no function_defaults scope, try function_params at top level
-    if not fd and "function_params" in data:
-        fd = data.get("function_params", {})
-    elif "function_defaults" in data and isinstance(fd, dict):
-        # function_defaults scope exists, use it (preferred)
-        pass
-    elif "function_params" in data and "function_defaults" not in data:
-        # Only function_params exists at top level, use it (backward compat)
-        fd = data.get("function_params", {})
+    if not isinstance(fd, dict) or not fd:
+        legacy_fd = data.get("function_params", {})
+        if isinstance(legacy_fd, dict):
+            fd = legacy_fd
 
     if isinstance(fd, dict):
         pie = fd.get("pie", {})

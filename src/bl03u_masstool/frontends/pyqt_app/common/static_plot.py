@@ -3,8 +3,9 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+from functools import lru_cache
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 import numpy as np
 from PyQt6 import QtCore, QtWidgets
@@ -17,15 +18,24 @@ _font_cache_dir.mkdir(parents=True, exist_ok=True)
 os.environ.setdefault("XDG_CACHE_HOME", str(_font_cache_dir))
 
 try:
-    from matplotlib import font_manager, rcParams
+    from matplotlib import font_manager, rcParams, rc_context, rc_params_from_file
     from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
     from matplotlib.figure import Figure
 except Exception:  # pragma: no cover - exercised only when the optional runtime is absent
     font_manager = None
     rcParams = None
+    rc_context = None
+    rc_params_from_file = None
     FigureCanvas = None
     Figure = None
 
+from bl03u_masstool.core.runtime_paths import default_resource_path
+from bl03u_masstool.frontends.pyqt_app.common.plot_spec import (
+    CurveSeries,
+    PlotProfile,
+    ScientificPlotSpec,
+    SeriesRole,
+)
 from bl03u_masstool.frontends.pyqt_app.theme import get_plot_theme
 
 
@@ -45,6 +55,59 @@ _CJK_FONT_FAMILIES = [
     "Source Han Sans SC",
     "Arial Unicode MS",
 ]
+
+_PROFILE_FILENAMES = {
+    PlotProfile.SCREEN: "bl03u-screen.mplstyle",
+    PlotProfile.PUBLICATION: "bl03u-publication.mplstyle",
+    PlotProfile.MONOCHROME: "bl03u-monochrome.mplstyle",
+}
+
+_SCIENCE_COLOR_CYCLE = (
+    "#0C5DA5",
+    "#00B945",
+    "#FF9500",
+    "#FF2C00",
+    "#845B97",
+    "#474747",
+    "#9E9E9E",
+)
+
+_COMPONENT_COLORS = (
+    "#00B945",
+    "#FF9500",
+    "#845B97",
+    "#474747",
+    "#9E9E9E",
+)
+
+_COMPONENT_LINESTYLES: tuple[Any, ...] = (
+    "--",
+    "-.",
+    ":",
+    (0, (5, 2, 1, 2)),
+    (0, (3, 1, 1, 1, 1, 1)),
+)
+
+_COMPARISON_LINESTYLES: tuple[Any, ...] = (
+    "-",
+    "--",
+    "-.",
+    ":",
+    (0, (5, 2, 1, 2)),
+    (0, (3, 1, 1, 1, 1, 1)),
+)
+
+
+@lru_cache(maxsize=len(_PROFILE_FILENAMES))
+def load_plot_profile(profile: PlotProfile | str) -> dict[str, Any]:
+    """Load a packaged Matplotlib profile without mutating global rcParams."""
+    resolved = PlotProfile(profile)
+    if rc_params_from_file is None:
+        return {}
+    style_path = default_resource_path(Path("mplstyles") / _PROFILE_FILENAMES[resolved])
+    if not style_path.is_file():
+        raise FileNotFoundError(f"Matplotlib style profile not found: {style_path}")
+    return dict(rc_params_from_file(style_path, use_default_template=False))
 
 
 def configure_matplotlib_fonts(
@@ -92,6 +155,8 @@ class StaticCurvePlot(QtWidgets.QWidget):
         self._plot_theme = get_plot_theme()
         self._xlabel = xlabel
         self._ylabel = ylabel
+        self._last_spec: ScientificPlotSpec | None = None
+        self._last_profile = PlotProfile.SCREEN
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
@@ -111,7 +176,14 @@ class StaticCurvePlot(QtWidgets.QWidget):
 
         configure_matplotlib_fonts()
 
-        self.figure = Figure(figsize=(7.2, 4.2), dpi=110, facecolor=self._plot_theme.background, constrained_layout=True)
+        screen_profile = load_plot_profile(PlotProfile.SCREEN)
+        with rc_context(screen_profile):
+            self.figure = Figure(
+                figsize=(7.2, 4.2),
+                dpi=110,
+                facecolor=self._plot_theme.background,
+                constrained_layout=True,
+            )
         self.canvas = FigureCanvas(self.figure)
         self.canvas.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Expanding)
         if min_height is not None:
@@ -119,19 +191,110 @@ class StaticCurvePlot(QtWidgets.QWidget):
             self.canvas.setMinimumHeight(min_height)
         layout.addWidget(self.canvas)
 
-        self.axes = self.figure.add_subplot(111)
-        self.clear_plot()
+        with rc_context(screen_profile):
+            self.axes = self.figure.add_subplot(111)
+            self.clear_plot()
+
+    def render_spec(
+        self,
+        spec: ScientificPlotSpec,
+        *,
+        profile: PlotProfile | str = PlotProfile.SCREEN,
+        draw: bool = True,
+    ) -> None:
+        """Render a scientific plot specification while preserving point order."""
+        if self.axes is None or self.canvas is None or rc_context is None:
+            if self._placeholder is not None:
+                self._placeholder.setText(spec.title or "无法显示曲线图")
+            return
+
+        resolved_profile = PlotProfile(profile)
+        self._last_spec = spec
+        self._last_profile = resolved_profile
+        self._xlabel = spec.xlabel
+        self._ylabel = spec.ylabel
+
+        x_arrays: list[np.ndarray] = []
+        y_arrays: list[np.ndarray] = []
+        component_index = 0
+        comparison_index = 0
+        with rc_context(load_plot_profile(resolved_profile)):
+            self.axes.clear()
+            self._style_axes()
+            self.axes.set_title(spec.title)
+
+            for series in spec.series:
+                if (
+                    series.role is SeriesRole.COMPONENT
+                    and series.contribution_percent is not None
+                    and series.contribution_percent <= spec.component_visibility_threshold
+                ):
+                    continue
+
+                x_arr, y_arr = self._finite_series_values(series)
+                if x_arr.size == 0:
+                    continue
+                x_arrays.append(x_arr)
+                y_arrays.append(y_arr)
+
+                if series.role is SeriesRole.COMPONENT:
+                    style_index = component_index
+                    component_index += 1
+                elif series.role is SeriesRole.COMPARISON:
+                    style_index = comparison_index
+                    comparison_index += 1
+                else:
+                    style_index = 0
+
+                style = self._series_style(series, style_index, resolved_profile)
+                self.axes.plot(
+                    x_arr,
+                    y_arr,
+                    label=series.label or None,
+                    **style,
+                )
+
+            if spec.xlim is None or spec.ylim is None:
+                self.apply_data_limits(x_arrays, y_arrays)
+            if spec.xlim is not None:
+                self.axes.set_xlim(*spec.xlim)
+            if spec.ylim is not None:
+                self.axes.set_ylim(*spec.ylim)
+
+            if spec.show_zero_line:
+                self.axes.axhline(
+                    0.0,
+                    color="#64748b" if resolved_profile is PlotProfile.SCREEN else "0.35",
+                    linewidth=0.9,
+                    linestyle=(0, (4, 4)),
+                    alpha=0.65,
+                    zorder=0,
+                )
+
+            if spec.show_legend:
+                handles, labels = self.axes.get_legend_handles_labels()
+                if labels:
+                    self.axes.legend(
+                        handles,
+                        labels,
+                        loc=spec.legend_loc,
+                        ncol=2 if len(labels) > 8 else 1,
+                    )
+
+            if draw:
+                self.canvas.draw_idle()
 
     def clear_plot(self, *, title: str = "", xlabel: str | None = None, ylabel: str | None = None) -> None:
         if self.axes is None or self.canvas is None:
             if self._placeholder is not None:
                 self._placeholder.setText(title or "未安装 matplotlib，无法显示高质量曲线图")
             return
-        self.axes.clear()
-        self._xlabel = xlabel or self._xlabel
-        self._ylabel = ylabel or self._ylabel
-        self._style_axes()
-        self.axes.set_title(title, loc="center", fontsize=12, fontweight="bold", color="#111827", pad=12)
+        with rc_context(load_plot_profile(PlotProfile.SCREEN)):
+            self.axes.clear()
+            self._xlabel = xlabel or self._xlabel
+            self._ylabel = ylabel or self._ylabel
+            self._style_axes()
+            self.axes.set_title(title)
         self.canvas.draw_idle()
 
     def show_empty(self, message: str, *, title: str = "") -> None:
@@ -260,31 +423,124 @@ class StaticCurvePlot(QtWidgets.QWidget):
         """Save figure to file. Returns True if successful."""
         if self.figure is None:
             return False
+        previous_spec = self._last_spec
+        previous_profile = self._last_profile
+        previous_size = self.figure.get_size_inches().copy()
         try:
             filepath = Path(filepath)
             filepath.parent.mkdir(parents=True, exist_ok=True)
-            self.figure.savefig(
-                str(filepath),
-                dpi=300,
-                bbox_inches="tight",
-                facecolor=self._plot_theme.background,
-            )
+            profile = load_plot_profile(PlotProfile.PUBLICATION)
+            if previous_spec is not None:
+                self.render_spec(previous_spec, profile=PlotProfile.PUBLICATION, draw=False)
+            publication_size = profile.get("figure.figsize")
+            if publication_size:
+                self.figure.set_size_inches(*publication_size, forward=False)
+            with rc_context(profile):
+                self.figure.savefig(
+                    str(filepath),
+                    dpi=300,
+                    bbox_inches="tight",
+                    facecolor=self._plot_theme.background,
+                )
             return True
         except Exception:
             return False
+        finally:
+            self.figure.set_size_inches(*previous_size, forward=False)
+            if previous_spec is not None:
+                self.render_spec(previous_spec, profile=previous_profile)
 
     def _style_axes(self) -> None:
         self.axes.set_facecolor(self._plot_theme.background)
-        self.axes.set_xlabel(self._xlabel, color="#334155", labelpad=8)
-        self.axes.set_ylabel(self._ylabel, color="#334155", labelpad=8)
-        # Lighten grid: only major grid, reduce opacity
-        self.axes.grid(True, which="major", color=self._plot_theme.grid, linewidth=0.6, alpha=0.35)
+        self.axes.set_xlabel(self._xlabel)
+        self.axes.set_ylabel(self._ylabel)
+        self.axes.grid(bool(rcParams["axes.grid"]), which="major")
         self.axes.grid(False, which="minor")
-        self.axes.tick_params(colors="#475569", labelsize=9)
-        self.axes.spines["top"].set_visible(False)
-        self.axes.spines["right"].set_visible(False)
-        self.axes.spines["left"].set_color("#cbd5e1")
-        self.axes.spines["bottom"].set_color("#cbd5e1")
+        self.axes.spines["top"].set_visible(bool(rcParams["xtick.top"]))
+        self.axes.spines["right"].set_visible(bool(rcParams["ytick.right"]))
+
+    @staticmethod
+    def _finite_series_values(series: CurveSeries) -> tuple[np.ndarray, np.ndarray]:
+        x_arr = np.asarray(list(series.x), dtype=float)
+        y_arr = np.asarray(list(series.y), dtype=float)
+        count = min(x_arr.size, y_arr.size)
+        x_arr = x_arr[:count]
+        y_arr = y_arr[:count]
+        valid = np.isfinite(x_arr) & np.isfinite(y_arr)
+        return x_arr[valid], y_arr[valid]
+
+    def _series_style(
+        self,
+        series: CurveSeries,
+        index: int,
+        profile: PlotProfile,
+    ) -> dict[str, Any]:
+        monochrome = profile is PlotProfile.MONOCHROME
+        publication = profile is not PlotProfile.SCREEN
+        if series.role is SeriesRole.EXPERIMENTAL:
+            return {
+                "color": "0.12" if monochrome else _SCIENCE_COLOR_CYCLE[0],
+                "linewidth": 0.75 if publication else 0.85,
+                "marker": "o",
+                "markersize": 3.0 if publication else 4.0,
+                "markeredgewidth": 0.45 if publication else 0.55,
+                "markeredgecolor": "white",
+                "zorder": 5,
+            }
+        if series.role is SeriesRole.TOTAL_FIT:
+            return {
+                "color": "0.05" if monochrome else _SCIENCE_COLOR_CYCLE[3],
+                "linewidth": 1.3 if publication else 1.7,
+                "marker": None,
+                "linestyle": "-",
+                "zorder": 6,
+            }
+        if series.role is SeriesRole.COMPONENT:
+            return {
+                "color": (
+                    str(min(0.28 + index * 0.12, 0.72))
+                    if monochrome
+                    else (series.color or _COMPONENT_COLORS[index % len(_COMPONENT_COLORS)])
+                ),
+                "linewidth": 0.8 if publication else 0.95,
+                "marker": None,
+                "linestyle": _COMPONENT_LINESTYLES[index % len(_COMPONENT_LINESTYLES)],
+                "alpha": 0.92,
+                "zorder": 3,
+            }
+        if series.role is SeriesRole.RESIDUAL:
+            return {
+                "color": "0.20" if monochrome else _SCIENCE_COLOR_CYCLE[5],
+                "linewidth": 0.8 if publication else 0.95,
+                "marker": "o",
+                "markersize": 2.8 if publication else 3.6,
+                "linestyle": "-",
+                "zorder": 4,
+            }
+        if series.role is SeriesRole.COMPARISON:
+            return {
+                "color": (
+                    str(min(0.15 + index * 0.10, 0.75))
+                    if monochrome
+                    else (series.color or _SCIENCE_COLOR_CYCLE[index % len(_SCIENCE_COLOR_CYCLE)])
+                ),
+                "linewidth": 1.0 if publication else 1.25,
+                "marker": "o",
+                "markersize": 2.8 if publication else 3.6,
+                "linestyle": _COMPARISON_LINESTYLES[index % len(_COMPARISON_LINESTYLES)],
+                "markeredgewidth": 0.65,
+                "markeredgecolor": "white",
+                "zorder": 3,
+            }
+        return {
+            "color": "0.15" if monochrome else (series.color or _SCIENCE_COLOR_CYCLE[0]),
+            "linewidth": 1.0 if publication else 1.4,
+            "marker": "o",
+            "markersize": 3.0 if publication else 4.0,
+            "markeredgewidth": 0.45 if publication else 0.55,
+            "markeredgecolor": "white",
+            "zorder": 4,
+        }
 
     @staticmethod
     def _finite_concat(arrays: Iterable[Iterable[float]]) -> np.ndarray:

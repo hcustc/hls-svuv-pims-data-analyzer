@@ -355,6 +355,9 @@ def test_apply_low_energy_reference_keeps_only_overrides(qapp, monkeypatch):
         species_combo = dialog.energy_parent_table.cellWidget(0, 2)
         assert mz_combo is not None
         assert species_combo is not None
+        assert dialog.energy_parent_table.rowHeight(0) == 32
+        assert mz_combo.height() <= 24
+        assert species_combo.height() <= 24
 
         dialog._set_combo_current_data(mz_combo, 15)
         dialog._on_mz_changed_for_parent_config(0, 8.0)

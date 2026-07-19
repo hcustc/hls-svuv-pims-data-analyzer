@@ -1,0 +1,46 @@
+# BL03U grayscale/print profile. Series remain distinct through line styles.
+# Visual parameters adapt SciencePlots' science style (MIT License):
+# https://github.com/garrettj403/SciencePlots
+text.usetex: False
+axes.unicode_minus: False
+font.family: sans-serif
+mathtext.fontset: dejavusans
+figure.figsize: 3.5, 2.625
+figure.facecolor: white
+axes.facecolor: white
+axes.edgecolor: black
+axes.linewidth: 0.5
+axes.titlesize: 8
+axes.titleweight: normal
+axes.labelsize: 7
+axes.labelcolor: black
+axes.grid: False
+xtick.color: black
+ytick.color: black
+xtick.labelsize: 7
+ytick.labelsize: 7
+xtick.direction: in
+ytick.direction: in
+xtick.top: True
+ytick.right: True
+xtick.minor.visible: True
+ytick.minor.visible: True
+xtick.major.size: 3
+ytick.major.size: 3
+xtick.major.width: 0.5
+ytick.major.width: 0.5
+xtick.minor.size: 1.5
+ytick.minor.size: 1.5
+xtick.minor.width: 0.5
+ytick.minor.width: 0.5
+lines.linewidth: 1.0
+lines.markersize: 3
+legend.fontsize: 7
+legend.frameon: False
+savefig.dpi: 300
+savefig.facecolor: white
+savefig.bbox: tight
+savefig.pad_inches: 0.05
+pdf.fonttype: 42
+ps.fonttype: 42
+svg.fonttype: path

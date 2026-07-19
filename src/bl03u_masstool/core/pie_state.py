@@ -504,8 +504,10 @@ class PieStateManager:
                 # Components (species with contributions)
                 result_entry['components'] = [
                     {
-                        'species_id': sp.get('id'),
+                        'species_id': sp.get('id') or next(iter(sp.get('ids') or []), None),
                         'species': sp.get('species'),
+                        'formula': sp.get('formula'),
+                        'smiles': sp.get('smiles'),
                         'coefficient': float(sp.get('coefficient', 0.0)),
                         'contribution_percent': float(sp.get('contribution_percent', 0.0)),
                         'ionization_energy': float(sp.get('ie', 0.0)) if sp.get('ie') is not None else None,

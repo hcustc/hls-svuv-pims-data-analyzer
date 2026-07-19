@@ -4,6 +4,8 @@ from pathlib import Path
 import runpy
 import sys
 
+from PyInstaller.utils.hooks import collect_all
+
 
 ROOT = Path.cwd().resolve()
 APP_NAME = "BL03U-MassSpectrumTool"
@@ -18,13 +20,15 @@ datas = [
     (str(ROOT / "src" / "bl03u_masstool" / "resources"), "resources"),
     (str(ROOT / "data" / "examples"), "data/examples"),
 ]
+rdkit_datas, rdkit_binaries, rdkit_hiddenimports = collect_all("rdkit")
+datas += rdkit_datas
 
 a = Analysis(
     [str(ROOT / "main.py")],
     pathex=[str(ROOT / "src"), str(ROOT)],
-    binaries=[],
+    binaries=rdkit_binaries,
     datas=datas,
-    hiddenimports=[],
+    hiddenimports=rdkit_hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

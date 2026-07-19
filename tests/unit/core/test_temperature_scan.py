@@ -89,6 +89,21 @@ def test_batch_peak_integration_matches_individual_integration_exactly(method):
     assert batched == individual
 
 
+def test_explicit_integration_method_wins_over_gaussian_preference():
+    y = np.asarray([5.0, 10.0, 5.0])
+    peak = Peak(index=1, time=1.0, mz=1.0, intensity=10.0, fwhm=1.0, left_bound=0, right_bound=2)
+
+    individual = integrate_peak_with_method(
+        y, peak, prefer_gaussian=True, integration_method="baseline"
+    )
+    batched = integrate_peaks_with_method(
+        y, [peak], prefer_gaussian=True, integration_method="baseline"
+    )
+
+    assert individual == (pytest.approx(5.0), "baseline")
+    assert batched == [individual]
+
+
 def test_temperature_filename_replicates_can_average_or_sum(tmp_path):
     peak_file = tmp_path / "peaks.csv"
     peak_file.write_text("mz,peak,start,end\n22,22,21,23\n", encoding="utf-8")
@@ -257,7 +272,7 @@ def test_temperature_can_use_baseline_corrected_integration(tmp_path):
         tmp_path,
         calibration=Calibration(a=0, b=1, c=0),
         manual_peak_path=peak_file,
-        prefer_gaussian=False,
+        prefer_gaussian=True,
         integration_method="baseline",
         photon_normalize=False,
     )

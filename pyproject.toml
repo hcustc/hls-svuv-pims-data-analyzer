@@ -20,6 +20,7 @@ dependencies = [
     "pyqtgraph",
     "PyWavelets",
     "PyYAML",
+    "rdkit",
     "requests",
     "scikit-learn",
     "scipy",
@@ -60,6 +61,7 @@ namespaces = true
 [tool.setuptools.package-data]
 "bl03u_masstool" = [
     "resources/config/*.yaml",
+    "resources/mplstyles/*.mplstyle",
     "resources/pics/*.csv",
     "resources/pics/*.sql",
 ]

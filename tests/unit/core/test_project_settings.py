@@ -330,6 +330,12 @@ def test_load_project_settings_accepts_legacy_mass_discrimination(tmp_path):
     assert loaded.mass_discrimination == pytest.approx(0.42)
 
 
+def test_normalization_settings_preserve_project_mass_discrimination():
+    settings = ProjectSettings(mass_discrimination=0.42)
+
+    assert settings.to_normalization_settings().mass_discrimination == pytest.approx(0.42)
+
+
 def test_load_project_settings_warns_when_file_missing(tmp_path, caplog):
     missing_path = tmp_path / "missing-project.yaml"
 

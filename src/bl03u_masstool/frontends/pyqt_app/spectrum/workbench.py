@@ -178,6 +178,7 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         self.peakProjectStateLabel.setObjectName("ProjectHint")
         self.peakProjectStateLabel.setWordWrap(True)
         self.peakProjectStateLabel.setMinimumHeight(22)
+        self._add_peak_data_menu_controls()
         self._add_peak_project_controls()
         self._add_peak_navigation_controls()
         self._refresh_peak_table_project_state()
@@ -277,6 +278,9 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
             table.verticalHeader().setDefaultSectionSize(24)
             table.setWordWrap(False)
         self.peakData.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.peakData.setHorizontalHeaderLabels(
+            ["物种", "TOF", "m/z", "强度", "左边界", "右边界"]
+        )
 
         self.peakData.setAccessibleName("卡峰范围表")
         self.region.setAccessibleName("质谱定标点表")
@@ -288,6 +292,35 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
     def _take_all_items(self, layout):
         while layout.count():
             layout.takeAt(0)
+
+    def _command_menu_button(self, text: str, parent: QtWidgets.QWidget):
+        button = QtWidgets.QToolButton(parent)
+        button.setObjectName("CommandMenuButton")
+        button.setText(text)
+        button.setPopupMode(QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup)
+        button.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextOnly)
+        button.setFixedHeight(30)
+        return button
+
+    def _add_peak_data_menu_controls(self):
+        """Keep infrequent file/data commands out of the primary search row."""
+        for button in (self.savePeakdata, self.clearPeaksButton):
+            self.horizontalLayout_4.removeWidget(button)
+            button.hide()
+
+        self.peakDataMenuButton = self._command_menu_button("数据操作", self.widget_3)
+        self.peakDataMenuButton.setToolTip("导出或清空当前卡峰数据")
+        data_menu = QMenu(self.peakDataMenuButton)
+        self.exportPeakDataAction = data_menu.addAction("导出卡峰范围…")
+        self.clearPeakDataAction = data_menu.addAction("清空峰值数据")
+        self.exportPeakDataAction.triggered.connect(self.savePeakdata.click)
+        self.clearPeakDataAction.triggered.connect(self.clearPeaksButton.click)
+        self.peakDataMenuButton.setMenu(data_menu)
+        self.peakDataMenuButton.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        self.horizontalLayout_4.addWidget(self.peakDataMenuButton)
 
     def _add_peak_navigation_controls(self):
         self.peakNavigationPanel = QtWidgets.QWidget(self.widget_3)
@@ -306,13 +339,20 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         self.addPeak.setToolTip("根据当前框选区域添加一个峰，并按 m/z 插入表格")
         self.updatePeakRangeButton.setToolTip("根据当前框选区域重算当前峰，并写回卡峰范围")
 
+        self.peakEditMenuButton = self._command_menu_button("编辑峰", self.peakNavigationPanel)
+        self.peakEditMenuButton.setToolTip("修改或删除当前卡峰范围")
+        edit_menu = QMenu(self.peakEditMenuButton)
+        self.updatePeakRangeAction = edit_menu.addAction("用框选区域更新当前峰")
+        self.deleteSelectedPeakAction = edit_menu.addAction("删除选中的峰")
+        self.updatePeakRangeAction.triggered.connect(self.updatePeakRangeButton.click)
+        self.deleteSelectedPeakAction.triggered.connect(self.deleteSelectedPeakButton.click)
+        self.peakEditMenuButton.setMenu(edit_menu)
+
         self.horizontalLayout_4.removeWidget(self.addPeak)
         for button in (
             self.previousPeakButton,
             self.nextPeakButton,
             self.addPeak,
-            self.deleteSelectedPeakButton,
-            self.updatePeakRangeButton,
         ):
             button.setMinimumWidth(0)
             button.setSizePolicy(
@@ -322,12 +362,20 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
             button.setFixedHeight(28)
         for button in (self.previousPeakButton, self.nextPeakButton):
             button.setObjectName("BrowseButton")
+        for button in (self.deleteSelectedPeakButton, self.updatePeakRangeButton):
+            button.setParent(self.peakNavigationPanel)
+            button.hide()
 
-        navigation_layout.addWidget(self.previousPeakButton)
-        navigation_layout.addWidget(self.nextPeakButton)
-        navigation_layout.addWidget(self.addPeak)
-        navigation_layout.addWidget(self.deleteSelectedPeakButton)
-        navigation_layout.addWidget(self.updatePeakRangeButton)
+        self.peakEditMenuButton.setMinimumWidth(72)
+        self.peakEditMenuButton.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+
+        navigation_layout.addWidget(self.previousPeakButton, 1)
+        navigation_layout.addWidget(self.nextPeakButton, 1)
+        navigation_layout.addWidget(self.addPeak, 1)
+        navigation_layout.addWidget(self.peakEditMenuButton, 1)
         self.verticalLayout.insertWidget(2, self.peakNavigationPanel)
 
         self.previousPeakButton.clicked.connect(self.select_previous_peak)
@@ -345,16 +393,24 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         project_action_layout.setContentsMargins(0, 0, 0, 0)
         project_action_layout.setSpacing(4)
         for button in (self.openProjectPeaksButton, self.publishProjectPeaksButton):
-            button.setMinimumWidth(0)
-            button.setSizePolicy(
-                QtWidgets.QSizePolicy.Policy.Expanding,
-                QtWidgets.QSizePolicy.Policy.Fixed,
-            )
-            button.setFixedHeight(28)
-            project_action_layout.addWidget(button)
-        self.verticalLayout.insertWidget(2, self.peakProjectActionPanel)
+            button.setParent(self.peakProjectActionPanel)
+            button.hide()
+
+        self.peakProjectMenuButton = self._command_menu_button(
+            "项目操作", self.peakProjectActionPanel
+        )
+        self.peakProjectMenuButton.setToolTip("打开或保存项目卡峰范围")
+        project_menu = QMenu(self.peakProjectMenuButton)
+        self.openProjectPeaksAction = project_menu.addAction("打开项目卡峰范围…")
+        self.publishProjectPeaksAction = project_menu.addAction("保存当前范围到项目")
+        self.openProjectPeaksAction.triggered.connect(self.openProjectPeaksButton.click)
+        self.publishProjectPeaksAction.triggered.connect(self.publishProjectPeaksButton.click)
+        self.peakProjectMenuButton.setMenu(project_menu)
+
         if hasattr(self, "peakProjectStateLabel"):
-            self.verticalLayout.insertWidget(3, self.peakProjectStateLabel)
+            project_action_layout.addWidget(self.peakProjectStateLabel, 1)
+        project_action_layout.addWidget(self.peakProjectMenuButton, 0)
+        self.verticalLayout.insertWidget(2, self.peakProjectActionPanel)
 
     def _rebuild_top_controls(self):
         self.widget.setObjectName("ControlBar")
@@ -597,8 +653,7 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         toolbar_body_layout.addWidget(tool_panel)
 
         for edit in (self.lineEdit_4, self.lineEdit_5, self.lineEdit_6, self.lineEdit_2, self.lineEdit_3):
-            edit.setMinimumHeight(26)
-            edit.setMaximumHeight(28)
+            edit.setFixedHeight(30)
         self.lineEdit_4.setMinimumWidth(180)
         self.lineEdit_5.setMinimumWidth(120)
         self.lineEdit_6.setMinimumWidth(120)
@@ -608,7 +663,7 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         self.lineEdit_3.setMaximumWidth(150)
         for button in (self.toolButton, self.toolButton_2):
             button.setObjectName("ArrowButton")
-            button.setFixedSize(32, 28)
+            button.setFixedSize(32, 30)
         self.horizontalLayout_17.addWidget(toolbar_body, stretch=1)
 
     def _default_spectrum_source_scope(self) -> str:
@@ -902,6 +957,7 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         self.horizontalLayout_4.setSpacing(4)
         self.savePeakdata.setText("导出")
         self.pushButton_4.setText("自动寻峰")
+        self.pushButton_4.setObjectName("PrimaryButton")
         self.peakDetectionPreset = QtWidgets.QComboBox(self.widget_3)
         self.peakDetectionPreset.setObjectName("PeakDetectionPreset")
         self.peakDetectionPreset.addItem("项目设置", "project")
@@ -920,13 +976,13 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
                 QtWidgets.QSizePolicy.Policy.Expanding,
                 QtWidgets.QSizePolicy.Policy.Fixed,
             )
-            button.setFixedHeight(28)
+            button.setFixedHeight(30)
         self.peakDetectionPreset.setMinimumWidth(86)
         self.peakDetectionPreset.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Fixed,
         )
-        self.peakDetectionPreset.setFixedHeight(28)
+        self.peakDetectionPreset.setFixedHeight(30)
         self.verticalLayout.addLayout(self.horizontalLayout_4)
         self._add_peak_project_controls()
         self.verticalLayout_3.setContentsMargins(0, 0, 0, 0)
@@ -1541,6 +1597,9 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         button = getattr(self, "publishProjectPeaksButton", None)
         if button is not None:
             button.setEnabled(self._valid_peak_rows() != [])
+        action = getattr(self, "publishProjectPeaksAction", None)
+        if action is not None:
+            action.setEnabled(self._valid_peak_rows() != [])
 
     def update_peak_navigation_state(self):
         if not hasattr(self, "previousPeakButton"):
@@ -1555,15 +1614,21 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
             bool(rows) if not has_current else any(row > current for row in rows)
         )
         if hasattr(self, "deleteSelectedPeakButton"):
-            self.deleteSelectedPeakButton.setEnabled(
-                any(self._peak_row_values(row) is not None for row in self._selected_peak_rows())
+            can_delete = any(
+                self._peak_row_values(row) is not None for row in self._selected_peak_rows()
             )
+            self.deleteSelectedPeakButton.setEnabled(can_delete)
+            if hasattr(self, "deleteSelectedPeakAction"):
+                self.deleteSelectedPeakAction.setEnabled(can_delete)
         self._refresh_peak_table_project_state()
-        self.updatePeakRangeButton.setEnabled(
+        can_update = (
             has_current
             and self.selection_region is not None
             and self.current_plot_y.size > 0
         )
+        self.updatePeakRangeButton.setEnabled(can_update)
+        if hasattr(self, "updatePeakRangeAction"):
+            self.updatePeakRangeAction.setEnabled(can_update)
 
     def _select_peak_row(self, row: int) -> None:
         if row < 0 or row >= self.peakData.rowCount():
@@ -2623,7 +2688,7 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
             table.setRowCount(len(peaks))
 
             # 设置表格的列标题
-            headers = ["Species", "飞行时间", "质量数 (m/z)", "强度", "左边界", "右边界"]
+            headers = ["物种", "TOF", "m/z", "强度", "左边界", "右边界"]
             table.setHorizontalHeaderLabels(headers)
 
             sorted_peaks = sorted(peaks, key=lambda peak: (float(peak.mz), float(peak.time)))

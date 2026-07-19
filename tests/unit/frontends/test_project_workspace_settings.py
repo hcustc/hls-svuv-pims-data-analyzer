@@ -452,6 +452,11 @@ def test_temperature_page_owns_analysis_switches(qapp, tmp_path):
     settings = NormalizationSettings(light_source="beam_current", expansion_factors={})
     widget = TemperatureScanDialog(Calibration(), settings)
     try:
+        assert widget._sidebar.isHidden()
+        assert widget.curve_stats.isHidden()
+        assert widget.preview_data_button.isHidden()
+        assert widget.export_button.isHidden()
+        assert widget.export_plot_button.isHidden()
         ps = ProjectSettings(
             temperature_scan_folder=str(scan_dir),
             temperature_photon_normalize=False,
@@ -632,15 +637,36 @@ def test_temperature_selected_mz_updates_multi_energy_plot_and_interval_card(qap
             {"energy": 8.7, "folder": "/tmp/8.7eV", "folder_label": "8.7eV", "curves": {70: curve(70, "intermediate", "中间体(先升后降低)", [1, 3, 1])}},
             {"energy": 9.0, "folder": "/tmp/9eV", "folder_label": "9eV", "curves": {70: curve(70, "unclassified", "暂未区分", [1, 1, 1])}},
         ]
+        widget.result_df = pd.concat(
+            [item["curves"][70]["rows"] for item in widget.energy_results],
+            ignore_index=True,
+        )
         widget.curves = widget._build_display_curves()
         widget.populate_mz_list()
 
         assert widget.current_mz == 70
+        assert not widget._sidebar.isHidden()
+        assert not widget.curve_stats.isHidden()
+        assert not widget.sidebar_toggle_btn.isHidden()
+        assert not widget.export_button.isHidden()
+        assert widget.export_plot_button.isHidden()
+        assert widget.export_result_action.isEnabled()
+        assert widget.export_plot_action.isEnabled()
         assert "8.00-8.70 eV" in widget.current_interval_label.text()
         assert widget.energy_interval_table.rowCount() == 3
         assert widget.energy_interval_table.item(0, 2).text() == "是"
         assert widget.energy_interval_table.item(2, 2).text() == "否"
         assert "各能量" in widget.plot_widget.axes.get_title()
+        assert [line.get_color() for line in widget.plot_widget.axes.lines[:3]] == [
+            "#0C5DA5",
+            "#00B945",
+            "#FF9500",
+        ]
+        assert [line.get_linestyle() for line in widget.plot_widget.axes.lines[:3]] == [
+            "-",
+            "--",
+            "-.",
+        ]
     finally:
         widget.deleteLater()
 
@@ -816,9 +842,19 @@ def test_temperature_multi_folder_analysis_reuses_curves_and_preserves_order(qap
             return result
 
         widget._analyze_temperature_folder_with_params = fake_analyze
-        output = widget._analyze_temperature_folders_with_params(folders, {})
+        progress_updates = []
+        output = widget._analyze_temperature_folders_with_params(
+            folders,
+            {},
+            progress_callback=lambda value, message: progress_updates.append((value, message)),
+        )
 
         assert analysis_order == [8.0, 9.0, 10.0]
+        assert progress_updates[0] == (10, "正在处理 8.0eV（1/3）")
+        assert progress_updates[-1] == (86, "正在汇总不同能量的温度曲线…")
+        assert [value for value, _message in progress_updates] == sorted(
+            value for value, _message in progress_updates
+        )
         assert [item["energy"] for item in output["energy_results"]] == [8.0, 9.0, 10.0]
         assert [item["folder_label"] for item in output["energy_results"]] == [
             "8.0eV",
@@ -1321,7 +1357,7 @@ def test_open_project_restores_data_sources_and_applies_to_tools(qapp, tmp_path,
         assert window.temperature_page.calibration.a == pytest.approx(9.1e-7)
         assert window.pie_page.project_settings.pie_scan_folder == str(pie_folder)
         assert window.pie_page.pie_source_scope == "project"
-        assert window.pie_page.project_source_button.text() == "项目管理"
+        assert window.pie_page.project_source_button.text() == "项目数据"
         assert window.pie_page.temporary_source_button.text() == "临时数据"
         assert not window.pie_page.select_folder_button.isHidden()
         assert window.pie_page.select_folder_button.text() == "管理能段..."
@@ -1852,6 +1888,44 @@ def test_workbench_peak_detection_preset_is_temporary(qapp, tmp_path):
         assert saved.prominence_ratio == pytest.approx(0.005)
     finally:
         window.project_settings_manager.clear_project_path()
+        window.deleteLater()
+
+
+def test_workbench_peak_commands_use_compact_action_menus(qapp):
+    window = MainWindow()
+    try:
+        assert window.savePeakdata.isHidden()
+        assert window.clearPeaksButton.isHidden()
+        assert window.deleteSelectedPeakButton.isHidden()
+        assert window.updatePeakRangeButton.isHidden()
+        assert window.openProjectPeaksButton.isHidden()
+        assert window.publishProjectPeaksButton.isHidden()
+
+        assert window.peakDataMenuButton.menu() is not None
+        assert [action.text() for action in window.peakDataMenuButton.menu().actions()] == [
+            "导出卡峰范围…",
+            "清空峰值数据",
+        ]
+        assert window.peakNavigationPanel.layout().count() == 4
+        assert [
+            window.peakNavigationPanel.layout().itemAt(index).widget().text()
+            for index in range(window.peakNavigationPanel.layout().count())
+        ] == ["上一峰", "下一峰", "添加峰", "编辑峰"]
+        assert [action.text() for action in window.peakEditMenuButton.menu().actions()] == [
+            "用框选区域更新当前峰",
+            "删除选中的峰",
+        ]
+        assert window.peakProjectActionPanel.layout().count() == 2
+        assert window.peakProjectActionPanel.layout().itemAt(0).widget() is window.peakProjectStateLabel
+        assert window.peakProjectActionPanel.layout().itemAt(1).widget() is window.peakProjectMenuButton
+        assert [
+            window.peakData.horizontalHeaderItem(column).text()
+            for column in range(window.peakData.columnCount())
+        ] == ["物种", "TOF", "m/z", "强度", "左边界", "右边界"]
+        assert not window.publishProjectPeaksAction.isEnabled()
+        assert not window.updatePeakRangeAction.isEnabled()
+        assert not window.deleteSelectedPeakAction.isEnabled()
+    finally:
         window.deleteLater()
 
 
@@ -2390,6 +2464,67 @@ def test_import_finished_registers_data_source_and_refreshes_tools(qapp, tmp_pat
         assert window.project_temperature_folder_edit.text() == str(imported_dir)
         assert window.temperature_page.project_settings.temperature_scan_folder == str(imported_dir)
         assert window.datasource_row_status_labels["temperature_scan"].text().startswith("✓")
+    finally:
+        window.project_settings_manager.clear_project_path()
+        window.deleteLater()
+
+
+def test_import_finished_appends_pie_segment_without_overwriting_existing(qapp, tmp_path):
+    project_dir = tmp_path / "Project_Multi_PIE"
+    low = project_dir / "raw_data" / "pie_scan" / "low"
+    high = project_dir / "raw_data" / "pie_scan" / "high"
+    low.mkdir(parents=True)
+    high.mkdir(parents=True)
+    ps = ProjectSettings(
+        project_name="Multi PIE",
+        output_dir=str(project_dir),
+        pie_scan_folder=str(low),
+        pie_scan_folders=[str(low)],
+    )
+    save_project_settings(ps, project_dir / "config" / "project.yaml")
+
+    window = MainWindow()
+    try:
+        window.project_settings_manager.set_project_path(project_dir)
+        window.project_settings_manager.set(ps)
+        window._read_project_settings_to_ui(ps)
+
+        window._on_import_finished(
+            {
+                "success": True,
+                "field_name": "pie_scan_folder",
+                "destination": str(high),
+                "label": "PIE 能段目录",
+                "source_key": "pie_scan",
+            }
+        )
+
+        saved = load_project_settings(project_dir / "config" / "project.yaml")
+        assert saved.pie_scan_folders == [str(low), str(high)]
+        assert saved.pie_multi_folder_mode is True
+    finally:
+        window.project_settings_manager.clear_project_path()
+        window.deleteLater()
+
+
+def test_project_settings_autosave_failure_is_visible(qapp, tmp_path, monkeypatch, caplog):
+    window = MainWindow()
+    try:
+        window.project_settings_manager.set_project_path(tmp_path / "project.yaml")
+        monkeypatch.setattr(
+            window.project_settings_manager,
+            "save",
+            lambda: (_ for _ in ()).throw(OSError("disk full")),
+        )
+
+        with caplog.at_level("ERROR"):
+            window._sync_project_page_edits_to_runtime(
+                save_project=True,
+                sync_tools=False,
+            )
+
+        assert "自动保存失败" in window.statusbar.currentMessage()
+        assert "Failed to save project settings" in caplog.text
     finally:
         window.project_settings_manager.clear_project_path()
         window.deleteLater()

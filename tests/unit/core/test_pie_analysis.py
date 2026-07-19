@@ -28,6 +28,7 @@ from bl03u_masstool.core import peak_detection as peak_detection_module
 from bl03u_masstool.core.peak_detection import GaussianFit, Peak, detect_peaks_ensemble, detect_peaks_in_range, detect_peaks_prominence
 from bl03u_masstool.core.peak_ranges import load_peak_ranges
 from bl03u_masstool.core.pie_analysis import (
+    analyze_multiple_pie_folders,
     analyze_pie_folder,
     build_pie_curves,
     discover_pie_segment_folders,
@@ -106,6 +107,16 @@ def test_discover_pie_segment_folders_keeps_energy_subdirectories_as_one_source(
         energy_folder.mkdir()
         (energy_folder / "spectrum-a.txt").write_text("spectrum", encoding="utf-8")
         (energy_folder / "spectrum-b.txt").write_text("spectrum", encoding="utf-8")
+
+    assert discover_pie_segment_folders(tmp_path) == [tmp_path]
+
+
+def test_discover_pie_segment_folders_ignores_empty_candidates(tmp_path):
+    populated = tmp_path / "PIE_populated"
+    empty = tmp_path / "PIE_empty"
+    populated.mkdir()
+    empty.mkdir()
+    (populated / "9.0eV.txt").write_text("spectrum", encoding="utf-8")
 
     assert discover_pie_segment_folders(tmp_path) == [tmp_path]
 
@@ -307,6 +318,98 @@ peaks:
     assert summed.iloc[0]["integration_method"] == "sum_counts"
     assert baseline.iloc[0]["raw_area"] == 5.0
     assert baseline.iloc[0]["integration_method"] == "baseline"
+
+
+def test_explicit_pie_integration_method_wins_over_gaussian_preference(tmp_path):
+    peak_file = tmp_path / "peaks.yaml"
+    peak_file.write_text(
+        "peaks:\n  - mz: 22\n    peak: 22\n    start: 21\n    end: 23\n",
+        encoding="utf-8",
+    )
+    y = [0.0] * 50
+    y[21:24] = [5.0, 10.0, 5.0]
+    header = [
+        "Energy:12.0 eV", "IO:10 nA", "Beam Current:1mA",
+        "Undulator Offset:0mm", "Time:1 s", "Burner Position:0 mm",
+        "Temperature:300 C", "DIFF PRESSURE:1Pa", "ION PRESSURE:1Pa",
+        "TOF PRESSURE:1Pa",
+    ]
+    (tmp_path / "spectrum.txt").write_text(
+        "\n".join(header + [str(value) for value in y]), encoding="utf-8"
+    )
+
+    result = analyze_pie_folder(
+        tmp_path,
+        calibration=Calibration(a=0, b=1, c=0),
+        recursive=False,
+        manual_peak_path=peak_file,
+        prefer_gaussian=True,
+        integration_method="baseline",
+        photon_normalize=False,
+    )
+
+    assert result.iloc[0]["integration_method"] == "baseline"
+    assert result.iloc[0]["raw_area"] == pytest.approx(5.0)
+
+
+def test_analyze_multiple_pie_folders_merges_energy_segments(tmp_path):
+    peak_file = tmp_path / "peaks.yaml"
+    peak_file.write_text(
+        "peaks:\n  - mz: 22\n    peak: 22\n    start: 21\n    end: 23\n",
+        encoding="utf-8",
+    )
+    low = tmp_path / "low"
+    high = tmp_path / "high"
+    low.mkdir()
+    high.mkdir()
+
+    def write_spectrum(folder, energy, intensity):
+        y = [0.0] * 50
+        y[22] = intensity
+        header = [
+            f"Energy:{energy} eV", "IO:10 nA", "Beam Current:1mA",
+            "Undulator Offset:0mm", "Time:1 s", "Burner Position:0 mm",
+            "Temperature:300 C", "DIFF PRESSURE:1Pa", "ION PRESSURE:1Pa",
+            "TOF PRESSURE:1Pa",
+        ]
+        (folder / f"{energy:.1f}eV.txt").write_text(
+            "\n".join(header + [str(value) for value in y]), encoding="utf-8"
+        )
+
+    write_spectrum(low, 9.0, 10.0)
+    write_spectrum(low, 10.0, 20.0)
+    write_spectrum(high, 10.0, 2.0)
+    write_spectrum(high, 11.0, 3.0)
+
+    shared_options = {
+        "calibration": Calibration(a=0, b=1, c=0),
+        "recursive": False,
+        "manual_peak_path": peak_file,
+        "prefer_gaussian": False,
+        "integration_method": "sum_counts",
+        "photon_normalize": False,
+    }
+    single_result = analyze_pie_folder(low, **shared_options)
+    single_via_multi = analyze_multiple_pie_folders(
+        [low], merge_method="low_energy_dominant", **shared_options
+    )
+    common_columns = list(single_result.columns)
+    pd.testing.assert_frame_equal(
+        single_result.reset_index(drop=True),
+        single_via_multi[common_columns].reset_index(drop=True),
+        check_dtype=False,
+    )
+
+    result = analyze_multiple_pie_folders(
+        [low, high],
+        merge_method="low_energy_dominant",
+        **shared_options,
+    ).set_index("energy")
+
+    assert list(result.index) == [9.0, 10.0, 11.0]
+    assert result.loc[9.0, "normalized_intensity"] == pytest.approx(10.0)
+    assert result.loc[10.0, "normalized_intensity"] == pytest.approx(20.0)
+    assert result.loc[11.0, "normalized_intensity"] == pytest.approx(30.0)
 
 
 def test_pie_filename_replicates_ignore_small_energy_drift(tmp_path):
@@ -572,3 +675,37 @@ def test_merge_pie_segments_scales_high_energy_segment_from_overlap_ratio():
     assert merged.loc[10.0, "normalized_intensity"] == pytest.approx(30.0)
     assert merged.loc[11.0, "normalized_intensity"] == pytest.approx(40.0)
     assert merged.loc[12.0, "normalized_intensity"] == pytest.approx(50.0)
+
+
+@pytest.mark.parametrize(
+    ("merge_method", "expected_overlap"),
+    [("mean", 11.0), ("first_segment_dominant", 2.0)],
+)
+def test_merge_pie_segments_supports_remaining_merge_modes(merge_method, expected_overlap):
+    def segment(energies, intensities):
+        return pd.DataFrame(
+            {
+                "energy": energies,
+                "mz_rounded": [30] * len(energies),
+                "normalized_intensity": intensities,
+                "raw_area": intensities,
+                "photon_normalized_intensity": intensities,
+                "integration_method": ["sum_counts"] * len(energies),
+                "mz": [30.0] * len(energies),
+                "species": [""] * len(energies),
+                "file_count": [1] * len(energies),
+                "io": [1.0] * len(energies),
+                "light_source": ["io"] * len(energies),
+                "left_bound": [29] * len(energies),
+                "right_bound": [31] * len(energies),
+            }
+        )
+
+    first = segment([9.0, 10.0, 11.0], [2.0, 3.0, 4.0])
+    lower_energy = segment([8.0, 9.0, 10.0], [10.0, 20.0, 30.0])
+
+    merged = merge_pie_segments(
+        [first, lower_energy], merge_method=merge_method
+    ).set_index("energy")
+
+    assert merged.loc[9.0, "normalized_intensity"] == pytest.approx(expected_overlap)

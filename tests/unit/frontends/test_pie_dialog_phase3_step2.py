@@ -526,6 +526,52 @@ class TestDirtyFlagManagement:
         assert error is None
         assert pie_dialog.pie_state_dirty is False
 
+    def test_persist_interface_writes_current_fit_results(
+        self, pie_dialog, project_settings, sample_curves, sample_database
+    ):
+        pie_dialog.project_settings = project_settings
+        pie_dialog.project_dir = str(project_root(project_settings))
+        pie_dialog.curves = sample_curves
+        pie_dialog.database = sample_database
+        pie_dialog.per_mz_config[46] = {
+            "selected_species": [{"id": 1, "species": "NO"}],
+            "coefficients": {1: 0.75},
+            "locked_ids": [],
+        }
+        config_hash = pie_dialog._get_per_mz_config_hash(46)
+        pie_dialog.all_fit_results[46] = {
+            "success": True,
+            "model": {
+                "r_squared": 0.98,
+                "rmse": 0.02,
+                "mae": 0.01,
+                "species": [
+                    {
+                        "id": 1,
+                        "species": "NO",
+                        "coefficient": 0.75,
+                        "contribution_percent": 100.0,
+                        "ie": 9.26,
+                    }
+                ],
+                "fitted_curve": [100.0, 200.0, 150.0, 50.0],
+                "component_curves": [[100.0], [200.0], [150.0], [50.0]],
+            },
+            "fit_config_hash": config_hash,
+            "global_config_hash": pie_dialog.global_solver_config["config_hash"],
+        }
+        pie_dialog.pie_state_dirty = True
+
+        success, error = pie_dialog.persist_pie_project_state()
+        assert success, error
+
+        state = PieStateManager(pie_dialog.project_dir).load_state(
+            sample_curves, sample_database, pie_dialog.calibration
+        )
+        assert state["results"]["46"]["metrics"]["r_squared"] == pytest.approx(0.98)
+        arrays = PieStateManager(pie_dialog.project_dir).load_mz_arrays(46)
+        assert arrays["total_fit"].tolist() == [100.0, 200.0, 150.0, 50.0]
+
     def test_persist_interface_returns_failure_on_error(
         self, pie_dialog, project_settings, sample_curves, sample_database
     ):

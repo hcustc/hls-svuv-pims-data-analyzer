@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 
 from .calibration import Calibration
-from .integration import integrate_peaks_with_method
+from .integration import integrate_peaks_with_method, resolve_integration_method
 from .normalization import extract_light_intensity
 from .peak_ranges import load_peak_ranges, peak_ranges_to_peaks
 from .peak_detection import detect_peaks_by_algorithm
@@ -104,12 +104,10 @@ def _summarize_integration_methods(values) -> str:
 
 
 def _normalize_integration_method(value: str | None, *, prefer_gaussian: bool | None = None) -> str:
-    if prefer_gaussian:
-        return "gaussian"
-    method = str(value or "").strip()
-    if method in {"sum_counts", "baseline", "gaussian"}:
-        return method
-    return "sum_counts"
+    return resolve_integration_method(
+        value,
+        prefer_gaussian=bool(prefer_gaussian),
+    )
 
 
 def analyze_temperature_folder(
@@ -120,7 +118,7 @@ def analyze_temperature_folder(
     threshold_end: float = 2,
     min_intensity: float = 3,
     prefer_gaussian: bool = True,
-    integration_method: str = "sum_counts",
+    integration_method: str | None = None,
     reference_mode: str = "sum",
     detection_min_idx: int = 3000,
     nearby_peak_window: int = 30,
@@ -596,7 +594,7 @@ def compute_kr_expansion_factors(
     threshold_end: float = 2,
     min_intensity: float = 3,
     prefer_gaussian: bool = True,
-    integration_method: str = "sum_counts",
+    integration_method: str | None = None,
     reference_mode: str = "sum",
     detection_min_idx: int = 3000,
     nearby_peak_window: int = 30,

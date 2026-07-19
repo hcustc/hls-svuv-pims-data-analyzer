@@ -24,6 +24,7 @@ except ImportError as e:
 pytestmark = pytest.mark.gui
 
 from bl03u_masstool.frontends.pyqt_app.pie.fitting_control_widget import FittingControlWidget
+from bl03u_masstool.frontends.pyqt_app.theme import apply_application_theme
 
 
 @pytest.fixture
@@ -240,3 +241,25 @@ def test_manual_coefficient_mode_and_preview_guard_confirmation(widget):
 
     widget.show_fit_result(model, "COMPLETED")
     assert widget.confirm_btn.isEnabled()
+
+
+def test_candidate_table_editor_stays_inside_row_at_narrow_width(widget, qapp):
+    apply_application_theme(qapp)
+    widget.resize(420, 760)
+    widget.populate_unified_species_table(
+        15,
+        [{"id": 1, "mz": 15, "species": "Methyl radical", "ie": 9.839}],
+        [],
+    )
+    widget.show()
+    qapp.processEvents()
+
+    table = widget.species_table
+    coefficient = table.cellWidget(0, 3)
+    assert isinstance(coefficient, QtWidgets.QDoubleSpinBox)
+    assert table.horizontalHeaderItem(1).text() == "物种"
+    assert table.rowHeight(0) == 32
+    assert coefficient.height() <= 24
+    assert coefficient.y() >= 0
+    assert coefficient.y() + coefficient.height() <= table.rowHeight(0)
+    assert sum(table.columnWidth(index) for index in (0, 2, 3, 4)) == 264
