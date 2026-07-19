@@ -13,7 +13,7 @@ try:
 except ImportError as e:
     pytest.skip(f"PyQt6 display libraries not available: {e}", allow_module_level=True)
 
-from bl03u_masstool.frontends.pyqt_app.common.widgets import DataFrameTableMixin
+from bl03u_masstool.frontends.pyqt_app.common.widgets import DataFrameTableMixin, ElidedLabel
 
 
 pytestmark = pytest.mark.gui
@@ -31,6 +31,14 @@ class _FailingTable(QtWidgets.QTableWidget):
     def setItem(self, row, column, item):
         del row, column, item
         raise RuntimeError("test insertion failure")
+
+
+def test_elided_label_sets_tooltip_for_initial_text(qapp):
+    label = ElidedLabel("完整参数摘要")
+    try:
+        assert label.toolTip() == "完整参数摘要"
+    finally:
+        label.deleteLater()
 
 
 def test_dataframe_table_restores_widget_state_after_error(qapp):

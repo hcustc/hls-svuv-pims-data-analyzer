@@ -17,4 +17,4 @@ def test_package_version_uses_release_version_source() -> None:
         and isinstance(node.value, ast.Constant)
     )
 
-    assert bl03u_masstool.__version__ == assigned_version == "0.2.3"
+    assert bl03u_masstool.__version__ == assigned_version == "0.2.4"

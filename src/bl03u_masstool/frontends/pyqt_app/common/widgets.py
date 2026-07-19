@@ -4,6 +4,33 @@ import pandas as pd
 from PyQt6 import QtCore, QtGui, QtWidgets
 
 
+class ElidedLabel(QtWidgets.QLabel):
+    """Single-line label that elides long text while preserving it in a tooltip."""
+
+    def __init__(self, text: str = "", parent=None):
+        super().__init__("", parent)
+        self._full_text = ""
+        self.setText(text)
+
+    def setText(self, text: str) -> None:
+        self._full_text = str(text)
+        self.setToolTip(self._full_text)
+        self._update_elided_text()
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._update_elided_text()
+
+    def _update_elided_text(self) -> None:
+        available = max(0, self.contentsRect().width() - 2)
+        visible = self.fontMetrics().elidedText(
+            self._full_text,
+            QtCore.Qt.TextElideMode.ElideRight,
+            available,
+        )
+        super().setText(visible)
+
+
 class StateGlyph(QtWidgets.QWidget):
     """Small painted status glyph that avoids platform-dependent text symbols."""
 
