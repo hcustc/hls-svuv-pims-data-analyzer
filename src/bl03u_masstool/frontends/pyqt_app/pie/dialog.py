@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import asdict
 import hashlib
 import json
@@ -78,6 +79,11 @@ from bl03u_masstool.core.mole_fraction import (
 )
 from bl03u_masstool.frontends.pyqt_app.workers import WorkerThread
 from bl03u_masstool.frontends.pyqt_app.project_artifacts import record_project_artifact
+from bl03u_masstool.frontends.pyqt_app.temporary_analysis_settings import (
+    TEMPORARY_SETTINGS_SOURCES,
+    TemporaryAnalysisSettingsDialog,
+    build_temporary_settings,
+)
 
 from bl03u_masstool.frontends.pyqt_app.common.widgets import (
     AnalysisEmptyState,
@@ -136,7 +142,13 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         super().__init__(parent)
         self.calibration = calibration
         self.normalization_settings = normalization_settings or NormalizationSettings()
+        self._global_calibration = deepcopy(self.calibration)
+        self._global_normalization_settings = deepcopy(self.normalization_settings)
         self.project_settings: ProjectSettings | None = None
+        self.temporary_settings: ProjectSettings | None = None
+        self.temporary_settings_source = "global"
+        self.temporary_settings_modified = False
+        self._temporary_settings_source_explicit = False
         self.project_dir: str | None = None  # Phase 3: Project directory for state persistence
         self.pie_state_dirty = False  # Phase 3 Step 2: dirty flag for unsaved config changes
         self.pie_source_scope = "temporary"
@@ -155,6 +167,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.current_fit: dict | None = None
         self.all_fit_results: dict[int, dict] = {}  # 保存所有拟合结果
         self.worker: WorkerThread | None = None
+        self._analysis_request_id = 0
         self._autoload_worker: WorkerThread | None = None
         self._autoload_cache_token: dict | None = None
         self._autoload_request_id = 0
@@ -307,11 +320,60 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         source_scope_layout.addWidget(self.project_source_button)
         source_scope_layout.addWidget(self.temporary_source_button)
         folder_row.addWidget(source_scope_panel)
+        self.temporary_params_label = QtWidgets.QLabel("当前来源：全局参数副本")
+        self.temporary_params_label.setObjectName("ContextValue")
+        # Non-layout compatibility control.  The visible menu describes source
+        # changes as copy/reset actions so it cannot be mistaken for editing
+        # the project or global configuration itself.
+        self.temporary_params_combo = QtWidgets.QComboBox()
+        for source, label in TEMPORARY_SETTINGS_SOURCES:
+            self.temporary_params_combo.addItem(label, source)
+        self.temporary_params_combo.setCurrentIndex(
+            self.temporary_params_combo.findData(self.temporary_settings_source)
+        )
+        self.temporary_params_combo.hide()
+        self.temporary_params_combo.currentIndexChanged.connect(self._on_temporary_settings_source_changed)
+        self.temporary_params_button = QtWidgets.QPushButton("编辑本次参数…")
+        self.temporary_params_button.setObjectName("BrowseButton")
+        self.temporary_params_button.clicked.connect(self._edit_temporary_settings)
+        self.temporary_params_reload_button = QtWidgets.QToolButton()
+        self.temporary_params_reload_button.setText("重新载入")
+        self.temporary_params_reload_button.setObjectName("CommandMenuButton")
+        self.temporary_params_reload_button.setPopupMode(
+            QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup
+        )
+        self.temporary_params_menu = QtWidgets.QMenu(self.temporary_params_reload_button)
+        self.copy_project_params_action = self.temporary_params_menu.addAction("从当前项目复制")
+        self.copy_global_params_action = self.temporary_params_menu.addAction("从全局配置复制")
+        self.restore_default_params_action = self.temporary_params_menu.addAction("恢复程序默认值")
+        self.copy_project_params_action.triggered.connect(
+            lambda: self._select_temporary_settings_source("project")
+        )
+        self.copy_global_params_action.triggered.connect(
+            lambda: self._select_temporary_settings_source("global")
+        )
+        self.restore_default_params_action.triggered.connect(
+            lambda: self._select_temporary_settings_source("default")
+        )
+        self.temporary_params_reload_button.setMenu(self.temporary_params_menu)
+
+        self.temporary_params_panel = QtWidgets.QGroupBox("临时数据参数")
+        temporary_params_layout = QtWidgets.QHBoxLayout(self.temporary_params_panel)
+        temporary_params_layout.setContentsMargins(10, 8, 10, 8)
+        temporary_params_layout.setSpacing(10)
+        temporary_params_layout.addWidget(self.temporary_params_label)
+        temporary_params_layout.addWidget(self.temporary_params_button)
+        temporary_params_layout.addWidget(self.temporary_params_reload_button)
+        self.temporary_params_hint = QtWidgets.QLabel("仅用于当前临时数据，不会修改项目或全局配置")
+        self.temporary_params_hint.setObjectName("HintLabel")
+        temporary_params_layout.addWidget(self.temporary_params_hint)
+        temporary_params_layout.addStretch(1)
         folder_row.addWidget(self.folder_edit, stretch=1)
         folder_row.addWidget(self.select_folder_button)
         folder_row.addWidget(self.temporary_segments_button)
         folder_row.addWidget(self.analyze_button)
         data_layout.addLayout(folder_row)
+        data_layout.addWidget(self.temporary_params_panel)
 
         analysis_options_row = QtWidgets.QHBoxLayout()
         analysis_options_row.setSpacing(8)
@@ -1966,8 +2028,89 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         return bool(
             self.project_settings.project_name
             or self.project_settings.effective_pie_scan_folders()
+            or self.project_settings.pics_database_path
             or (self.project_settings.output_dir and self.project_settings.output_dir != "output")
         )
+
+    def _ensure_temporary_settings(self) -> ProjectSettings:
+        if self.temporary_settings is None:
+            source = self.temporary_settings_source
+            if source == "project" and self.project_settings is None:
+                source = "global"
+                self.temporary_settings_source = source
+            self.temporary_settings = self._build_temporary_settings_snapshot(source)
+            self.temporary_settings_modified = False
+        return self.temporary_settings
+
+    def _build_temporary_settings_snapshot(self, source: str) -> ProjectSettings:
+        return build_temporary_settings(
+            source,
+            self.project_settings,
+            runtime_calibration=self._global_calibration,
+            runtime_normalization=self._global_normalization_settings,
+        )
+
+    def _effective_analysis_settings(self) -> ProjectSettings:
+        if self._has_project_scope() and self.project_settings is not None:
+            return self.project_settings
+        return self._ensure_temporary_settings()
+
+    def _on_temporary_settings_source_changed(self, _index: int) -> None:
+        if not hasattr(self, "temporary_params_combo"):
+            return
+        source = str(self.temporary_params_combo.currentData() or "default")
+        self._reset_temporary_settings_source(source)
+
+    def _select_temporary_settings_source(self, source: str) -> None:
+        if source == "project" and not self._has_project_context():
+            return
+        blocker = QtCore.QSignalBlocker(self.temporary_params_combo)
+        self.temporary_params_combo.setCurrentIndex(self.temporary_params_combo.findData(source))
+        del blocker
+        self._reset_temporary_settings_source(source)
+
+    def _reset_temporary_settings_source(self, source: str) -> None:
+        if source == "project" and not self._has_project_context():
+            source = "global"
+        self.temporary_settings_source = source
+        self._temporary_settings_source_explicit = True
+        self.temporary_settings = self._build_temporary_settings_snapshot(source)
+        self.temporary_settings_modified = False
+        self._apply_temporary_settings_to_runtime()
+
+    def _edit_temporary_settings(self) -> None:
+        dialog = TemporaryAnalysisSettingsDialog(
+            self._ensure_temporary_settings(),
+            self.temporary_settings_source,
+            self,
+            initial_tab="function",
+        )
+        if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return
+        self.temporary_settings = dialog.settings()
+        self.temporary_settings_modified = True
+        self._apply_temporary_settings_to_runtime()
+
+    def _apply_temporary_settings_to_runtime(self) -> None:
+        if self._has_project_scope():
+            return
+        ps = self._ensure_temporary_settings()
+        self.calibration = ps.to_calibration()
+        self.normalization_settings = ps.to_normalization_settings()
+        self.peak_detection = ps.to_peak_detection_config()
+        database_path = str(resolve_species_database_path(ps.pics_database_path))
+        if database_path != self._loaded_database_path:
+            self.load_database(database_path, show_message=False)
+        self.integration_method_label.setText(
+            f"积分方式: {self._integration_method_label(ps.pie_integration_method)}"
+        )
+        self.photon_correction_check.setChecked(ps.pie_photon_mode != "off")
+        mode = ps.pie_replicate_mode if ps.pie_replicate_mode in {"mean", "sum"} else "off"
+        self.replicate_enabled_check.setChecked(mode != "off")
+        index = self.replicate_mode_combo.findData(mode if mode != "off" else "mean")
+        if index >= 0:
+            self.replicate_mode_combo.setCurrentIndex(index)
+        self._refresh_pie_source_controls()
 
     def _remember_temporary_source(self, _text: str | None = None) -> None:
         if self.pie_source_scope != "temporary":
@@ -2023,6 +2166,9 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         if scope == "project":
             if apply_project and self.project_settings is not None:
                 self._apply_project_pie_source(self.project_settings, reset_state=previous_scope != "project")
+                self.calibration = self.project_settings.to_calibration()
+                self.normalization_settings = self.project_settings.to_normalization_settings()
+                self.peak_detection = self.project_settings.to_peak_detection_config()
         elif previous_scope == "project" and restore_saved:
             self.project_dir = None
             self.per_mz_config = {}
@@ -2031,6 +2177,10 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.current_mz = None
             self.folder_edit.setText(self._temporary_pie_folder)
             self._update_fit_stats(0, 0, None)
+
+        if scope == "temporary":
+            self._ensure_temporary_settings()
+            self._apply_temporary_settings_to_runtime()
 
         self._refresh_pie_source_controls()
         if hasattr(self, "fit_button"):
@@ -2064,6 +2214,34 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         )
         self.select_folder_button.setEnabled(not busy)
         self.select_folder_button.setVisible(True)
+        self.temporary_params_panel.setVisible(not use_project)
+        self.temporary_params_combo.setVisible(False)
+        self.common_params_button.setVisible(use_project)
+        self.temporary_params_button.setEnabled(not busy)
+        self.temporary_params_reload_button.setEnabled(not busy)
+        project_index = self.temporary_params_combo.findData("project")
+        if project_index >= 0:
+            model_item = self.temporary_params_combo.model().item(project_index)
+            if model_item is not None:
+                model_item.setEnabled(self._has_project_context())
+        self.copy_project_params_action.setEnabled(self._has_project_context())
+        source_text = {
+            "project": "项目参数副本",
+            "global": "全局参数副本",
+            "default": "程序默认参数",
+        }.get(self.temporary_settings_source, "程序默认参数")
+        if self.temporary_settings_modified:
+            source_text += " · 已修改"
+        self.temporary_params_label.setText(f"当前来源：{source_text}")
+        self.temporary_params_button.setText("编辑本次参数…")
+        self.temporary_params_button.setToolTip(
+            "打开完整参数编辑器；所有修改仅对当前临时数据会话生效"
+        )
+        self.temporary_params_reload_button.setToolTip("丢弃本次修改，并从指定来源重新创建参数副本")
+        self.common_params_action.setText(
+            "通用分析参数…" if use_project else "编辑本次临时参数…"
+        )
+        self.edit_project_action.setEnabled(self._has_project_context())
         self.temporary_segments_button.setVisible(not use_project)
         self.temporary_segments_button.setEnabled(
             not use_project
@@ -2410,15 +2588,37 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         Also loads per-m/z configurations from the new project's state.
         Clears previous project's in-memory state to prevent data leakage.
         """
+        self._analysis_request_id += 1
         has_project_context = bool(
             ps.project_name
             or ps.effective_pie_scan_folders()
+            or ps.pics_database_path
             or (ps.output_dir and ps.output_dir != "output")
         )
         if activate_project_scope is None:
             activate_project_scope = (self._has_project_scope() or bool(self.project_dir)) and has_project_context
         previous_project_dir = self.project_dir
         self.project_settings = ps
+        if has_project_context and not self._temporary_settings_source_explicit:
+            self.temporary_settings_source = "project"
+            self.temporary_settings = self._build_temporary_settings_snapshot("project")
+            blocker = QtCore.QSignalBlocker(self.temporary_params_combo)
+            self.temporary_params_combo.setCurrentIndex(self.temporary_params_combo.findData("project"))
+            del blocker
+        elif (
+            not has_project_context
+            and activate_project_scope is False
+            and (not self._temporary_settings_source_explicit or self.temporary_settings_source == "project")
+        ):
+            self.temporary_settings_source = "global"
+            self._temporary_settings_source_explicit = False
+            self.temporary_settings_modified = False
+            self.temporary_settings = self._build_temporary_settings_snapshot("global")
+            blocker = QtCore.QSignalBlocker(self.temporary_params_combo)
+            self.temporary_params_combo.setCurrentIndex(self.temporary_params_combo.findData("global"))
+            del blocker
+        elif self.temporary_settings_source == "project" and not self.temporary_settings_modified:
+            self.temporary_settings = self._build_temporary_settings_snapshot("project")
         database_path = resolve_species_database_path(ps.pics_database_path)
         normalized_database_path = str(database_path)
         if normalized_database_path != self._loaded_database_path:
@@ -2431,6 +2631,14 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.set_pie_source_scope("project", restore_saved=False, apply_project=False)
         elif self._has_project_scope() and not has_project_context:
             self.set_pie_source_scope("temporary")
+
+        # Keep PIE preprocessing, cache keys, and saved fit-state fingerprints
+        # on the active project's TOF -> m/z calibration.  Otherwise this page
+        # can retain the global/default Calibration supplied by its constructor.
+        if self._has_project_scope():
+            self.calibration = ps.to_calibration()
+            self.normalization_settings = ps.to_normalization_settings()
+            self.peak_detection = ps.to_peak_detection_config()
 
         if self._has_project_scope():
             new_project_dir = str(project_root(ps))
@@ -2453,6 +2661,8 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         )
         if hasattr(self, "photon_correction_check"):
             self.photon_correction_check.setChecked(ps.pie_photon_mode != "off")
+        if not self._has_project_scope():
+            self._apply_temporary_settings_to_runtime()
         self._refresh_pie_source_controls()
         if self._has_project_scope() and ps.effective_pie_scan_folders() and not self.curves:
             if not self._try_load_project_pie_cache_async():
@@ -2460,6 +2670,8 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         else:
             self._autoload_cache_token = None
         self._update_action_state()
+        if not has_project_context and activate_project_scope is False:
+            self.project_settings = None
 
     def _load_per_mz_configs(self) -> None:
         """Load per-m/z configurations from persistent state (Phase 3 Step 2).
@@ -2734,6 +2946,9 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.pie_state_dirty = True
 
     def open_common_parameters(self):
+        if not self._has_project_scope():
+            self._edit_temporary_settings()
+            return
         self._open_project_settings()
         if self.parent() is not None:
             return
@@ -2742,7 +2957,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.calibration = load_calibration_config()
 
     def _pie_cache_dir(self) -> Path:
-        if self.project_settings is not None and self.project_settings.output_dir:
+        if self._has_project_scope() and self.project_settings is not None and self.project_settings.output_dir:
             return Path(self.project_settings.output_dir) / "analysis" / "pie" / "cache"
         return ensure_output_dir("analysis", "pie") / "cache"
 
@@ -2799,15 +3014,17 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         return fingerprints
 
     def _pie_cache_parameters(self, folders: list[str], merge_method: str | None) -> dict:
-        ps = self.project_settings or ProjectSettings()
-        peak_config = ps.to_peak_detection_config() if self.project_settings else load_peak_detection_config()
+        ps = self._effective_analysis_settings()
+        peak_config = ps.to_peak_detection_config()
+        calibration = ps.to_calibration()
+        normalization = ps.to_normalization_settings()
         photon_mode = "none" if self.photon_correction_check.isChecked() else "off"
         manual_peak_path = (ps.manual_peak_file or None) if self._has_project_scope() else None
         return {
             "calibration": {
-                "a": float(self.calibration.a),
-                "b": float(self.calibration.b),
-                "c": float(self.calibration.c),
+                "a": float(calibration.a),
+                "b": float(calibration.b),
+                "c": float(calibration.c),
             },
             "peak_config": asdict(peak_config),
             "energy_decimals": int(ps.pie_energy_decimals),
@@ -2818,7 +3035,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             "manual_peak": self._path_fingerprint(manual_peak_path),
             "photon_mode": photon_mode,
             "mass_discrimination": 1.0,
-            "light_source": str(self.normalization_settings.light_source),
+            "light_source": str(normalization.light_source),
             "folders": self._pie_folder_fingerprints(
                 folders,
                 recursive=bool(ps.pie_recursive),
@@ -2961,31 +3178,36 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 else "正在生成临时 PIE 曲线..."
             )
 
-        ps = self.project_settings or ProjectSettings()
+        ps = self._effective_analysis_settings()
         energy_decimals = ps.pie_energy_decimals
         recursive = ps.pie_recursive
         integration_method = ps.pie_integration_method
         prefer_gaussian = integration_method == "gaussian"
         ps.pie_prefer_gaussian = prefer_gaussian
         manual_peak_path = (ps.manual_peak_file or None) if self._has_project_scope() else None
-        peak_config = ps.to_peak_detection_config() if self.project_settings else load_peak_detection_config()
+        peak_config = ps.to_peak_detection_config()
         threshold_end = peak_config.threshold_end
         min_intensity = peak_config.min_intensity
-        settings = self.normalization_settings
+        settings = ps.to_normalization_settings()
         photon_mode = "none" if self.photon_correction_check.isChecked() else "off"
         ps.pie_photon_mode = photon_mode
         settings.pie_photon_mode = photon_mode
+        self.normalization_settings.pie_photon_mode = photon_mode
         photon_normalize = photon_mode != "off"
         photon_reference_mode = "none" if photon_mode == "off" else photon_mode
         mass_discrimination = 1.0
         light_source = settings.light_source
+        calibration = ps.to_calibration()
         ps.pie_replicate_mode = self._current_replicate_mode()
         self._save_project_analysis_switches()
         self.set_busy(True, message)
         self._begin_analysis_progress(message)
+        self._analysis_request_id += 1
+        request_id = self._analysis_request_id
         worker = WorkerThread(
             lambda: self.run_pie_analysis_sync(
                 folders,
+                calibration=calibration,
                 merge_method=merge_method,
                 recursive=recursive,
                 energy_decimals=energy_decimals,
@@ -3035,10 +3257,18 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.worker = worker
         if hasattr(worker, "progress"):
             worker.progress.connect(self._on_analysis_progress)
-        worker.finished_with_result.connect(self.on_analysis_complete)
+        worker.finished_with_result.connect(
+            lambda result, token=request_id: self._on_analysis_result(token, result)
+        )
         worker.failed.connect(self.on_analysis_failed)
         worker.finished.connect(lambda: self.set_busy(False, self.status_label.text()))
         worker.start()
+
+    def _on_analysis_result(self, request_id: int, result: object) -> None:
+        """Ignore analysis results from a project that was switched meanwhile."""
+        if request_id != self._analysis_request_id:
+            return
+        self.on_analysis_complete(result)
 
     def _analysis_source_selection(self) -> tuple[list[str], str | None]:
         """Resolve the active source scope without exposing segment mode in this page."""
@@ -3218,6 +3448,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self,
         folders: list[str],
         *,
+        calibration: Calibration | None = None,
         merge_method: str | None = None,
         recursive: bool,
         energy_decimals: int,
@@ -3257,6 +3488,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         progress_callback: Callable[[int, str], None] | None = None,
     ) -> tuple[pd.DataFrame, dict[int, dict], dict[str, object]]:
 
+        analysis_calibration = calibration or self.calibration
         if progress_callback is not None:
             progress_callback(5, "正在检查 PIE 数据源…")
         auto_discovered = False
@@ -3274,7 +3506,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         if merge_method is not None and len(folders) > 1:
             analysis_df = analyze_multiple_pie_folders(
                 folders,
-                calibration=self.calibration,
+                calibration=analysis_calibration,
                 recursive=recursive,
                 energy_decimals=energy_decimals,
                 algorithm=algorithm,
@@ -3312,7 +3544,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         else:
             analysis_df = analyze_pie_folder(
                 folders[0],
-                calibration=self.calibration,
+                calibration=analysis_calibration,
                 recursive=recursive,
                 energy_decimals=energy_decimals,
                 algorithm=algorithm,

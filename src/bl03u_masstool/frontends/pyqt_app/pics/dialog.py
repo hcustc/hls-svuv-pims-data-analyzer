@@ -92,12 +92,23 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self._init_ui()
         self._load_no_cross_sections()
 
-    def set_project_settings(self, ps: ProjectSettings) -> None:
+    def set_project_settings(
+        self,
+        ps: ProjectSettings,
+        *,
+        activate_project_scope: bool = True,
+    ) -> None:
         """Apply ProjectSettings defaults to PICSCalculatorDialog controls."""
-        self.project_settings = ps
+        self.project_settings = ps if activate_project_scope else None
+        if activate_project_scope:
+            self.calibration = ps.to_calibration()
+            self.normalization_settings = ps.to_normalization_settings()
+            self.settings = ps.to_mole_fraction_settings()
+        else:
+            self.settings = load_mole_fraction_settings()
         self._load_database()
-        if ps.pie_scan_folder and hasattr(self, "txt_folder_path"):
-            self.txt_folder_path.setText(ps.pie_scan_folder)
+        if hasattr(self, "txt_folder_path"):
+            self.txt_folder_path.setText(ps.pie_scan_folder if activate_project_scope else "")
         if hasattr(self, "spin_no_mz"):
             self.spin_no_mz.setValue(ps.pics_no_mz)
         if hasattr(self, "txt_no_formula"):
@@ -107,7 +118,12 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
         if hasattr(self, "double_new_mf"):
             self.double_new_mf.setValue(ps.pics_new_species_mf)
         if hasattr(self, "spin_md_exponent"):
-            self.spin_md_exponent.setValue(ps.mf_mass_disc_exponent)
+            exponent = (
+                ps.mf_mass_disc_exponent
+                if activate_project_scope
+                else self.settings.mass_disc_exponent
+            )
+            self.spin_md_exponent.setValue(exponent)
         # 更新摘要栏
         if hasattr(self, "summary_project_label"):
             project_name = ps.project_name or "---"
@@ -518,9 +534,12 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
         species_mz = self.new_species_mz
         no_mz = self.spin_no_mz.value()
-        a, b, c = self.calibration.a, self.calibration.b, self.calibration.c
-        if abs(a) < 1e-10 or abs(b) < 1e-10:
-            a, b, c = 0.0, 0.07, -48.0
+        try:
+            a, b, c = self._calibration_coefficients()
+        except ValueError as exc:
+            self._set_label_status(self.lbl_folder_status, str(exc), "error")
+            self._set_status(str(exc), "error")
+            return
 
         self.btn_browse.setDisabled(True)
         self.btn_load_data.setDisabled(True)
@@ -632,6 +651,15 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
                     pass
         return 200.0
 
+    def _calibration_coefficients(self) -> tuple[float, float, float]:
+        """Return the configured calibration without substituting hidden defaults."""
+        a = float(self.calibration.a)
+        b = float(self.calibration.b)
+        c = float(self.calibration.c)
+        if abs(a) < 1e-20 and abs(b) < 1e-20:
+            raise ValueError("定标参数无效：二次项 a 和一次项 b 不能同时为 0")
+        return a, b, c
+
     def _extract_io_current(self, metadata_lines):
         for line in metadata_lines:
             line = line.strip().lower()
@@ -652,6 +680,9 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.spin_md_exponent.setValue(MASS_DISCRIMINATION_PRESETS[name])
 
     def _load_database(self):
+        self.database = []
+        self.mz_index = {}
+        self._loaded_database_path = ""
         try:
             configured_path = (
                 self.project_settings.pics_database_path

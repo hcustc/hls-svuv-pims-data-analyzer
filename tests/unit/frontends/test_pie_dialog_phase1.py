@@ -123,6 +123,7 @@ def test_project_open_restores_cached_pie_curves_without_reanalysis(qapp, tmp_pa
     writer.project_settings = ps
     writer.project_dir = str(project_root(ps))
     writer.set_pie_source_scope("project", apply_project=False)
+    writer.calibration = ps.to_calibration()
     writer.photon_correction_check.setChecked(ps.pie_photon_mode != "off")
     writer.analysis_df = analysis_df
     cache_key = writer._pie_cache_key([str(raw_dir)], None)
@@ -359,6 +360,44 @@ def test_project_scope_applies_project_source_and_restores_temporary_path(pie_di
     assert not pie_dialog.folder_edit.isReadOnly()
 
 
+def test_pie_project_scope_uses_project_calibration(pie_dialog, tmp_path):
+    project_calibration = Calibration(a=7.65e-7, b=3.21e-4, c=0.654)
+    project_folder = tmp_path / "project_pie"
+    project_folder.mkdir()
+    ps = ProjectSettings(
+        project_name="Calibrated PIE",
+        output_dir=str(tmp_path / "project"),
+        pie_scan_folder=str(project_folder),
+        cal_a=project_calibration.a,
+        cal_b=project_calibration.b,
+        cal_c=project_calibration.c,
+        light_source="beam_current",
+        expansion_factors={450.0: 1.1},
+    )
+
+    pie_dialog.set_project_settings(ps, activate_project_scope=True)
+
+    assert pie_dialog.calibration == project_calibration
+    assert pie_dialog.normalization_settings.light_source == "beam_current"
+    assert pie_dialog.normalization_settings.expansion_factors == {450.0: 1.1}
+    assert pie_dialog._pie_cache_parameters([str(project_folder)], None)["calibration"] == {
+        "a": project_calibration.a,
+        "b": project_calibration.b,
+        "c": project_calibration.c,
+    }
+
+
+def test_pie_ignores_analysis_result_from_previous_project(pie_dialog, monkeypatch):
+    applied = []
+    monkeypatch.setattr(pie_dialog, "on_analysis_complete", lambda result: applied.append(result))
+    pie_dialog._analysis_request_id = 9
+
+    pie_dialog._on_analysis_result(8, ("stale",))
+    pie_dialog._on_analysis_result(9, ("current",))
+
+    assert applied == [("current",)]
+
+
 def test_switching_from_project_scope_persists_dirty_results(pie_dialog, tmp_path, monkeypatch):
     project_folder = tmp_path / "project_pie"
     project_folder.mkdir()
@@ -517,6 +556,56 @@ def test_project_settings_sync_respects_temporary_source_scope(pie_dialog, tmp_p
 
     assert pie_dialog.pie_source_scope == "temporary"
     assert pie_dialog.folder_edit.text() == str(temporary_folder)
+
+
+def test_temporary_pie_parameters_are_an_isolated_project_snapshot(pie_dialog, tmp_path):
+    project_folder = tmp_path / "project_pie"
+    project_folder.mkdir()
+    ps = ProjectSettings(
+        project_name="PIE temporary parameters",
+        output_dir=str(tmp_path / "project"),
+        pie_scan_folder=str(project_folder),
+        cal_a=3.5e-6,
+        cal_b=0.004,
+        cal_c=-1.25,
+        pie_energy_decimals=3,
+        pie_integration_method="baseline",
+        min_intensity=17.0,
+    )
+    pie_dialog.set_project_settings(ps, activate_project_scope=True)
+    pie_dialog.set_pie_source_scope("temporary")
+
+    effective = pie_dialog._effective_analysis_settings()
+    assert pie_dialog.temporary_settings_source == "project"
+    assert pie_dialog.temporary_params_panel.title() == "临时数据参数"
+    assert pie_dialog.temporary_params_label.text() == "当前来源：项目参数副本"
+    assert pie_dialog.temporary_params_button.text() == "编辑本次参数…"
+    assert pie_dialog.copy_project_params_action.isEnabled()
+    assert pie_dialog.common_params_action.text() == "编辑本次临时参数…"
+    assert effective is not ps
+    assert effective.to_calibration() == ps.to_calibration()
+    assert effective.pie_energy_decimals == 3
+    assert effective.pie_integration_method == "baseline"
+    assert effective.to_peak_detection_config().min_intensity == 17.0
+    assert pie_dialog._pie_cache_dir() != tmp_path / "project" / "analysis" / "pie" / "cache"
+
+    effective.cal_a = 8.0
+    effective.pie_energy_decimals = 5
+    assert ps.cal_a == 3.5e-6
+    assert ps.pie_energy_decimals == 3
+
+
+def test_temporary_parameter_menu_disables_project_copy_without_project(pie_dialog):
+    assert pie_dialog.pie_source_scope == "temporary"
+    assert pie_dialog.temporary_params_label.text() == "当前来源：全局参数副本"
+    assert pie_dialog.temporary_params_button.text() == "编辑本次参数…"
+    assert not pie_dialog.copy_project_params_action.isEnabled()
+    assert pie_dialog.common_params_action.text() == "编辑本次临时参数…"
+    assert pie_dialog.common_params_button.isHidden()
+
+    pie_dialog._select_temporary_settings_source("default")
+    assert pie_dialog.temporary_settings_source == "default"
+    assert pie_dialog.temporary_params_label.text() == "当前来源：程序默认参数"
 
 
 def test_analysis_and_fit_actions_follow_real_prerequisites(pie_dialog, tmp_path):

@@ -193,6 +193,34 @@ def test_calibration_spinboxes_accept_command_v_paste(qapp):
         widget.deleteLater()
 
 
+def test_project_calibration_round_trip_preserves_fitted_precision(qapp):
+    from bl03u_masstool.core.calibration import Calibration
+    from bl03u_masstool.core.normalization import NormalizationSettings
+    from bl03u_masstool.frontends.pyqt_app.normalization.widget import CommonParametersWidget
+
+    calibration = Calibration(
+        a=3.66334123456789e-7,
+        b=0.000637719123456789,
+        c=0.2724890721234567,
+    )
+    settings = ProjectSettings(
+        cal_a=calibration.a,
+        cal_b=calibration.b,
+        cal_c=calibration.c,
+    )
+    widget = CommonParametersWidget(NormalizationSettings(), Calibration(), None)
+    try:
+        widget.set_project_settings(settings)
+        restored = ProjectSettings()
+        widget.apply_to_settings(restored)
+
+        assert restored.cal_a == pytest.approx(calibration.a, rel=1e-12)
+        assert restored.cal_b == pytest.approx(calibration.b, rel=1e-14)
+        assert restored.cal_c == pytest.approx(calibration.c, rel=1e-14)
+    finally:
+        widget.deleteLater()
+
+
 def test_kr_energy_selection_updates_displayed_lambda_values(qapp, monkeypatch):
     from bl03u_masstool.core.calibration import Calibration
     from bl03u_masstool.core.normalization import NormalizationSettings
@@ -462,6 +490,7 @@ def test_temperature_page_owns_analysis_switches(qapp, tmp_path):
             temperature_photon_normalize=False,
             temperature_kr_correct=True,
             temp_replicate_mode="sum",
+            light_source="beam_current",
         )
         widget.set_project_settings(ps, activate_project_scope=True)
         assert widget.temperature_photon_check.isChecked() is False
@@ -479,6 +508,123 @@ def test_temperature_page_owns_analysis_switches(qapp, tmp_path):
     finally:
         if widget.worker is not None and widget.worker.isRunning():
             widget.worker.wait(1000)
+        widget.deleteLater()
+
+
+def test_temperature_project_scope_uses_project_calibration(qapp, tmp_path, monkeypatch):
+    from bl03u_masstool.core.calibration import Calibration
+    from bl03u_masstool.frontends.pyqt_app.temperature import dialog as temperature_dialog_module
+    from bl03u_masstool.frontends.pyqt_app.temperature.dialog import TemperatureScanDialog
+
+    project_calibration = Calibration(a=8.21e-7, b=4.56e-4, c=0.789)
+    ps = ProjectSettings(
+        project_name="Calibrated Temperature",
+        output_dir=str(tmp_path / "project"),
+        temperature_scan_folder=str(tmp_path / "temperature_scan"),
+        cal_a=project_calibration.a,
+        cal_b=project_calibration.b,
+        cal_c=project_calibration.c,
+        light_source="beam_current",
+        temperature_kr_correct=True,
+        expansion_factors={500.0: 1.25},
+    )
+    widget = TemperatureScanDialog(Calibration(a=0.0, b=1.0, c=0.0))
+    captured = {}
+
+    def fake_analyze_temperature_folder(_folder, **kwargs):
+        captured["calibration"] = kwargs["calibration"]
+        return pd.DataFrame()
+
+    monkeypatch.setattr(
+        temperature_dialog_module,
+        "analyze_temperature_folder",
+        fake_analyze_temperature_folder,
+    )
+    try:
+        widget.set_project_settings(ps, activate_project_scope=True)
+        params = widget._analysis_parameters()
+        widget._analyze_temperature_folder_with_params(str(tmp_path), params)
+
+        assert widget.calibration == project_calibration
+        assert widget.normalization_settings.light_source == "beam_current"
+        assert widget.normalization_settings.expansion_factors == {500.0: 1.25}
+        assert captured["calibration"] == project_calibration
+        assert widget._analysis_cache_parameters(params)["calibration"] == {
+            "a": project_calibration.a,
+            "b": project_calibration.b,
+            "c": project_calibration.c,
+        }
+        assert params["cache_dir"] == tmp_path / "project" / "analysis" / "temperature_scan" / "cache"
+    finally:
+        widget.deleteLater()
+
+
+def test_temperature_ignores_analysis_result_from_previous_project(qapp, monkeypatch):
+    from bl03u_masstool.core.calibration import Calibration
+    from bl03u_masstool.frontends.pyqt_app.temperature.dialog import TemperatureScanDialog
+
+    widget = TemperatureScanDialog(Calibration())
+    applied = []
+    monkeypatch.setattr(widget, "on_analysis_complete", lambda result: applied.append(result))
+    try:
+        widget._analysis_request_id = 7
+
+        widget._on_analysis_result(6, {"stale": True})
+        widget._on_analysis_result(7, {"current": True})
+
+        assert applied == [{"current": True}]
+    finally:
+        widget.deleteLater()
+
+
+def test_temperature_temporary_data_uses_isolated_project_parameter_snapshot(qapp, tmp_path):
+    from bl03u_masstool.core.calibration import Calibration
+    from bl03u_masstool.frontends.pyqt_app.temperature.dialog import TemperatureScanDialog
+
+    project_calibration = Calibration(a=1.25e-6, b=0.0025, c=-0.75)
+    (tmp_path / "project_data").mkdir()
+    ps = ProjectSettings(
+        project_name="Temporary parameter source",
+        output_dir=str(tmp_path / "project"),
+        temperature_scan_folder=str(tmp_path / "project_data"),
+        cal_a=project_calibration.a,
+        cal_b=project_calibration.b,
+        cal_c=project_calibration.c,
+        temp_integration_method="baseline",
+        min_intensity=12.0,
+    )
+    widget = TemperatureScanDialog(Calibration(a=0.0, b=1.0, c=0.0))
+    try:
+        widget.set_project_settings(ps, activate_project_scope=True)
+        widget.set_temperature_source_scope("temporary")
+
+        params = widget._analysis_parameters()
+        assert widget.temporary_settings_source == "project"
+        assert widget.temporary_params_panel.title() == "临时数据参数"
+        assert widget.temporary_params_label.text() == "当前来源：项目参数副本"
+        assert widget.temporary_params_button.text() == "编辑本次参数…"
+        assert widget.temporary_params_reload_button.text() == "重新载入"
+        assert widget.temporary_params_hint.text() == "仅用于当前临时数据，不会修改项目或全局配置"
+        assert widget.copy_project_params_action.isEnabled()
+        assert [action.text() for action in widget.temporary_params_menu.actions() if not action.isSeparator()] == [
+            "从当前项目复制",
+            "从全局配置复制",
+            "恢复程序默认值",
+        ]
+        assert params["calibration"] == project_calibration
+        assert params["integration_method"] == "baseline"
+        assert params["min_intensity"] == 12.0
+        assert params["cache_dir"] != tmp_path / "project" / "analysis" / "temperature_scan" / "cache"
+
+        widget.temporary_settings.cal_a = 9.0
+        widget.temporary_settings.temp_integration_method = "gaussian"
+        assert ps.cal_a == project_calibration.a
+        assert ps.temp_integration_method == "baseline"
+
+        widget._select_temporary_settings_source("default")
+        assert widget.temporary_settings_source == "default"
+        assert widget.temporary_params_label.text() == "当前来源：程序默认参数"
+    finally:
         widget.deleteLater()
 
 
@@ -1372,6 +1518,10 @@ def test_open_project_restores_data_sources_and_applies_to_tools(qapp, tmp_path,
 
 
 def test_close_project_returns_related_tools_to_temporary_data_scope(qapp, tmp_path, monkeypatch):
+    from bl03u_masstool.core.mole_fraction import MoleFractionSettings
+    from bl03u_masstool.frontends.pyqt_app.mole_fraction import dialog as mole_fraction_module
+    from bl03u_masstool.frontends.pyqt_app.pics import dialog as pics_module
+
     project_dir = tmp_path / "Opened_Project"
     single_file = project_dir / "raw_data" / "single.txt"
     sum_folder = project_dir / "raw_data" / "sum"
@@ -1389,8 +1539,13 @@ def test_close_project_returns_related_tools_to_temporary_data_scope(qapp, tmp_p
         sum_spectrum_folder=str(sum_folder),
         temperature_scan_folder=str(temperature_folder),
         pie_scan_folder=str(pie_folder),
+        mf_mass_disc_exponent=0.91,
     )
     save_project_settings(ps, project_dir / "config" / "project.yaml")
+
+    standalone_mf = MoleFractionSettings(mass_disc_exponent=0.42)
+    monkeypatch.setattr(mole_fraction_module, "load_mole_fraction_settings", lambda: standalone_mf)
+    monkeypatch.setattr(pics_module, "load_mole_fraction_settings", lambda: standalone_mf)
 
     window = MainWindow()
     monkeypatch.setattr(QtWidgets.QFileDialog, "getExistingDirectory", lambda *args, **kwargs: str(project_dir))
@@ -1416,6 +1571,12 @@ def test_close_project_returns_related_tools_to_temporary_data_scope(qapp, tmp_p
         assert not window.temperature_page.select_folder_button.isHidden()
         assert window.pie_page.pie_source_scope == "temporary"
         assert not window.pie_page.select_folder_button.isHidden()
+        assert window.temperature_page.project_settings is None
+        assert window.pie_page.project_settings is None
+        assert window.mole_fraction_page.project_settings is None
+        assert window.pics_page.project_settings is None
+        assert window.mole_fraction_page._mass_disc_exponent == pytest.approx(0.42)
+        assert window.pics_page.spin_md_exponent.value() == pytest.approx(0.42)
     finally:
         window.project_settings_manager.clear_project_path()
         window.deleteLater()

@@ -66,7 +66,6 @@ from bl03u_masstool.frontends.pyqt_app.temporary_analysis_settings import (
     TEMPORARY_SETTINGS_SOURCES,
     TemporaryAnalysisSettingsDialog,
     build_temporary_settings,
-    temporary_settings_source_label,
 )
 
 from bl03u_masstool.frontends.pyqt_app.common.widgets import (
@@ -190,22 +189,54 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         source_scope_layout.addWidget(self.temporary_source_button)
         source_row.addWidget(source_scope_panel)
 
-        self.temporary_params_label = QtWidgets.QLabel("参数")
-        self.temporary_params_label.setObjectName("ReadoutLabel")
+        self.temporary_params_label = QtWidgets.QLabel("当前来源：全局参数副本")
+        self.temporary_params_label.setObjectName("ContextValue")
+        # Kept as a non-layout compatibility control for tests and callers that
+        # select a source by data.  The visible UI uses an action menu whose
+        # wording makes it explicit that a session snapshot is being rebuilt.
         self.temporary_params_combo = QtWidgets.QComboBox()
         for source, label in TEMPORARY_SETTINGS_SOURCES:
             self.temporary_params_combo.addItem(label, source)
         self.temporary_params_combo.setCurrentIndex(
             self.temporary_params_combo.findData(self.temporary_settings_source)
         )
-        self.temporary_params_combo.setToolTip("选择临时会话参数的初始来源；切换后创建独立副本")
+        self.temporary_params_combo.hide()
         self.temporary_params_combo.currentIndexChanged.connect(self._on_temporary_settings_source_changed)
-        self.temporary_params_button = QtWidgets.QPushButton("编辑参数...")
+        self.temporary_params_button = QtWidgets.QPushButton("编辑本次参数…")
         self.temporary_params_button.setObjectName("BrowseButton")
         self.temporary_params_button.clicked.connect(self._edit_temporary_settings)
-        source_row.addWidget(self.temporary_params_label)
-        source_row.addWidget(self.temporary_params_combo)
-        source_row.addWidget(self.temporary_params_button)
+        self.temporary_params_reload_button = QtWidgets.QToolButton()
+        self.temporary_params_reload_button.setText("重新载入")
+        self.temporary_params_reload_button.setObjectName("CommandMenuButton")
+        self.temporary_params_reload_button.setPopupMode(
+            QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup
+        )
+        self.temporary_params_menu = QtWidgets.QMenu(self.temporary_params_reload_button)
+        self.copy_project_params_action = self.temporary_params_menu.addAction("从当前项目复制")
+        self.copy_global_params_action = self.temporary_params_menu.addAction("从全局配置复制")
+        self.restore_default_params_action = self.temporary_params_menu.addAction("恢复程序默认值")
+        self.copy_project_params_action.triggered.connect(
+            lambda: self._select_temporary_settings_source("project")
+        )
+        self.copy_global_params_action.triggered.connect(
+            lambda: self._select_temporary_settings_source("global")
+        )
+        self.restore_default_params_action.triggered.connect(
+            lambda: self._select_temporary_settings_source("default")
+        )
+        self.temporary_params_reload_button.setMenu(self.temporary_params_menu)
+
+        self.temporary_params_panel = QtWidgets.QGroupBox("临时数据参数")
+        temporary_params_layout = QtWidgets.QHBoxLayout(self.temporary_params_panel)
+        temporary_params_layout.setContentsMargins(10, 8, 10, 8)
+        temporary_params_layout.setSpacing(10)
+        temporary_params_layout.addWidget(self.temporary_params_label)
+        temporary_params_layout.addWidget(self.temporary_params_button)
+        temporary_params_layout.addWidget(self.temporary_params_reload_button)
+        self.temporary_params_hint = QtWidgets.QLabel("仅用于当前临时数据，不会修改项目或全局配置")
+        self.temporary_params_hint.setObjectName("HintLabel")
+        temporary_params_layout.addWidget(self.temporary_params_hint)
+        temporary_params_layout.addStretch(1)
 
         self.folder_edit = QtWidgets.QLineEdit()
         self.folder_edit.setPlaceholderText("选择温度扫描数据文件夹")
@@ -239,6 +270,7 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         source_row.addWidget(self.summary_open_project_btn)
         source_row.addWidget(self.run_button)
         data_layout.addLayout(source_row)
+        data_layout.addWidget(self.temporary_params_panel)
 
         analysis_options_row = QtWidgets.QHBoxLayout()
         analysis_options_row.setSpacing(8)
@@ -565,6 +597,17 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         if not hasattr(self, "temporary_params_combo"):
             return
         source = str(self.temporary_params_combo.currentData() or "default")
+        self._reset_temporary_settings_source(source)
+
+    def _select_temporary_settings_source(self, source: str) -> None:
+        if source == "project" and not self._has_project_context():
+            return
+        blocker = QtCore.QSignalBlocker(self.temporary_params_combo)
+        self.temporary_params_combo.setCurrentIndex(self.temporary_params_combo.findData(source))
+        del blocker
+        self._reset_temporary_settings_source(source)
+
+    def _reset_temporary_settings_source(self, source: str) -> None:
         if source == "project" and not self._has_project_context():
             source = "global"
         self.temporary_settings_source = source
@@ -572,6 +615,7 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.temporary_settings = self._build_temporary_settings_snapshot(source)
         self.temporary_settings_modified = False
         self._apply_temporary_settings_to_controls()
+        self._refresh_temperature_source_controls()
 
     def _edit_temporary_settings(self) -> None:
         dialog = TemporaryAnalysisSettingsDialog(
@@ -763,25 +807,30 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.select_folder_button.setText("浏览...")
         self.select_folder_button.setVisible(not use_project)
         self.select_folder_button.setEnabled(not busy)
-        self.temporary_params_label.setVisible(not use_project)
-        self.temporary_params_combo.setVisible(not use_project)
-        self.temporary_params_button.setVisible(not use_project)
-        self.temporary_params_combo.setEnabled(not busy)
+        self.summary_open_project_btn.setVisible(use_project)
+        self.temporary_params_panel.setVisible(not use_project)
+        self.temporary_params_combo.setVisible(False)
         self.temporary_params_button.setEnabled(not busy)
+        self.temporary_params_reload_button.setEnabled(not busy)
         project_index = self.temporary_params_combo.findData("project")
         if project_index >= 0:
             model_item = self.temporary_params_combo.model().item(project_index)
             if model_item is not None:
                 model_item.setEnabled(self._has_project_context())
+        self.copy_project_params_action.setEnabled(self._has_project_context())
+        source_text = {
+            "project": "项目参数副本",
+            "global": "全局参数副本",
+            "default": "程序默认参数",
+        }.get(self.temporary_settings_source, "程序默认参数")
+        if self.temporary_settings_modified:
+            source_text += " · 已修改"
+        self.temporary_params_label.setText(f"当前来源：{source_text}")
+        self.temporary_params_button.setText("编辑本次参数…")
         self.temporary_params_button.setToolTip(
-            "参数来源：" + temporary_settings_source_label(
-                self.temporary_settings_source,
-                modified=self.temporary_settings_modified,
-            )
+            "打开完整参数编辑器；所有修改仅对当前临时数据会话生效"
         )
-        self.temporary_params_button.setText(
-            "编辑参数*..." if self.temporary_settings_modified else "编辑参数..."
-        )
+        self.temporary_params_reload_button.setToolTip("丢弃本次修改，并从指定来源重新创建参数副本")
         if use_project and not has_project_path:
             self._show_inline_empty("请先在项目管理中配置温度扫描文件夹")
 

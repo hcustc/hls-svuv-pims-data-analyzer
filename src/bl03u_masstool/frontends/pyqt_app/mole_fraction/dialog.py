@@ -181,27 +181,62 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.expansion_coefficients,
         )
 
-    def set_project_settings(self, ps: ProjectSettings) -> None:
+    def set_project_settings(
+        self,
+        ps: ProjectSettings,
+        *,
+        activate_project_scope: bool = True,
+    ) -> None:
         """Apply ProjectSettings defaults to MoleFractionDialog controls."""
-        self.project_settings = ps
+        self.project_settings = ps if activate_project_scope else None
+        if activate_project_scope:
+            self.calibration = ps.to_calibration()
+            self.normalization_settings = ps.to_normalization_settings()
+            self.settings = ps.to_mole_fraction_settings()
+        else:
+            self.settings = load_mole_fraction_settings()
         self._load_project_database_from_settings()
         # 卡峰范围由项目管理统一维护，在此自动加载
         self._load_peak_ranges_from_project()
         if hasattr(self, "spin_parent_mz"):
             self._setting_parent_mz = True
-            self.spin_parent_mz.setValue(ps.mf_parent_mz)
+            self.spin_parent_mz.setValue(
+                ps.mf_parent_mz if activate_project_scope else self.settings.parent_mz
+            )
             self._setting_parent_mz = False
-            self._parent_mz_origin = "project" if ps.mf_parent_mz > 0 else "unset"
+            if activate_project_scope:
+                self._parent_mz_origin = "project" if ps.mf_parent_mz > 0 else "unset"
+            else:
+                self._parent_mz_origin = "saved" if self.settings.parent_mz > 0 else "unset"
             self._parent_mz_confirmed = False
         if hasattr(self, "spin_parent_mf0"):
-            self.spin_parent_mf0.setValue(ps.mf_parent_initial_mf)
+            self.spin_parent_mf0.setValue(
+                ps.mf_parent_initial_mf
+                if activate_project_scope
+                else self.settings.parent_initial_mf
+            )
         if hasattr(self, "spin_parent_energy"):
-            self.spin_parent_energy.setValue(ps.mf_photon_energy)
-        if hasattr(self, "spin_parent_t0") and ps.mf_reference_temperature is not None:
-            self.spin_parent_t0.setValue(int(ps.mf_reference_temperature))
+            self.spin_parent_energy.setValue(
+                ps.mf_photon_energy if activate_project_scope else self.settings.photon_energy
+            )
+        if hasattr(self, "spin_parent_t0"):
+            configured_reference_temperature = (
+                ps.mf_reference_temperature
+                if activate_project_scope
+                else self.settings.reference_temperature
+            )
+            reference_temperature = (
+                550
+                if configured_reference_temperature is None
+                else int(configured_reference_temperature)
+            )
+            self.spin_parent_t0.setValue(reference_temperature)
         # 膨胀系数从项目全局设置同步（通用参数中计算的）
-        if ps.expansion_factors:
-            self.expansion_coefficients = dict(ps.expansion_factors)
+        self.expansion_coefficients = (
+            dict(ps.expansion_factors)
+            if activate_project_scope
+            else dict(self.settings.expansion_factors)
+        )
         # 更新摘要栏
         if hasattr(self, "summary_project_label"):
             project_name = ps.project_name or "---"
