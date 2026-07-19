@@ -9,8 +9,10 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 pytest.importorskip("matplotlib")
 pytest.importorskip("PyQt6")
-
-from PyQt6 import QtWidgets
+try:
+    from PyQt6 import QtWidgets
+except ImportError as e:
+    pytest.skip(f"PyQt6 display libraries not available: {e}", allow_module_level=True)
 
 from bl03u_masstool.frontends.pyqt_app.common.plot_spec import (
     CurveSeries,
