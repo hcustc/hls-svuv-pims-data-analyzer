@@ -174,8 +174,8 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
         top_grid.addWidget(self._build_calibration_section(), 0, 1)
         top_grid.addWidget(self._build_mass_discrimination_section(), 1, 0)
         top_grid.addWidget(self._build_element_filter_section(), 1, 1)
-        top_grid.setColumnStretch(0, 1)
-        top_grid.setColumnStretch(1, 1)
+        top_grid.setColumnStretch(0, 2)
+        top_grid.setColumnStretch(1, 3)
         content_layout.addLayout(top_grid)
         content_layout.addWidget(self._build_kr_expansion_section())
         content_layout.addStretch(1)
@@ -246,7 +246,7 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
             # only about six significant digits for the quadratic coefficient.
             edit.setDecimals(18)
             edit.setSingleStep(0.000000001)
-            edit.setMinimumWidth(120)
+            edit.setMinimumWidth(128)
             edit.setMaximumWidth(180)
             # 隐藏上下箭头，允许直接修改数值
             edit.setButtonSymbols(QtWidgets.QAbstractSpinBox.ButtonSymbols.NoButtons)
@@ -257,14 +257,14 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
         self.calibration_b_edit.editingFinished.connect(self._sync_calibration_to_project_settings)
         self.calibration_c_edit.editingFinished.connect(self._sync_calibration_to_project_settings)
 
-        layout.addWidget(QtWidgets.QLabel("A:"), 0, 0)
-        layout.addWidget(self.calibration_a_edit, 0, 1)
-        layout.addWidget(QtWidgets.QLabel("B:"), 0, 2)
-        layout.addWidget(self.calibration_b_edit, 0, 3)
-        layout.addWidget(QtWidgets.QLabel("C:"), 0, 4)
-        layout.addWidget(self.calibration_c_edit, 0, 5)
+        layout.addWidget(QtWidgets.QLabel("A（二次项）"), 0, 0)
+        layout.addWidget(QtWidgets.QLabel("B（一次项）"), 0, 1)
+        layout.addWidget(QtWidgets.QLabel("C（常数项）"), 0, 2)
+        layout.addWidget(self.calibration_a_edit, 1, 0)
+        layout.addWidget(self.calibration_b_edit, 1, 1)
+        layout.addWidget(self.calibration_c_edit, 1, 2)
 
-        for col in (1, 3, 5):
+        for col in range(3):
             layout.setColumnStretch(col, 1)
         return group
 
@@ -1378,18 +1378,32 @@ class FunctionDefaultsWidget(QtWidgets.QWidget):
 
     包含内容：
     - 寻峰参数（自动寻峰算法、边界检测等）
-    - PIE 拟合、温度扫描、PICS 计算、摩尔分数等功能的默认参数
+    - PIE 分析、温度扫描、PICS 计算、摩尔分数等功能的默认参数
     """
     settings_saved = QtCore.pyqtSignal()
     navigate_requested = QtCore.pyqtSignal(str)
 
-    _PAGE_BY_TAB = ("spectrum", "temperature", "pie", "pics", "mole_fraction")
-    _PAGE_LABEL_BY_TAB = ("质谱工作台", "温度扫描", "PIE 拟合", "PICS 计算", "摩尔分数")
+    _PAGE_LABELS = {
+        "spectrum": "质谱工作台",
+        "temperature": "温度扫描",
+        "pie": "PIE 拟合",
+        "pics": "PICS 计算",
+        "mole_fraction": "摩尔分数",
+    }
 
-    def __init__(self, parent=None, *, show_actions: bool = True):
+    def __init__(
+        self,
+        parent=None,
+        *,
+        show_actions: bool = True,
+        visible_pages: tuple[str, ...] | None = None,
+    ):
         super().__init__(parent)
         self.peak_detection = load_peak_detection_config()
         self.project_settings: ProjectSettings | None = None
+        visible_page_set = set(visible_pages) if visible_pages is not None else None
+        self._visible_pages: list[str] = []
+        self._visible_page_labels: list[str] = []
 
         root = QtWidgets.QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -1408,11 +1422,21 @@ class FunctionDefaultsWidget(QtWidgets.QWidget):
 
         # 使用标签页组织功能参数
         self.tabs = QtWidgets.QTabWidget()
-        self.tabs.addTab(self._build_peak_detection_tab(), "寻峰积分")
-        self.tabs.addTab(self._build_temperature_scan_tab(), "温度扫描")
-        self.tabs.addTab(self._build_pie_fitting_tab(), "PIE 拟合")
-        self.tabs.addTab(self._build_pics_tab(), "PICS 计算")
-        self.tabs.addTab(self._build_mole_fraction_tab(), "摩尔分数")
+        tab_specs = (
+            ("spectrum", "寻峰与积分", self._build_peak_detection_tab()),
+            ("temperature", "温度扫描", self._build_temperature_scan_tab()),
+            ("pie", "PIE 分析", self._build_pie_fitting_tab()),
+            ("pics", "PICS 计算", self._build_pics_tab()),
+            ("mole_fraction", "摩尔分数", self._build_mole_fraction_tab()),
+        )
+        for page_name, tab_label, tab_widget in tab_specs:
+            if visible_page_set is not None and page_name not in visible_page_set:
+                tab_widget.setParent(self)
+                tab_widget.hide()
+                continue
+            self.tabs.addTab(tab_widget, tab_label)
+            self._visible_pages.append(page_name)
+            self._visible_page_labels.append(self._PAGE_LABELS[page_name])
         self.tabs.currentChanged.connect(self._refresh_function_page_button)
         root.addWidget(self.tabs, 1)
 
@@ -1436,17 +1460,21 @@ class FunctionDefaultsWidget(QtWidgets.QWidget):
         self.load_from_settings()
 
     def _refresh_function_page_button(self, index: int) -> None:
-        if not 0 <= index < len(self._PAGE_LABEL_BY_TAB):
+        if not 0 <= index < len(self._visible_page_labels):
             return
-        self.open_function_page_button.setText(f"前往{self._PAGE_LABEL_BY_TAB[index]}")
+        self.open_function_page_button.setText(f"打开{self._visible_page_labels[index]}页")
 
     def _request_current_function_page(self) -> None:
         index = self.tabs.currentIndex()
-        if 0 <= index < len(self._PAGE_BY_TAB):
-            self.navigate_requested.emit(self._PAGE_BY_TAB[index])
+        if 0 <= index < len(self._visible_pages):
+            self.navigate_requested.emit(self._visible_pages[index])
+
+    def set_current_page(self, page_name: str) -> None:
+        if page_name in self._visible_pages:
+            self.tabs.setCurrentIndex(self._visible_pages.index(page_name))
 
     def _build_peak_detection_tab(self) -> QtWidgets.QWidget:
-        """寻峰积分参数标签页"""
+        """寻峰与积分参数标签页"""
         widget = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(widget)
         layout.setContentsMargins(12, 12, 12, 12)
@@ -1505,33 +1533,33 @@ class FunctionDefaultsWidget(QtWidgets.QWidget):
         self.peak_gaussian_boundary_scale_edit.setToolTip("高斯拟合成功后，以该倍数 FWHM 重新估计卡峰边界")
 
         row = 0
-        peak_layout.addWidget(QtWidgets.QLabel("寻峰算法:"), row, 0)
+        peak_layout.addWidget(QtWidgets.QLabel("寻峰算法"), row, 0)
         peak_layout.addWidget(self.peak_algorithm_combo, row, 1)
-        peak_layout.addWidget(QtWidgets.QLabel("最小 TOF 索引:"), row, 2)
+        peak_layout.addWidget(QtWidgets.QLabel("起始 TOF 索引"), row, 2)
         peak_layout.addWidget(self.peak_detection_min_idx_edit, row, 3)
 
         row += 1
-        peak_layout.addWidget(QtWidgets.QLabel("阈值(结束):"), row, 0)
+        peak_layout.addWidget(QtWidgets.QLabel("峰结束阈值"), row, 0)
         peak_layout.addWidget(self.peak_threshold_end_edit, row, 1)
-        peak_layout.addWidget(QtWidgets.QLabel("最小强度:"), row, 2)
+        peak_layout.addWidget(QtWidgets.QLabel("最小峰强度"), row, 2)
         peak_layout.addWidget(self.peak_min_intensity_edit, row, 3)
 
         row += 1
-        peak_layout.addWidget(QtWidgets.QLabel("相邻峰窗口:"), row, 0)
+        peak_layout.addWidget(QtWidgets.QLabel("邻近峰抑制窗口"), row, 0)
         peak_layout.addWidget(self.peak_nearby_window_edit, row, 1)
-        peak_layout.addWidget(QtWidgets.QLabel("重复峰窗口:"), row, 2)
+        peak_layout.addWidget(QtWidgets.QLabel("同峰合并窗口"), row, 2)
         peak_layout.addWidget(self.peak_duplicate_window_edit, row, 3)
 
         row += 1
-        peak_layout.addWidget(QtWidgets.QLabel("边界填充:"), row, 0)
+        peak_layout.addWidget(QtWidgets.QLabel("边界扩展点数"), row, 0)
         peak_layout.addWidget(self.peak_boundary_padding_edit, row, 1)
-        peak_layout.addWidget(QtWidgets.QLabel("弱峰比率:"), row, 2)
+        peak_layout.addWidget(QtWidgets.QLabel("弱肩峰保留倍率"), row, 2)
         peak_layout.addWidget(self.peak_weak_tail_ratio_edit, row, 3)
 
         row += 1
-        peak_layout.addWidget(QtWidgets.QLabel("高斯窗口(最大):"), row, 0)
+        peak_layout.addWidget(QtWidgets.QLabel("高斯最大半窗"), row, 0)
         peak_layout.addWidget(self.peak_gaussian_window_max_edit, row, 1)
-        peak_layout.addWidget(QtWidgets.QLabel("高斯边界倍数:"), row, 2)
+        peak_layout.addWidget(QtWidgets.QLabel("高斯边界倍数"), row, 2)
         peak_layout.addWidget(self.peak_gaussian_boundary_scale_edit, row, 3)
 
         peak_layout.setColumnStretch(1, 1)
@@ -1595,7 +1623,7 @@ class FunctionDefaultsWidget(QtWidgets.QWidget):
         form.addWidget(self.temp_curve_class_change_threshold_edit, 1, 1)
         form.addWidget(QtWidgets.QLabel("端点峰值比例"), 1, 2)
         form.addWidget(self.temp_curve_class_peak_fraction_edit, 1, 3)
-        form.addWidget(QtWidgets.QLabel("重复采集"), 2, 0)
+        form.addWidget(QtWidgets.QLabel("重复采集处理"), 2, 0)
         form.addWidget(self.temp_replicate_mode_combo, 2, 1)
         for col in (1, 3, 5):
             form.setColumnStretch(col, 1)
@@ -1610,7 +1638,7 @@ class FunctionDefaultsWidget(QtWidgets.QWidget):
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
 
-        group = QtWidgets.QGroupBox("PIE 拟合默认参数")
+        group = QtWidgets.QGroupBox("PIE 分析参数")
         form = QtWidgets.QGridLayout(group)
         form.setHorizontalSpacing(8)
         form.setVerticalSpacing(8)
@@ -1619,7 +1647,7 @@ class FunctionDefaultsWidget(QtWidgets.QWidget):
         self.pie_energy_decimals_edit.setRange(0, 6)
         self.pie_energy_decimals_edit.setToolTip("光子能量分组时保留的小数位数")
 
-        self.pie_recursive_check = QtWidgets.QCheckBox("递归拟合")
+        self.pie_recursive_check = QtWidgets.QCheckBox("递归扩展拟合")
         self.pie_recursive_check.setToolTip("先拟合高能段，再逐步扩展到低能区")
 
         self.pie_integration_method_combo = QtWidgets.QComboBox()
@@ -1639,14 +1667,14 @@ class FunctionDefaultsWidget(QtWidgets.QWidget):
         self.pie_replicate_mode_combo.addItem("累加重复采集", "sum")
         self.pie_replicate_mode_combo.setToolTip("仅在确认同一条件多次采集时选择平均或累加")
 
-        form.addWidget(QtWidgets.QLabel("能量小数位"), 0, 0)
+        form.addWidget(QtWidgets.QLabel("能量分组小数位"), 0, 0)
         form.addWidget(self.pie_energy_decimals_edit, 0, 1)
         form.addWidget(self.pie_recursive_check, 0, 2)
         form.addWidget(QtWidgets.QLabel("积分方式"), 0, 3)
         form.addWidget(self.pie_integration_method_combo, 0, 4)
-        form.addWidget(QtWidgets.QLabel("合并方法"), 1, 0)
+        form.addWidget(QtWidgets.QLabel("能段合并方式"), 1, 0)
         form.addWidget(self.pie_merge_method_combo, 1, 1)
-        form.addWidget(QtWidgets.QLabel("重复采集"), 2, 0)
+        form.addWidget(QtWidgets.QLabel("重复采集处理"), 2, 0)
         form.addWidget(self.pie_replicate_mode_combo, 2, 1)
         for col in (1, 3):
             form.setColumnStretch(col, 1)

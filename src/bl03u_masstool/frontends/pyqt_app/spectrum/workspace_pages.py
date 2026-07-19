@@ -19,15 +19,11 @@ from bl03u_masstool.core.project_lifecycle import (
     PROJECT_DIRECTORIES,
     PROJECT_SOURCE_SPECS,
     DataSourceValidationStatus,
-    WorkflowProfile,
-    analyze_workflow_capabilities,
-    build_project_stage_statuses,
     collect_project_files,
     ensure_project_structure,
     get_data_source_validation_status,
     import_project_source,
     materialize_project_data_sources,
-    next_project_stage,
     project_root,
     sanitize_project_slug,
     validate_all_data_sources,
@@ -60,13 +56,23 @@ class WorkspacePagesMixin:
 
         self.verticalLayout_9.removeItem(self.verticalLayout_7)
 
-        self.page_nav = QtWidgets.QWidget(self.centralwidget)
+        self.workspace_shell = QtWidgets.QWidget(self.centralwidget)
+        self.workspace_shell.setObjectName("WorkspaceShell")
+        shell_layout = QVBoxLayout(self.workspace_shell)
+        shell_layout.setContentsMargins(0, 0, 0, 0)
+        shell_layout.setSpacing(8)
+
+        self.page_nav = QtWidgets.QWidget(self.workspace_shell)
         self.page_nav.setObjectName("PageNav")
+        self.page_nav.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
         nav_layout = QHBoxLayout(self.page_nav)
         nav_layout.setContentsMargins(8, 6, 8, 6)
-        nav_layout.setSpacing(2)
+        nav_layout.setSpacing(6)
 
-        self.workspace_stack = QtWidgets.QStackedWidget(self.centralwidget)
+        self.workspace_stack = QtWidgets.QStackedWidget(self.workspace_shell)
         self.workspace_stack.setObjectName("WorkspaceStack")
 
         self.spectrum_page = QtWidgets.QWidget(self.workspace_stack)
@@ -146,52 +152,57 @@ class WorkspacePagesMixin:
             "ionization": "查询物种电离能",
             "isotope": "由分子式计算质量与同位素，或由质量搜索候选分子式",
         }
-        # Pages that get a separator inserted AFTER them in the nav bar
-        _nav_separators_after = {"project", "mole_fraction"}
+        page_lookup = {
+            page_name: (index, label, page)
+            for index, (page_name, label, page) in enumerate(pages)
+        }
+        nav_groups = [
+            ("项目", ("project",)),
+            ("数据处理", ("spectrum", "temperature", "pie", "mole_fraction")),
+            ("PICS 与资料", ("pics", "pics_import", "ionization", "isotope")),
+        ]
 
         self.page_buttons: dict[str, QtWidgets.QToolButton] = {}
         self.page_button_group = QtWidgets.QButtonGroup(self.page_nav)
         self.page_button_group.setExclusive(True)
-        for index, (page_name, label, page) in enumerate(pages):
+        for page_name, _label, page in pages:
             if page is not self.spectrum_page:
                 self.workspace_stack.addWidget(page)
-            button = QtWidgets.QToolButton(self.page_nav)
-            button.setText(label)
-            button.setObjectName("WorkspaceTab")
-            button.setCheckable(True)
-            button.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextOnly)
-            button.setMinimumHeight(32)
-            shortcut_text = f"Ctrl+{index + 1}"
-            button.setToolTip(f"{page_descriptions[page_name]}（{shortcut_text}）")
-            button.setAccessibleName(label)
-            button.setAccessibleDescription(page_descriptions[page_name])
-            button.setSizePolicy(
-                QtWidgets.QSizePolicy.Policy.Preferred,
-                QtWidgets.QSizePolicy.Policy.Fixed,
-            )
-            button.clicked.connect(lambda checked=False, name=page_name: self.switch_workspace_page(name))
-            self.page_button_group.addButton(button, index)
-            self.page_buttons[page_name] = button
-            nav_layout.addWidget(button)
-            shortcut = QtGui.QShortcut(QtGui.QKeySequence(shortcut_text), self)
-            shortcut.setContext(QtCore.Qt.ShortcutContext.ApplicationShortcut)
-            shortcut.activated.connect(lambda name=page_name: self.switch_workspace_page(name))
-            if page_name in _nav_separators_after:
-                sep = QtWidgets.QFrame(self.page_nav)
-                sep.setFrameShape(QtWidgets.QFrame.Shape.VLine)
-                sep.setObjectName("NavSeparator")
-                sep.setFixedWidth(1)
-                sep.setSizePolicy(
-                    QtWidgets.QSizePolicy.Policy.Fixed,
-                    QtWidgets.QSizePolicy.Policy.Expanding,
-                )
-                nav_layout.addWidget(sep)
-                nav_layout.addSpacing(2)
-        nav_layout.addStretch(1)
 
+        for group_index, (_group_title, group_pages) in enumerate(nav_groups):
+            if group_index > 0:
+                separator = QtWidgets.QFrame(self.page_nav)
+                separator.setObjectName("NavSeparator")
+                separator.setFrameShape(QtWidgets.QFrame.Shape.VLine)
+                separator.setFrameShadow(QtWidgets.QFrame.Shadow.Plain)
+                nav_layout.addWidget(separator)
+            for page_name in group_pages:
+                index, label, _page = page_lookup[page_name]
+                button = QtWidgets.QToolButton(self.page_nav)
+                button.setText(label)
+                button.setObjectName("WorkspaceTab")
+                button.setCheckable(True)
+                button.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextOnly)
+                button.setMinimumHeight(34)
+                shortcut_text = f"Ctrl+{index + 1}"
+                button.setToolTip(f"{page_descriptions[page_name]}（{shortcut_text}）")
+                button.setAccessibleName(label)
+                button.setAccessibleDescription(page_descriptions[page_name])
+                button.setSizePolicy(
+                    QtWidgets.QSizePolicy.Policy.Expanding,
+                    QtWidgets.QSizePolicy.Policy.Fixed,
+                )
+                button.clicked.connect(lambda checked=False, name=page_name: self.switch_workspace_page(name))
+                self.page_button_group.addButton(button, index)
+                self.page_buttons[page_name] = button
+                nav_layout.addWidget(button)
+                shortcut = QtGui.QShortcut(QtGui.QKeySequence(shortcut_text), self)
+                shortcut.setContext(QtCore.Qt.ShortcutContext.ApplicationShortcut)
+                shortcut.activated.connect(lambda name=page_name: self.switch_workspace_page(name))
         self.page_buttons["spectrum"].setChecked(True)
-        self.verticalLayout_9.insertWidget(0, self.page_nav)
-        self.verticalLayout_9.insertWidget(1, self.workspace_stack, stretch=1)
+        shell_layout.addWidget(self.page_nav)
+        shell_layout.addWidget(self.workspace_stack, stretch=1)
+        self.verticalLayout_9.insertWidget(0, self.workspace_shell, stretch=1)
         self.workspace_stack.setCurrentWidget(self.spectrum_page)
         self._route_common_parameter_buttons()
 
@@ -220,10 +231,8 @@ class WorkspacePagesMixin:
         identity_layout.setSpacing(10)
 
         self._build_project_identity_card(self.project_identity_page)
-        self._build_project_workflow_card(self.project_identity_page)
         self._build_datasource_card(self.project_identity_page)
         identity_layout.addWidget(self.project_identity_card)
-        identity_layout.addWidget(self.project_workflow_card)
         identity_layout.addWidget(self.datasource_card)
 
         settings_scroll.setWidget(settings_content)
@@ -375,62 +384,6 @@ class WorkspacePagesMixin:
             self.select_project_output_parent_folder
         )
 
-    def _build_project_workflow_card(self, parent) -> None:
-        self.project_workflow_card = QtWidgets.QFrame(parent)
-        self.project_workflow_card.setObjectName("ProjectCard")
-        card_layout = QVBoxLayout(self.project_workflow_card)
-        card_layout.setContentsMargins(10, 8, 10, 10)
-        card_layout.setSpacing(8)
-
-        header = QHBoxLayout()
-        title_column = QVBoxLayout()
-        title_column.setSpacing(2)
-        title = QtWidgets.QLabel("项目工作流", self.project_workflow_card)
-        title.setObjectName("ProjectTitle")
-        self.project_next_action_label = QtWidgets.QLabel("创建或打开项目后显示建议步骤", self.project_workflow_card)
-        self.project_next_action_label.setObjectName("ProjectHint")
-        self.project_next_action_label.setWordWrap(True)
-        title_column.addWidget(title)
-        title_column.addWidget(self.project_next_action_label)
-        header.addLayout(title_column, 1)
-
-        self.project_continue_button = QPushButton("继续下一步", self.project_workflow_card)
-        self.project_continue_button.setObjectName("PrimaryButton")
-        self.project_continue_button.setToolTip("保存当前项目设置并打开尚未完成的下一阶段")
-        self.project_continue_button.clicked.connect(self.continue_next_project_stage)
-        header.addWidget(self.project_continue_button)
-        card_layout.addLayout(header)
-
-        stages_row = QHBoxLayout()
-        stages_row.setSpacing(6)
-        self.project_stage_buttons: dict[str, QtWidgets.QToolButton] = {}
-        for stage in build_project_stage_statuses(ProjectSettings()):
-            button = QtWidgets.QToolButton(self.project_workflow_card)
-            button.setObjectName("ProjectStageButton")
-            button.setText(stage.label)
-            button.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextOnly)
-            button.setSizePolicy(
-                QtWidgets.QSizePolicy.Policy.Expanding,
-                QtWidgets.QSizePolicy.Policy.Fixed,
-            )
-            button.clicked.connect(
-                lambda checked=False, page=stage.nav_page, key=stage.key: self._open_project_stage(page, key)
-            )
-            self.project_stage_buttons[stage.key] = button
-            stages_row.addWidget(button)
-        card_layout.addLayout(stages_row)
-
-    def _open_project_stage(self, page_name: str, stage_key: str) -> None:
-        if page_name == "project":
-            self.switch_workspace_page("project")
-            self.project_tabs.setCurrentWidget(self.project_identity_page)
-            if stage_key == "raw_data":
-                self.datasource_card.setFocus(QtCore.Qt.FocusReason.OtherFocusReason)
-            else:
-                self.project_name_edit.setFocus(QtCore.Qt.FocusReason.OtherFocusReason)
-            return
-        self.switch_workspace_page(page_name)
-
     # ── Project data sources ─────────────────────────────────────────────
 
     def _build_datasource_card(self, parent):
@@ -463,7 +416,7 @@ class WorkspacePagesMixin:
         title_column.addWidget(datasource_hint)
         top_bar.addLayout(title_column, stretch=1)
 
-        self.datasource_import_button = QPushButton("启动导入向导", self.datasource_card)
+        self.datasource_import_button = QPushButton("导入项目数据", self.datasource_card)
         self.datasource_import_button.setObjectName("PrimaryButton")
         self.datasource_import_button.setToolTip("选择原始数据源，并复制/登记到当前项目")
         self.datasource_import_button.setFixedHeight(30)
@@ -473,7 +426,7 @@ class WorkspacePagesMixin:
         # 分割线
         sep = QtWidgets.QFrame(self.datasource_card)
         sep.setFrameShape(QtWidgets.QFrame.Shape.HLine)
-        sep.setObjectName("NavSeparator")
+        sep.setObjectName("PanelSeparator")
         card_layout.addWidget(sep)
 
         # ── 路径配置区：每行含内联状态 ──
@@ -600,16 +553,16 @@ class WorkspacePagesMixin:
         params_grid.setColumnStretch(1, 1)
 
         # -- PIE defaults --
-        pie_group = QtWidgets.QGroupBox("PIE拟合默认值", self.function_params_card)
+        pie_group = QtWidgets.QGroupBox("PIE 分析默认参数", self.function_params_card)
         pie_layout = QtWidgets.QGridLayout(pie_group)
         pie_layout.setHorizontalSpacing(8)
         pie_layout.setVerticalSpacing(6)
 
         self.fp_pie_energy_decimals = QtWidgets.QSpinBox()
-        self.fp_pie_energy_decimals.setToolTip("光子能量保留的小数位数。值越大能量分组越细，典型值 1-2")
+        self.fp_pie_energy_decimals.setToolTip("光子能量分组时保留的小数位数。值越大能量分组越细，典型值 1-2")
         self.fp_pie_energy_decimals.setRange(0, 6)
         self.fp_pie_energy_decimals.setValue(1)
-        self.fp_pie_recursive = QtWidgets.QCheckBox("递归")
+        self.fp_pie_recursive = QtWidgets.QCheckBox("递归扩展拟合")
         self.fp_pie_recursive.setToolTip("启用后先用高能段数据拟合，再逐步扩展到低能区，提高低信号区拟合稳定性")
         self.fp_pie_integration_method = QtWidgets.QComboBox()
         self.fp_pie_integration_method.setToolTip("PIE 原始积分信号的默认计算方式；高斯拟合不可用时回退范围累加，并在结果中记录实际方式")
@@ -622,17 +575,17 @@ class WorkspacePagesMixin:
         self.fp_pie_merge_method.addItem("第一组为主", "first_segment_dominant")
         self.fp_pie_merge_method.addItem("简单拼接", "mean")
 
-        pie_layout.addWidget(QtWidgets.QLabel("能量小数位"), 0, 0)
+        pie_layout.addWidget(QtWidgets.QLabel("能量分组小数位"), 0, 0)
         pie_layout.addWidget(self.fp_pie_energy_decimals, 0, 1)
         pie_layout.addWidget(self.fp_pie_recursive, 0, 2)
         pie_layout.addWidget(QtWidgets.QLabel("积分方式"), 0, 3)
         pie_layout.addWidget(self.fp_pie_integration_method, 0, 4)
-        pie_layout.addWidget(QtWidgets.QLabel("合并方法"), 1, 0)
+        pie_layout.addWidget(QtWidgets.QLabel("能段合并方式"), 1, 0)
         pie_layout.addWidget(self.fp_pie_merge_method, 1, 1)
         params_grid.addWidget(pie_group, 0, 0)
 
         # -- Temperature Scan defaults --
-        temp_group = QtWidgets.QGroupBox("温度扫描默认值", self.function_params_card)
+        temp_group = QtWidgets.QGroupBox("温度扫描默认参数", self.function_params_card)
         temp_layout = QtWidgets.QGridLayout(temp_group)
         temp_layout.setHorizontalSpacing(8)
         temp_layout.setVerticalSpacing(6)
@@ -653,7 +606,7 @@ class WorkspacePagesMixin:
         params_grid.addWidget(temp_group, 0, 1)
 
         # -- PICS defaults --
-        pics_group = QtWidgets.QGroupBox("PICS计算默认值", self.function_params_card)
+        pics_group = QtWidgets.QGroupBox("PICS 计算默认参数", self.function_params_card)
         pics_layout = QtWidgets.QGridLayout(pics_group)
         pics_layout.setHorizontalSpacing(8)
         pics_layout.setVerticalSpacing(6)
@@ -948,17 +901,14 @@ class WorkspacePagesMixin:
 
         validation_records = validate_all_data_sources(ps)
         validation_status = get_data_source_validation_status(ps, validation_records)
-        workflow_result = analyze_workflow_capabilities(ps, validation_records)
 
         self.current_data_source_status = validation_status
         self.current_validation_records = validation_records
-        self.current_workflow_result = workflow_result
 
         # 项目未初始化
         root_exists = project_root(ps).exists()
         if not root_exists:
             self._clear_datasource_row_statuses()
-            self._refresh_workflow_chips([])
             return
 
         # 每行内联状态
@@ -985,28 +935,11 @@ class WorkspacePagesMixin:
                     lbl.setText(f"✓ {count_text}")
                     lbl.setStyleSheet("color: #27ae60;")
 
-        # 工作流能力 chips
-        available = []
-        for profile in (workflow_result.available_workflows or []):
-            if profile == WorkflowProfile.SPECTRUM_ONLY:
-                available.append("质谱工作台")
-            elif profile == WorkflowProfile.TEMPERATURE_SCAN:
-                available.append("温度扫描")
-            elif profile == WorkflowProfile.PIE_ANALYSIS:
-                available.append("PIE拟合")
-            elif profile == WorkflowProfile.FULL_ANALYSIS:
-                available.append("完整流程")
-        self._refresh_workflow_chips(available)
-
     def _clear_datasource_row_statuses(self) -> None:
         if hasattr(self, "datasource_row_status_labels"):
             for lbl in self.datasource_row_status_labels.values():
                 lbl.setText("—")
                 lbl.setStyleSheet("")
-
-    def _refresh_workflow_chips(self, available: list[str]) -> None:
-        """Placeholder method - workflow display removed"""
-        pass
 
     def _collect_function_params_from_ui(self, ps: ProjectSettings) -> None:
         """Deprecated: Use FunctionDefaultsWidget.apply_to_settings() instead.
@@ -1147,7 +1080,7 @@ class WorkspacePagesMixin:
 
             if getattr(self, "current_data_source_status", None) == DataSourceValidationStatus.UNCONFIGURED:
                 self.statusbar.showMessage(
-                    f"✓ 已加载项目：{ps.project_name or project_path.name}；尚未登记数据源，请点击“启动导入向导”",
+                    f"✓ 已加载项目：{ps.project_name or project_path.name}；尚未登记数据源，请点击“导入项目数据”",
                     7000,
                 )
             else:
@@ -1737,20 +1670,6 @@ class WorkspacePagesMixin:
         self.switch_workspace_page("spectrum")
         self.statusbar.showMessage("已切换到质谱工作台，可开始新分析", 4000)
 
-    def continue_next_project_stage(self) -> None:
-        ps = self._collect_and_save_project_settings()
-        status = next_project_stage(ps)
-        if status is None:
-            self.switch_workspace_page("project")
-            self.statusbar.showMessage("全部阶段均已有记录", 4000)
-            return
-        self.switch_workspace_page(status.nav_page)
-        if status.key == "raw_data" and hasattr(self, "project_tabs"):
-            self.project_tabs.setCurrentWidget(self.project_identity_page)
-        elif status.key == "project_setup" and hasattr(self, "project_tabs"):
-            self.project_tabs.setCurrentWidget(self.project_identity_page)
-        self.statusbar.showMessage(status.next_action, 5000)
-
     def create_project_version_snapshot(self) -> None:
         ps = self._collect_and_save_project_settings()
 
@@ -1896,61 +1815,12 @@ class WorkspacePagesMixin:
         self.statusbar.showMessage("项目导出已取消", 3000)
 
     def refresh_project_lifecycle(self, ps: ProjectSettings | None = None) -> None:
-        if not hasattr(self, "project_stage_buttons"):
-            return
-        ps = ps or self.project_settings_manager.get()
-        statuses = build_project_stage_statuses(ps)
-        completed_indexes = [index for index, status in enumerate(statuses) if status.completed and not status.warning]
-        furthest_completed_index = max(completed_indexes, default=-1)
+        """Compatibility hook for project artifact registration.
 
-        def _effectively_completed(index: int, status) -> bool:
-            # A recorded downstream result implies its prerequisites were usable,
-            # even when an older project did not preserve every intermediate file.
-            return status.completed or (index < furthest_completed_index and not status.warning)
-
-        next_status = next(
-            (
-                status
-                for index, status in enumerate(statuses)
-                if not _effectively_completed(index, status)
-            ),
-            None,
-        )
-
-        for index, status in enumerate(statuses):
-            button = self.project_stage_buttons.get(status.key)
-            if button is None:
-                continue
-            inferred_complete = not status.completed and index < furthest_completed_index and not status.warning
-            if _effectively_completed(index, status):
-                state = "complete"
-                prefix = "✓"
-            elif status.warning:
-                state = "warning"
-                prefix = "!"
-            elif next_status is not None and status.key == next_status.key:
-                state = "active"
-                prefix = "→"
-            else:
-                state = "pending"
-                prefix = "○"
-            button.setText(f"{prefix} {status.label}")
-            detail = status.detail or status.next_action
-            if inferred_complete:
-                detail = f"已由后续分析结果推断完成；{detail}"
-            button.setToolTip(detail)
-            button.setProperty("stageState", state)
-            button.style().unpolish(button)
-            button.style().polish(button)
-
-        if next_status is None:
-            self.project_next_action_label.setText("所有核心分析阶段均已有项目记录，可检查产物或创建项目备份。")
-            self.project_continue_button.setText("查看项目数据")
-            self.project_continue_button.setEnabled(True)
-        else:
-            self.project_next_action_label.setText(f"建议下一步：{next_status.next_action}")
-            self.project_continue_button.setText(f"继续：{next_status.label}")
-            self.project_continue_button.setEnabled(True)
+        Project workflow progress is no longer displayed in the project page;
+        project management now focuses on data sources and shared parameters.
+        """
+        return
 
     def _format_file_size(self, size_bytes: int) -> str:
         size = float(size_bytes)
@@ -2001,10 +1871,7 @@ class WorkspacePagesMixin:
                 "first_segment_dominant": "第一组为主",
                 "mean": "简单拼接",
             }
-            next_status = next_project_stage(ps)
-            next_step = next_status.next_action if next_status is not None else "检查产物并导出项目备份"
             summary = (
-                f"下一步: {next_step}\n"
                 "统一参数:\n"
                 f"定标 A={calibration.a:.6g}, B={calibration.b:.6g}, C={calibration.c:.6g}; "
                 f"光强来源={light_map.get(ps.light_source, ps.light_source)}; "
@@ -2015,7 +1882,7 @@ class WorkspacePagesMixin:
                 f"温度光强归一化={'开' if ps.temperature_photon_normalize else '关'}, "
                 f"温度Kr校正={'开' if ps.temperature_kr_correct else '关'}, "
                 f"PIE光强={pie_map.get(ps.pie_photon_mode, ps.pie_photon_mode)}; "
-                f"PIE 能量小数位={ps.pie_energy_decimals}, "
+                f"PIE 能量分组小数位={ps.pie_energy_decimals}, "
                 f"递归={'开' if ps.pie_recursive else '关'}, "
                 f"合并={merge_map.get(ps.pie_merge_method, ps.pie_merge_method)}; "
                 f"温度参考={temp_map.get(ps.temp_reference_mode, ps.temp_reference_mode)}, "

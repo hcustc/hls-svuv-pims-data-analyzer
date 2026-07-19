@@ -422,10 +422,15 @@ QLabel#ParentSelectionStatus[selectionState="warning"] {{
     color: #a16207;
 }}
 
+QWidget#WorkspaceShell {{
+    background: transparent;
+}}
+
 QWidget#PageNav {{
     background: {t.panel_bg};
     border: 1px solid {t.border};
     border-radius: 8px;
+    min-height: 44px;
 }}
 
 QWidget#ProjectPage {{
@@ -441,6 +446,29 @@ QWidget#CalibrationPanel {{
     background: {t.panel_subtle};
     border: 1px solid {t.border_light};
     border-radius: 6px;
+}}
+
+QWidget#ContextHeader {{
+    background: transparent;
+    border: 0;
+}}
+
+QWidget#SourceInputRow {{
+    background: {t.panel_bg};
+    border: 1px solid {t.border_light};
+    border-radius: 6px;
+}}
+
+QWidget#SettingsStrip {{
+    background: {t.panel_subtle};
+    border: 1px solid {t.border_light};
+    border-radius: 6px;
+}}
+
+QWidget#StatusActionStrip {{
+    background: transparent;
+    border: 0;
+    border-left: 1px solid {t.border_light};
 }}
 
 QWidget#SpectrumToolbarBody,
@@ -528,6 +556,13 @@ QGroupBox::title {{
     padding: 0 4px;
     color: {t.text_primary};
     background: {t.panel_bg};
+}}
+
+QWidget#InlineParameterPanel {{
+    border: 1px solid {t.border_light};
+    border-radius: 6px;
+    background: {t.panel_bg};
+    color: {t.text_secondary};
 }}
 
 QFrame#PanelFrame {{
@@ -717,7 +752,17 @@ QToolButton#ModeToggle:checked {{
     color: {t.text_inverse};
 }}
 
-QToolButton#WorkspaceTab,
+QToolButton#WorkspaceTab {{
+    background: transparent;
+    color: {t.text_secondary};
+    border: 1px solid transparent;
+    border-radius: 6px;
+    padding: 4px 10px;
+    min-height: 26px;
+    font-weight: 700;
+    text-align: center;
+}}
+
 QToolButton#PageCard {{
     background: transparent;
     color: {t.text_secondary};
@@ -728,39 +773,6 @@ QToolButton#PageCard {{
     font-weight: 700;
 }}
 
-QToolButton#ProjectStageButton {{
-    background: {t.panel_subtle};
-    color: {t.text_secondary};
-    border: 1px solid {t.border};
-    border-radius: 6px;
-    padding: 6px 8px;
-    min-height: 24px;
-    font-weight: 600;
-}}
-
-QToolButton#ProjectStageButton[stageState="complete"] {{
-    background: #ecfdf5;
-    color: #047857;
-    border-color: #a7f3d0;
-}}
-
-QToolButton#ProjectStageButton[stageState="active"] {{
-    background: {t.primary_soft};
-    color: {t.primary_hover};
-    border-color: {t.primary_border};
-    font-weight: 700;
-}}
-
-QToolButton#ProjectStageButton[stageState="warning"] {{
-    background: {t.warning_bg};
-    color: #a16207;
-    border-color: {t.warning_border};
-}}
-
-QToolButton#ProjectStageButton:hover {{
-    border-color: {t.primary};
-}}
-
 QToolButton#WorkspaceTab:hover,
 QToolButton#PageCard:hover {{
     background: {t.primary_soft};
@@ -768,7 +780,12 @@ QToolButton#PageCard:hover {{
     border-color: {t.primary_softer};
 }}
 
-QToolButton#WorkspaceTab:checked,
+QToolButton#WorkspaceTab:checked {{
+    background: {t.primary_softer};
+    color: {t.primary_hover};
+    border-color: {t.primary_border};
+}}
+
 QToolButton#PageCard:checked {{
     background: {t.primary_softer};
     color: {t.primary_hover};
@@ -960,7 +977,9 @@ QTabBar::tab:hover:!selected {{
 
 QFrame#NavSeparator {{
     background: {t.border};
-    margin: 6px 2px;
+    min-width: 1px;
+    max-width: 1px;
+    margin: 7px 8px;
 }}
 
 QSplitter#MainSplitter {{

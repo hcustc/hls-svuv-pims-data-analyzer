@@ -80,7 +80,6 @@ from bl03u_masstool.core.mole_fraction import (
 from bl03u_masstool.frontends.pyqt_app.workers import WorkerThread
 from bl03u_masstool.frontends.pyqt_app.project_artifacts import record_project_artifact
 from bl03u_masstool.frontends.pyqt_app.temporary_analysis_settings import (
-    TEMPORARY_SETTINGS_SOURCES,
     TemporaryAnalysisSettingsDialog,
     build_temporary_settings,
 )
@@ -89,6 +88,7 @@ from bl03u_masstool.frontends.pyqt_app.common.widgets import (
     AnalysisEmptyState,
     AnalysisProgressState,
     DataFrameTableMixin,
+    ElidedLabel,
     FlowLayout,
 )
 from bl03u_masstool.frontends.pyqt_app.common.plot_spec import (
@@ -146,9 +146,8 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self._global_normalization_settings = deepcopy(self.normalization_settings)
         self.project_settings: ProjectSettings | None = None
         self.temporary_settings: ProjectSettings | None = None
-        self.temporary_settings_source = "global"
+        self.temporary_settings_source = "default"
         self.temporary_settings_modified = False
-        self._temporary_settings_source_explicit = False
         self.project_dir: str | None = None  # Phase 3: Project directory for state persistence
         self.pie_state_dirty = False  # Phase 3 Step 2: dirty flag for unsaved config changes
         self.pie_source_scope = "temporary"
@@ -256,16 +255,16 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.export_plot_button.hide()
 
         self.common_params_button = QtWidgets.QToolButton()
-        self.common_params_button.setText("设置")
+        self.common_params_button.setText("项目参数")
         self.common_params_button.setObjectName("CommandMenuButton")
         self.common_params_button.setPopupMode(QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup)
         self.settings_menu = QtWidgets.QMenu(self.common_params_button)
-        self.common_params_action = self.settings_menu.addAction("通用分析参数…")
+        self.common_params_action = self.settings_menu.addAction("分析默认值…")
         self.common_params_action.triggered.connect(self.open_common_parameters)
-        self.edit_project_action = self.settings_menu.addAction("编辑项目信息…")
+        self.edit_project_action = self.settings_menu.addAction("项目与数据…")
         self.edit_project_action.triggered.connect(self._open_project_settings)
         self.common_params_button.setMenu(self.settings_menu)
-        self.common_params_button.setToolTip("修改分析参数或项目设置")
+        self.common_params_button.setToolTip("打开项目管理中的分析默认值或项目数据设置")
         self.summary_open_project_btn = QtWidgets.QPushButton("编辑项目")
         self.summary_open_project_btn.setObjectName("BrowseButton")
         self.summary_open_project_btn.setToolTip("修改项目名、体系、数据源等")
@@ -281,107 +280,111 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         source_panel = QtWidgets.QWidget()
         source_panel.setObjectName("ControlBar")
         data_layout = QtWidgets.QVBoxLayout(source_panel)
-        data_layout.setContentsMargins(8, 8, 8, 8)
-        data_layout.setSpacing(6)
+        data_layout.setContentsMargins(10, 9, 10, 9)
+        data_layout.setSpacing(7)
 
         self.summary_bar = QtWidgets.QWidget()
+        self.summary_bar.setObjectName("ContextHeader")
         summary_layout = QtWidgets.QHBoxLayout(self.summary_bar)
         summary_layout.setContentsMargins(0, 0, 0, 0)
-        summary_layout.setSpacing(6)
-        self.summary_project_label = QtWidgets.QLabel("项目: ---")
-        self.summary_system_label = QtWidgets.QLabel("体系: ---")
-        self.summary_data_label = QtWidgets.QLabel("数据源: ---")
+        summary_layout.setSpacing(10)
+        self.summary_project_label = QtWidgets.QLabel("项目：---")
+        self.summary_system_label = QtWidgets.QLabel("体系：---")
+        self.summary_data_label = QtWidgets.QLabel("数据源：---")
         self.summary_project_label.setObjectName("ContextValue")
         self.summary_system_label.setObjectName("ContextValue")
         self.summary_data_label.setObjectName("ContextValue")
         self.summary_project_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
         self.summary_system_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
         self.summary_data_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        for lbl in (self.summary_project_label, self.summary_system_label, self.summary_data_label):
+            lbl.setMinimumHeight(24)
         summary_layout.addWidget(self.summary_project_label)
         summary_layout.addWidget(self.summary_system_label)
+        self.summary_data_label.setMaximumWidth(560)
+        self.summary_data_label.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Ignored,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        self.summary_data_label.hide()
         summary_layout.addWidget(self.summary_data_label)
-        summary_layout.addStretch()
-        self.workflow_stage_label = QtWidgets.QLabel("步骤 1/3 · 选择数据并生成曲线")
-        self.workflow_stage_label.setObjectName("PieWorkflowStage")
-        summary_layout.addWidget(self.workflow_stage_label)
         data_layout.addWidget(self.summary_bar)
 
+        folder_row_panel = QtWidgets.QWidget()
+        folder_row_panel.setObjectName("SourceInputRow")
         folder_row = QtWidgets.QHBoxLayout()
+        folder_row_panel.setLayout(folder_row)
+        folder_row.setContentsMargins(8, 6, 8, 6)
         folder_row.setSpacing(6)
-        folder_label = QtWidgets.QLabel("数据来源")
+        folder_label = QtWidgets.QLabel("数据源")
         folder_label.setObjectName("ReadoutLabel")
         folder_row.addWidget(folder_label)
         source_scope_panel = QtWidgets.QWidget()
         source_scope_panel.setObjectName("ModeSegment")
         source_scope_panel.setMinimumWidth(136)
+        source_scope_panel.setFixedHeight(30)
         source_scope_layout = QtWidgets.QHBoxLayout(source_scope_panel)
         source_scope_layout.setContentsMargins(0, 0, 0, 0)
         source_scope_layout.setSpacing(3)
         source_scope_layout.addWidget(self.project_source_button)
         source_scope_layout.addWidget(self.temporary_source_button)
         folder_row.addWidget(source_scope_panel)
-        self.temporary_params_label = QtWidgets.QLabel("当前来源：全局参数副本")
+        self.temporary_params_label = QtWidgets.QLabel("默认参数，可修改")
         self.temporary_params_label.setObjectName("ContextValue")
-        # Non-layout compatibility control.  The visible menu describes source
-        # changes as copy/reset actions so it cannot be mistaken for editing
-        # the project or global configuration itself.
-        self.temporary_params_combo = QtWidgets.QComboBox()
-        for source, label in TEMPORARY_SETTINGS_SOURCES:
-            self.temporary_params_combo.addItem(label, source)
-        self.temporary_params_combo.setCurrentIndex(
-            self.temporary_params_combo.findData(self.temporary_settings_source)
-        )
-        self.temporary_params_combo.hide()
-        self.temporary_params_combo.currentIndexChanged.connect(self._on_temporary_settings_source_changed)
-        self.temporary_params_button = QtWidgets.QPushButton("编辑本次参数…")
+        self.temporary_params_button = QtWidgets.QPushButton("编辑参数…")
         self.temporary_params_button.setObjectName("BrowseButton")
         self.temporary_params_button.clicked.connect(self._edit_temporary_settings)
-        self.temporary_params_reload_button = QtWidgets.QToolButton()
-        self.temporary_params_reload_button.setText("重新载入")
-        self.temporary_params_reload_button.setObjectName("CommandMenuButton")
-        self.temporary_params_reload_button.setPopupMode(
-            QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup
-        )
-        self.temporary_params_menu = QtWidgets.QMenu(self.temporary_params_reload_button)
-        self.copy_project_params_action = self.temporary_params_menu.addAction("从当前项目复制")
-        self.copy_global_params_action = self.temporary_params_menu.addAction("从全局配置复制")
-        self.restore_default_params_action = self.temporary_params_menu.addAction("恢复程序默认值")
-        self.copy_project_params_action.triggered.connect(
-            lambda: self._select_temporary_settings_source("project")
-        )
-        self.copy_global_params_action.triggered.connect(
-            lambda: self._select_temporary_settings_source("global")
-        )
-        self.restore_default_params_action.triggered.connect(
-            lambda: self._select_temporary_settings_source("default")
-        )
-        self.temporary_params_reload_button.setMenu(self.temporary_params_menu)
 
-        self.temporary_params_panel = QtWidgets.QGroupBox("临时数据参数")
+        self.temporary_params_panel = QtWidgets.QWidget(self.summary_bar)
+        self.temporary_params_panel.setObjectName("InlineParameterPanel")
+        self.temporary_params_panel.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Fixed,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        self.temporary_params_panel.setFixedHeight(34)
         temporary_params_layout = QtWidgets.QHBoxLayout(self.temporary_params_panel)
-        temporary_params_layout.setContentsMargins(10, 8, 10, 8)
-        temporary_params_layout.setSpacing(10)
+        temporary_params_layout.setContentsMargins(8, 3, 8, 3)
+        temporary_params_layout.setSpacing(8)
+        self.temporary_params_title_label = QtWidgets.QLabel("临时数据参数", self.temporary_params_panel)
+        self.temporary_params_title_label.setObjectName("ReadoutLabel")
+        temporary_params_layout.addWidget(self.temporary_params_title_label)
         temporary_params_layout.addWidget(self.temporary_params_label)
         temporary_params_layout.addWidget(self.temporary_params_button)
-        temporary_params_layout.addWidget(self.temporary_params_reload_button)
-        self.temporary_params_hint = QtWidgets.QLabel("仅用于当前临时数据，不会修改项目或全局配置")
+        self.temporary_params_hint = QtWidgets.QLabel("只影响本次临时分析，不会写回项目")
         self.temporary_params_hint.setObjectName("HintLabel")
-        temporary_params_layout.addWidget(self.temporary_params_hint)
-        temporary_params_layout.addStretch(1)
+        self.temporary_params_hint.hide()
+        summary_layout.addWidget(self.temporary_params_panel)
+        summary_layout.addWidget(self.common_params_button)
+        self.parameter_summary_label = ElidedLabel()
+        self.parameter_summary_label.setObjectName("ProjectParamSummary")
+        self.parameter_summary_label.setMinimumWidth(0)
+        self.parameter_summary_label.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Ignored,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        summary_layout.addWidget(self.parameter_summary_label, stretch=1)
+        self.folder_edit.setMinimumWidth(180)
         folder_row.addWidget(self.folder_edit, stretch=1)
         folder_row.addWidget(self.select_folder_button)
         folder_row.addWidget(self.temporary_segments_button)
         folder_row.addWidget(self.analyze_button)
-        data_layout.addLayout(folder_row)
-        data_layout.addWidget(self.temporary_params_panel)
+        data_layout.addWidget(folder_row_panel)
 
+        analysis_options_panel = QtWidgets.QWidget()
+        analysis_options_panel.setObjectName("SettingsStrip")
         analysis_options_row = QtWidgets.QHBoxLayout()
+        analysis_options_panel.setLayout(analysis_options_row)
+        analysis_options_row.setContentsMargins(8, 5, 8, 5)
         analysis_options_row.setSpacing(8)
+        analysis_label = QtWidgets.QLabel("分析设置")
+        analysis_label.setObjectName("ReadoutLabel")
+        analysis_options_row.addWidget(analysis_label)
         self.photon_correction_check = QtWidgets.QCheckBox("光强校正")
         self.photon_correction_check.setToolTip("开启时按每个能量点的光强逐点校正；关闭时使用原始积分信号")
+        self.photon_correction_check.toggled.connect(self._refresh_parameter_summary)
         analysis_options_row.addWidget(self.photon_correction_check)
-        self.integration_method_label = QtWidgets.QLabel("积分方式: 范围累加")
-        self.integration_method_label.setObjectName("HintLabel")
+        self.integration_method_label = QtWidgets.QLabel("积分方式：范围累加")
+        self.integration_method_label.setObjectName("ReadoutValue")
         self.integration_method_label.setToolTip("PIE 积分方式由项目管理 -> 功能默认参数 -> PIE 拟合设置")
         analysis_options_row.addWidget(self.integration_method_label)
         self.replicate_enabled_check = QtWidgets.QCheckBox("合并重复采集")
@@ -393,12 +396,22 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.replicate_mode_combo.addItem("累加", "sum")
         self.replicate_mode_combo.setToolTip("开启合并重复采集后，同组重复采集的聚合方式")
         self.replicate_mode_combo.setEnabled(False)
+        self.replicate_mode_combo.currentIndexChanged.connect(self._refresh_parameter_summary)
         analysis_options_row.addWidget(self.replicate_mode_combo)
         analysis_options_row.addStretch()
-        analysis_options_row.addWidget(self.status_label)
-        analysis_options_row.addWidget(self.common_params_button)
-        analysis_options_row.addWidget(self.export_button)
-        data_layout.addLayout(analysis_options_row)
+
+        status_cluster = QtWidgets.QWidget()
+        status_cluster.setObjectName("StatusActionStrip")
+        status_layout = QtWidgets.QHBoxLayout(status_cluster)
+        status_layout.setContentsMargins(8, 0, 0, 0)
+        status_layout.setSpacing(6)
+        status_title = QtWidgets.QLabel("状态")
+        status_title.setObjectName("ReadoutLabel")
+        status_layout.addWidget(status_title)
+        status_layout.addWidget(self.status_label)
+        status_layout.addWidget(self.export_button)
+        analysis_options_row.addWidget(status_cluster)
+        data_layout.addWidget(analysis_options_panel)
 
         layout.addWidget(source_panel)
 
@@ -532,7 +545,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         # Keep the initial workspace deliberately quiet: one explanation and one action.
         self._empty_state = AnalysisEmptyState(
             title="尚未生成 PIE 曲线",
-            description="选择数据目录并生成曲线后，可继续选择 m/z 和配置物种拟合。",
+            description="当前没有可显示的 PIE 曲线。",
             action_text="选择数据",
         )
         self._empty_state.browse_requested.connect(self.select_folder)
@@ -657,6 +670,17 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             win.project_tabs.setCurrentWidget(win.project_identity_page)
         if hasattr(win, "project_pie_folders_list"):
             win.project_pie_folders_list.setFocus(QtCore.Qt.FocusReason.OtherFocusReason)
+
+    def _open_project_analysis_defaults(self) -> bool:
+        """Open the PIE section under the project's analysis defaults."""
+        win = self.window()
+        if not hasattr(win, "switch_workspace_page"):
+            return False
+        win.switch_workspace_page("project")
+        if hasattr(win, "project_tabs") and hasattr(win, "project_function_defaults_widget"):
+            win.project_tabs.setCurrentWidget(win.project_function_defaults_widget)
+            win.project_function_defaults_widget.set_current_page("pie")
+        return True
 
     def _goto_pics_import(self):
         """跳转到 PICS 导入页面（处理 pics_import_requested 信号）。"""
@@ -2034,11 +2058,8 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
     def _ensure_temporary_settings(self) -> ProjectSettings:
         if self.temporary_settings is None:
-            source = self.temporary_settings_source
-            if source == "project" and self.project_settings is None:
-                source = "global"
-                self.temporary_settings_source = source
-            self.temporary_settings = self._build_temporary_settings_snapshot(source)
+            self.temporary_settings_source = "default"
+            self.temporary_settings = self._build_temporary_settings_snapshot("default")
             self.temporary_settings_modified = False
         return self.temporary_settings
 
@@ -2055,35 +2076,13 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             return self.project_settings
         return self._ensure_temporary_settings()
 
-    def _on_temporary_settings_source_changed(self, _index: int) -> None:
-        if not hasattr(self, "temporary_params_combo"):
-            return
-        source = str(self.temporary_params_combo.currentData() or "default")
-        self._reset_temporary_settings_source(source)
-
-    def _select_temporary_settings_source(self, source: str) -> None:
-        if source == "project" and not self._has_project_context():
-            return
-        blocker = QtCore.QSignalBlocker(self.temporary_params_combo)
-        self.temporary_params_combo.setCurrentIndex(self.temporary_params_combo.findData(source))
-        del blocker
-        self._reset_temporary_settings_source(source)
-
-    def _reset_temporary_settings_source(self, source: str) -> None:
-        if source == "project" and not self._has_project_context():
-            source = "global"
-        self.temporary_settings_source = source
-        self._temporary_settings_source_explicit = True
-        self.temporary_settings = self._build_temporary_settings_snapshot(source)
-        self.temporary_settings_modified = False
-        self._apply_temporary_settings_to_runtime()
-
     def _edit_temporary_settings(self) -> None:
         dialog = TemporaryAnalysisSettingsDialog(
             self._ensure_temporary_settings(),
-            self.temporary_settings_source,
             self,
             initial_tab="function",
+            visible_function_pages=("spectrum", "pie"),
+            initial_function_page="pie",
         )
         if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
             return
@@ -2102,7 +2101,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         if database_path != self._loaded_database_path:
             self.load_database(database_path, show_message=False)
         self.integration_method_label.setText(
-            f"积分方式: {self._integration_method_label(ps.pie_integration_method)}"
+            f"积分方式：{self._integration_method_label(ps.pie_integration_method)}"
         )
         self.photon_correction_check.setChecked(ps.pie_photon_mode != "off")
         mode = ps.pie_replicate_mode if ps.pie_replicate_mode in {"mean", "sum"} else "off"
@@ -2215,31 +2214,17 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.select_folder_button.setEnabled(not busy)
         self.select_folder_button.setVisible(True)
         self.temporary_params_panel.setVisible(not use_project)
-        self.temporary_params_combo.setVisible(False)
         self.common_params_button.setVisible(use_project)
         self.temporary_params_button.setEnabled(not busy)
-        self.temporary_params_reload_button.setEnabled(not busy)
-        project_index = self.temporary_params_combo.findData("project")
-        if project_index >= 0:
-            model_item = self.temporary_params_combo.model().item(project_index)
-            if model_item is not None:
-                model_item.setEnabled(self._has_project_context())
-        self.copy_project_params_action.setEnabled(self._has_project_context())
-        source_text = {
-            "project": "项目参数副本",
-            "global": "全局参数副本",
-            "default": "程序默认参数",
-        }.get(self.temporary_settings_source, "程序默认参数")
-        if self.temporary_settings_modified:
-            source_text += " · 已修改"
-        self.temporary_params_label.setText(f"当前来源：{source_text}")
-        self.temporary_params_button.setText("编辑本次参数…")
+        source_text = "本次已修改" if self.temporary_settings_modified else "默认参数，可修改"
+        self.temporary_params_title_label.setText("临时数据参数")
+        self.temporary_params_label.setText(source_text)
+        self.temporary_params_button.setText("编辑参数…")
         self.temporary_params_button.setToolTip(
-            "打开完整参数编辑器；所有修改仅对当前临时数据会话生效"
+            "编辑本次临时数据分析参数；不会写回项目"
         )
-        self.temporary_params_reload_button.setToolTip("丢弃本次修改，并从指定来源重新创建参数副本")
         self.common_params_action.setText(
-            "通用分析参数…" if use_project else "编辑本次临时参数…"
+            "分析默认值…" if use_project else "编辑参数…"
         )
         self.edit_project_action.setEnabled(self._has_project_context())
         self.temporary_segments_button.setVisible(not use_project)
@@ -2405,7 +2390,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self._update_action_state()
         if hasattr(self, "summary_data_label") and self._temporary_segment_summaries:
             self.summary_data_label.setText(
-                f"临时数据: {self._temporary_segment_root} · "
+                f"临时数据：{self._temporary_segment_root} · "
                 f"已选 {len(self._temporary_selected_segment_folders)}/"
                 f"{len(self._temporary_segment_summaries)} 段"
             )
@@ -2548,7 +2533,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             if hasattr(self, "_plot_stack"):
                 self._plot_stack.setCurrentWidget(self._empty_state)
         project_folders = ps.effective_pie_scan_folders()
-        self.integration_method_label.setText(f"积分方式: {self._integration_method_label(ps.pie_integration_method)}")
+        self.integration_method_label.setText(f"积分方式：{self._integration_method_label(ps.pie_integration_method)}")
         mode = ps.pie_replicate_mode if ps.pie_replicate_mode in {"mean", "sum"} else "off"
         self.replicate_enabled_check.setChecked(mode != "off")
         idx_mode = self.replicate_mode_combo.findData(mode if mode != "off" else "mean")
@@ -2599,31 +2584,12 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             activate_project_scope = (self._has_project_scope() or bool(self.project_dir)) and has_project_context
         previous_project_dir = self.project_dir
         self.project_settings = ps
-        if has_project_context and not self._temporary_settings_source_explicit:
-            self.temporary_settings_source = "project"
-            self.temporary_settings = self._build_temporary_settings_snapshot("project")
-            blocker = QtCore.QSignalBlocker(self.temporary_params_combo)
-            self.temporary_params_combo.setCurrentIndex(self.temporary_params_combo.findData("project"))
-            del blocker
-        elif (
-            not has_project_context
-            and activate_project_scope is False
-            and (not self._temporary_settings_source_explicit or self.temporary_settings_source == "project")
-        ):
-            self.temporary_settings_source = "global"
-            self._temporary_settings_source_explicit = False
-            self.temporary_settings_modified = False
-            self.temporary_settings = self._build_temporary_settings_snapshot("global")
-            blocker = QtCore.QSignalBlocker(self.temporary_params_combo)
-            self.temporary_params_combo.setCurrentIndex(self.temporary_params_combo.findData("global"))
-            del blocker
-        elif self.temporary_settings_source == "project" and not self.temporary_settings_modified:
-            self.temporary_settings = self._build_temporary_settings_snapshot("project")
+        self.temporary_settings_source = "default"
         database_path = resolve_species_database_path(ps.pics_database_path)
         normalized_database_path = str(database_path)
         if normalized_database_path != self._loaded_database_path:
             self.load_database(normalized_database_path, show_message=False)
-        self.integration_method_label.setText(f"积分方式: {self._integration_method_label(ps.pie_integration_method)}")
+        self.integration_method_label.setText(f"积分方式：{self._integration_method_label(ps.pie_integration_method)}")
 
         project_name = ps.project_name or "---"
         system = ps.system or "---"
@@ -2654,10 +2620,10 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             )
         else:
             pie_path = self.folder_edit.text().strip() or "---"
-        self.summary_project_label.setText(f"项目: {project_name}")
-        self.summary_system_label.setText(f"体系: {system}")
+        self.summary_project_label.setText(f"项目：{project_name}")
+        self.summary_system_label.setText(f"体系：{system}")
         self.summary_data_label.setText(
-            f"{'项目管理' if self._has_project_scope() else '临时数据'}: {pie_path}"
+            f"{'项目管理' if self._has_project_scope() else '临时数据'}：{pie_path}"
         )
         if hasattr(self, "photon_correction_check"):
             self.photon_correction_check.setChecked(ps.pie_photon_mode != "off")
@@ -2666,7 +2632,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self._refresh_pie_source_controls()
         if self._has_project_scope() and ps.effective_pie_scan_folders() and not self.curves:
             if not self._try_load_project_pie_cache_async():
-                self.status_label.setText('项目参数已同步，点击"生成曲线"')
+                self.status_label.setText("项目参数已同步")
         else:
             self._autoload_cache_token = None
         self._update_action_state()
@@ -2949,8 +2915,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         if not self._has_project_scope():
             self._edit_temporary_settings()
             return
-        self._open_project_settings()
-        if self.parent() is not None:
+        if self._open_project_analysis_defaults():
             return
         dialog = CommonParametersDialog(self.normalization_settings, self.calibration, self)
         dialog.exec()
@@ -3140,13 +3105,13 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
     def _on_project_pie_cache_failed(self, expected_token: dict | None) -> None:
         if self._is_current_pie_cache_token(expected_token):
-            self.status_label.setText('项目参数已同步，点击"生成曲线"')
+            self.status_label.setText("项目参数已同步")
 
     def _on_project_pie_cache_loaded(self, result: object, expected_token: dict | None) -> None:
         if not self._is_current_pie_cache_token(expected_token):
             return
         if not result:
-            self.status_label.setText('项目参数已同步，点击"生成曲线"')
+            self.status_label.setText("项目参数已同步")
             self._update_action_state()
             return
         self.on_analysis_complete(result)
@@ -3307,6 +3272,25 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
     def _on_replicate_enabled_changed(self, checked: bool) -> None:
         self.replicate_mode_combo.setEnabled(checked)
+        self._refresh_parameter_summary()
+
+    def _refresh_parameter_summary(self) -> None:
+        if not hasattr(self, "parameter_summary_label"):
+            return
+        photon_text = "开" if self.photon_correction_check.isChecked() else "关"
+        integration_text = self.integration_method_label.text().replace("积分方式：", "")
+        replicate_text = (
+            self.replicate_mode_combo.currentText()
+            if self.replicate_enabled_check.isChecked()
+            else "关"
+        )
+        scope_text = "项目参数" if self._has_project_scope() else "本次参数"
+        text = (
+            f"{scope_text}：光强校正 {photon_text} · "
+            f"积分 {integration_text} · 重复采集 {replicate_text}"
+        )
+        self.parameter_summary_label.setText(text)
+        self.parameter_summary_label.setToolTip(text)
 
     def _current_replicate_mode(self) -> str:
         if not self.replicate_enabled_check.isChecked():
@@ -3361,6 +3345,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
     def _update_action_state(self) -> None:
         busy = getattr(self, "_busy", False)
+        self._refresh_parameter_summary()
         has_curves = bool(self.curves)
         has_fit_records = bool(self.all_fit_results)
         current_global_hash = self.global_solver_config.get("config_hash", "")
@@ -3420,29 +3405,6 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         else:
             self.fit_button.setText("拟合当前")
             self.fit_button.setToolTip("请先选择一条 m/z 曲线")
-
-        if busy:
-            workflow_text = "处理中 · 请稍候"
-            workflow_status = "busy"
-        elif not has_curves:
-            workflow_text = "步骤 1/3 · 选择数据并生成曲线"
-            workflow_status = "pending"
-        elif not has_selection:
-            workflow_text = "步骤 2/3 · 选择 m/z 曲线"
-            workflow_status = "pending"
-        elif not selection_ready:
-            workflow_text = "步骤 3/3 · 启用候选物种"
-            workflow_status = "warning"
-        elif has_valid_fits:
-            workflow_text = "结果就绪 · 可确认或导出"
-            workflow_status = "complete"
-        else:
-            workflow_text = "步骤 3/3 · 配置候选并拟合"
-            workflow_status = "active"
-        self.workflow_stage_label.setText(workflow_text)
-        self.workflow_stage_label.setProperty("status", workflow_status)
-        self.workflow_stage_label.style().unpolish(self.workflow_stage_label)
-        self.workflow_stage_label.style().polish(self.workflow_stage_label)
 
     def run_pie_analysis_sync(
         self,
@@ -3715,7 +3677,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             parts.append(f"扣基线积分 {baseline_count} 点")
         if mixed_count:
             parts.append(f"混合 {mixed_count} 点")
-        return "积分方式: " + "，".join(parts) if parts else ""
+        return "积分方式：" + "，".join(parts) if parts else ""
 
     def on_analysis_failed(self, message: str) -> None:
         self._restore_analysis_workspace()

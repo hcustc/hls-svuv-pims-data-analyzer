@@ -558,7 +558,7 @@ def test_project_settings_sync_respects_temporary_source_scope(pie_dialog, tmp_p
     assert pie_dialog.folder_edit.text() == str(temporary_folder)
 
 
-def test_temporary_pie_parameters_are_an_isolated_project_snapshot(pie_dialog, tmp_path):
+def test_pie_parameters_follow_selected_data_source(pie_dialog, tmp_path):
     project_folder = tmp_path / "project_pie"
     project_folder.mkdir()
     ps = ProjectSettings(
@@ -573,20 +573,29 @@ def test_temporary_pie_parameters_are_an_isolated_project_snapshot(pie_dialog, t
         min_intensity=17.0,
     )
     pie_dialog.set_project_settings(ps, activate_project_scope=True)
+
+    project_effective = pie_dialog._effective_analysis_settings()
+    assert pie_dialog.pie_source_scope == "project"
+    assert project_effective is ps
+    assert project_effective.to_calibration() == ps.to_calibration()
+    assert project_effective.pie_energy_decimals == 3
+    assert project_effective.pie_integration_method == "baseline"
+    assert project_effective.to_peak_detection_config().min_intensity == 17.0
+
     pie_dialog.set_pie_source_scope("temporary")
+    assert pie_dialog.temporary_settings_source == "default"
+    assert pie_dialog.temporary_params_title_label.text() == "临时数据参数"
+    assert pie_dialog.temporary_params_label.text() == "默认参数，可修改"
+    assert pie_dialog.temporary_params_button.text() == "编辑参数…"
+    assert pie_dialog._effective_analysis_settings().pie_energy_decimals == ProjectSettings().pie_energy_decimals
 
     effective = pie_dialog._effective_analysis_settings()
-    assert pie_dialog.temporary_settings_source == "project"
-    assert pie_dialog.temporary_params_panel.title() == "临时数据参数"
-    assert pie_dialog.temporary_params_label.text() == "当前来源：项目参数副本"
-    assert pie_dialog.temporary_params_button.text() == "编辑本次参数…"
-    assert pie_dialog.copy_project_params_action.isEnabled()
-    assert pie_dialog.common_params_action.text() == "编辑本次临时参数…"
+    assert pie_dialog.temporary_settings_source == "default"
+    assert pie_dialog.common_params_action.text() == "编辑参数…"
     assert effective is not ps
-    assert effective.to_calibration() == ps.to_calibration()
-    assert effective.pie_energy_decimals == 3
-    assert effective.pie_integration_method == "baseline"
-    assert effective.to_peak_detection_config().min_intensity == 17.0
+    assert effective.pie_energy_decimals == ProjectSettings().pie_energy_decimals
+    assert effective.pie_integration_method == ProjectSettings().pie_integration_method
+    assert effective.to_peak_detection_config().min_intensity == ProjectSettings().min_intensity
     assert pie_dialog._pie_cache_dir() != tmp_path / "project" / "analysis" / "pie" / "cache"
 
     effective.cal_a = 8.0
@@ -595,17 +604,20 @@ def test_temporary_pie_parameters_are_an_isolated_project_snapshot(pie_dialog, t
     assert ps.pie_energy_decimals == 3
 
 
-def test_temporary_parameter_menu_disables_project_copy_without_project(pie_dialog):
+def test_temporary_parameter_panel_uses_default_editable_parameters_without_project(pie_dialog):
     assert pie_dialog.pie_source_scope == "temporary"
-    assert pie_dialog.temporary_params_label.text() == "当前来源：全局参数副本"
-    assert pie_dialog.temporary_params_button.text() == "编辑本次参数…"
-    assert not pie_dialog.copy_project_params_action.isEnabled()
-    assert pie_dialog.common_params_action.text() == "编辑本次临时参数…"
+    assert pie_dialog.temporary_params_title_label.text() == "临时数据参数"
+    assert pie_dialog.temporary_params_label.text() == "默认参数，可修改"
+    assert pie_dialog.temporary_params_button.text() == "编辑参数…"
+    assert not hasattr(pie_dialog, "copy_project_params_action")
+    assert not hasattr(pie_dialog, "temporary_params_reload_button")
+    assert pie_dialog.common_params_action.text() == "编辑参数…"
     assert pie_dialog.common_params_button.isHidden()
 
-    pie_dialog._select_temporary_settings_source("default")
+    pie_dialog.temporary_settings_modified = True
+    pie_dialog._refresh_pie_source_controls()
     assert pie_dialog.temporary_settings_source == "default"
-    assert pie_dialog.temporary_params_label.text() == "当前来源：程序默认参数"
+    assert pie_dialog.temporary_params_label.text() == "本次已修改"
 
 
 def test_analysis_and_fit_actions_follow_real_prerequisites(pie_dialog, tmp_path):

@@ -26,6 +26,9 @@ from bl03u_masstool.core.project_settings import save_project_settings
 from bl03u_masstool.core.project_lifecycle import project_root
 from bl03u_masstool.frontends.pyqt_app.normalization.widget import FunctionDefaultsWidget
 from bl03u_masstool.frontends.pyqt_app.spectrum.workbench import MainWindow
+from bl03u_masstool.frontends.pyqt_app.temporary_analysis_settings import (
+    TemporaryAnalysisSettingsDialog,
+)
 
 
 def _wait_for_project_materialization(qapp, window: MainWindow, timeout_ms: int = 5000) -> None:
@@ -332,13 +335,34 @@ def test_function_defaults_routes_users_to_corresponding_function_page(qapp):
     widget.navigate_requested.connect(requested_pages.append)
     try:
         widget.tabs.setCurrentIndex(2)
-        assert widget.open_function_page_button.text() == "前往PIE 拟合"
+        assert widget.open_function_page_button.text() == "打开PIE 拟合页"
 
         widget.open_function_page_button.click()
 
         assert requested_pages == ["pie"]
     finally:
         widget.deleteLater()
+
+
+def test_temporary_settings_dialog_scopes_function_pages_for_pie(qapp):
+    dialog = TemporaryAnalysisSettingsDialog(
+        ProjectSettings(),
+        initial_tab="function",
+        visible_function_pages=("spectrum", "pie"),
+        initial_function_page="pie",
+    )
+    try:
+        assert dialog.tabs.currentWidget() is dialog.function_widget
+        assert [
+            dialog.function_widget.tabs.tabText(index)
+            for index in range(dialog.function_widget.tabs.count())
+        ] == ["寻峰与积分", "PIE 分析"]
+        assert dialog.function_widget.tabs.currentIndex() == 1
+
+        dialog.function_widget.tabs.setCurrentIndex(1)
+        assert dialog.function_widget.open_function_page_button.text() == "打开PIE 拟合页"
+    finally:
+        dialog.deleteLater()
 
 
 def test_project_parameter_pages_do_not_show_internal_ownership_banners(qapp):
@@ -374,28 +398,113 @@ def test_spectrum_source_path_edit_has_bottom_painting_clearance(qapp):
         window.deleteLater()
 
 
-def test_project_page_exposes_workflow_progress_and_next_action(qapp, tmp_path):
+def test_project_page_omits_workflow_progress_card(qapp):
     window = MainWindow()
     try:
-        ps = ProjectSettings(
-            project_name="Workflow UI",
-            system="Test",
-            output_dir=str(tmp_path / "Workflow_UI"),
-        )
-        window.project_settings_manager.set(ps)
-        window._read_project_settings_to_ui(ps)
-        window.refresh_project_lifecycle(ps)
-
-        assert "项目初始化" in window.project_stage_buttons["project_setup"].text()
-        assert window.project_stage_buttons["project_setup"].property("stageState") == "active"
-        assert window.project_continue_button.text().startswith("继续：")
-        assert "建议下一步" in window.project_next_action_label.text()
+        assert not hasattr(window, "project_workflow_card")
+        assert not hasattr(window, "project_stage_buttons")
+        assert not hasattr(window, "project_continue_button")
+        assert [
+            window.project_tabs.tabText(index)
+            for index in range(window.project_tabs.count())
+        ] == ["项目与数据", "共享参数", "分析默认值"]
+        labels = " ".join(label.text() for label in window.project_identity_page.findChildren(QtWidgets.QLabel))
+        assert "项目工作流" not in labels
+        assert "建议下一步" not in labels
     finally:
-        window.project_settings_manager.clear_project_path()
         window.deleteLater()
 
 
-def test_project_workflow_infers_prerequisites_from_downstream_result(qapp, tmp_path):
+def test_pie_project_parameter_menu_opens_pie_analysis_defaults(qapp):
+    window = MainWindow()
+    try:
+        window.pie_page.set_project_settings(
+            ProjectSettings(project_name="UI test", output_dir="output"),
+            activate_project_scope=True,
+        )
+        window.switch_workspace_page("pie")
+
+        assert window.pie_page.common_params_button.text() == "项目参数"
+        assert window.pie_page.common_params_action.text() == "分析默认值…"
+        assert window.pie_page.edit_project_action.text() == "项目与数据…"
+
+        window.pie_page.common_params_action.trigger()
+
+        assert window.workspace_stack.currentWidget() is window.project_page
+        assert window.project_tabs.currentWidget() is window.project_function_defaults_widget
+        assert window.project_function_defaults_widget.tabs.tabText(
+            window.project_function_defaults_widget.tabs.currentIndex()
+        ) == "PIE 分析"
+    finally:
+        window.deleteLater()
+
+
+def test_temperature_project_parameter_menu_opens_temperature_defaults(qapp):
+    window = MainWindow()
+    try:
+        window.temperature_page.set_project_settings(
+            ProjectSettings(project_name="UI test", output_dir="output"),
+            activate_project_scope=True,
+        )
+        window.switch_workspace_page("temperature")
+
+        assert window.temperature_page.common_params_button.text() == "项目参数"
+        assert window.temperature_page.common_params_action.text() == "分析默认值…"
+        assert window.temperature_page.edit_project_action.text() == "项目与数据…"
+
+        window.temperature_page.common_params_action.trigger()
+
+        assert window.workspace_stack.currentWidget() is window.project_page
+        assert window.project_tabs.currentWidget() is window.project_function_defaults_widget
+        assert window.project_function_defaults_widget.tabs.tabText(
+            window.project_function_defaults_widget.tabs.currentIndex()
+        ) == "温度扫描"
+    finally:
+        window.deleteLater()
+
+
+def test_temperature_project_parameters_fall_back_outside_workspace(qapp, monkeypatch):
+    from bl03u_masstool.core.calibration import Calibration
+    from bl03u_masstool.frontends.pyqt_app.temperature import dialog as temperature_dialog_module
+    from bl03u_masstool.frontends.pyqt_app.temperature.dialog import TemperatureScanDialog
+
+    opened = []
+
+    class FakeCommonParametersDialog:
+        def __init__(self, settings, calibration, parent):
+            opened.append((settings, calibration, parent))
+
+        def exec(self):
+            return 0
+
+    reloaded_calibration = Calibration(a=1.0, b=2.0, c=3.0)
+    monkeypatch.setattr(
+        temperature_dialog_module,
+        "CommonParametersDialog",
+        FakeCommonParametersDialog,
+    )
+    monkeypatch.setattr(
+        temperature_dialog_module,
+        "load_calibration_config",
+        lambda: reloaded_calibration,
+    )
+
+    widget = TemperatureScanDialog(Calibration())
+    try:
+        widget.set_project_settings(
+            ProjectSettings(project_name="Standalone", output_dir="output"),
+            activate_project_scope=True,
+        )
+        widget.open_common_parameters()
+
+        assert len(opened) == 1
+        assert opened[0][2] is widget
+        assert widget.calibration == reloaded_calibration
+    finally:
+        widget.deleteLater()
+
+
+def test_refresh_project_lifecycle_is_compatible_without_workflow_ui(qapp, tmp_path):
     window = MainWindow()
     result_file = tmp_path / "temperature_result.csv"
     result_file.write_text("mz,temperature,signal\n29,650,1\n", encoding="utf-8")
@@ -409,8 +518,8 @@ def test_project_workflow_infers_prerequisites_from_downstream_result(qapp, tmp_
         window.project_settings_manager.set(ps)
         window.refresh_project_lifecycle(ps)
 
-        assert window.project_stage_buttons["calibration"].property("stageState") == "complete"
-        assert "PIE拟合" in window.project_continue_button.text()
+        assert not hasattr(window, "project_stage_buttons")
+        assert not hasattr(window, "project_continue_button")
     finally:
         window.project_settings_manager.clear_project_path()
         window.deleteLater()
@@ -577,7 +686,7 @@ def test_temperature_ignores_analysis_result_from_previous_project(qapp, monkeyp
         widget.deleteLater()
 
 
-def test_temperature_temporary_data_uses_isolated_project_parameter_snapshot(qapp, tmp_path):
+def test_temperature_parameters_follow_selected_data_source(qapp, tmp_path):
     from bl03u_masstool.core.calibration import Calibration
     from bl03u_masstool.frontends.pyqt_app.temperature.dialog import TemperatureScanDialog
 
@@ -596,24 +705,27 @@ def test_temperature_temporary_data_uses_isolated_project_parameter_snapshot(qap
     widget = TemperatureScanDialog(Calibration(a=0.0, b=1.0, c=0.0))
     try:
         widget.set_project_settings(ps, activate_project_scope=True)
+
+        project_params = widget._analysis_parameters()
+        assert widget.temperature_source_scope == "project"
+        assert project_params["calibration"] == project_calibration
+        assert project_params["integration_method"] == "baseline"
+        assert project_params["min_intensity"] == 12.0
+
         widget.set_temperature_source_scope("temporary")
+        assert widget.temporary_settings_source == "default"
+        assert widget.temporary_params_title_label.text() == "临时数据参数"
+        assert widget.temporary_params_label.text() == "默认参数，可修改"
+        assert widget.temporary_params_button.text() == "编辑参数…"
+        assert not hasattr(widget, "temporary_params_reload_button")
+        assert not hasattr(widget, "copy_project_params_action")
+        assert widget._analysis_parameters()["integration_method"] == ProjectSettings().temp_integration_method
 
         params = widget._analysis_parameters()
-        assert widget.temporary_settings_source == "project"
-        assert widget.temporary_params_panel.title() == "临时数据参数"
-        assert widget.temporary_params_label.text() == "当前来源：项目参数副本"
-        assert widget.temporary_params_button.text() == "编辑本次参数…"
-        assert widget.temporary_params_reload_button.text() == "重新载入"
-        assert widget.temporary_params_hint.text() == "仅用于当前临时数据，不会修改项目或全局配置"
-        assert widget.copy_project_params_action.isEnabled()
-        assert [action.text() for action in widget.temporary_params_menu.actions() if not action.isSeparator()] == [
-            "从当前项目复制",
-            "从全局配置复制",
-            "恢复程序默认值",
-        ]
-        assert params["calibration"] == project_calibration
-        assert params["integration_method"] == "baseline"
-        assert params["min_intensity"] == 12.0
+        assert widget.temporary_params_hint.text() == "只影响本次临时分析，不会写回项目"
+        assert params["calibration"] != project_calibration
+        assert params["integration_method"] == ProjectSettings().temp_integration_method
+        assert params["min_intensity"] == ProjectSettings().min_intensity
         assert params["cache_dir"] != tmp_path / "project" / "analysis" / "temperature_scan" / "cache"
 
         widget.temporary_settings.cal_a = 9.0
@@ -621,9 +733,10 @@ def test_temperature_temporary_data_uses_isolated_project_parameter_snapshot(qap
         assert ps.cal_a == project_calibration.a
         assert ps.temp_integration_method == "baseline"
 
-        widget._select_temporary_settings_source("default")
+        widget.temporary_settings_modified = True
+        widget._refresh_temperature_source_controls()
         assert widget.temporary_settings_source == "default"
-        assert widget.temporary_params_label.text() == "当前来源：程序默认参数"
+        assert widget.temporary_params_label.text() == "本次已修改"
     finally:
         widget.deleteLater()
 
@@ -667,7 +780,7 @@ def test_temperature_page_lists_energy_subfolders_for_project_source(qapp, tmp_p
             (14.6, str(range_energy)),
         ]
         assert widget.run_button.isEnabled()
-        assert widget.workflow_stage_label.text() == "步骤 2/3 · 生成温度曲线"
+        assert not hasattr(widget, "workflow_stage_label")
         assert not hasattr(widget, "interval_mz_spin")
         assert not hasattr(widget, "energy_interval_button")
 

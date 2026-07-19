@@ -15,13 +15,6 @@ from bl03u_masstool.frontends.pyqt_app.normalization.widget import (
 )
 
 
-TEMPORARY_SETTINGS_SOURCES = (
-    ("project", "当前项目"),
-    ("global", "全局配置"),
-    ("default", "程序默认值"),
-)
-
-
 def build_temporary_settings(
     source: str,
     project_settings: ProjectSettings | None = None,
@@ -53,32 +46,26 @@ def build_temporary_settings(
     return ProjectSettings()
 
 
-def temporary_settings_source_label(source: str, *, modified: bool = False) -> str:
-    labels = dict(TEMPORARY_SETTINGS_SOURCES)
-    label = labels.get(source, labels["default"])
-    return f"临时会话（复制自{label}{'，已修改' if modified else ''}）"
-
-
 class TemporaryAnalysisSettingsDialog(QtWidgets.QDialog):
     """Edit a ProjectSettings snapshot without persisting any changes."""
 
     def __init__(
         self,
         settings: ProjectSettings,
-        source: str,
         parent=None,
         *,
         initial_tab: str | None = None,
+        visible_function_pages: tuple[str, ...] | None = None,
+        initial_function_page: str | None = None,
     ) -> None:
         super().__init__(parent)
         self._settings = deepcopy(settings)
-        self.setWindowTitle("临时数据参数")
+        self.setWindowTitle("编辑临时数据参数")
         self.resize(1040, 720)
 
         layout = QtWidgets.QVBoxLayout(self)
         notice = QtWidgets.QLabel(
-            f"参数来源：{temporary_settings_source_label(source)}。"
-            "这里的修改只对本次临时数据会话生效，不会写回项目或全局配置。"
+            "临时数据默认使用默认参数。这里的修改只用于本次分析，不会写回项目配置。"
         )
         notice.setWordWrap(True)
         notice.setObjectName("HintLabel")
@@ -94,20 +81,26 @@ class TemporaryAnalysisSettingsDialog(QtWidgets.QDialog):
             persist_changes=False,
         )
         self.common_widget.set_project_settings(self._settings)
-        self.function_widget = FunctionDefaultsWidget(self, show_actions=False)
+        self.function_widget = FunctionDefaultsWidget(
+            self,
+            show_actions=False,
+            visible_pages=visible_function_pages,
+        )
         self.function_widget.set_project_settings(self._settings)
-        self.tabs.addTab(self.common_widget, "通用参数")
-        self.tabs.addTab(self.function_widget, "寻峰与功能参数")
+        self.tabs.addTab(self.common_widget, "通用处理参数")
+        self.tabs.addTab(self.function_widget, "功能参数")
         layout.addWidget(self.tabs, 1)
 
         if initial_tab == "function":
             self.tabs.setCurrentIndex(1)
+        if initial_function_page:
+            self.function_widget.set_current_page(initial_function_page)
 
         buttons = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.StandardButton.Ok
             | QtWidgets.QDialogButtonBox.StandardButton.Cancel
         )
-        buttons.button(QtWidgets.QDialogButtonBox.StandardButton.Ok).setText("应用本次参数")
+        buttons.button(QtWidgets.QDialogButtonBox.StandardButton.Ok).setText("应用到本次分析")
         buttons.button(QtWidgets.QDialogButtonBox.StandardButton.Cancel).setText("取消")
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
