@@ -50,7 +50,7 @@ def pie_dialog(qapp):
     dialog.deleteLater()
 
 
-def test_temporary_data_uses_project_pics_database(pie_dialog, tmp_path):
+def test_temporary_data_uses_default_pics_database(pie_dialog, tmp_path):
     database_path = tmp_path / "project_species.sqlite"
     save_species_database_sqlite(
         [
@@ -73,8 +73,8 @@ def test_temporary_data_uses_project_pics_database(pie_dialog, tmp_path):
     )
 
     assert pie_dialog.pie_source_scope == "temporary"
-    assert pie_dialog._loaded_database_path == str(database_path)
-    assert any(item["species"] == "TemporaryDataCandidate" for item in pie_dialog.database)
+    assert pie_dialog._loaded_database_path != str(database_path)
+    assert not any(item["species"] == "TemporaryDataCandidate" for item in pie_dialog.database)
 
 
 def test_closing_project_restores_default_pics_database(pie_dialog, tmp_path):
@@ -92,7 +92,11 @@ def test_closing_project_restores_default_pics_database(pie_dialog, tmp_path):
         ],
         database_path,
     )
-    pie_dialog.set_project_settings(ProjectSettings(pics_database_path=str(database_path)))
+    pie_dialog.set_project_settings(
+        ProjectSettings(pics_database_path=str(database_path)),
+        activate_project_scope=True,
+    )
+    assert pie_dialog.pie_source_scope == "project"
     assert any(item["species"] == "ProjectOnlyCandidate" for item in pie_dialog.database)
 
     pie_dialog.set_project_settings(ProjectSettings(), activate_project_scope=False)
