@@ -1,0 +1,50 @@
+# BL03U desktop scientific plot profile.
+# Visual parameters adapt SciencePlots' science style (MIT License):
+# https://github.com/garrettj403/SciencePlots
+# Keep this profile independent from LaTeX and platform-specific fonts.
+text.usetex: False
+axes.unicode_minus: False
+font.family: sans-serif
+mathtext.fontset: dejavusans
+figure.facecolor: white
+axes.facecolor: white
+axes.edgecolor: 0.18
+axes.linewidth: 0.65
+axes.titlesize: 10.5
+axes.titleweight: normal
+axes.titlepad: 7
+axes.labelsize: 9.5
+axes.labelcolor: 0.22
+axes.labelpad: 6
+axes.grid: False
+axes.axisbelow: True
+axes.prop_cycle: cycler('color', ['0C5DA5', '00B945', 'FF9500', 'FF2C00', '845B97', '474747', '9E9E9E'])
+xtick.color: 0.32
+ytick.color: 0.32
+xtick.labelsize: 8.5
+ytick.labelsize: 8.5
+xtick.direction: in
+ytick.direction: in
+xtick.top: True
+ytick.right: True
+xtick.minor.visible: True
+ytick.minor.visible: True
+xtick.major.size: 3
+ytick.major.size: 3
+xtick.major.width: 0.6
+ytick.major.width: 0.6
+xtick.minor.size: 1.5
+ytick.minor.size: 1.5
+xtick.minor.width: 0.5
+ytick.minor.width: 0.5
+lines.linewidth: 1.0
+lines.markersize: 4.0
+lines.solid_capstyle: round
+lines.dash_capstyle: round
+legend.fontsize: 8
+legend.frameon: False
+legend.labelspacing: 0.38
+legend.handlelength: 2.2
+savefig.facecolor: white
+savefig.bbox: tight
+savefig.pad_inches: 0.05

@@ -107,6 +107,7 @@ class FittingControlWidget(QtWidgets.QWidget):
         empty_layout = QtWidgets.QVBoxLayout(self.empty_state_widget)
         empty_layout.setContentsMargins(16, 16, 16, 16)
         empty_layout.setSpacing(12)
+        empty_layout.addStretch()
 
         empty_icon = StateGlyph("candidate")
         empty_layout.addWidget(
@@ -139,6 +140,11 @@ class FittingControlWidget(QtWidgets.QWidget):
 
         main_layout.addWidget(self.empty_state_widget, stretch=1)
 
+        self.candidate_controls_widget = QtWidgets.QWidget()
+        candidate_controls_layout = QtWidgets.QVBoxLayout(self.candidate_controls_widget)
+        candidate_controls_layout.setContentsMargins(0, 0, 0, 0)
+        candidate_controls_layout.setSpacing(6)
+
         candidate_summary_row = QtWidgets.QHBoxLayout()
         candidate_summary_row.setSpacing(6)
         self.candidate_summary_label = QtWidgets.QLabel("0 个候选 · 0 个启用")
@@ -147,12 +153,12 @@ class FittingControlWidget(QtWidgets.QWidget):
         self.fit_mode_label = QtWidgets.QLabel("自动 NNLS")
         self.fit_mode_label.setObjectName("FitModeBadge")
         candidate_summary_row.addWidget(self.fit_mode_label)
-        main_layout.addLayout(candidate_summary_row)
+        candidate_controls_layout.addLayout(candidate_summary_row)
 
         self.lock_hint_label = QtWidgets.QLabel("※ 锁定：自动筛选时保留该候选，系数仍由拟合决定")
         self.lock_hint_label.setObjectName("HintLabel")
         self.lock_hint_label.setWordWrap(True)
-        main_layout.addWidget(self.lock_hint_label)
+        candidate_controls_layout.addWidget(self.lock_hint_label)
 
         # 按钮行
         control_row2 = QtWidgets.QHBoxLayout()
@@ -161,7 +167,7 @@ class FittingControlWidget(QtWidgets.QWidget):
         self.select_all_btn = QtWidgets.QPushButton("全选")
         self.select_all_btn.clicked.connect(lambda: self._set_all_rows_checked(True))
         self.select_all_btn.setObjectName("BrowseButton")
-        control_row2.addWidget(self.select_all_btn)
+        self.select_all_btn.hide()
 
         self.clear_selection_btn = QtWidgets.QPushButton("清除选择")
         self.clear_selection_btn.setToolTip("取消所有物种的勾选")
@@ -173,16 +179,34 @@ class FittingControlWidget(QtWidgets.QWidget):
         self.zero_coeff_btn.setToolTip("将所有系数值清零")
         self.zero_coeff_btn.clicked.connect(self._zero_all_coefficients)
         self.zero_coeff_btn.setObjectName("BrowseButton")
-        control_row2.addWidget(self.zero_coeff_btn)
+        self.zero_coeff_btn.hide()
 
         self.ie_query_btn = QtWidgets.QPushButton("查询缺失 IE")
         self.ie_query_btn.setToolTip("通过本地物种库 / NIST WebBook 查询当前候选中缺失的电离能")
         self.ie_query_btn.clicked.connect(self.ie_query_requested.emit)
         self.ie_query_btn.setObjectName("BrowseButton")
-        control_row2.addWidget(self.ie_query_btn)
+        self.ie_query_btn.hide()
+
+        self.candidate_actions_btn = QtWidgets.QToolButton()
+        self.candidate_actions_btn.setText("候选操作")
+        self.candidate_actions_btn.setObjectName("CommandMenuButton")
+        self.candidate_actions_btn.setPopupMode(
+            QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup
+        )
+        self.candidate_actions_menu = QtWidgets.QMenu(self.candidate_actions_btn)
+        self.select_all_action = self.candidate_actions_menu.addAction("启用全部候选")
+        self.select_all_action.triggered.connect(lambda: self._set_all_rows_checked(True))
+        self.zero_coeff_action = self.candidate_actions_menu.addAction("全部系数清零")
+        self.zero_coeff_action.triggered.connect(self._zero_all_coefficients)
+        self.candidate_actions_menu.addSeparator()
+        self.ie_query_action = self.candidate_actions_menu.addAction("查询缺失电离能")
+        self.ie_query_action.triggered.connect(self.ie_query_requested.emit)
+        self.candidate_actions_btn.setMenu(self.candidate_actions_menu)
+        self.candidate_actions_btn.setToolTip("批量处理当前候选物种")
+        control_row2.addWidget(self.candidate_actions_btn)
 
         control_row2.addStretch()
-        main_layout.addLayout(control_row2)
+        candidate_controls_layout.addLayout(control_row2)
 
         # ---- 下方：物种表格（启用 | 物种(※) | IE | 系数 | 操作） ----
         self.species_table = QtWidgets.QTableWidget()
@@ -194,17 +218,21 @@ class FittingControlWidget(QtWidgets.QWidget):
         self.species_table.setAlternatingRowColors(True)
         self.species_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.species_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.species_table.setTextElideMode(QtCore.Qt.TextElideMode.ElideRight)
         self.species_table.verticalHeader().setVisible(False)
-        self.species_table.verticalHeader().setDefaultSectionSize(30)
+        self.species_table.verticalHeader().setDefaultSectionSize(32)
+        self.species_table.verticalHeader().setMinimumSectionSize(32)
         self.species_table.horizontalHeader().setStretchLastSection(False)
-        main_layout.addWidget(self.species_table, stretch=1)
+        candidate_controls_layout.addWidget(self.species_table, stretch=1)
+        main_layout.addWidget(self.candidate_controls_widget, stretch=1)
 
         # ---- 结果摘要区（拟合后显示）----
         # 分隔线
-        separator = QtWidgets.QFrame()
-        separator.setFrameShape(QtWidgets.QFrame.Shape.HLine)
-        separator.setObjectName("PanelSeparator")
-        main_layout.addWidget(separator)
+        self.panel_separator = QtWidgets.QFrame()
+        self.panel_separator.setFrameShape(QtWidgets.QFrame.Shape.HLine)
+        self.panel_separator.setObjectName("PanelSeparator")
+        self.panel_separator.setVisible(False)
+        main_layout.addWidget(self.panel_separator)
 
         self.result_section = QtWidgets.QWidget()
         self.result_section.setVisible(False)
@@ -351,12 +379,14 @@ class FittingControlWidget(QtWidgets.QWidget):
         if has_candidates:
             # 有候选物种 → 显示表格
             self.empty_state_widget.hide()
-            self.species_table.show()
+            self.candidate_controls_widget.show()
+            self.panel_separator.setVisible(self.result_section.isVisible())
             self._refresh_table_from_data()
         elif self._candidates_loaded:
             # 查询已执行但无结果 → 显示"未找到候选物种"空状态
             self.species_table.setRowCount(0)
             self.empty_icon.set_kind("warning")
+            self.empty_icon.show()
             self.empty_title.setText("当前 m/z 未找到候选物种")
             self.empty_text.setText(
                 "PICS 数据库中尚未收录该质荷比的物种或缺少截面数据。\n"
@@ -364,19 +394,18 @@ class FittingControlWidget(QtWidgets.QWidget):
             )
             self.goto_pics_btn.show()
             self.empty_state_widget.show()
-            self.species_table.hide()
+            self.candidate_controls_widget.hide()
+            self.panel_separator.hide()
         else:
             # 前置数据未准备 → 显示"请先生成 PIE 曲线"空状态
             self.species_table.setRowCount(0)
-            self.empty_icon.set_kind("candidate")
-            self.empty_title.setText("等待 PIE 曲线")
-            self.empty_text.setText(
-                "请先在上方选择数据源并生成 PIE 曲线。\n"
-                "随后在左侧选择 m/z，对应候选物种将自动显示在此。"
-            )
+            self.empty_icon.hide()
+            self.empty_title.setText("尚未选择曲线")
+            self.empty_text.setText("从左侧选择一条 m/z 曲线后显示候选物种。")
             self.goto_pics_btn.hide()
             self.empty_state_widget.show()
-            self.species_table.hide()
+            self.candidate_controls_widget.hide()
+            self.panel_separator.hide()
         self.current_mz_label.setText(
             f"m/z {self._current_mz}" if self._current_mz is not None else "未选择 m/z"
         )
@@ -462,24 +491,25 @@ class FittingControlWidget(QtWidgets.QWidget):
 
             # 更新header显示当前m/z
             if self._current_mz is not None:
-                self.species_table.horizontalHeader().setSectionResizeMode(
-                    0, QtWidgets.QHeaderView.ResizeMode.ResizeToContents
-                )
                 self.species_table.setHorizontalHeaderLabels([
-                    "启用", f"物种 (m/z={self._current_mz})", "IE (eV)", "系数", "操作"
+                    "启用", "物种", "IE (eV)", "系数", "操作"
                 ])
 
             header = self.species_table.horizontalHeader()
-            # 设置列宽
-            self.species_table.setColumnWidth(0, 40)   # 启用 checkbox
-            self.species_table.setColumnWidth(2, 78)   # IE
-            self.species_table.setColumnWidth(3, 105)  # 系数
-            self.species_table.setColumnWidth(4, 42)   # 操作 (删除按钮)
-
-            # 自适应列
-            header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Stretch)  # 物种名称
+            header.setSectionsMovable(False)
+            header.setMinimumSectionSize(36)
+            header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Fixed)
+            header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Stretch)
+            header.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.Fixed)
+            header.setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.Fixed)
+            header.setSectionResizeMode(4, QtWidgets.QHeaderView.ResizeMode.Fixed)
+            self.species_table.setColumnWidth(0, 40)
+            self.species_table.setColumnWidth(2, 72)
+            self.species_table.setColumnWidth(3, 112)
+            self.species_table.setColumnWidth(4, 40)
 
             for row, species in enumerate(self._unified_species_data):
+                self.species_table.setRowHeight(row, 32)
                 self._populate_table_row(row, species)
         finally:
             self._updating = False
@@ -507,13 +537,18 @@ class FittingControlWidget(QtWidgets.QWidget):
         species_name = species.get('species', '')
         name_label = QtWidgets.QLabel(species_name)
         name_label.setWordWrap(False)
+        name_label.setMinimumWidth(0)
+        name_label.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Ignored,
+            QtWidgets.QSizePolicy.Policy.Preferred,
+        )
         species_layout.addWidget(name_label, stretch=1)
 
         # 切换按钮 (※) - 锁定候选标记
         # 注意：新实现"锁定候选"（不被筛选移除，系数正常优化）
         # 详见 locked_candidates_refactor_plan.md
         toggle_btn = QtWidgets.QPushButton("※")
-        toggle_btn.setFixedSize(24, 24)
+        toggle_btn.setFixedSize(22, 22)
         toggle_btn.setFlat(False)
         toggle_btn.setToolTip("点击切换锁定/普通状态")
         toggle_btn.clicked.connect(lambda checked=False, r=row: self._toggle_locked_status(r))
@@ -555,12 +590,13 @@ class FittingControlWidget(QtWidgets.QWidget):
 
         # Col 3: 系数（QDoubleSpinBox）
         coeff_spin = QtWidgets.QDoubleSpinBox()
+        coeff_spin.setObjectName("TableCellEditor")
         coeff_spin.setRange(0, 1e6)
         coeff_spin.setDecimals(6)
         coeff_spin.setValue(species.get('coefficient', 0.0))
         coeff_spin.setToolTip("保持 0 时由 NNLS 自动求解；输入正值后按手动系数拟合")
         coeff_spin.setFixedHeight(24)
-        coeff_spin.setContentsMargins(0, 0, 0, 0)
+        coeff_spin.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
         coeff_spin.valueChanged.connect(lambda val, r=row: self._on_row_changed(r))
         self.species_table.setCellWidget(row, 3, coeff_spin)
 
@@ -571,7 +607,7 @@ class FittingControlWidget(QtWidgets.QWidget):
         remove_layout.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         remove_btn = QtWidgets.QPushButton("✕")
         remove_btn.setObjectName("IconButton")
-        remove_btn.setFixedSize(24, 24)
+        remove_btn.setFixedSize(22, 22)
         remove_btn.setToolTip("移除物种")
         remove_btn.clicked.connect(lambda checked=False, r=row: self._remove_row(r))
         remove_layout.addWidget(remove_btn)
@@ -798,6 +834,7 @@ class FittingControlWidget(QtWidgets.QWidget):
             species.get("ie_query_status") == "pending" for species in self._unified_species_data
         )
         self.ie_query_btn.setEnabled(bool(self._unified_species_data) and has_missing and not has_pending)
+        self.ie_query_action.setEnabled(bool(self._unified_species_data) and has_missing and not has_pending)
 
     def _refresh_candidate_summary(self) -> None:
         candidate_count = len(self._unified_species_data)
@@ -827,6 +864,9 @@ class FittingControlWidget(QtWidgets.QWidget):
         self.select_all_btn.setEnabled(has_candidates and len(selected_ids) < candidate_count)
         self.clear_selection_btn.setEnabled(has_candidates and bool(selected_ids))
         self.zero_coeff_btn.setEnabled(has_candidates and manual_mode)
+        self.select_all_action.setEnabled(has_candidates and len(selected_ids) < candidate_count)
+        self.zero_coeff_action.setEnabled(has_candidates and manual_mode)
+        self.candidate_actions_btn.setEnabled(has_candidates)
         ready, reason = self.get_fit_readiness()
         self.fit_readiness_changed.emit(ready, reason)
 
@@ -930,6 +970,7 @@ class FittingControlWidget(QtWidgets.QWidget):
         self.set_fit_result_status(status)
 
         # 显示结果区
+        self.panel_separator.setVisible(True)
         self.result_section.setVisible(True)
 
     def clear_fit_result(self):
@@ -940,6 +981,7 @@ class FittingControlWidget(QtWidgets.QWidget):
         self.confirm_btn.setText("✓ 确认鉴定")
         self.confirm_btn.setEnabled(False)
         self.export_result_btn.setEnabled(False)
+        self.panel_separator.setVisible(False)
         self.result_section.setVisible(False)
 
     def set_fit_confirmed(self, confirmed: bool):

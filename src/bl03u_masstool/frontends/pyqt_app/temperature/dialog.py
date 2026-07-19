@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import asdict
 from datetime import datetime
 import hashlib
@@ -63,7 +64,13 @@ from bl03u_masstool.frontends.pyqt_app.project_artifacts import record_project_a
 
 from bl03u_masstool.frontends.pyqt_app.common.widgets import (
     AnalysisEmptyState,
+    AnalysisProgressState,
     DataFrameTableMixin,
+)
+from bl03u_masstool.frontends.pyqt_app.common.plot_spec import (
+    CurveSeries,
+    ScientificPlotSpec,
+    SeriesRole,
 )
 from bl03u_masstool.frontends.pyqt_app.common.static_plot import StaticCurvePlot
 
@@ -124,7 +131,7 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.summary_system_label = QtWidgets.QLabel("体系: ---")
         self.summary_data_label = QtWidgets.QLabel("数据源: ---")
         for lbl in (self.summary_project_label, self.summary_system_label, self.summary_data_label):
-            lbl.setObjectName("ReadoutValue")
+            lbl.setObjectName("ContextValue")
             lbl.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
         summary_layout.addWidget(self.summary_project_label)
         summary_layout.addWidget(self.summary_system_label)
@@ -144,11 +151,13 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.project_source_button.setText("项目数据")
         self.project_source_button.setObjectName("ModeToggle")
         self.project_source_button.setCheckable(True)
+        self.project_source_button.setMinimumWidth(66)
         self.project_source_button.setToolTip("使用项目管理中登记的温度扫描数据源")
         self.temporary_source_button = QtWidgets.QToolButton()
         self.temporary_source_button.setText("临时数据")
         self.temporary_source_button.setObjectName("ModeToggle")
         self.temporary_source_button.setCheckable(True)
+        self.temporary_source_button.setMinimumWidth(66)
         self.temporary_source_button.setToolTip("只为本次温度扫描分析选择数据，不写回项目配置")
         self.source_scope_group = QtWidgets.QButtonGroup(self)
         self.source_scope_group.setExclusive(True)
@@ -159,6 +168,7 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         )
         source_scope_panel = QtWidgets.QWidget()
         source_scope_panel.setObjectName("ModeSegment")
+        source_scope_panel.setMinimumWidth(136)
         source_scope_layout = QtWidgets.QHBoxLayout(source_scope_panel)
         source_scope_layout.setContentsMargins(0, 0, 0, 0)
         source_scope_layout.setSpacing(3)
@@ -196,6 +206,7 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.summary_open_project_btn.setToolTip("在项目管理中修改数据源、寻峰、归一化和温度扫描默认参数")
         self.summary_open_project_btn.clicked.connect(self._open_project_settings)
         source_row.addWidget(self.summary_open_project_btn)
+        source_row.addWidget(self.run_button)
         data_layout.addLayout(source_row)
 
         analysis_options_row = QtWidgets.QHBoxLayout()
@@ -228,18 +239,14 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.replicate_mode_combo.setEnabled(False)
         analysis_options_row.addWidget(self.replicate_mode_combo)
         analysis_options_row.addStretch(1)
-        analysis_options_row.addWidget(self.run_button)
-        data_layout.addLayout(analysis_options_row)
 
-        result_actions_row = QtWidgets.QHBoxLayout()
-        result_actions_row.setSpacing(8)
-        result_label = QtWidgets.QLabel("运行状态")
+        result_label = QtWidgets.QLabel("状态")
         result_label.setObjectName("ReadoutLabel")
-        result_actions_row.addWidget(result_label)
         self.inline_status_icon = QtWidgets.QLabel("")
-        self.inline_status_icon.setFixedWidth(20)
+        self.inline_status_icon.setFixedWidth(12)
         self.inline_status_text = QtWidgets.QLabel("就绪")
         self.inline_status_text.setObjectName("InlineStatusLabel")
+        self.inline_status_text.setMaximumWidth(300)
         self.inline_status_text.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
         self.inline_retry_button = QtWidgets.QPushButton("重试")
         self.inline_retry_button.setObjectName("BrowseButton")
@@ -247,41 +254,55 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.inline_retry_button.hide()
         self.inline_action_hint = QtWidgets.QLabel('确认数据源后点击"生成曲线"')
         self.inline_action_hint.setObjectName("ProjectHint")
-        result_actions_row.addWidget(self.inline_status_icon)
-        result_actions_row.addWidget(self.inline_status_text, stretch=1)
-        result_actions_row.addWidget(self.inline_action_hint)
-        result_actions_row.addWidget(self.inline_retry_button)
 
-        self.export_button = QtWidgets.QPushButton("导出结果")
-        self.export_button.setObjectName("ExportButton")
-        self.export_button.setToolTip("导出分析结果为 CSV 或 Excel")
-        self.export_button.clicked.connect(self.export_result)
+        self.export_button = QtWidgets.QToolButton()
+        self.export_button.setText("结果操作")
+        self.export_button.setObjectName("CommandMenuButton")
+        self.export_button.setPopupMode(QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.result_menu = QtWidgets.QMenu(self.export_button)
+        self.preview_data_action = self.result_menu.addAction("预览全部积分数据")
+        self.preview_data_action.triggered.connect(self.show_data_preview)
+        self.result_menu.addSeparator()
+        self.export_result_action = self.result_menu.addAction("导出分析结果…")
+        self.export_result_action.triggered.connect(self.export_result)
+        self.export_plot_action = self.result_menu.addAction("导出当前图表…")
+        self.export_plot_action.triggered.connect(self.export_plot)
+        self.export_button.setMenu(self.result_menu)
+        self.export_button.setToolTip("预览或导出温度扫描结果")
+
+        # Compatibility controls retain stable attributes for existing callers;
+        # their commands now live in the compact result menu above.
         self.export_plot_button = QtWidgets.QPushButton("导出图表")
         self.export_plot_button.setObjectName("ExportButton")
         self.export_plot_button.setToolTip("导出当前曲线图表为 PNG/PDF")
         self.export_plot_button.clicked.connect(self.export_plot)
+        self.export_plot_button.hide()
         self.preview_data_button = QtWidgets.QPushButton("预览数据")
         self.preview_data_button.setObjectName("BrowseButton")
         self.preview_data_button.setToolTip("预览全部积分结果")
         self.preview_data_button.clicked.connect(self.show_data_preview)
-        self.sidebar_toggle_btn = QtWidgets.QPushButton("◀ 曲线")
+        self.preview_data_button.hide()
+        self.sidebar_toggle_btn = QtWidgets.QPushButton("隐藏列表")
         self.sidebar_toggle_btn.setObjectName("BrowseButton")
         self.sidebar_toggle_btn.setToolTip("展开/折叠曲线浏览")
         self.sidebar_toggle_btn.setCheckable(True)
         self.sidebar_toggle_btn.setChecked(True)
         self.sidebar_toggle_btn.clicked.connect(self._toggle_sidebar)
-        result_actions_row.addWidget(self.preview_data_button)
-        result_actions_row.addWidget(self.export_button)
-        result_actions_row.addWidget(self.export_plot_button)
-        result_actions_row.addWidget(self.sidebar_toggle_btn)
-
-        data_layout.addLayout(result_actions_row)
+        analysis_options_row.addWidget(result_label)
+        analysis_options_row.addWidget(self.inline_status_icon)
+        analysis_options_row.addWidget(self.inline_status_text)
+        analysis_options_row.addWidget(self.inline_action_hint)
+        analysis_options_row.addWidget(self.inline_retry_button)
+        analysis_options_row.addWidget(self.sidebar_toggle_btn)
+        analysis_options_row.addWidget(self.export_button)
+        data_layout.addLayout(analysis_options_row)
         root.addWidget(source_panel)
         self.set_temperature_source_scope("temporary", restore_saved=False)
 
         # ── Body: sidebar + main area ────────────────────────────────────────
         body_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
         body_splitter.setObjectName("MainSplitter")
+        self.body_splitter = body_splitter
         root.addWidget(body_splitter, stretch=1)
 
         # ── Left sidebar ─────────────────────────────────────────────────────
@@ -361,27 +382,29 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self._plot_container = QtWidgets.QWidget()
         self._plot_container.setObjectName("PlotPanel")
         plot_stack = QtWidgets.QStackedLayout(self._plot_container)
+        self._plot_stack = plot_stack
 
-        # Empty state widget: preview the result shape and the three-step workflow.
+        # Empty state widget: one concise explanation and one next action.
         self._empty_state = AnalysisEmptyState(
-            variant="temperature",
-            eyebrow="温度扫描工作区",
-            title="从扫描数据识别温度变化趋势",
-            description="选择温度扫描目录，程序会汇总温度点并生成分类后的 m/z 趋势曲线。",
-            steps=("选择扫描目录", "确认能量范围", "生成趋势曲线"),
-            action_text="选择温度扫描数据",
+            title="尚未生成温度曲线",
+            description="选择温度扫描目录并生成曲线后，可继续浏览 m/z 和比较不同能量。",
+            action_text="选择数据",
         )
         self._empty_state.browse_requested.connect(self.select_folder)
         plot_stack.addWidget(self._empty_state)
 
+        self._progress_state = AnalysisProgressState(title="正在生成温度曲线")
+        plot_stack.addWidget(self._progress_state)
+
         self.plot_widget = StaticCurvePlot("温度 / °C", "归一化信号")
         plot_stack.addWidget(self.plot_widget)
 
-        plot_stack.setCurrentIndex(0)  # show empty state initially
+        plot_stack.setCurrentWidget(self._empty_state)
         right_layout.addWidget(self._plot_container, stretch=3)
 
         curve_stats = QtWidgets.QFrame()
         curve_stats.setObjectName("StatsBar")
+        self.curve_stats = curve_stats
         curve_stats_layout = QtWidgets.QHBoxLayout(curve_stats)
         curve_stats_layout.setContentsMargins(10, 2, 10, 2)
         curve_stats_layout.setSpacing(12)
@@ -436,7 +459,7 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
     def _toggle_sidebar(self, checked: bool) -> None:
         self._sidebar.setVisible(checked)
-        self.sidebar_toggle_btn.setText("◀ 曲线" if checked else "▶ 曲线")
+        self.sidebar_toggle_btn.setText("隐藏列表" if checked else "曲线列表")
 
     def _toggle_table_visibility(self) -> None:
         """Toggle the visibility of the data tables and adjust layout."""
@@ -452,14 +475,25 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
     def _show_plot(self) -> None:
         """Switch plot container from empty state to the actual plot."""
-        stack = self._plot_container.layout()
-        if stack is not None and stack.count() > 1:
-            stack.setCurrentIndex(1)
+        self._plot_stack.setCurrentWidget(self.plot_widget)
 
     def _show_empty_plot(self) -> None:
-        stack = self._plot_container.layout()
-        if stack is not None and stack.count() > 0:
-            stack.setCurrentIndex(0)
+        self._plot_stack.setCurrentWidget(self._empty_state)
+
+    def _begin_analysis_progress(self, detail: str) -> None:
+        self._progress_state.start(title="正在生成温度曲线", detail=detail)
+        self._plot_stack.setCurrentWidget(self._progress_state)
+
+    def _on_analysis_progress(self, value: int, detail: str) -> None:
+        self._progress_state.set_progress(value, detail)
+
+    def _restore_analysis_workspace(self) -> None:
+        if self._plot_stack.currentWidget() is not self._progress_state:
+            return
+        if self.curves:
+            self._show_plot()
+        else:
+            self._show_empty_plot()
 
     def _has_project_scope(self) -> bool:
         return self.temperature_source_scope == "project"
@@ -949,6 +983,7 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self,
         folders: list[tuple[float | None, str]],
         params: dict,
+        progress_callback: Callable[[int, str], None] | None = None,
     ) -> dict:
         energy_results: list[dict] = []
         frames: list[pd.DataFrame] = []
@@ -957,13 +992,19 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         # not stable when several energy folders are fitted in Python threads.
         # Keep folder analysis deterministic; the safe speedup below comes from
         # reusing each folder's already-built curves instead of grouping twice.
-        for energy, folder in folders:
+        folder_count = max(1, len(folders))
+        for index, (energy, folder) in enumerate(folders):
+            folder_label = Path(folder).name
+            if progress_callback is not None:
+                progress_callback(
+                    10 + round(72 * index / folder_count),
+                    f"正在处理 {folder_label}（{index + 1}/{folder_count}）",
+                )
             result_df = self._analyze_temperature_folder_with_params(folder, params)
             cached_curves = result_df.attrs.pop(
                 "_bl03u_temperature_curves",
                 None,
             )
-            folder_label = Path(folder).name
             scan_energy = float(energy) if energy is not None else np.nan
             if not result_df.empty:
                 result_df = result_df.copy()
@@ -994,23 +1035,43 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
                     ),
                 }
             )
+            if progress_callback is not None:
+                progress_callback(
+                    10 + round(72 * (index + 1) / folder_count),
+                    f"已完成 {folder_label}（{index + 1}/{folder_count}）",
+                )
         combined = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        if progress_callback is not None:
+            progress_callback(86, "正在汇总不同能量的温度曲线…")
         return {"result_df": combined, "energy_results": energy_results}
 
     def _analyze_temperature_folders_with_cache(
         self,
         folders: list[tuple[float | None, str]],
         params: dict,
+        progress_callback: Callable[[int, str], None] | None = None,
     ) -> dict:
+        if progress_callback is not None:
+            progress_callback(5, "正在检查已有分析缓存…")
         cache_key = self._temperature_cache_key(folders, params)
         cached = self._load_temperature_analysis_cache(cache_key)
         if cached is not None:
+            if progress_callback is not None:
+                progress_callback(100, "缓存结果已载入，正在显示曲线…")
             cached["from_cache"] = True
             return cached
 
-        result = self._analyze_temperature_folders_with_params(folders, params)
+        result = self._analyze_temperature_folders_with_params(
+            folders,
+            params,
+            progress_callback=progress_callback,
+        )
+        if progress_callback is not None:
+            progress_callback(92, "正在保存分析结果缓存…")
         self._save_temperature_analysis_cache(cache_key, result)
         result["from_cache"] = False
+        if progress_callback is not None:
+            progress_callback(100, "温度曲线已生成，正在更新界面…")
         return result
 
     def _try_load_project_temperature_cache_async(self) -> bool:
@@ -1415,14 +1476,22 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         else:
             message = "正在分析温度扫描数据..."
         self.set_busy(True, message)
-        self.worker = WorkerThread(
-            lambda: self._analyze_temperature_folders_with_cache(folders, params),
+        self._begin_analysis_progress(message)
+        worker = WorkerThread(
+            lambda: self._analyze_temperature_folders_with_cache(
+                folders,
+                params,
+                progress_callback=worker.report_progress,
+            ),
             self,
         )
-        self.worker.finished_with_result.connect(self.on_analysis_complete)
-        self.worker.failed.connect(self.on_analysis_failed)
-        self.worker.finished.connect(lambda: self.set_busy(False, "就绪"))
-        self.worker.start()
+        self.worker = worker
+        if hasattr(worker, "progress"):
+            worker.progress.connect(self._on_analysis_progress)
+        worker.finished_with_result.connect(self.on_analysis_complete)
+        worker.failed.connect(self.on_analysis_failed)
+        worker.finished.connect(lambda: self.set_busy(False, "就绪"))
+        worker.start()
 
     def compute_kr_expansion(self):
         # Get parameters from project settings (single source of truth)
@@ -1571,12 +1640,23 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         has_selection = self.current_mz is not None and self.current_mz in self.curves
 
         self.run_button.setEnabled(has_source and not busy)
+        self.run_button.setText("刷新曲线" if has_curves else "生成曲线")
         self.export_button.setEnabled(has_results and not busy)
         self.export_plot_button.setEnabled(has_curves and has_selection and not busy)
         self.preview_data_button.setEnabled(has_results and not busy)
+        self.preview_data_action.setEnabled(has_results and not busy)
+        self.export_result_action.setEnabled(has_results and not busy)
+        self.export_plot_action.setEnabled(has_curves and has_selection and not busy)
         if hasattr(self, "toggle_table_button"):
             self.toggle_table_button.setEnabled((has_selection or self.energy_interval_result is not None) and not busy)
         self.scan_folder_combo.setEnabled(has_source and self.scan_folder_combo.count() > 1 and not busy)
+        if hasattr(self, "_sidebar"):
+            self._sidebar.setVisible(has_curves and self.sidebar_toggle_btn.isChecked())
+            self.curve_stats.setVisible(has_curves)
+            self.sidebar_toggle_btn.setVisible(has_curves)
+            self.export_button.setVisible(has_results)
+            self.preview_data_button.setVisible(False)
+            self.export_plot_button.setVisible(False)
 
         if busy:
             workflow_text = "处理中 · 请稍候"
@@ -1763,6 +1843,7 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         return "积分方式: " + "，".join(parts) if parts else ""
 
     def on_analysis_failed(self, message: str) -> None:
+        self._restore_analysis_workspace()
         self._show_inline_error(f"分析失败: {message}", lambda: self.run_analysis())
         self._update_action_state()
 
@@ -2021,11 +2102,7 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         x_values = x_values[valid]
         y_values = y_values[valid]
 
-        # 简化标题：仅显示对象和图表类型，分类信息在状态栏
         title = f"m/z {curve['mz']} 温度响应曲线"
-        # 改为中文坐标轴标签
-        self.plot_widget.clear_plot(title=title, xlabel="温度 / °C", ylabel="归一化信号")
-
         if x_values.size == 0:
             self.plot_widget.show_empty("无有效数据", title=f"m/z {curve['mz']} 温度曲线")
             return
@@ -2034,17 +2111,6 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         group_key = curve.get("curve_class", "unclassified")
         color = self.CURVE_CLASS_COLORS.get(group_key, "#6b7280")
 
-        # 改进曲线绘制：线宽 2.2、标记点 6.0、白色描边（已内置），避免粘连
-        plot_x, plot_y = self.plot_widget.plot_series(
-            x_values,
-            y_values,
-            color=color,
-            linewidth=2.2,
-            marker="o",
-            markersize=6.0,
-        )
-
-        # 优化纵轴范围：减少顶部无效留白
         x_min, x_max = float(np.nanmin(x_values)), float(np.nanmax(x_values))
         y_min, y_max = float(np.nanmin(y_values)), float(np.nanmax(y_values))
 
@@ -2054,37 +2120,33 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         x_pad = 0.025 * x_span  # 2.5% 边距
         y_pad = max(0.08 * y_span, 0.03 * max(abs(y_max), 1.0))  # 8% 或最小 3%
 
-        # 手动设置数据范围避免留白过大
-        if self.plot_widget.axes is not None:
-            self.plot_widget.axes.set_xlim(x_min - x_pad, x_max + x_pad)
-            self.plot_widget.axes.set_ylim(y_min - y_pad, y_max + y_pad)
-
-            # 添加零基线（如果有物理意义）
-            if y_min < 0 < y_max:
-                self.plot_widget.axes.axhline(
-                    0.0,
-                    color="#94A3B8",
-                    linewidth=1.0,
-                    linestyle=(0, (4, 4)),
-                    alpha=0.55,
-                    zorder=0,
-                )
-
-        self.plot_widget.finish()
+        self.plot_widget.render_spec(
+            ScientificPlotSpec(
+                title=title,
+                xlabel="温度 / °C",
+                ylabel="归一化信号",
+                series=(
+                    CurveSeries(
+                        key=f"temperature-{curve['mz']}",
+                        role=SeriesRole.MEASUREMENT,
+                        x=x_values,
+                        y=y_values,
+                        color=color,
+                    ),
+                ),
+                xlim=(x_min - x_pad, x_max + x_pad),
+                ylim=(y_min - y_pad, y_max + y_pad),
+                show_zero_line=y_min < 0 < y_max,
+            )
+        )
 
     def update_multi_energy_plot(self, curve: dict) -> None:
         target_mz = int(curve.get("mz", 0))
         title = f"m/z {target_mz} 各能量温度响应曲线"
-        self.plot_widget.clear_plot(title=title, xlabel="温度 / °C", ylabel="归一化信号")
 
-        palette = [
-            "#2563eb", "#f97316", "#10b981", "#7c3aed", "#dc2626",
-            "#0891b2", "#ca8a04", "#db2777", "#4f46e5", "#16a34a",
-            "#ea580c", "#475569",
-        ]
         x_arrays: list[np.ndarray] = []
         y_arrays: list[np.ndarray] = []
-        plotted = 0
+        series: list[CurveSeries] = []
         energy_curves = sorted(
             curve.get("energy_curves", []),
             key=lambda pair: (
@@ -2106,38 +2168,43 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
             y_values = y_values[valid]
             if x_values.size == 0 or y_values.size == 0:
                 continue
-            color = palette[index % len(palette)]
-            plot_x, plot_y = self.plot_widget.plot_series(
-                x_values,
-                y_values,
-                label=label,
-                color=color,
-                linewidth=1.9,
-                marker="o",
-                markersize=4.8,
-                alpha=0.92,
+            series.append(
+                CurveSeries(
+                    key=f"energy-{index}",
+                    role=SeriesRole.COMPARISON,
+                    x=x_values,
+                    y=y_values,
+                    label=label,
+                )
             )
-            x_arrays.append(plot_x)
-            y_arrays.append(plot_y)
-            plotted += 1
+            x_arrays.append(x_values)
+            y_arrays.append(y_values)
 
-        if plotted == 0:
+        if not series:
             self.plot_widget.show_empty("无有效数据", title=title)
             return
 
-        self.plot_widget.apply_data_limits(x_arrays, y_arrays, x_pad_min=8.0, y_pad_min=0.02)
-        if self.plot_widget.axes is not None:
-            all_y = np.concatenate([values for values in y_arrays if values.size]) if y_arrays else np.array([])
-            if all_y.size and float(np.nanmin(all_y)) < 0 < float(np.nanmax(all_y)):
-                self.plot_widget.axes.axhline(
-                    0.0,
-                    color="#94A3B8",
-                    linewidth=1.0,
-                    linestyle=(0, (4, 4)),
-                    alpha=0.55,
-                    zorder=0,
-                )
-        self.plot_widget.finish(legend=True, legend_loc="upper right")
+        all_x = np.concatenate(x_arrays)
+        all_y = np.concatenate(y_arrays)
+        x_min, x_max = float(np.nanmin(all_x)), float(np.nanmax(all_x))
+        y_min, y_max = float(np.nanmin(all_y)), float(np.nanmax(all_y))
+        x_span = max(x_max - x_min, 1.0)
+        y_span = max(y_max - y_min, 1e-6)
+        x_pad = max(8.0, x_span * 0.08)
+        y_pad = max(0.02, y_span * 0.08)
+        self.plot_widget.render_spec(
+            ScientificPlotSpec(
+                title=title,
+                xlabel="温度 / °C",
+                ylabel="归一化信号",
+                series=tuple(series),
+                show_legend=True,
+                legend_loc="upper right",
+                xlim=(x_min - x_pad, x_max + x_pad),
+                ylim=(y_min - y_pad, y_max + y_pad),
+                show_zero_line=y_min < 0 < y_max,
+            )
+        )
 
     def run_analysis_sync(
         self,

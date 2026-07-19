@@ -105,7 +105,7 @@ class TestResultPersistence:
                     "rmse": 0.05,
                     "mae": 0.03,
                     "species": [
-                        {"id": 1, "species": "NO", "coefficient": 0.73, "contribution_percent": 73.0, "ie": 9.26},
+                        {"id": 1, "species": "NO", "formula": "NO", "smiles": "[N]=O", "coefficient": 0.73, "contribution_percent": 73.0, "ie": 9.26},
                         {"id": 5, "species": "N2", "coefficient": 0.27, "contribution_percent": 27.0, "ie": 15.6},
                     ],
                     "fitted_curve": [1.05, 2.05, 1.55],
@@ -138,6 +138,8 @@ class TestResultPersistence:
         assert result["metrics"]["rmse"] == 0.05
         assert len(result["components"]) == 2
         assert result["components"][0]["species"] == "NO"
+        assert result["components"][0]["formula"] == "NO"
+        assert result["components"][0]["smiles"] == "[N]=O"
         assert "experimental" in result["arrays"]
         assert "total_fit" in result["arrays"]
 

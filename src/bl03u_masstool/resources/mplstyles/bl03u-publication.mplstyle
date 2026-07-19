@@ -1,0 +1,55 @@
+# BL03U publication export profile inspired by scientific journal styles.
+# Visual parameters adapt SciencePlots' science and Nature styles (MIT License):
+# https://github.com/garrettj403/SciencePlots
+# Deliberately avoid LaTeX and fixed fonts for stable CJK output on macOS/Windows.
+text.usetex: False
+axes.unicode_minus: False
+font.family: sans-serif
+mathtext.fontset: dejavusans
+figure.figsize: 3.5, 2.625
+figure.facecolor: white
+axes.facecolor: white
+axes.edgecolor: black
+axes.linewidth: 0.5
+axes.titlesize: 8
+axes.titleweight: normal
+axes.titlepad: 5
+axes.labelsize: 7
+axes.labelcolor: black
+axes.labelpad: 4
+axes.grid: False
+axes.axisbelow: True
+axes.prop_cycle: cycler('color', ['0C5DA5', '00B945', 'FF9500', 'FF2C00', '845B97', '474747', '9E9E9E'])
+xtick.color: black
+ytick.color: black
+xtick.labelsize: 7
+ytick.labelsize: 7
+xtick.direction: in
+ytick.direction: in
+xtick.top: True
+ytick.right: True
+xtick.minor.visible: True
+ytick.minor.visible: True
+xtick.major.size: 3
+ytick.major.size: 3
+xtick.major.width: 0.5
+ytick.major.width: 0.5
+xtick.minor.size: 1.5
+ytick.minor.size: 1.5
+xtick.minor.width: 0.5
+ytick.minor.width: 0.5
+lines.linewidth: 1.0
+lines.markersize: 3
+lines.solid_capstyle: round
+lines.dash_capstyle: round
+legend.fontsize: 7
+legend.frameon: False
+legend.labelspacing: 0.3
+legend.handlelength: 2.2
+savefig.dpi: 300
+savefig.facecolor: white
+savefig.bbox: tight
+savefig.pad_inches: 0.05
+pdf.fonttype: 42
+ps.fonttype: 42
+svg.fonttype: path

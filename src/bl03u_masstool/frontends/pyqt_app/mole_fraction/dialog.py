@@ -597,6 +597,8 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.energy_parent_table.setColumnCount(4)
         self.energy_parent_table.setHorizontalHeaderLabels(["计算能量(eV)", "参考物种 m/z", "参考物种", "状态"])
         self.energy_parent_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
+        self.energy_parent_table.verticalHeader().setDefaultSectionSize(32)
+        self.energy_parent_table.verticalHeader().setMinimumSectionSize(32)
         layout.addWidget(self.energy_parent_table, 1)
 
         return widget
@@ -959,12 +961,16 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             mz = int(cfg.get("mz") or default_mz)
 
             mz_combo = QtWidgets.QComboBox()
+            mz_combo.setObjectName("TableCellEditor")
+            mz_combo.setFixedHeight(24)
             for value in mz_values:
                 mz_combo.addItem(str(value), value)
             self._set_combo_current_data(mz_combo, mz)
             self.energy_parent_table.setCellWidget(row, 1, mz_combo)
 
             species_combo = QtWidgets.QComboBox()
+            species_combo.setObjectName("TableCellEditor")
+            species_combo.setFixedHeight(24)
             self._populate_parent_species_combo(species_combo, mz, include_auto=True)
             self._set_combo_current_data(species_combo, cfg.get("species_name", default_species))
             self.energy_parent_table.setCellWidget(row, 2, species_combo)
@@ -973,6 +979,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             status_item = QtWidgets.QTableWidgetItem(status_text)
             status_item.setFlags(status_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
             self.energy_parent_table.setItem(row, 3, status_item)
+            self.energy_parent_table.setRowHeight(row, 32)
 
             mz_combo.currentIndexChanged.connect(
                 lambda _, r=row, e=energy: self._on_mz_changed_for_parent_config(r, e)

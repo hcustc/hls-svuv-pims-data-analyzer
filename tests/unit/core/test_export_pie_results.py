@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 import pandas as pd
+from openpyxl import load_workbook
 
 from bl03u_masstool.core.export_pie_results import export_pie_results_to_excel
 
@@ -60,3 +61,81 @@ def test_export_pie_results_falls_back_to_ionization_energy_alias(tmp_path):
     assert result["success"] is True
     exported = pd.read_excel(output_path)
     assert exported.loc[0, "电离能(eV)"] == 13.777
+
+
+def test_export_pie_results_adds_structure_oriented_species_sheet(tmp_path):
+    dialog = SimpleNamespace(
+        database=[
+            {
+                "id": 7,
+                "mz": 28,
+                "species": "Ethylene",
+                "formula": "C2H4",
+                "smiles": "C=C",
+            }
+        ],
+        all_fit_results={
+            28: {
+                "success": True,
+                "r_squared": 0.99,
+                "model": {
+                    "species": [
+                        {
+                            "id": 7,
+                            "species": "Ethylene",
+                            "ie": 10.51,
+                            "coefficient": 1.2,
+                            "contribution_percent": 100.0,
+                        }
+                    ]
+                },
+            }
+        },
+    )
+    output_path = tmp_path / "pie_results.xlsx"
+
+    result = export_pie_results_to_excel(dialog, output_path)
+
+    assert result["success"] is True
+    assert result["species_count"] == 1
+    workbook = load_workbook(output_path)
+    assert workbook.sheetnames == ["Sheet1", "物种表"]
+    species = pd.read_excel(output_path, sheet_name="物种表")
+    assert species.columns.tolist() == ["m/z", "Formula", "Name", "SMILES", "Structure"]
+    assert species.loc[0, "m/z"] == 28
+    assert species.loc[0, "Formula"] == "C2H4"
+    assert species.loc[0, "Name"] == "Ethylene"
+    assert species.loc[0, "SMILES"] == "C=C"
+    assert len(workbook["物种表"]._images) == 1
+    assert workbook["物种表"].row_dimensions[2].height == 82
+
+
+def test_export_species_sheet_keeps_invalid_smiles_without_image(tmp_path):
+    dialog = SimpleNamespace(
+        database=[],
+        all_fit_results={
+            15: {
+                "success": True,
+                "r_squared": 0.8,
+                "model": {
+                    "species": [
+                        {
+                            "species": "Methyl radical",
+                            "formula": "CH3",
+                            "smiles": "not-a-smiles",
+                            "coefficient": 1.0,
+                            "contribution_percent": 100.0,
+                        }
+                    ]
+                },
+            }
+        },
+    )
+    output_path = tmp_path / "pie_results.xlsx"
+
+    result = export_pie_results_to_excel(dialog, output_path)
+
+    assert result["success"] is True
+    species = pd.read_excel(output_path, sheet_name="物种表")
+    assert species.loc[0, "SMILES"] == "not-a-smiles"
+    assert len(load_workbook(output_path)["物种表"]._images) == 0

@@ -10,10 +10,10 @@ import numpy as np
 import pandas as pd
 
 from .calibration import Calibration
-from .integration import baseline_corrected_area, gaussian_area, summed_counts_area
+from .integration import integrate_peak_with_method, resolve_integration_method
 from .normalization import extract_light_intensity
 from .peak_ranges import load_peak_ranges, peak_ranges_to_peaks
-from .peak_detection import detect_peaks_by_algorithm, fit_gaussian
+from .peak_detection import detect_peaks_by_algorithm
 from .spectrum_io import Spectrum, extract_first_number, find_filename_replicate_groups, filename_replicate_key, read_spectrum
 
 
@@ -436,40 +436,6 @@ def _group_spectra_by_energy(
     return sorted(groups, key=lambda x: x["energy"])
 
 
-def _peak_integration_specs(reference_peaks: list) -> list[tuple[object, int, int]]:
-    return [
-        (
-            peak,
-            int(round(peak.index)),
-            max(5, min(30, int(peak.right_bound) - int(peak.left_bound) + 5)),
-        )
-        for peak in reference_peaks
-    ]
-
-
-def _integrate_pie_peak(
-    y_data: np.ndarray,
-    peak: object,
-    center_idx: int,
-    window_size: int,
-    *,
-    prefer_gaussian: bool,
-    integration_method: str = "sum_counts",
-) -> tuple[float, str]:
-    method = "gaussian" if prefer_gaussian else integration_method
-    method = method if method in {"sum_counts", "baseline", "gaussian"} else "sum_counts"
-    if method == "gaussian":
-        fit = fit_gaussian(y_data, center_idx, window_size)
-        if fit is not None:
-            area = gaussian_area(fit.amplitude, fit.fwhm)
-            if area > 0:
-                return area, "gaussian"
-        method = "sum_counts"
-    if method == "baseline":
-        return baseline_corrected_area(y_data, peak.left_bound, peak.right_bound), "baseline"
-    return summed_counts_area(y_data, peak.left_bound, peak.right_bound), "sum_counts"
-
-
 def _summarize_integration_methods(values) -> str:
     methods = sorted({str(value) for value in values if str(value)})
     if not methods:
@@ -480,79 +446,81 @@ def _summarize_integration_methods(values) -> str:
 
 
 def normalize_integration_method(value: str | None, *, prefer_gaussian: bool | None = None) -> str:
-    if prefer_gaussian:
-        return "gaussian"
-    method = str(value or "").strip()
-    if method in {"sum_counts", "baseline", "gaussian"}:
-        return method
-    return "sum_counts"
-
-
-def analyze_pie_folder(
-    folder: str | Path,
-    *,
-    calibration: Calibration = Calibration(),
-    suffixes: tuple[str, ...] = (".txt", ".asc", ".888"),
-    recursive: bool = True,
-    energy_decimals: int = 1,
-    algorithm: str = "legacy",
-    threshold_end: float = 2,
-    min_intensity: float = 3,
-    detection_min_idx: int = 3000,
-    nearby_peak_window: int = 30,
-    duplicate_window: int = 20,
-    weak_tail_early_window: int = 90,
-    weak_tail_late_window: int = 50,
-    weak_tail_ratio: float = 5,
-    gaussian_window_max: int = 30,
-    gaussian_boundary_scale: float = 1.5,
-    boundary_padding: int = 2,
-    prominence_ratio: float = 0.005,
-    smoothing_window: int = 5,
-    smoothing_poly_order: int = 2,
-    baseline_window: int = 301,
-    baseline_percentile: float = 5.0,
-    min_peak_width: int = 1,
-    max_peak_width: int = 80,
-    prefer_gaussian: bool = True,
-    integration_method: str = "sum_counts",
-    manual_peak_path: str | Path | None = None,
-    photon_normalize: bool = True,
-    photon_reference_mode: str = "first",
-    mass_discrimination: float = 1.0,
-    light_source: str = "io",
-    target_mz_values: list[int] | None = None,
-    replicate_mode: str = "off",
-    vote_threshold: float = 0.667,
-    min_intensity_for_single_vote: float = 5.0,
-    mz_tolerance: float = 0.2,
-    cwt_snr_threshold: float = 0.02,
-    cwt_wavelet_max_width: int = 30,
-    weak_tail_cutoff_idx: int = 15000,
-) -> pd.DataFrame:
-    """Generate experimental PIE curves from a folder of energy-resolved spectra."""
-    groups = _group_spectra_by_energy(
-        folder,
-        suffixes=suffixes,
-        recursive=recursive,
-        energy_decimals=energy_decimals,
-        light_source=light_source,
-        replicate_mode=replicate_mode,
+    return resolve_integration_method(
+        value,
+        prefer_gaussian=bool(prefer_gaussian),
     )
-    if not groups:
-        return pd.DataFrame(columns=[
-            "energy", "file_count", "io", "light_source", "replicate_mode", "replicate_grouping",
-            "replicate_warning", "mz", "mz_rounded",
-            "species", "photon_normalized_intensity", "normalized_intensity",
-            "raw_area", "integration_method", "left_bound", "right_bound", "blank_file_count",
-            "background_subtracted",
-        ])
+
+
+def _analyze_pie_sources(
+    folders: list[str | Path],
+    *,
+    calibration: Calibration,
+    suffixes: tuple[str, ...],
+    recursive: bool,
+    energy_decimals: int,
+    algorithm: str,
+    threshold_end: float,
+    min_intensity: float,
+    detection_min_idx: int,
+    nearby_peak_window: int,
+    duplicate_window: int,
+    weak_tail_early_window: int,
+    weak_tail_late_window: int,
+    weak_tail_ratio: float,
+    gaussian_window_max: int,
+    gaussian_boundary_scale: float,
+    boundary_padding: int,
+    prominence_ratio: float,
+    smoothing_window: int,
+    smoothing_poly_order: int,
+    baseline_window: int,
+    baseline_percentile: float,
+    min_peak_width: int,
+    max_peak_width: int,
+    prefer_gaussian: bool,
+    integration_method: str | None,
+    manual_peak_path: str | Path | None,
+    photon_normalize: bool,
+    photon_reference_mode: str,
+    mass_discrimination: float,
+    light_source: str,
+    target_mz_values: list[int] | None,
+    replicate_mode: str,
+    vote_threshold: float,
+    min_intensity_for_single_vote: float,
+    mz_tolerance: float,
+    cwt_snr_threshold: float,
+    cwt_wavelet_max_width: int,
+    weak_tail_cutoff_idx: int,
+    merge_method: str | None,
+) -> pd.DataFrame:
+    """Shared PIE analysis pipeline for one or many source folders."""
+    grouped_sources: list[tuple[int, Path, list[dict]]] = []
+    all_groups: list[dict] = []
+    for folder_idx, folder_value in enumerate(folders):
+        folder = Path(folder_value)
+        groups = _group_spectra_by_energy(
+            folder,
+            suffixes=suffixes,
+            recursive=recursive,
+            energy_decimals=energy_decimals,
+            light_source=light_source,
+            replicate_mode=replicate_mode,
+        )
+        grouped_sources.append((folder_idx, folder, groups))
+        all_groups.extend(groups)
+
+    if not all_groups:
+        return _empty_pie_dataframe()
+
+    reference_group = max(all_groups, key=lambda group: group["energy"])
     if manual_peak_path:
-        reference_group = max(groups, key=lambda x: x["energy"])
-        reference_peaks = peak_ranges_to_peaks(load_peak_ranges(manual_peak_path, calibration=calibration))
+        reference_peaks = peak_ranges_to_peaks(
+            load_peak_ranges(manual_peak_path, calibration=calibration)
+        )
         reference_source = Path(manual_peak_path).name
     else:
-        reference_group = max(groups, key=lambda x: x["energy"])
         reference_spectrum = reference_group["spectrum"]
         reference_peaks = detect_peaks_by_algorithm(
             reference_spectrum.y,
@@ -586,58 +554,165 @@ def analyze_pie_folder(
             weak_tail_cutoff_idx=weak_tail_cutoff_idx,
         )
         reference_source = "auto"
+
     if target_mz_values:
-        target_set = {int(round(v)) for v in target_mz_values}
-        reference_peaks = [p for p in reference_peaks if int(round(p.mz)) in target_set]
-    base_io = groups[0]["io"] if groups[0]["io"] > 0 else 1.0
+        target_set = {int(round(value)) for value in target_mz_values}
+        reference_peaks = [
+            peak for peak in reference_peaks
+            if int(round(peak.mz)) in target_set
+        ]
+
+    if photon_normalize and photon_reference_mode not in {"first", "none"}:
+        raise ValueError("photon_reference_mode must be 'first' or 'none'")
     denominator = float(mass_discrimination)
     if denominator <= 0:
         raise ValueError("mass_discrimination must be positive")
-    configured_integration_method = normalize_integration_method(integration_method, prefer_gaussian=prefer_gaussian)
-    peak_specs = _peak_integration_specs(reference_peaks)
-    rows = []
-    for group in groups:
-        spectrum = group["spectrum"]
-        for peak, center_idx, window_size in peak_specs:
-            raw_area, actual_integration_method = _integrate_pie_peak(
-                spectrum.y,
-                peak,
-                center_idx,
-                window_size,
-                prefer_gaussian=prefer_gaussian,
-                integration_method=configured_integration_method,
-            )
-            photon_normalized = raw_area
-            if photon_normalize:
-                photon_normalized = raw_area / group["io"] if group["io"] > 0 else 0.0
-                if photon_reference_mode == "first":
-                    photon_normalized *= base_io
-                elif photon_reference_mode != "none":
-                    raise ValueError("photon_reference_mode must be 'first' or 'none'")
-            normalized = photon_normalized / denominator
-            rows.append({
-                "energy": group["energy"],
-                "file_count": group["file_count"],
-                "io": group["io"],
-                "light_source": group["light_source"],
-                "replicate_mode": group.get("replicate_mode", replicate_mode),
-                "replicate_grouping": group.get("replicate_grouping", ""),
-                "replicate_warning": group.get("replicate_warning", ""),
-                "blank_file_count": group.get("blank_file_count", 0),
-                "background_subtracted": bool(group.get("background_subtracted", False)),
-                "reference_energy": reference_group["energy"],
-                "reference_source": reference_source,
-                "mz": peak.mz,
-                "mz_rounded": int(round(peak.mz)),
-                "species": peak.species,
-                "photon_normalized_intensity": photon_normalized,
-                "normalized_intensity": normalized,
-                "raw_area": raw_area,
-                "integration_method": actual_integration_method,
-                "left_bound": peak.left_bound,
-                "right_bound": peak.right_bound,
-            })
-    return pd.DataFrame(rows)
+    ordered_groups = sorted(all_groups, key=lambda group: group["energy"])
+    base_io = ordered_groups[0]["io"] if ordered_groups[0]["io"] > 0 else 1.0
+    configured_method = normalize_integration_method(
+        integration_method,
+        prefer_gaussian=prefer_gaussian,
+    )
+    include_source = merge_method is not None
+    rows: list[dict] = []
+    for folder_idx, folder, groups in grouped_sources:
+        for group in groups:
+            for peak in reference_peaks:
+                raw_area, actual_method = integrate_peak_with_method(
+                    group["spectrum"].y,
+                    peak,
+                    prefer_gaussian=prefer_gaussian,
+                    integration_method=configured_method,
+                )
+                photon_normalized = raw_area
+                if photon_normalize:
+                    photon_normalized = raw_area / group["io"] if group["io"] > 0 else 0.0
+                    if photon_reference_mode == "first":
+                        photon_normalized *= base_io
+                row = {
+                    "energy": group["energy"],
+                    "file_count": group["file_count"],
+                    "io": group["io"],
+                    "light_source": group["light_source"],
+                    "replicate_mode": group.get("replicate_mode", replicate_mode),
+                    "replicate_grouping": group.get("replicate_grouping", ""),
+                    "replicate_warning": group.get("replicate_warning", ""),
+                    "blank_file_count": group.get("blank_file_count", 0),
+                    "background_subtracted": bool(group.get("background_subtracted", False)),
+                    "reference_energy": reference_group["energy"],
+                    "reference_source": reference_source,
+                    "mz": peak.mz,
+                    "mz_rounded": int(round(peak.mz)),
+                    "species": peak.species,
+                    "photon_normalized_intensity": photon_normalized,
+                    "normalized_intensity": photon_normalized / denominator,
+                    "raw_area": raw_area,
+                    "integration_method": actual_method,
+                    "left_bound": peak.left_bound,
+                    "right_bound": peak.right_bound,
+                }
+                if include_source:
+                    row["source_folder_idx"] = folder_idx
+                    row["source_folder"] = str(folder)
+                rows.append(row)
+
+    if not rows:
+        return _empty_pie_dataframe()
+    analysis_df = pd.DataFrame(rows)
+    if merge_method is None:
+        return analysis_df
+    segment_frames = [
+        analysis_df[analysis_df["source_folder_idx"] == folder_idx].copy().reset_index(drop=True)
+        for folder_idx, _folder, _groups in grouped_sources
+    ]
+    return merge_pie_segments(segment_frames, merge_method=merge_method)
+
+
+def analyze_pie_folder(
+    folder: str | Path,
+    *,
+    calibration: Calibration = Calibration(),
+    suffixes: tuple[str, ...] = (".txt", ".asc", ".888"),
+    recursive: bool = True,
+    energy_decimals: int = 1,
+    algorithm: str = "legacy",
+    threshold_end: float = 2,
+    min_intensity: float = 3,
+    detection_min_idx: int = 3000,
+    nearby_peak_window: int = 30,
+    duplicate_window: int = 20,
+    weak_tail_early_window: int = 90,
+    weak_tail_late_window: int = 50,
+    weak_tail_ratio: float = 5,
+    gaussian_window_max: int = 30,
+    gaussian_boundary_scale: float = 1.5,
+    boundary_padding: int = 2,
+    prominence_ratio: float = 0.005,
+    smoothing_window: int = 5,
+    smoothing_poly_order: int = 2,
+    baseline_window: int = 301,
+    baseline_percentile: float = 5.0,
+    min_peak_width: int = 1,
+    max_peak_width: int = 80,
+    prefer_gaussian: bool = True,
+    integration_method: str | None = None,
+    manual_peak_path: str | Path | None = None,
+    photon_normalize: bool = True,
+    photon_reference_mode: str = "first",
+    mass_discrimination: float = 1.0,
+    light_source: str = "io",
+    target_mz_values: list[int] | None = None,
+    replicate_mode: str = "off",
+    vote_threshold: float = 0.667,
+    min_intensity_for_single_vote: float = 5.0,
+    mz_tolerance: float = 0.2,
+    cwt_snr_threshold: float = 0.02,
+    cwt_wavelet_max_width: int = 30,
+    weak_tail_cutoff_idx: int = 15000,
+) -> pd.DataFrame:
+    """Generate experimental PIE curves from a folder of energy-resolved spectra."""
+    return _analyze_pie_sources(
+        [folder],
+        calibration=calibration,
+        suffixes=suffixes,
+        recursive=recursive,
+        energy_decimals=energy_decimals,
+        algorithm=algorithm,
+        threshold_end=threshold_end,
+        min_intensity=min_intensity,
+        detection_min_idx=detection_min_idx,
+        nearby_peak_window=nearby_peak_window,
+        duplicate_window=duplicate_window,
+        weak_tail_early_window=weak_tail_early_window,
+        weak_tail_late_window=weak_tail_late_window,
+        weak_tail_ratio=weak_tail_ratio,
+        gaussian_window_max=gaussian_window_max,
+        gaussian_boundary_scale=gaussian_boundary_scale,
+        boundary_padding=boundary_padding,
+        prominence_ratio=prominence_ratio,
+        smoothing_window=smoothing_window,
+        smoothing_poly_order=smoothing_poly_order,
+        baseline_window=baseline_window,
+        baseline_percentile=baseline_percentile,
+        min_peak_width=min_peak_width,
+        max_peak_width=max_peak_width,
+        prefer_gaussian=prefer_gaussian,
+        integration_method=integration_method,
+        manual_peak_path=manual_peak_path,
+        photon_normalize=photon_normalize,
+        photon_reference_mode=photon_reference_mode,
+        mass_discrimination=mass_discrimination,
+        light_source=light_source,
+        target_mz_values=target_mz_values,
+        replicate_mode=replicate_mode,
+        vote_threshold=vote_threshold,
+        min_intensity_for_single_vote=min_intensity_for_single_vote,
+        mz_tolerance=mz_tolerance,
+        cwt_snr_threshold=cwt_snr_threshold,
+        cwt_wavelet_max_width=cwt_wavelet_max_width,
+        weak_tail_cutoff_idx=weak_tail_cutoff_idx,
+        merge_method=None,
+    )
 
 
 def build_pie_curves(analysis_df: pd.DataFrame) -> dict[int, dict]:
@@ -928,7 +1003,9 @@ def identify_species_for_mz_with_curve(
 
 def _empty_pie_dataframe() -> pd.DataFrame:
     return pd.DataFrame(columns=[
-        "energy", "file_count", "io", "light_source", "mz", "mz_rounded",
+        "energy", "file_count", "io", "light_source", "replicate_mode",
+        "replicate_grouping", "replicate_warning", "reference_energy",
+        "reference_source", "mz", "mz_rounded",
         "species", "photon_normalized_intensity", "normalized_intensity",
         "raw_area", "integration_method", "left_bound", "right_bound", "blank_file_count",
         "background_subtracted",
@@ -1270,7 +1347,7 @@ def analyze_multiple_pie_folders(
     min_peak_width: int = 1,
     max_peak_width: int = 80,
     prefer_gaussian: bool = True,
-    integration_method: str = "sum_counts",
+    integration_method: str | None = None,
     manual_peak_path: str | Path | None = None,
     photon_normalize: bool = True,
     photon_reference_mode: str = "first",
@@ -1286,130 +1363,48 @@ def analyze_multiple_pie_folders(
     weak_tail_cutoff_idx: int = 15000,
 ) -> pd.DataFrame:
     """Analyze multiple PIE folders and merge them with overlap scaling."""
-    all_spectra_by_folder: list[tuple[int, Path, list[dict]]] = []
-    all_spectra_flat: list[dict] = []
-
-    for folder_idx, folder in enumerate(folders):
-        folder = Path(folder)
-        groups = _group_spectra_by_energy(
-            folder,
-            suffixes=suffixes,
-            recursive=recursive,
-            energy_decimals=energy_decimals,
-            light_source=light_source,
-            replicate_mode=replicate_mode,
-        )
-        all_spectra_by_folder.append((folder_idx, folder, groups))
-        all_spectra_flat.extend(groups)
-
-    if not all_spectra_flat:
-        return _empty_pie_dataframe()
-
-    ref_group = max(all_spectra_flat, key=lambda g: g["energy"])
-    if manual_peak_path:
-        reference_peaks = peak_ranges_to_peaks(load_peak_ranges(manual_peak_path, calibration=calibration))
-        reference_source = Path(manual_peak_path).name
-    else:
-        reference_peaks = detect_peaks_by_algorithm(
-            ref_group["spectrum"].y,
-            algorithm=algorithm,
-            calibration=calibration,
-            start_idx=0,
-            end_idx=len(ref_group["spectrum"].y),
-            detection_min_idx=detection_min_idx,
-            threshold_end=threshold_end,
-            min_intensity=min_intensity,
-            nearby_peak_window=nearby_peak_window,
-            duplicate_window=duplicate_window,
-            weak_tail_early_window=weak_tail_early_window,
-            weak_tail_late_window=weak_tail_late_window,
-            weak_tail_ratio=weak_tail_ratio,
-            gaussian_window_max=gaussian_window_max,
-            gaussian_boundary_scale=gaussian_boundary_scale,
-            boundary_padding=boundary_padding,
-            prominence_ratio=prominence_ratio,
-            smoothing_window=smoothing_window,
-            smoothing_poly_order=smoothing_poly_order,
-            baseline_window=baseline_window,
-            baseline_percentile=baseline_percentile,
-            min_peak_width=min_peak_width,
-            max_peak_width=max_peak_width,
-            vote_threshold=vote_threshold,
-            min_intensity_for_single_vote=min_intensity_for_single_vote,
-            mz_tolerance=mz_tolerance,
-            cwt_snr_threshold=cwt_snr_threshold,
-            cwt_wavelet_max_width=cwt_wavelet_max_width,
-            weak_tail_cutoff_idx=weak_tail_cutoff_idx,
-        )
-        reference_source = "auto"
-
-    all_groups_sorted = sorted(all_spectra_flat, key=lambda g: g["energy"])
-    base_io = all_groups_sorted[0]["io"] if all_groups_sorted[0]["io"] > 0 else 1.0
-    denominator = float(mass_discrimination)
-    if denominator <= 0:
-        raise ValueError("mass_discrimination must be positive")
-
-    configured_integration_method = normalize_integration_method(integration_method, prefer_gaussian=prefer_gaussian)
-    peak_specs = _peak_integration_specs(reference_peaks)
-    all_rows = []
-    for folder_idx, folder, groups in all_spectra_by_folder:
-        for group in groups:
-            spectrum = group["spectrum"]
-            energy = group["energy"]
-            io_current = group["io"]
-            file_count = group["file_count"]
-
-            for peak, center_idx, window_size in peak_specs:
-                raw_area, actual_integration_method = _integrate_pie_peak(
-                    spectrum.y,
-                    peak,
-                    center_idx,
-                    window_size,
-                    prefer_gaussian=prefer_gaussian,
-                    integration_method=configured_integration_method,
-                )
-
-                photon_normalized = raw_area
-                if photon_normalize:
-                    photon_normalized = raw_area / io_current if io_current > 0 else 0.0
-                    if photon_reference_mode == "first":
-                        photon_normalized *= base_io
-                normalized = photon_normalized / denominator
-
-                all_rows.append({
-                    "energy": energy,
-                    "file_count": file_count,
-                    "io": io_current,
-                    "light_source": light_source,
-                    "replicate_mode": group.get("replicate_mode", replicate_mode),
-                    "replicate_grouping": group.get("replicate_grouping", ""),
-                    "replicate_warning": group.get("replicate_warning", ""),
-                    "blank_file_count": group.get("blank_file_count", 0),
-                    "background_subtracted": bool(group.get("background_subtracted", False)),
-                    "reference_energy": ref_group["energy"],
-                    "reference_source": reference_source,
-                    "source_folder_idx": folder_idx,
-                    "source_folder": str(folder),
-                    "mz": peak.mz,
-                    "mz_rounded": int(round(peak.mz)),
-                    "species": peak.species,
-                    "photon_normalized_intensity": photon_normalized,
-                    "normalized_intensity": normalized,
-                    "raw_area": raw_area,
-                    "integration_method": actual_integration_method,
-                    "left_bound": peak.left_bound,
-                    "right_bound": peak.right_bound,
-                })
-
-    if not all_rows:
-        return _empty_pie_dataframe()
-
-    temp_df = pd.DataFrame(all_rows)
-    analysis_dfs = [
-        temp_df[temp_df["source_folder_idx"] == folder_idx].copy().reset_index(drop=True)
-        for folder_idx, _folder, _groups in all_spectra_by_folder
-    ]
-    return merge_pie_segments(analysis_dfs, merge_method=merge_method)
+    return _analyze_pie_sources(
+        folders,
+        calibration=calibration,
+        suffixes=suffixes,
+        recursive=recursive,
+        energy_decimals=energy_decimals,
+        algorithm=algorithm,
+        threshold_end=threshold_end,
+        min_intensity=min_intensity,
+        detection_min_idx=detection_min_idx,
+        nearby_peak_window=nearby_peak_window,
+        duplicate_window=duplicate_window,
+        weak_tail_early_window=weak_tail_early_window,
+        weak_tail_late_window=weak_tail_late_window,
+        weak_tail_ratio=weak_tail_ratio,
+        gaussian_window_max=gaussian_window_max,
+        gaussian_boundary_scale=gaussian_boundary_scale,
+        boundary_padding=boundary_padding,
+        prominence_ratio=prominence_ratio,
+        smoothing_window=smoothing_window,
+        smoothing_poly_order=smoothing_poly_order,
+        baseline_window=baseline_window,
+        baseline_percentile=baseline_percentile,
+        min_peak_width=min_peak_width,
+        max_peak_width=max_peak_width,
+        prefer_gaussian=prefer_gaussian,
+        integration_method=integration_method,
+        manual_peak_path=manual_peak_path,
+        photon_normalize=photon_normalize,
+        photon_reference_mode=photon_reference_mode,
+        mass_discrimination=mass_discrimination,
+        light_source=light_source,
+        target_mz_values=None,
+        replicate_mode=replicate_mode,
+        vote_threshold=vote_threshold,
+        min_intensity_for_single_vote=min_intensity_for_single_vote,
+        mz_tolerance=mz_tolerance,
+        cwt_snr_threshold=cwt_snr_threshold,
+        cwt_wavelet_max_width=cwt_wavelet_max_width,
+        weak_tail_cutoff_idx=weak_tail_cutoff_idx,
+        merge_method=merge_method,
+    )
 
 def identify_species_for_mz(database: list[dict], mz: int, energies, intensities) -> list[dict]:
     model = identify_species_for_mz_with_curve(database, mz, energies, intensities)
