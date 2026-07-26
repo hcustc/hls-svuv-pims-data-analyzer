@@ -17,7 +17,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 pytest.importorskip("PyQt6")
 try:
-    from PyQt6 import QtWidgets
+    from PyQt6 import QtCore, QtTest, QtWidgets
 except ImportError as e:
     pytest.skip(f"PyQt6 display libraries not available: {e}", allow_module_level=True)
 
@@ -166,6 +166,8 @@ def test_candidate_table_displays_ie_and_missing_query_status(widget):
                 "id": 1,
                 "mz": 30,
                 "species": "Nitric oxide",
+                "formula": "NO",
+                "smiles": "[N]=O",
                 "ie": 9.2642,
                 "energies": [9.0, 10.0],
                 "cross_sections": [0.0, 1.0],
@@ -185,6 +187,9 @@ def test_candidate_table_displays_ie_and_missing_query_status(widget):
     assert widget.species_table.columnCount() == 5
     assert widget.species_table.item(0, 2).text() == "9.2642"
     assert widget.species_table.item(1, 2).text() == "待查询"
+    identity = widget.species_table.cellWidget(0, 1)
+    assert identity.findChild(QtWidgets.QLabel, "SpeciesFormulaLabel").text() == "NO"
+    assert widget.findChild(QtWidgets.QFrame, "SpeciesPreviewCard") is None
 
     widget.update_ionization_energy_for_ids(
         {2},
@@ -243,12 +248,115 @@ def test_manual_coefficient_mode_and_preview_guard_confirmation(widget):
     assert widget.confirm_btn.isEnabled()
 
 
+def test_candidate_and_fit_result_share_hover_structure_card(widget, qapp):
+    widget.resize(430, 740)
+    candidates = [
+        {
+            "id": 1,
+            "mz": 142,
+            "species": "1-Methylnaphthalene",
+            "formula": "C11H10",
+            "smiles": "Cc1cccc2ccccc12",
+        },
+        {
+            "id": 2,
+            "mz": 142,
+            "species": "2-Methylnaphthalene",
+            "formula": "C11H10",
+            "smiles": "Cc1ccc2ccccc2c1",
+        },
+    ]
+    widget.populate_unified_species_table(142, candidates, [])
+    widget.show()
+    qapp.processEvents()
+
+    first_identity = widget.species_table.cellWidget(0, 1)
+    QtTest.QTest.mouseMove(widget, QtCore.QPoint(5, 5))
+    QtTest.QTest.mouseMove(first_identity, QtCore.QPoint(20, 20))
+    QtTest.QTest.qWait(275)
+    assert widget.species_hover_card.isVisible()
+    assert widget.species_hover_card.name_label.text() == "1-Methylnaphthalene"
+    assert widget.species_hover_card.formula_label.text() == "分子式：C11H10"
+    assert not widget.species_hover_card.structure_label.pixmap().isNull()
+    QtTest.QTest.mouseMove(widget, QtCore.QPoint(5, 5))
+    qapp.processEvents()
+    assert not widget.species_hover_card.isVisible()
+
+    QtTest.QTest.mouseClick(
+        widget.species_table.cellWidget(1, 1),
+        QtCore.Qt.MouseButton.LeftButton,
+    )
+    qapp.processEvents()
+    assert widget.species_table.currentRow() == 1
+
+    widget.show_fit_result(
+        {
+            "r_squared": 0.99,
+            "species": [
+                {
+                    **candidates[0],
+                    "coefficient": 1.2,
+                    "contribution_percent": 60.0,
+                },
+                {
+                    **candidates[1],
+                    "coefficient": 0.8,
+                    "contribution_percent": 40.0,
+                },
+            ],
+        }
+    )
+    qapp.processEvents()
+    assert widget.fit_result_table.item(0, 0).text() == ""
+    assert widget.fit_result_table.item(0, 0).data(
+        QtCore.Qt.ItemDataRole.UserRole
+    ) == "1-Methylnaphthalene\nC11H10"
+    result_identity = widget.fit_result_table.cellWidget(1, 0)
+    labels = result_identity.findChildren(QtWidgets.QLabel)
+    assert [label.text() for label in labels] == [
+        "2-Methylnaphthalene",
+        "C11H10",
+    ]
+
+    QtTest.QTest.mouseMove(widget, QtCore.QPoint(5, 5))
+    QtTest.QTest.mouseMove(result_identity, QtCore.QPoint(20, 20))
+    QtTest.QTest.qWait(275)
+    assert widget.species_hover_card.name_label.text() == "2-Methylnaphthalene"
+    assert not widget.species_hover_card.structure_label.pixmap().isNull()
+
+
+def test_formula_only_candidate_has_hover_fallback(widget, qapp):
+    widget.populate_unified_species_table(
+        18,
+        [{"id": 1, "mz": 18, "species": "Water", "formula": "H2O", "smiles": ""}],
+        [],
+    )
+    widget.show()
+    qapp.processEvents()
+
+    identity = widget.species_table.cellWidget(0, 1)
+    identity.hover_entered.emit(identity.mapToGlobal(QtCore.QPoint(20, 20)))
+    QtTest.QTest.qWait(275)
+    assert widget.species_hover_card.formula_label.text() == "分子式：H2O"
+    assert widget.species_hover_card.structure_label.text() == "H2O\n暂无二维结构"
+    assert "未提供 SMILES" in widget.species_hover_card.hint_label.text()
+
+
 def test_candidate_table_editor_stays_inside_row_at_narrow_width(widget, qapp):
     apply_application_theme(qapp)
     widget.resize(420, 760)
     widget.populate_unified_species_table(
         15,
-        [{"id": 1, "mz": 15, "species": "Methyl radical", "ie": 9.839}],
+        [
+            {
+                "id": 1,
+                "mz": 15,
+                "species": "Methyl radical",
+                "formula": "CH3",
+                "smiles": "[CH3]",
+                "ie": 9.839,
+            }
+        ],
         [],
     )
     widget.show()
@@ -258,8 +366,10 @@ def test_candidate_table_editor_stays_inside_row_at_narrow_width(widget, qapp):
     coefficient = table.cellWidget(0, 3)
     assert isinstance(coefficient, QtWidgets.QDoubleSpinBox)
     assert table.horizontalHeaderItem(1).text() == "物种"
-    assert table.rowHeight(0) == 32
+    assert table.rowHeight(0) == 46
     assert coefficient.height() <= 24
     assert coefficient.y() >= 0
     assert coefficient.y() + coefficient.height() <= table.rowHeight(0)
     assert sum(table.columnWidth(index) for index in (0, 2, 3, 4)) == 264
+    assert widget.species_hover_card.parent() is widget
+    assert widget.species_hover_card.isWindow()

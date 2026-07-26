@@ -25,10 +25,201 @@ FittingControlWidget - 拟合配置面板
 - 详见 locked_candidates_refactor_plan.md
 """
 
-from PyQt6 import QtCore, QtWidgets
+from functools import lru_cache
+from io import BytesIO
+
 import numpy as np
+from PyQt6 import QtCore, QtGui, QtWidgets
 
 from bl03u_masstool.frontends.pyqt_app.common.widgets import StateGlyph
+
+
+@lru_cache(maxsize=256)
+def _formula_from_smiles(smiles: str) -> str:
+    """Return a molecular formula for a valid SMILES string."""
+    normalized = str(smiles or "").strip()
+    if not normalized:
+        return ""
+    try:
+        from rdkit import Chem, rdBase
+        from rdkit.Chem import rdMolDescriptors
+
+        with rdBase.BlockLogs():
+            molecule = Chem.MolFromSmiles(normalized)
+        return rdMolDescriptors.CalcMolFormula(molecule) if molecule is not None else ""
+    except Exception:
+        return ""
+
+
+@lru_cache(maxsize=256)
+def _structure_png(smiles: str, width: int = 320, height: int = 200) -> bytes | None:
+    """Render a SMILES string to PNG bytes without writing a temporary file."""
+    normalized = str(smiles or "").strip()
+    if not normalized:
+        return None
+    try:
+        from rdkit import Chem, rdBase
+        from rdkit.Chem import Draw
+
+        with rdBase.BlockLogs():
+            molecule = Chem.MolFromSmiles(normalized)
+        if molecule is None:
+            return None
+        image = Draw.MolToImage(
+            molecule,
+            size=(int(width), int(height)),
+            fitImage=True,
+        )
+        stream = BytesIO()
+        image.save(stream, format="PNG")
+        return stream.getvalue()
+    except Exception:
+        return None
+
+
+class _SpeciesIdentityWidget(QtWidgets.QWidget):
+    """Clickable identity block that also reports hover lifecycle."""
+
+    activated = QtCore.pyqtSignal()
+    hover_entered = QtCore.pyqtSignal(QtCore.QPoint)
+    hover_left = QtCore.pyqtSignal()
+
+    def enterEvent(self, event: QtGui.QEnterEvent) -> None:
+        self.hover_entered.emit(QtGui.QCursor.pos())
+        super().enterEvent(event)
+
+    def leaveEvent(self, event: QtCore.QEvent) -> None:
+        self.hover_left.emit()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
+        if event.button() == QtCore.Qt.MouseButton.LeftButton:
+            self.activated.emit()
+        super().mousePressEvent(event)
+
+
+class _SpeciesHoverCard(QtWidgets.QFrame):
+    """Non-activating floating card used for molecular structure previews."""
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None):
+        flags = (
+            QtCore.Qt.WindowType.ToolTip
+            | QtCore.Qt.WindowType.FramelessWindowHint
+        )
+        super().__init__(parent, flags)
+        self.setObjectName("SpeciesHoverCard")
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground)
+        self.setMinimumWidth(370)
+
+        layout = QtWidgets.QHBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(10)
+
+        self.structure_label = QtWidgets.QLabel("暂无结构数据")
+        self.structure_label.setObjectName("HoverStructureCanvas")
+        self.structure_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.structure_label.setFixedSize(150, 104)
+        self.structure_label.setWordWrap(True)
+        layout.addWidget(self.structure_label)
+
+        details = QtWidgets.QVBoxLayout()
+        details.setContentsMargins(0, 0, 0, 0)
+        details.setSpacing(4)
+
+        kicker = QtWidgets.QLabel("物种结构")
+        kicker.setObjectName("SpeciesHoverKicker")
+        details.addWidget(kicker)
+
+        self.name_label = QtWidgets.QLabel()
+        self.name_label.setObjectName("SpeciesHoverName")
+        self.name_label.setWordWrap(True)
+        details.addWidget(self.name_label)
+
+        self.formula_label = QtWidgets.QLabel()
+        self.formula_label.setObjectName("SpeciesHoverFormulaBadge")
+        details.addWidget(self.formula_label)
+
+        self.ie_label = QtWidgets.QLabel()
+        self.ie_label.setObjectName("SpeciesHoverMeta")
+        details.addWidget(self.ie_label)
+
+        self.hint_label = QtWidgets.QLabel()
+        self.hint_label.setObjectName("SpeciesHoverHint")
+        self.hint_label.setWordWrap(True)
+        details.addWidget(self.hint_label)
+        details.addStretch()
+        layout.addLayout(details, stretch=1)
+
+    def show_species(
+        self,
+        species: dict,
+        *,
+        formula: str,
+        ie_text: str,
+        anchor: QtCore.QPoint,
+    ) -> None:
+        name = str(
+            species.get("species") or species.get("name") or "未命名物种"
+        ).strip()
+        smiles = str(species.get("smiles") or "").strip()
+        image_bytes = _structure_png(smiles) if smiles else None
+
+        self.name_label.setText(name)
+        self.formula_label.setText(f"分子式：{formula or '未提供'}")
+        self.ie_label.setText(
+            f"IE：{ie_text}{' eV' if ie_text and ie_text[0].isdigit() else ''}"
+        )
+        self.structure_label.setPixmap(QtGui.QPixmap())
+        if image_bytes:
+            pixmap = QtGui.QPixmap()
+            if pixmap.loadFromData(image_bytes, "PNG"):
+                self.structure_label.setText("")
+                self.structure_label.setPixmap(
+                    pixmap.scaled(
+                        self.structure_label.size() - QtCore.QSize(8, 8),
+                        QtCore.Qt.AspectRatioMode.KeepAspectRatio,
+                        QtCore.Qt.TransformationMode.SmoothTransformation,
+                    )
+                )
+                self.hint_label.setText("二维结构来自数据库 SMILES")
+            else:
+                self.structure_label.setText("结构图加载失败")
+                self.hint_label.setText("无法加载结构图，请检查物种元数据")
+        elif smiles:
+            self.structure_label.setText("SMILES\n无法解析")
+            self.hint_label.setText("SMILES 无法解析，请检查物种元数据")
+        else:
+            self.structure_label.setText(
+                f"{formula}\n暂无二维结构" if formula else "暂无结构数据"
+            )
+            self.hint_label.setText(
+                "数据库未提供 SMILES，当前仅显示分子式"
+                if formula
+                else "数据库未提供分子式或 SMILES"
+            )
+
+        self.setToolTip(
+            f"物种: {name}\n分子式: {formula or '未提供'}\n"
+            f"SMILES: {smiles or '未提供'}"
+        )
+        self.adjustSize()
+        screen = QtGui.QGuiApplication.screenAt(anchor)
+        if screen is None:
+            screen = QtGui.QGuiApplication.primaryScreen()
+        available = screen.availableGeometry() if screen is not None else QtCore.QRect()
+        position = anchor + QtCore.QPoint(14, 18)
+        if available.isValid():
+            if position.x() + self.width() > available.right():
+                position.setX(anchor.x() - self.width() - 14)
+            if position.y() + self.height() > available.bottom():
+                position.setY(anchor.y() - self.height() - 12)
+            position.setX(max(available.left(), position.x()))
+            position.setY(max(available.top(), position.y()))
+        self.move(position)
+        self.show()
+        self.raise_()
 
 
 class FittingControlWidget(QtWidgets.QWidget):
@@ -81,6 +272,14 @@ class FittingControlWidget(QtWidgets.QWidget):
         self._current_mz_display: str | None = None            # 精确峰曲线显示标签
         self._updating = False                                 # 防止递归更新
         self._candidates_loaded = False                        # 是否已执行过 PICS 查询
+        self._fit_result_species_data: list[dict] = []         # 结果表与悬浮结构的数据源
+        self._pending_hover_species: dict | None = None
+        self._pending_hover_position = QtCore.QPoint()
+        self.species_hover_card = _SpeciesHoverCard(self)
+        self._species_hover_timer = QtCore.QTimer(self)
+        self._species_hover_timer.setSingleShot(True)
+        self._species_hover_timer.setInterval(250)
+        self._species_hover_timer.timeout.connect(self._show_pending_species_hover)
 
         # ---- UI构建 ----
         main_layout = QtWidgets.QVBoxLayout(self)
@@ -221,8 +420,8 @@ class FittingControlWidget(QtWidgets.QWidget):
         self.species_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         self.species_table.setTextElideMode(QtCore.Qt.TextElideMode.ElideRight)
         self.species_table.verticalHeader().setVisible(False)
-        self.species_table.verticalHeader().setDefaultSectionSize(32)
-        self.species_table.verticalHeader().setMinimumSectionSize(32)
+        self.species_table.verticalHeader().setDefaultSectionSize(46)
+        self.species_table.verticalHeader().setMinimumSectionSize(46)
         self.species_table.horizontalHeader().setStretchLastSection(False)
         candidate_controls_layout.addWidget(self.species_table, stretch=1)
         main_layout.addWidget(self.candidate_controls_widget, stretch=1)
@@ -264,18 +463,19 @@ class FittingControlWidget(QtWidgets.QWidget):
         self.fit_result_table = QtWidgets.QTableWidget()
         self.fit_result_table.setColumnCount(4)
         self.fit_result_table.setHorizontalHeaderLabels(["物种", "IE(eV)", "贡献%", "系数"])
-        self.fit_result_table.setWordWrap(False)
+        self.fit_result_table.setWordWrap(True)
         self.fit_result_table.setAlternatingRowColors(True)
         self.fit_result_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.fit_result_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         self.fit_result_table.setMaximumHeight(160)
         self.fit_result_table.setMinimumHeight(60)
+        self.fit_result_table.verticalHeader().setDefaultSectionSize(44)
         self.fit_result_table.horizontalHeader().setSectionResizeMode(
             0, QtWidgets.QHeaderView.ResizeMode.Stretch
         )
         self.fit_result_table.setColumnWidth(1, 72)
-        self.fit_result_table.setColumnWidth(2, 60)
-        self.fit_result_table.setColumnWidth(3, 80)
+        self.fit_result_table.setColumnWidth(2, 68)
+        self.fit_result_table.setColumnWidth(3, 72)
         result_layout.addWidget(self.fit_result_table)
 
         # 操作按钮行
@@ -304,6 +504,10 @@ class FittingControlWidget(QtWidgets.QWidget):
         # 初始化空状态显示
         self._update_ui_state()
 
+    def hideEvent(self, event: QtGui.QHideEvent) -> None:
+        self._hide_species_hover()
+        super().hideEvent(event)
+
     # ---- 物种数据管理方法 ----
 
     @staticmethod
@@ -328,6 +532,13 @@ class FittingControlWidget(QtWidgets.QWidget):
             "not_found": "未查到",
             "failed": "查询失败",
         }.get(status, "待查询")
+
+    @staticmethod
+    def _formula_display_text(species: dict) -> str:
+        formula = str(species.get("formula") or "").strip()
+        if formula:
+            return formula
+        return _formula_from_smiles(str(species.get("smiles") or ""))
 
     def populate_unified_species_table(
         self,
@@ -405,6 +616,7 @@ class FittingControlWidget(QtWidgets.QWidget):
             self.empty_state_widget.show()
             self.candidate_controls_widget.hide()
             self.panel_separator.hide()
+            self._hide_species_hover()
         else:
             # 前置数据未准备 → 显示"请先生成 PIE 曲线"空状态
             self.species_table.setRowCount(0)
@@ -415,6 +627,7 @@ class FittingControlWidget(QtWidgets.QWidget):
             self.empty_state_widget.show()
             self.candidate_controls_widget.hide()
             self.panel_separator.hide()
+            self._hide_species_hover()
         self.current_mz_label.setText(
             f"m/z {self._current_mz_display}"
             if self._current_mz is not None
@@ -496,6 +709,7 @@ class FittingControlWidget(QtWidgets.QWidget):
 
     def _refresh_table_from_data(self):
         """从_unified_species_data刷新表格显示"""
+        previous_row = self.species_table.currentRow()
         self._updating = True
         try:
             self.species_table.setRowCount(len(self._unified_species_data))
@@ -520,10 +734,13 @@ class FittingControlWidget(QtWidgets.QWidget):
             self.species_table.setColumnWidth(4, 40)
 
             for row, species in enumerate(self._unified_species_data):
-                self.species_table.setRowHeight(row, 32)
+                self.species_table.setRowHeight(row, 46)
                 self._populate_table_row(row, species)
         finally:
             self._updating = False
+        if self._unified_species_data:
+            target_row = previous_row if 0 <= previous_row < len(self._unified_species_data) else 0
+            self.species_table.setCurrentCell(target_row, 1)
 
     def _populate_table_row(self, row: int, species: dict):
         """填充表格的一行。"""
@@ -539,21 +756,46 @@ class FittingControlWidget(QtWidgets.QWidget):
         self.species_table.setCellWidget(row, 0, enable_widget)
 
         # Col 1: 物种名称 + 切换按钮 (※)
-        species_widget = QtWidgets.QWidget()
+        species_widget = _SpeciesIdentityWidget()
+        species_widget.activated.connect(
+            lambda r=row: self._select_candidate_row(r)
+        )
+        species_widget.hover_entered.connect(
+            lambda position, sp=species: self._schedule_species_hover(sp, position)
+        )
+        species_widget.hover_left.connect(self._hide_species_hover)
         species_layout = QtWidgets.QHBoxLayout(species_widget)
-        species_layout.setContentsMargins(4, 0, 4, 0)
+        species_layout.setContentsMargins(4, 2, 4, 2)
         species_layout.setSpacing(4)
 
-        # 物种名称 (QLabel)
+        # 物种名称 + 常驻分子式
         species_name = species.get('species', '')
+        identity_layout = QtWidgets.QVBoxLayout()
+        identity_layout.setContentsMargins(0, 0, 0, 0)
+        identity_layout.setSpacing(0)
         name_label = QtWidgets.QLabel(species_name)
+        name_label.setObjectName("SpeciesNameLabel")
+        name_label.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         name_label.setWordWrap(False)
         name_label.setMinimumWidth(0)
         name_label.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Ignored,
             QtWidgets.QSizePolicy.Policy.Preferred,
         )
-        species_layout.addWidget(name_label, stretch=1)
+        identity_layout.addWidget(name_label)
+
+        formula = self._formula_display_text(species)
+        formula_label = QtWidgets.QLabel(formula or "分子式未知")
+        formula_label.setObjectName("SpeciesFormulaLabel")
+        formula_label.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        formula_label.setWordWrap(False)
+        formula_label.setMinimumWidth(0)
+        formula_label.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Ignored,
+            QtWidgets.QSizePolicy.Policy.Preferred,
+        )
+        identity_layout.addWidget(formula_label)
+        species_layout.addLayout(identity_layout, stretch=1)
 
         # 切换按钮 (※) - 锁定候选标记
         # 注意：新实现"锁定候选"（不被筛选移除，系数正常优化）
@@ -578,8 +820,11 @@ class FittingControlWidget(QtWidgets.QWidget):
         ie_message = species.get('ie_message') or ""
         source = species.get('source', '自动')
         locked = "是" if species.get('is_locked', False) else "否"
+        smiles = str(species.get("smiles") or "").strip()
         tooltip_text = (
             f"物种: {species_name}\n"
+            f"分子式: {formula or '未提供'}\n"
+            f"SMILES: {smiles or '未提供'}\n"
             f"m/z: {species.get('mz', 'N/A')}\n"
             f"IE: {ie_text}{' eV' if self._coerce_ie(species) is not None else ''}\n"
             f"IE来源: {ie_source}\n"
@@ -587,7 +832,6 @@ class FittingControlWidget(QtWidgets.QWidget):
             f"来源: {source}\n"
             f"锁定: {locked}"
         )
-        name_label.setToolTip(tooltip_text)
         toggle_btn.setToolTip(tooltip_text + "\n\n点击切换锁定/普通状态")
 
         self.species_table.setCellWidget(row, 1, species_widget)
@@ -623,6 +867,35 @@ class FittingControlWidget(QtWidgets.QWidget):
         remove_btn.clicked.connect(lambda checked=False, r=row: self._remove_row(r))
         remove_layout.addWidget(remove_btn)
         self.species_table.setCellWidget(row, 4, remove_widget)
+
+    def _select_candidate_row(self, row: int) -> None:
+        if 0 <= row < self.species_table.rowCount():
+            self.species_table.setCurrentCell(row, 1)
+
+    def _schedule_species_hover(
+        self,
+        species: dict,
+        position: QtCore.QPoint,
+    ) -> None:
+        self._pending_hover_species = species
+        self._pending_hover_position = QtCore.QPoint(position)
+        self._species_hover_timer.start()
+
+    def _show_pending_species_hover(self) -> None:
+        species = self._pending_hover_species
+        if species is None or not self.isVisible():
+            return
+        self.species_hover_card.show_species(
+            species,
+            formula=self._formula_display_text(species),
+            ie_text=self._ie_display_text(species),
+            anchor=self._pending_hover_position,
+        )
+
+    def _hide_species_hover(self) -> None:
+        self._species_hover_timer.stop()
+        self._pending_hover_species = None
+        self.species_hover_card.hide()
 
     def _toggle_locked_status(self, row: int):
         """切换物种的锁定状态"""
@@ -738,7 +1011,9 @@ class FittingControlWidget(QtWidgets.QWidget):
                 # 获取物种名 (从 Col 1 的 widget 中)
                 species_widget = self.species_table.cellWidget(row, 1)
                 if species_widget:
-                    name_label = species_widget.findChild(QtWidgets.QLabel)
+                    name_label = species_widget.findChild(
+                        QtWidgets.QLabel, "SpeciesNameLabel"
+                    )
                     if name_label and name_label.text() in coeff_by_name:
                         coeff_spin = self.species_table.cellWidget(row, 3)  # Col 3: 系数
                         if isinstance(coeff_spin, QtWidgets.QDoubleSpinBox):
@@ -930,6 +1205,7 @@ class FittingControlWidget(QtWidgets.QWidget):
             status: "COMPLETED" | "OBSOLETE" | "CONFIRMED"
         """
         species_list = fit_model.get("species", [])
+        self._fit_result_species_data = [dict(species) for species in species_list]
         r2 = fit_model.get("r_squared", 0.0)
 
         # 更新 R² 标签（带颜色）
@@ -951,6 +1227,7 @@ class FittingControlWidget(QtWidgets.QWidget):
             total_contrib = 1.0
         for row, sp in enumerate(species_list):
             name = str(sp.get("species", ""))
+            formula = self._formula_display_text(sp)
             ie = self._coerce_ie(sp)
             ie_text = f"{ie:.4f}" if ie is not None else {
                 "pending": "查询中…",
@@ -959,7 +1236,46 @@ class FittingControlWidget(QtWidgets.QWidget):
             contrib = float(sp.get("contribution_percent", 0.0))
             coeff = float(sp.get("coefficient", 0.0))
 
-            name_item = QtWidgets.QTableWidgetItem(name)
+            # The visible text is drawn by the cell widget. Keep the backing
+            # item text empty so the delegate cannot paint a duplicate label.
+            name_item = QtWidgets.QTableWidgetItem("")
+            name_item.setData(
+                QtCore.Qt.ItemDataRole.UserRole,
+                f"{name}\n{formula}" if formula else name,
+            )
+            identity_widget = _SpeciesIdentityWidget()
+            identity_widget.activated.connect(
+                lambda r=row: self.fit_result_table.setCurrentCell(r, 0)
+            )
+            identity_widget.hover_entered.connect(
+                lambda position, sp=sp: self._schedule_species_hover(sp, position)
+            )
+            identity_widget.hover_left.connect(self._hide_species_hover)
+            identity_layout = QtWidgets.QVBoxLayout(identity_widget)
+            identity_layout.setContentsMargins(6, 2, 4, 2)
+            identity_layout.setSpacing(0)
+            result_name_label = QtWidgets.QLabel(name)
+            result_name_label.setObjectName("FitResultSpeciesNameLabel")
+            result_name_label.setAttribute(
+                QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents
+            )
+            result_name_label.setMinimumWidth(0)
+            result_name_label.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Ignored,
+                QtWidgets.QSizePolicy.Policy.Preferred,
+            )
+            result_formula_label = QtWidgets.QLabel(formula or "分子式未知")
+            result_formula_label.setObjectName("SpeciesFormulaLabel")
+            result_formula_label.setAttribute(
+                QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents
+            )
+            result_formula_label.setMinimumWidth(0)
+            result_formula_label.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Ignored,
+                QtWidgets.QSizePolicy.Policy.Preferred,
+            )
+            identity_layout.addWidget(result_name_label)
+            identity_layout.addWidget(result_formula_label)
             ie_item = QtWidgets.QTableWidgetItem(ie_text)
             ie_item.setToolTip(
                 f"来源: {sp.get('ie_source') or '未提供'}\n"
@@ -973,11 +1289,14 @@ class FittingControlWidget(QtWidgets.QWidget):
             coeff_item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
 
             self.fit_result_table.setItem(row, 0, name_item)
+            self.fit_result_table.setCellWidget(row, 0, identity_widget)
             self.fit_result_table.setItem(row, 1, ie_item)
             self.fit_result_table.setItem(row, 2, contrib_item)
             self.fit_result_table.setItem(row, 3, coeff_item)
+            self.fit_result_table.setRowHeight(row, 44)
 
-        self.fit_result_table.resizeRowsToContents()
+        if species_list:
+            self.fit_result_table.setCurrentCell(0, 0)
 
         # 更新状态标签与结果操作可用性
         self.set_fit_result_status(status)
@@ -988,6 +1307,7 @@ class FittingControlWidget(QtWidgets.QWidget):
 
     def clear_fit_result(self):
         """隐藏结果摘要区并清空内容"""
+        self._fit_result_species_data = []
         self.fit_result_table.setRowCount(0)
         self.result_r2_label.setText("")
         self.result_status_label.setText("")
@@ -996,6 +1316,7 @@ class FittingControlWidget(QtWidgets.QWidget):
         self.export_result_btn.setEnabled(False)
         self.panel_separator.setVisible(False)
         self.result_section.setVisible(False)
+        self._hide_species_hover()
 
     def set_fit_confirmed(self, confirmed: bool):
         """更新确认状态显示"""

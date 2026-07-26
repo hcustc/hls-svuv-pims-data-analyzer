@@ -154,6 +154,48 @@ QLabel#ResultMetrics {{
     font-weight: 600;
 }}
 
+QFrame#SpeciesHoverCard {{
+    background: {t.panel_bg};
+    border: 1px solid {t.primary_border};
+    border-radius: 8px;
+}}
+
+QLabel#HoverStructureCanvas {{
+    background: {t.panel_subtle};
+    border: 1px solid {t.border_light};
+    border-radius: 6px;
+    color: {t.text_muted};
+    font-size: 9pt;
+}}
+
+QLabel#SpeciesHoverKicker {{
+    color: {t.text_muted};
+    font-size: 9pt;
+    font-weight: 600;
+}}
+
+QLabel#SpeciesHoverName {{
+    color: {t.text_primary};
+    font-size: 11pt;
+    font-weight: 600;
+}}
+
+QLabel#SpeciesHoverFormulaBadge {{
+    background: {t.primary_soft};
+    border: 1px solid {t.primary_border};
+    border-radius: 4px;
+    color: {t.primary_hover};
+    font-weight: 600;
+    padding: 2px 6px;
+}}
+
+QLabel#SpeciesHoverMeta,
+QLabel#SpeciesHoverHint,
+QLabel#SpeciesFormulaLabel {{
+    color: {t.text_muted};
+    font-size: 9pt;
+}}
+
 QLabel#PieWorkflowStage,
 QLabel#PieSelectionSummary {{
     background: {t.panel_subtle};

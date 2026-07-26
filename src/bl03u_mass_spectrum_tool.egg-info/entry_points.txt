@@ -1,0 +1,4 @@
+[console_scripts]
+bl03u = bl03u_masstool.scripts.bl03u_cli:main
+bl03u-build-species-db = bl03u_masstool.scripts.build_species_database:main
+bl03u-gui = bl03u_masstool.desktop:main

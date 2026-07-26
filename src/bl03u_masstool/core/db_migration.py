@@ -24,16 +24,33 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-# Increment this whenever the schema changes and add a migration entry below.
-SCHEMA_VERSION: int = 1
+# Increment this whenever the schema or maintained reference data changes and
+# add a migration entry below.
+SCHEMA_VERSION: int = 3
 
 # Maps target_version -> SQL to bring the database from (target-1) to target.
 # Version 1 is the initial schema; it has no migration SQL because a missing
 # database is always rebuilt from seed rather than migrated from version 0.
 _MIGRATIONS: dict[int, str] = {
     1: "",  # Initial schema – handled by build_species_database_from_seed.
-    # Example for a future change:
-    # 2: "ALTER TABLE species ADD COLUMN source TEXT;",
+    2: """
+        UPDATE species
+        SET formula = 'C10H22', smiles = 'CCCCCCCCCC'
+        WHERE name COLLATE NOCASE = 'n-Decane';
+
+        UPDATE species
+        SET formula = 'C11H10', smiles = 'Cc1cccc2ccccc12'
+        WHERE name COLLATE NOCASE = '1-Methylnaphthalene';
+
+        UPDATE species
+        SET formula = 'C11H10', smiles = 'Cc1ccc2ccccc2c1'
+        WHERE name COLLATE NOCASE = '2-Methylnaphthalene';
+    """,
+    3: """
+        UPDATE species
+        SET formula = 'CH3', smiles = '[CH3]'
+        WHERE name COLLATE NOCASE = 'Methyl radical';
+    """,
 }
 
 

@@ -80,12 +80,29 @@ def test_default_species_seed_rebuilds_complete_sqlite_database(tmp_path):
         point_count = conn.execute("SELECT COUNT(*) FROM pic_cross_sections").fetchone()[0]
         null_ie_count = conn.execute("SELECT COUNT(*) FROM species WHERE ionization_energy IS NULL").fetchone()[0]
         mz_range = conn.execute("SELECT MIN(mz), MAX(mz) FROM species").fetchone()
+        mz_142_metadata = conn.execute(
+            """
+            SELECT name, formula, smiles
+            FROM species
+            WHERE name IN ('n-Decane', '1-Methylnaphthalene', '2-Methylnaphthalene')
+            ORDER BY id
+            """
+        ).fetchall()
+        methyl_radical_metadata = conn.execute(
+            "SELECT formula, smiles FROM species WHERE name = 'Methyl radical'"
+        ).fetchone()
         db_version = get_user_version(conn)
 
     assert species_count == expected_species
     assert point_count == len(seed_rows)
     assert null_ie_count == 0
     assert mz_range == (1, 720)
+    assert mz_142_metadata == [
+        ("n-Decane", "C10H22", "CCCCCCCCCC"),
+        ("1-Methylnaphthalene", "C11H10", "Cc1cccc2ccccc12"),
+        ("2-Methylnaphthalene", "C11H10", "Cc1ccc2ccccc2c1"),
+    ]
+    assert methyl_radical_metadata == ("CH3", "[CH3]")
     assert db_version == SCHEMA_VERSION
 
 
@@ -107,15 +124,34 @@ def test_ensure_database_up_to_date_is_noop_on_current_version(tmp_path):
 
 
 def test_ensure_database_up_to_date_migrates_old_version(tmp_path):
-    """A database stamped with version 0 (pre-migration) gets updated to SCHEMA_VERSION."""
+    """A legacy database is stamped and receives maintained structure metadata."""
     db_path = tmp_path / "species_database.sqlite"
     build_species_database_from_seed(db_path)
-    # Simulate a legacy database with no version stamp (user_version = 0).
+    # Simulate the version-1 metadata that used a library label as a formula
+    # and did not include a structure identifier.
     with sqlite3.connect(db_path) as conn:
-        conn.execute("PRAGMA user_version = 0")
+        conn.execute(
+            """
+            UPDATE species
+            SET formula = 'A2-1-CH3', smiles = NULL
+            WHERE name = '1-Methylnaphthalene'
+            """
+        )
+        conn.execute(
+            "UPDATE species SET smiles = NULL WHERE name = 'Methyl radical'"
+        )
+        conn.execute("PRAGMA user_version = 1")
     ensure_database_up_to_date(db_path)
     with sqlite3.connect(db_path) as conn:
         assert get_user_version(conn) == SCHEMA_VERSION
+        metadata = conn.execute(
+            "SELECT formula, smiles FROM species WHERE name = '1-Methylnaphthalene'"
+        ).fetchone()
+        methyl_metadata = conn.execute(
+            "SELECT formula, smiles FROM species WHERE name = 'Methyl radical'"
+        ).fetchone()
+    assert metadata == ("C11H10", "Cc1cccc2ccccc12")
+    assert methyl_metadata == ("CH3", "[CH3]")
 
 
 def test_pics_fit_returns_fitted_curve():
