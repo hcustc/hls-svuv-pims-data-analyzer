@@ -650,9 +650,11 @@ class WorkspacePagesMixin:
         self.fp_mf_mass_disc_exponent.setRange(0, 10)
         self.fp_mf_mass_disc_exponent.setDecimals(6)
         self.fp_mf_mass_disc_exponent.setValue(0.77897)
-        self.fp_mf_parent_mz = QtWidgets.QSpinBox()
-        self.fp_mf_parent_mz.setToolTip("母体物种（反应物）的质量数")
-        self.fp_mf_parent_mz.setRange(0, 1000)
+        self.fp_mf_parent_mz = QtWidgets.QDoubleSpinBox()
+        self.fp_mf_parent_mz.setToolTip("母体物种（反应物）对应的精确峰 m/z")
+        self.fp_mf_parent_mz.setRange(0.0, 1000.0)
+        self.fp_mf_parent_mz.setDecimals(6)
+        self.fp_mf_parent_mz.setSingleStep(0.001)
         self.fp_mf_parent_mz.setSpecialValueText("未设置")
         self.fp_mf_parent_mz.setValue(0)
         self.fp_mf_parent_initial_mf = QtWidgets.QDoubleSpinBox()
@@ -1864,7 +1866,13 @@ class WorkspacePagesMixin:
             calibration = ps.to_calibration()
             light_map = {"io": "IO光电流", "beam_current": "Beam Current"}
             pie_map = {"first": "光强校正", "none": "光强校正", "off": "不校正光强"}
-            peak_map = {"ensemble": "Ensemble融合检测", "prominence": "Prominence", "legacy": "传统局部极大", "cwt": "CWT小波"}
+            peak_map = {
+                "adaptive": "自适应高召回（实验）",
+                "ensemble": "Ensemble融合检测",
+                "prominence": "Prominence",
+                "legacy": "传统局部极大",
+                "cwt": "CWT小波",
+            }
             temp_map = {"sum": "Sum谱参考", "individual": "独立参考"}
             merge_map = {
                 "low_energy_dominant": "低能段为主",

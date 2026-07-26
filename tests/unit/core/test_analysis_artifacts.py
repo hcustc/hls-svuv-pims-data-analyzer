@@ -102,3 +102,38 @@ def test_temperature_evidence_reports_curve_class():
 
     assert evidence["22"]["curve_class"] == "intermediate"
     assert "中间体" in report
+
+
+def test_temperature_evidence_keeps_precise_curve_keys():
+    curves = {
+        228.021: {
+            "mz": 228.021,
+            "mz_rounded": 228,
+            "mz_exact_mean": 228.021,
+            "curve_key": 228.021,
+            "temperatures": [400.0, 500.0, 600.0],
+            "areas": [1.0, 2.0, 3.0],
+            "curve_class": "formation",
+            "curve_class_label": "生成(升高)",
+            "curve_class_reason": "测试",
+        },
+        228.099: {
+            "mz": 228.099,
+            "mz_rounded": 228,
+            "mz_exact_mean": 228.099,
+            "curve_key": 228.099,
+            "temperatures": [400.0, 500.0, 600.0],
+            "areas": [10.0, 20.0, 30.0],
+            "curve_class": "formation",
+            "curve_class_label": "生成(升高)",
+            "curve_class_reason": "测试",
+        },
+    }
+
+    evidence = build_temperature_evidence_objects(curves)
+
+    assert set(evidence) == {"228.021", "228.099"}
+    assert evidence["228.021"]["mz"] == 228.021
+    assert evidence["228.021"]["mz_rounded"] == 228
+    assert evidence["228.021"]["mz_exact_mean"] == 228.021
+    assert evidence["228.099"]["curve"]["areas"] == [10.0, 20.0, 30.0]

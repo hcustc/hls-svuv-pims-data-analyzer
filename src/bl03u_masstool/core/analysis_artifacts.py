@@ -30,9 +30,14 @@ def _series_values(values: Any) -> list[float]:
 
 
 def _curve_payload(curve: dict[str, Any]) -> dict[str, Any]:
+    exact_mz = float(curve.get("mz_exact_mean", curve.get("mz", 0)))
+    nominal_mz = int(
+        round(float(curve.get("mz_rounded", curve.get("mz", exact_mz))))
+    )
     return {
-        "mz": int(curve.get("mz", 0)),
-        "mz_exact_mean": float(curve.get("mz_exact_mean", curve.get("mz", 0))),
+        "mz": exact_mz,
+        "mz_rounded": nominal_mz,
+        "mz_exact_mean": exact_mz,
         "species": curve.get("species", ""),
         "energies": _series_values(curve.get("energies", [])),
         "intensities": _series_values(curve.get("intensities", [])),
@@ -51,7 +56,7 @@ def build_analysis_manifest(
     parameters: dict[str, Any] | None = None,
     outputs: dict[str, str | Path] | None = None,
     analysis_df: pd.DataFrame | None = None,
-    curves: dict[int, dict[str, Any]] | None = None,
+    curves: dict[int | float, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     row_count = 0 if analysis_df is None else int(len(analysis_df))
     curve_count = 0 if curves is None else int(len(curves))
@@ -84,7 +89,7 @@ def build_analysis_manifest(
                 file_count = analysis_df["file_count"].sum()
             manifest["data_summary"]["file_count"] = int(file_count)
     if curves:
-        manifest["data_summary"]["mz_values"] = sorted(int(mz) for mz in curves)
+        manifest["data_summary"]["mz_values"] = sorted(curves, key=float)
     return manifest
 
 
@@ -122,18 +127,25 @@ def score_pie_fit(fit: dict[str, Any] | None, *, point_count: int = 0) -> dict[s
 
 
 def build_pie_evidence_objects(
-    curves: dict[int, dict[str, Any]],
-    fits: dict[int, dict[str, Any]] | None = None,
+    curves: dict[int | float, dict[str, Any]],
+    fits: dict[int | float, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     fits = fits or {}
     objects: dict[str, Any] = {}
-    for mz, curve in sorted(curves.items()):
+    for curve_key, curve in sorted(curves.items(), key=lambda item: float(item[0])):
         payload = _curve_payload(curve)
-        fit = fits.get(int(mz))
+        fit = fits.get(curve_key)
         score = score_pie_fit(fit, point_count=len(payload["energies"]))
-        objects[str(int(mz))] = {
+        exact_mz = float(curve.get("mz_exact_mean", curve_key))
+        nominal_mz = int(
+            round(float(curve.get("mz_rounded", curve.get("mz", exact_mz))))
+        )
+        objects[str(curve_key)] = {
             "analysis_type": "pie",
-            "mz": int(mz),
+            "curve_key": curve_key,
+            "mz": exact_mz,
+            "mz_rounded": nominal_mz,
+            "mz_exact_mean": exact_mz,
             "curve": {
                 "energies": payload["energies"],
                 "intensities": payload["intensities"],
@@ -147,18 +159,37 @@ def build_pie_evidence_objects(
     return objects
 
 
-def build_temperature_evidence_objects(curves: dict[int, dict[str, Any]]) -> dict[str, Any]:
+def build_temperature_evidence_objects(
+    curves: dict[int | float, dict[str, Any]],
+) -> dict[str, Any]:
     objects: dict[str, Any] = {}
-    for mz, curve in sorted(curves.items()):
+    for curve_key, curve in sorted(
+        curves.items(),
+        key=lambda item: float(item[0]),
+    ):
         payload = _curve_payload(curve)
         warnings = []
         if len(payload["temperatures"]) < 3:
             warnings.append("有效温度点少于 3 个")
         if payload.get("curve_class") == "unclassified":
             warnings.append("温度响应类型暂未区分")
-        objects[str(int(mz))] = {
+        exact_mz = float(curve.get("mz_exact_mean", curve_key))
+        nominal_mz = int(
+            round(
+                float(
+                    curve.get(
+                        "mz_rounded",
+                        curve.get("mz", exact_mz),
+                    )
+                )
+            )
+        )
+        objects[str(curve_key)] = {
             "analysis_type": "temperature",
-            "mz": int(mz),
+            "curve_key": curve_key,
+            "mz": exact_mz,
+            "mz_rounded": nominal_mz,
+            "mz_exact_mean": exact_mz,
             "curve": {
                 "temperatures": payload["temperatures"],
                 "areas": payload["areas"],
@@ -191,7 +222,7 @@ def build_summary_report(
     if "temperature_count" in summary:
         lines.append(f"- 温度点数：{summary['temperature_count']}")
     lines.extend(["", "## m/z 级证据摘要", "", "| m/z | 类型/拟合 | 置信度 | 警告 |", "| --- | --- | --- | --- |"])
-    for mz, item in sorted(evidence.items(), key=lambda pair: int(pair[0])):
+    for mz, item in sorted(evidence.items(), key=lambda pair: float(pair[0])):
         if item.get("analysis_type") == "temperature":
             descriptor = item.get("curve_class_label") or item.get("curve_class") or "未分类"
         else:

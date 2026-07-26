@@ -78,6 +78,7 @@ class FittingControlWidget(QtWidgets.QWidget):
         self._locked_species: list[str] = []                   # 主要使用：锁定候选物种名称列表
         self._unified_species_data: list[dict] = []            # 统一的物种数据
         self._current_mz: int | None = None                    # 当前m/z
+        self._current_mz_display: str | None = None            # 精确峰曲线显示标签
         self._updating = False                                 # 防止递归更新
         self._candidates_loaded = False                        # 是否已执行过 PICS 查询
 
@@ -328,7 +329,14 @@ class FittingControlWidget(QtWidgets.QWidget):
             "failed": "查询失败",
         }.get(status, "待查询")
 
-    def populate_unified_species_table(self, mz: int, filtered_db: list[dict], locked_species: list[str]):
+    def populate_unified_species_table(
+        self,
+        mz: int,
+        filtered_db: list[dict],
+        locked_species: list[str],
+        *,
+        display_mz: str | None = None,
+    ):
         """
         填充统一的物种表格
         - 显示当前 m/z 的 PICS 数据库候选物种
@@ -339,6 +347,7 @@ class FittingControlWidget(QtWidgets.QWidget):
         标记候选查询已执行（_candidates_loaded = True）
         """
         self._current_mz = mz
+        self._current_mz_display = str(display_mz) if display_mz else str(mz)
         self._updating = True
         try:
             # 收集自动候选物种
@@ -407,7 +416,9 @@ class FittingControlWidget(QtWidgets.QWidget):
             self.candidate_controls_widget.hide()
             self.panel_separator.hide()
         self.current_mz_label.setText(
-            f"m/z {self._current_mz}" if self._current_mz is not None else "未选择 m/z"
+            f"m/z {self._current_mz_display}"
+            if self._current_mz is not None
+            else "未选择 m/z"
         )
         self._refresh_candidate_summary()
         self._refresh_ie_query_button()
@@ -901,6 +912,8 @@ class FittingControlWidget(QtWidgets.QWidget):
         """清空UI内容，重置为初始状态"""
         self._locked_species = []
         self._unified_species_data = []
+        self._current_mz = None
+        self._current_mz_display = None
         self._candidates_loaded = False  # 重置查询标志
         self.species_table.setRowCount(0)
         self.clear_fit_result()

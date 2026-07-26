@@ -1136,6 +1136,7 @@ class PeakDetectionWidget(QtWidgets.QWidget):
         peak_layout.setVerticalSpacing(8)
 
         self.peak_algorithm_combo = QtWidgets.QComboBox()
+        self.peak_algorithm_combo.addItem("自适应高召回（实验）", "adaptive")
         self.peak_algorithm_combo.addItem("Ensemble 融合检测（推荐）", "ensemble")
         self.peak_algorithm_combo.addItem("Prominence", "prominence")
         self.peak_algorithm_combo.addItem("传统局部极大", "legacy")
@@ -1486,6 +1487,7 @@ class FunctionDefaultsWidget(QtWidgets.QWidget):
         peak_layout.setVerticalSpacing(8)
 
         self.peak_algorithm_combo = QtWidgets.QComboBox()
+        self.peak_algorithm_combo.addItem("自适应高召回（实验）", "adaptive")
         self.peak_algorithm_combo.addItem("Ensemble 融合检测（推荐）", "ensemble")
         self.peak_algorithm_combo.addItem("Prominence", "prominence")
         self.peak_algorithm_combo.addItem("传统局部极大", "legacy")
@@ -1739,10 +1741,12 @@ class FunctionDefaultsWidget(QtWidgets.QWidget):
         form.setHorizontalSpacing(8)
         form.setVerticalSpacing(8)
 
-        self.mf_parent_mz_edit = QtWidgets.QSpinBox()
-        self.mf_parent_mz_edit.setRange(0, 1000)
+        self.mf_parent_mz_edit = QtWidgets.QDoubleSpinBox()
+        self.mf_parent_mz_edit.setRange(0.0, 1000.0)
+        self.mf_parent_mz_edit.setDecimals(6)
+        self.mf_parent_mz_edit.setSingleStep(0.001)
         self.mf_parent_mz_edit.setSpecialValueText("未设置")
-        self.mf_parent_mz_edit.setToolTip("母体物种质量数")
+        self.mf_parent_mz_edit.setToolTip("母体物种对应的精确峰 m/z")
 
         self.mf_parent_initial_mf_edit = QtWidgets.QDoubleSpinBox()
         self.mf_parent_initial_mf_edit.setRange(0.0, 1.0)

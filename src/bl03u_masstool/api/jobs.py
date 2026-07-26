@@ -22,8 +22,8 @@ class PieJob:
     error: str = ""
     summary: Dict[str, Any] = field(default_factory=dict)
     analysis_df: Any = None
-    curves: Dict[int, dict] = field(default_factory=dict)
-    fits: Dict[int, dict] = field(default_factory=dict)
+    curves: Dict[int | float, dict] = field(default_factory=dict)
+    fits: Dict[int | float, dict] = field(default_factory=dict)
     database_path: str = ""
     source_folder: str = ""
     peak_source: str = ""

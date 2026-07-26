@@ -78,8 +78,81 @@ def test_analyze_pie_folder_builds_selectable_curves(tmp_path):
         prefer_gaussian=False,
     )
     curves = build_pie_curves(df)
-    assert 22 in curves
-    assert curves[22]["energies"] == [11.0, 12.0]
+    curve_key, curve = next(iter(curves.items()))
+    assert curve_key == pytest.approx(22.0)
+    assert curve["mz"] == pytest.approx(curve_key)
+    assert curve["mz_rounded"] == 22
+    assert curve["energies"] == [11.0, 12.0]
+
+
+def test_build_pie_curves_keeps_precise_peaks_separate_within_nominal_mz():
+    analysis_df = pd.DataFrame(
+        {
+            "energy": [7.0, 8.0, 7.0, 8.0],
+            "mz": [227.587157, 227.587157, 228.023117, 228.023117],
+            "mz_rounded": [228, 228, 228, 228],
+            "normalized_intensity": [0.0, 0.2, 1.0, 10.0],
+            "raw_area": [0.0, 2.0, 10.0, 100.0],
+            "photon_normalized_intensity": [0.0, 0.2, 1.0, 10.0],
+            "integration_method": ["sum_counts"] * 4,
+            "species": [""] * 4,
+            "file_count": [1] * 4,
+            "io": [1.0] * 4,
+            "replicate_mode": ["off"] * 4,
+            "left_bound": [24076, 24076, 24091, 24091],
+            "right_bound": [24086, 24086, 24118, 24118],
+        }
+    )
+
+    curves = build_pie_curves(analysis_df)
+
+    assert set(curves) == {227.587157, 228.023117}
+    assert curves[227.587157]["mz"] == pytest.approx(227.587157)
+    assert curves[227.587157]["mz_rounded"] == 228
+    assert curves[227.587157]["energies"] == [7.0, 8.0]
+    assert curves[227.587157]["intensities"] == [0.0, 0.2]
+    assert curves[228.023117]["energies"] == [7.0, 8.0]
+    assert curves[228.023117]["intensities"] == [1.0, 10.0]
+    assert all(curve["has_nominal_collision"] for curve in curves.values())
+
+
+def test_build_pie_curves_uses_precise_key_for_single_peak():
+    analysis_df = pd.DataFrame(
+        {
+            "energy": [7.0, 8.0],
+            "mz": [228.023117, 228.023117],
+            "mz_rounded": [228, 228],
+            "normalized_intensity": [1.0, 10.0],
+            "replicate_mode": ["off", "off"],
+        }
+    )
+
+    curves = build_pie_curves(analysis_df)
+
+    assert set(curves) == {228.023117}
+    assert curves[228.023117]["mz"] == pytest.approx(228.023117)
+    assert curves[228.023117]["mz_rounded"] == 228
+    assert curves[228.023117]["mz_exact_mean"] == pytest.approx(228.023117)
+    assert curves[228.023117]["has_nominal_collision"] is False
+
+
+def test_build_pie_curves_tracks_one_peak_across_small_mz_drift():
+    analysis_df = pd.DataFrame(
+        {
+            "energy": [9.0, 10.0, 11.0],
+            "mz": [28.010, 28.015, 28.020],
+            "mz_rounded": [28, 28, 28],
+            "normalized_intensity": [1.0, 2.0, 3.0],
+            "replicate_mode": ["off", "off", "off"],
+        }
+    )
+
+    curves = build_pie_curves(analysis_df)
+
+    assert set(curves) == {28.015}
+    assert curves[28.015]["energies"] == [9.0, 10.0, 11.0]
+    assert curves[28.015]["mz"] == pytest.approx(28.015)
+    assert curves[28.015]["mz_rounded"] == 28
 
 
 def test_discover_pie_segment_folders_detects_temporary_multi_segment_parent(tmp_path):
@@ -639,8 +712,10 @@ def test_analyze_pie_folder_uses_asc_files_by_default(tmp_path):
         prefer_gaussian=False,
     )
     curves = build_pie_curves(df)
-    assert 22 in curves
-    assert curves[22]["energies"] == [11.0, 12.0]
+    curve_key, curve = next(iter(curves.items()))
+    assert curve_key == pytest.approx(22.0)
+    assert curve["mz_rounded"] == 22
+    assert curve["energies"] == [11.0, 12.0]
 
 
 def test_merge_pie_segments_scales_high_energy_segment_from_overlap_ratio():
@@ -675,6 +750,60 @@ def test_merge_pie_segments_scales_high_energy_segment_from_overlap_ratio():
     assert merged.loc[10.0, "normalized_intensity"] == pytest.approx(30.0)
     assert merged.loc[11.0, "normalized_intensity"] == pytest.approx(40.0)
     assert merged.loc[12.0, "normalized_intensity"] == pytest.approx(50.0)
+
+
+def test_merge_pie_segments_preserves_multiple_precise_peaks_per_nominal_mass():
+    def segment(energies, peak_rows):
+        rows = []
+        for exact_mz, left_bound, right_bound, intensities in peak_rows:
+            for energy, intensity in zip(energies, intensities):
+                rows.append(
+                    {
+                        "energy": energy,
+                        "mz_rounded": 228,
+                        "normalized_intensity": intensity,
+                        "raw_area": intensity,
+                        "photon_normalized_intensity": intensity,
+                        "integration_method": "sum_counts",
+                        "mz": exact_mz,
+                        "species": "",
+                        "file_count": 1,
+                        "io": 1.0,
+                        "light_source": "io",
+                        "left_bound": left_bound,
+                        "right_bound": right_bound,
+                    }
+                )
+        return pd.DataFrame(rows)
+
+    low_energy = segment(
+        [8.0, 9.0, 10.0],
+        [
+            (227.58715739409433, 400, 405, [1.0, 2.0, 3.0]),
+            (228.02311680380544, 410, 416, [10.0, 20.0, 30.0]),
+        ],
+    )
+    high_energy = segment(
+        [9.0, 10.0, 11.0],
+        [
+            (227.58715739409433, 400, 405, [0.2, 0.3, 0.4]),
+            (228.02311680380544, 410, 416, [2.0, 3.0, 4.0]),
+        ],
+    )
+
+    merged = merge_pie_segments(
+        [low_energy, high_energy],
+        merge_method="low_energy_dominant",
+    )
+    curves = build_pie_curves(merged)
+
+    assert len(curves) == 2
+    assert sorted(curves) == pytest.approx(
+        [227.58715739409433, 228.02311680380544]
+    )
+    assert all(curve["mz"] == pytest.approx(key) for key, curve in curves.items())
+    assert all(curve["mz_rounded"] == 228 for curve in curves.values())
+    assert all(curve["energies"] == [8.0, 9.0, 10.0, 11.0] for curve in curves.values())
 
 
 @pytest.mark.parametrize(

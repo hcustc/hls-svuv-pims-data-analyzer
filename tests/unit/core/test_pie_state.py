@@ -535,6 +535,74 @@ class TestPieStateManagerLoad:
         assert 'total_fit' in arrays
         assert isinstance(arrays['energies'], np.ndarray)
 
+    def test_precise_curve_keys_round_trip_without_overwrite(
+        self,
+        temp_project_dir,
+        sample_database,
+    ):
+        exact_mz_values = [227.58715739409433, 228.02311680380544]
+        curves = {
+            exact_mz: {
+                "mz": exact_mz,
+                "mz_rounded": 228,
+                "mz_exact_mean": exact_mz,
+                "curve_key": exact_mz,
+                "has_nominal_collision": True,
+                "energies": np.array([9.0, 10.0, 11.0]),
+                "intensities": np.array([index + 1.0, index + 2.0, index + 3.0]),
+            }
+            for index, exact_mz in enumerate(exact_mz_values)
+        }
+        configs = {
+            exact_mz: {"selected_species": [], "coefficients": {}, "locked_ids": []}
+            for exact_mz in exact_mz_values
+        }
+        fit_results = {
+            exact_mz: {
+                "success": True,
+                "model": {
+                    "species": [
+                        {
+                            "id": 1,
+                            "species": "candidate",
+                            "coefficient": 1.0,
+                            "contribution_percent": 100.0,
+                        }
+                    ],
+                    "r_squared": 0.95,
+                    "fitted_curve": np.array([1.0, 2.0, 3.0]),
+                    "component_curves": [[1.0], [2.0], [3.0]],
+                },
+            }
+            for exact_mz in exact_mz_values
+        }
+        manager = PieStateManager(temp_project_dir)
+
+        success, error = manager.save_state(
+            curves,
+            sample_database,
+            MockCalibration(),
+            configs,
+            fit_results,
+            "global",
+        )
+        state = manager.load_state(curves, sample_database, MockCalibration())
+
+        assert success is True, error
+        assert set(state["configs"]) == {str(value) for value in exact_mz_values}
+        assert set(state["results"]) == {str(value) for value in exact_mz_values}
+        for exact_mz in exact_mz_values:
+            saved_result = state["results"][str(exact_mz)]
+            assert saved_result["curve_key"] == pytest.approx(exact_mz)
+            assert saved_result["mz"] == pytest.approx(exact_mz)
+            assert saved_result["mz_rounded"] == 228
+            assert saved_result["mz_exact"] == pytest.approx(exact_mz)
+            assert manager.load_mz_arrays(exact_mz)["energies"].tolist() == [
+                9.0,
+                10.0,
+                11.0,
+            ]
+
 
 class TestSecurityAndIntegrity:
     """Test security checks and data integrity."""

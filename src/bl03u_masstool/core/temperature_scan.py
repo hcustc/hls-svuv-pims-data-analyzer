@@ -26,6 +26,7 @@ TEMPERATURE_CURVE_CLASS_LABELS = {
 }
 
 PRODUCT_LIKE_TEMPERATURE_CURVE_CLASSES = {"formation", "intermediate"}
+TemperatureCurveKey = int | float
 
 
 def group_energies_by_tolerance(energies: list[float], tolerance: float = 0.01) -> dict[float, list[float]]:
@@ -384,6 +385,7 @@ def _apply_temperature_normalization(
             kr_rows = result[result["mz_rounded"].astype(int) == int(kr_mz)]
             if kr_rows.empty:
                 raise ValueError(f"Kr correction requested but m/z {kr_mz} is not present in peak ranges")
+            kr_rows = _select_kr_reference_peak_rows(kr_rows, kr_mz=kr_mz)
             kr_by_temperature = kr_rows.groupby("temperature")["photon_normalized_area"].sum().sort_index()
             positive_kr = kr_by_temperature[kr_by_temperature > 0]
             if positive_kr.empty:
@@ -405,6 +407,81 @@ def _apply_temperature_normalization(
     result["normalized_area"] = (normalized / denominator).fillna(0.0)
     result["area"] = result["normalized_area"]
     return result
+
+
+_KR_ISOTOPE_EXACT_MASSES = {
+    78: 77.92036494,
+    80: 79.91637808,
+    82: 81.91348273,
+    83: 82.91412716,
+    84: 83.91149773,
+    86: 85.91061063,
+}
+
+
+def _select_kr_reference_peak_rows(
+    kr_rows: pd.DataFrame,
+    *,
+    kr_mz: int,
+) -> pd.DataFrame:
+    """Select one resolved Kr peak instead of summing a nominal-mass collision."""
+    if kr_rows.empty:
+        return kr_rows.copy()
+
+    working = kr_rows.copy()
+    if (
+        "temperature_peak_track" in working
+        and working["temperature_peak_track"].notna().all()
+    ):
+        working["_kr_peak_identity"] = working["temperature_peak_track"].map(
+            lambda value: f"track:{int(value)}"
+        )
+    elif all(
+        column in working and working[column].notna().all()
+        for column in ("left_bound", "right_bound")
+    ):
+        working["_kr_peak_identity"] = [
+            f"bounds:{int(left)}:{int(right)}"
+            for left, right in zip(working["left_bound"], working["right_bound"])
+        ]
+    else:
+        working["_kr_peak_identity"] = pd.to_numeric(
+            working["mz"],
+            errors="coerce",
+        ).map(lambda value: f"mz:{float(value):.9f}")
+
+    identities = (
+        working.groupby("_kr_peak_identity", as_index=False)
+        .agg(mz=("mz", "mean"))
+        .dropna(subset=["mz"])
+    )
+    if identities.empty:
+        raise ValueError(f"Kr m/z {kr_mz} has no valid precise peak identity")
+    if len(identities) == 1:
+        selected_identity = str(identities.iloc[0]["_kr_peak_identity"])
+    else:
+        target_exact_mz = _KR_ISOTOPE_EXACT_MASSES.get(int(kr_mz), float(kr_mz))
+        identities["_distance"] = (
+            pd.to_numeric(identities["mz"], errors="coerce") - target_exact_mz
+        ).abs()
+        ordered = identities.sort_values(
+            ["_distance", "mz", "_kr_peak_identity"],
+            kind="stable",
+        )
+        if (
+            len(ordered) > 1
+            and abs(float(ordered.iloc[0]["_distance"]) - float(ordered.iloc[1]["_distance"]))
+            <= 1e-12
+        ):
+            candidates = ", ".join(f"{float(value):.9g}" for value in ordered["mz"])
+            raise ValueError(
+                f"Kr nominal m/z {kr_mz} contains equally close precise peaks: {candidates}"
+            )
+        selected_identity = str(ordered.iloc[0]["_kr_peak_identity"])
+
+    return working.loc[
+        working["_kr_peak_identity"] == selected_identity
+    ].drop(columns=["_kr_peak_identity"])
 
 
 def _map_expansion_factors(
@@ -549,38 +626,63 @@ def annotate_temperature_curve_groups(
     *,
     relative_change_threshold: float = 0.25,
     endpoint_peak_fraction: float = 0.65,
-    curves: dict[int, dict] | None = None,
+    curves: dict[TemperatureCurveKey, dict] | None = None,
 ) -> pd.DataFrame:
     """Add curve classification columns to temperature scan rows."""
     result = result_df.copy()
     if result.empty:
-        for column in ("curve_class", "curve_class_label", "curve_class_reason"):
+        for column in (
+            "temperature_peak_track",
+            "temperature_curve_key",
+            "curve_class",
+            "curve_class_label",
+            "curve_class_reason",
+        ):
             if column not in result:
                 result[column] = []
         return result
 
+    result["mz_rounded"] = result["mz"].round().astype(int)
+    result = _assign_temperature_peak_tracks(result)
     if curves is None:
         curves = build_temperature_curves(
             result,
             relative_change_threshold=relative_change_threshold,
             endpoint_peak_fraction=endpoint_peak_fraction,
         )
-    class_by_mz = {
-        mz: (
+    class_by_peak = {
+        (
+            int(curve.get("mz_rounded", curve.get("mz", round(float(curve_key))))),
+            int(curve.get("temperature_peak_track", 0)),
+        ): (
+            curve_key,
             curve["curve_class"],
             curve["curve_class_label"],
             curve["curve_class_reason"],
         )
-        for mz, curve in curves.items()
+        for curve_key, curve in curves.items()
     }
-    mz_rounded = result["mz"].round().astype(int)
-    result["curve_class"] = mz_rounded.map(lambda mz: class_by_mz.get(int(mz), ("unclassified", "", ""))[0])
-    result["curve_class_label"] = mz_rounded.map(
-        lambda mz: class_by_mz.get(int(mz), ("unclassified", TEMPERATURE_CURVE_CLASS_LABELS["unclassified"], ""))[1]
+    peak_identities = list(
+        zip(
+            result["mz_rounded"].astype(int),
+            result["_temperature_peak_track"].astype(int),
+        )
     )
-    result["curve_class_reason"] = mz_rounded.map(
-        lambda mz: class_by_mz.get(int(mz), ("unclassified", "", ""))[2]
+    defaults = (
+        np.nan,
+        "unclassified",
+        TEMPERATURE_CURVE_CLASS_LABELS["unclassified"],
+        "",
     )
+    annotations = [class_by_peak.get(identity, defaults) for identity in peak_identities]
+    result["temperature_peak_track"] = [
+        int(track) for track in result["_temperature_peak_track"]
+    ]
+    result["temperature_curve_key"] = [annotation[0] for annotation in annotations]
+    result["curve_class"] = [annotation[1] for annotation in annotations]
+    result["curve_class_label"] = [annotation[2] for annotation in annotations]
+    result["curve_class_reason"] = [annotation[3] for annotation in annotations]
+    result = result.drop(columns=["_temperature_peak_track"], errors="ignore")
     return result
 
 
@@ -638,6 +740,7 @@ def compute_kr_expansion_factors(
     kr_rows = result[result["mz_rounded"].astype(int) == int(kr_mz)].copy()
     if kr_rows.empty:
         raise ValueError(f"Kr m/z {kr_mz} was not found in the calibration folder")
+    kr_rows = _select_kr_reference_peak_rows(kr_rows, kr_mz=kr_mz)
 
     return _build_kr_expansion_factor_table(kr_rows, use_highest_energy=use_highest_energy)
 
@@ -815,18 +918,119 @@ def identify_product_energy_intervals(
 
 
 
+def _temperature_peak_track_series(group: pd.DataFrame) -> pd.Series:
+    """Assign stable resolved-peak tracks within one nominal-mass group.
+
+    Temperature scans integrate a fixed reference-peak list, so a resolved peak
+    keeps its order among neighbouring peaks even if calibrated m/z drifts
+    slightly between temperatures. Peak bounds are preferred as the identity;
+    ordered exact m/z is the fallback for older cached rows without bounds.
+    """
+    if group.empty:
+        return pd.Series(dtype="int64", index=group.index)
+
+    base = group.reset_index(drop=True).copy()
+    base.attrs = {}
+    base["_temperature_row_order"] = np.arange(len(base), dtype=int)
+    axis_columns = ["temperature"]
+    if (
+        "scan_folder" in base
+        and base["scan_folder"].nunique(dropna=False) > 1
+    ):
+        axis_columns.insert(0, "scan_folder")
+    elif (
+        "photon_energy" in base
+        and pd.to_numeric(base["photon_energy"], errors="coerce").nunique(dropna=False) > 1
+    ):
+        axis_columns.insert(0, "photon_energy")
+
+    has_complete_bounds = all(
+        column in base.columns and base[column].notna().all()
+        for column in ("left_bound", "right_bound")
+    )
+    identity_columns = (
+        ["left_bound", "right_bound"] if has_complete_bounds else ["mz"]
+    )
+    identity_keys = [*axis_columns, *identity_columns]
+    identities = base[identity_keys].drop_duplicates()
+    if identity_columns == ["mz"]:
+        identities["_peak_sort_mz"] = pd.to_numeric(
+            identities["mz"],
+            errors="coerce",
+        )
+    else:
+        mz_means = (
+            base.groupby(identity_keys, dropna=False, as_index=False)["mz"]
+            .mean()
+            .rename(columns={"mz": "_peak_sort_mz"})
+        )
+        identities = identities.merge(
+            mz_means,
+            on=identity_keys,
+            how="left",
+        )
+    identities = identities.sort_values(
+        [*axis_columns, "_peak_sort_mz", *identity_columns],
+        kind="stable",
+    )
+    identities["_temperature_peak_track"] = identities.groupby(
+        axis_columns,
+        dropna=False,
+        sort=False,
+    ).cumcount()
+    tracked = base.merge(
+        identities[identity_keys + ["_temperature_peak_track"]],
+        on=identity_keys,
+        how="left",
+        sort=False,
+    ).sort_values("_temperature_row_order", kind="stable")
+    return pd.Series(
+        tracked["_temperature_peak_track"].to_numpy(dtype="int64"),
+        index=group.index,
+        dtype="int64",
+    )
+
+
+def _assign_temperature_peak_tracks(result_df: pd.DataFrame) -> pd.DataFrame:
+    """Return rows in their original order with a precise-peak track column."""
+    working = result_df.copy()
+    working.attrs = {}
+    if working.empty:
+        working["_temperature_peak_track"] = pd.Series(dtype="int64")
+        return working
+    if "mz_rounded" not in working:
+        working["mz_rounded"] = working["mz"].round().astype(int)
+    working["_temperature_row_order"] = np.arange(len(working), dtype=int)
+    tracked_groups: list[pd.DataFrame] = []
+    for _nominal_mz, group in working.groupby("mz_rounded", sort=False):
+        group = group.copy()
+        group.attrs = {}
+        group["_temperature_peak_track"] = _temperature_peak_track_series(group).to_numpy()
+        tracked_groups.append(group)
+    return (
+        pd.concat(tracked_groups, axis=0)
+        .sort_values("_temperature_row_order", kind="stable")
+        .drop(columns=["_temperature_row_order"])
+    )
+
+
 def build_temperature_curves(
     result_df: pd.DataFrame,
     *,
     relative_change_threshold: float = 0.25,
     endpoint_peak_fraction: float = 0.65,
-) -> dict[int, dict]:
-    """Convert temperature scan rows into m/z keyed curve objects."""
-    curves: dict[int, dict] = {}
+) -> dict[TemperatureCurveKey, dict]:
+    """Convert scan rows into separate curves for every resolved exact peak.
+
+    Each curve uses its mean calibrated m/z as its identity. The nominal integer
+    is stored only in ``mz_rounded`` for broad species/database matching.
+    """
+    curves: dict[TemperatureCurveKey, dict] = {}
     if result_df.empty:
         return curves
 
     working = result_df.copy()
+    working.attrs = {}
     working["mz_rounded"] = working["mz"].round().astype(int)
     if "raw_area" not in working:
         working["raw_area"] = working["area"]
@@ -846,13 +1050,18 @@ def build_temperature_curves(
         working["replicate_grouping"] = "temperature"
     if "replicate_warning" not in working:
         working["replicate_warning"] = ""
+    if "reference_temperature" not in working:
+        working["reference_temperature"] = np.nan
+    if "file" not in working:
+        working["file"] = [f"row-{index}" for index in range(len(working))]
+    working = _assign_temperature_peak_tracks(working)
     replicate_mode = str(
         working["replicate_mode"].dropna().iloc[0]
         if not working["replicate_mode"].dropna().empty
         else "off"
     )
     area_agg = "mean" if replicate_mode != "sum" else "sum"
-    group_keys = ["mz_rounded", "temperature"]
+    group_keys = ["mz_rounded", "_temperature_peak_track", "temperature"]
     working["file_count"] = working.groupby(group_keys)["file"].transform("nunique")
     if replicate_mode != "off":
         fallback_mask = (
@@ -862,45 +1071,91 @@ def build_temperature_curves(
         working.loc[fallback_mask, "replicate_warning"] = (
             "未识别到文件名末尾采集序号，已退回按温度分组的旧逻辑处理重复文件。"
         )
+        aggregations: dict[str, tuple[str, object]] = {
+            "area": ("area", area_agg),
+            "raw_area": ("raw_area", area_agg),
+            "integration_method": ("integration_method", _summarize_integration_methods),
+            "photon_normalized_area": ("photon_normalized_area", area_agg),
+            "expansion_lambda": ("expansion_lambda", "first"),
+            "species": ("species", "first"),
+            "photon_energy": ("photon_energy", "first"),
+            "mz": ("mz", "mean"),
+            "file_count": ("file", "nunique"),
+            "replicate_mode": ("replicate_mode", "first"),
+            "replicate_grouping": (
+                "replicate_grouping",
+                lambda values: "filename"
+                if (values.astype(str) == "filename").any()
+                else "temperature",
+            ),
+            "replicate_warning": (
+                "replicate_warning",
+                lambda values: "; ".join(
+                    sorted({str(value) for value in values if str(value)})
+                ),
+            ),
+            "reference_temperature": ("reference_temperature", "first"),
+        }
+        for column in ("left_bound", "right_bound", "scan_folder"):
+            if column in working:
+                aggregations[column] = (column, "first")
         prepared = (
             working.groupby(group_keys, as_index=False)
-            .agg(
-                area=("area", area_agg),
-                raw_area=("raw_area", area_agg),
-                integration_method=("integration_method", _summarize_integration_methods),
-                photon_normalized_area=("photon_normalized_area", area_agg),
-                expansion_lambda=("expansion_lambda", "first"),
-                species=("species", "first"),
-                photon_energy=("photon_energy", "first"),
-                mz=("mz", "mean"),
-                file_count=("file", "nunique"),
-                replicate_mode=("replicate_mode", "first"),
-                replicate_grouping=("replicate_grouping", lambda values: "filename" if (values.astype(str) == "filename").any() else "temperature"),
-                replicate_warning=("replicate_warning", lambda values: "; ".join(sorted({str(v) for v in values if str(v)}))),
-                reference_temperature=("reference_temperature", "first"),
-            )
-            .sort_values(["mz_rounded", "temperature"])
+            .agg(**aggregations)
+            .sort_values(["mz_rounded", "_temperature_peak_track", "temperature"])
         )
     else:
-        prepared = working.sort_values(["mz_rounded", "temperature", "file"])
-
-    for mz, group in prepared.groupby("mz_rounded", sort=False):
-        ordered = group.drop(columns=["mz_rounded"]).reset_index(drop=True)
-        classification = classify_temperature_curve(
-            ordered["temperature"],
-            ordered["area"],
-            relative_change_threshold=relative_change_threshold,
-            endpoint_peak_fraction=endpoint_peak_fraction,
+        prepared = working.sort_values(
+            ["mz_rounded", "_temperature_peak_track", "temperature", "file"]
         )
-        curves[int(mz)] = {
-            "mz": int(mz),
-            "mz_exact_mean": float(ordered["mz"].mean()),
-            "species": str(ordered["species"].iloc[0]) if "species" in ordered else "",
-            "temperatures": ordered["temperature"].astype(float).tolist(),
-            "areas": ordered["area"].astype(float).tolist(),
-            "curve_class": classification["curve_class"],
-            "curve_class_label": classification["curve_class_label"],
-            "curve_class_reason": classification["curve_class_reason"],
-            "rows": ordered,
-        }
+
+    for nominal_mz, nominal_group in prepared.groupby("mz_rounded", sort=False):
+        peak_groups = list(
+            nominal_group.groupby(
+                "_temperature_peak_track",
+                dropna=False,
+                sort=False,
+            )
+        )
+        has_nominal_collision = len(peak_groups) > 1
+        for peak_track, group in peak_groups:
+            ordered = (
+                group.drop(columns=["mz_rounded"])
+                .sort_values("temperature", kind="stable")
+                .reset_index(drop=True)
+            )
+            classification = classify_temperature_curve(
+                ordered["temperature"],
+                ordered["area"],
+                relative_change_threshold=relative_change_threshold,
+                endpoint_peak_fraction=endpoint_peak_fraction,
+            )
+            exact_mz = float(ordered["mz"].mean())
+            curve_key: TemperatureCurveKey = exact_mz
+            if curve_key in curves:
+                raise ValueError(
+                    "Temperature curve identity collision for precise m/z "
+                    f"{exact_mz:.12g}; peak bounds must uniquely identify each curve"
+                )
+            ordered["temperature_peak_track"] = int(peak_track)
+            ordered["temperature_curve_key"] = curve_key
+            ordered["curve_class"] = classification["curve_class"]
+            ordered["curve_class_label"] = classification["curve_class_label"]
+            ordered["curve_class_reason"] = classification["curve_class_reason"]
+            ordered = ordered.drop(columns=["_temperature_peak_track"], errors="ignore")
+            curves[curve_key] = {
+                "mz": exact_mz,
+                "mz_rounded": int(nominal_mz),
+                "mz_exact_mean": exact_mz,
+                "curve_key": curve_key,
+                "temperature_peak_track": int(peak_track),
+                "has_nominal_collision": has_nominal_collision,
+                "species": str(ordered["species"].iloc[0]) if "species" in ordered else "",
+                "temperatures": ordered["temperature"].astype(float).tolist(),
+                "areas": ordered["area"].astype(float).tolist(),
+                "curve_class": classification["curve_class"],
+                "curve_class_label": classification["curve_class_label"],
+                "curve_class_reason": classification["curve_class_reason"],
+                "rows": ordered,
+            }
     return curves

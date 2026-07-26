@@ -47,6 +47,99 @@ def test_manual_peak_ranges_integrate_fixed_bounds(qapp):
         dialog.deleteLater()
 
 
+def test_manual_peak_ranges_keep_same_nominal_mz_peaks_separate(qapp):
+    dialog = MoleFractionDialog(Calibration(a=0.0, b=1.0, c=0.0), None)
+    try:
+        data = np.zeros(24)
+        data[5] = 2.0
+        data[12] = 100.0
+
+        peaks = dialog._detect_and_integrate_peaks(
+            data,
+            {
+                227.587: (5, 5),
+                228.023: (12, 12),
+            },
+        )
+
+        assert [peak["mz_rounded"] for peak in peaks] == [228, 228]
+        assert [peak["curve_key"] for peak in peaks] == pytest.approx(
+            [227.587, 228.023]
+        )
+        assert not any(peak["overlapped"] for peak in peaks)
+    finally:
+        dialog.deleteLater()
+
+
+def test_temperature_and_pie_import_preserve_precise_mz_collision(
+    qapp,
+    tmp_path,
+):
+    temperature_result = tmp_path / "temperature_collision.csv"
+    temperature_result.write_text(
+        "\n".join(
+            [
+                "temperature,mz,mz_rounded,temperature_curve_key,"
+                "temperature_peak_track,area,photon_energy,file",
+                "650,227.587,228,227.587,0,2,10,a.txt",
+                "650,228.023,228,228.023,1,100,10,a.txt",
+                "750,227.587,228,227.587,0,3,10,b.txt",
+                "750,228.023,228,228.023,1,120,10,b.txt",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    pie_result = tmp_path / "pie_collision.csv"
+    pie_result.write_text(
+        "\n".join(
+            [
+                "精确m/z,质量数,物种名称,电离能(eV),贡献比例(%),R²",
+                "227.587,228,Noise,9.0,1.0,0.1",
+                "228.023,228,Product,10.0,99.0,0.999",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    dialog = MoleFractionDialog(Calibration(a=0.0, b=1.0, c=0.0), None)
+    try:
+        dialog._load_temperature_result_file(
+            temperature_result,
+            show_message=False,
+            register_artifact=False,
+        )
+        signals = dialog.temperature_scan_data[10.0][650.0][
+            "precomputed_signals"
+        ]
+
+        assert signals == pytest.approx({227.587: 2.0, 228.023: 100.0})
+        assert dialog._get_signal_from_scan_data(227.587, 10.0) == pytest.approx(
+            {650.0: 2.0, 750.0: 3.0}
+        )
+        assert dialog._get_signal_from_scan_data(228.023, 10.0) == pytest.approx(
+            {650.0: 100.0, 750.0: 120.0}
+        )
+        assert dialog._get_signal_from_scan_data(228, 10.0) == {}
+
+        dialog._load_pie_results(
+            pie_result,
+            show_message=False,
+            register_artifact=False,
+        )
+
+        assert {
+            record["curve_key"]: record["species"]
+            for record in dialog.pie_species_data
+        } == {227.587: "Noise", 228.023: "Product"}
+        species_names = {
+            name for name, _ie in dialog._species_options_for_mz(228.023)
+        }
+        assert "Product" in species_names
+        assert "Noise" not in species_names
+    finally:
+        dialog.deleteLater()
+
+
 def test_mass_discrimination_exponent_falls_back_to_legacy_settings(qapp):
     dialog = MoleFractionDialog(Calibration(a=0.0, b=1.0, c=0.0), None)
     try:

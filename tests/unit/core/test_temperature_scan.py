@@ -40,7 +40,9 @@ from bl03u_masstool.core.pie_analysis import (
     save_species_database_sqlite,
 )
 from bl03u_masstool.core.temperature_scan import (
+    _select_kr_reference_peak_rows,
     analyze_temperature_folder,
+    annotate_temperature_curve_groups,
     build_temperature_curves,
     classify_temperature_curve,
     compute_kr_expansion_factors,
@@ -48,18 +50,114 @@ from bl03u_masstool.core.temperature_scan import (
 )
 
 
-def test_build_temperature_curves_groups_by_rounded_mz():
+def test_kr_reference_uses_one_precise_peak_in_nominal_mass_collision():
+    rows = pd.DataFrame(
+        [
+            {
+                "temperature": 650.0,
+                "mz": 83.587,
+                "mz_rounded": 84,
+                "temperature_peak_track": 0,
+                "photon_normalized_area": 1000.0,
+            },
+            {
+                "temperature": 750.0,
+                "mz": 83.587,
+                "mz_rounded": 84,
+                "temperature_peak_track": 0,
+                "photon_normalized_area": 1000.0,
+            },
+            {
+                "temperature": 650.0,
+                "mz": 84.023,
+                "mz_rounded": 84,
+                "temperature_peak_track": 1,
+                "photon_normalized_area": 10.0,
+            },
+            {
+                "temperature": 750.0,
+                "mz": 84.023,
+                "mz_rounded": 84,
+                "temperature_peak_track": 1,
+                "photon_normalized_area": 20.0,
+            },
+        ]
+    )
+
+    selected = _select_kr_reference_peak_rows(rows, kr_mz=84)
+
+    assert selected["temperature_peak_track"].tolist() == [1, 1]
+    assert selected["photon_normalized_area"].tolist() == [10.0, 20.0]
+
+
+def test_build_temperature_curves_aggregates_replicates_of_the_same_peak():
     df = pd.DataFrame(
         [
-            {"temperature": 800.0, "file": "a.txt", "reference_temperature": 900.0, "mz": 17.99, "area": 10.0, "replicate_mode": "sum"},
-            {"temperature": 825.0, "file": "b.txt", "reference_temperature": 900.0, "mz": 18.02, "area": 12.0, "replicate_mode": "sum"},
-            {"temperature": 825.0, "file": "b.txt", "reference_temperature": 900.0, "mz": 18.01, "area": 3.0, "replicate_mode": "sum"},
+            {"temperature": 800.0, "file": "a.txt", "reference_temperature": 900.0, "mz": 17.99, "area": 10.0, "replicate_mode": "sum", "left_bound": 100, "right_bound": 110},
+            {"temperature": 825.0, "file": "b.txt", "reference_temperature": 900.0, "mz": 18.02, "area": 12.0, "replicate_mode": "sum", "left_bound": 100, "right_bound": 110},
+            {"temperature": 825.0, "file": "c.txt", "reference_temperature": 900.0, "mz": 18.01, "area": 3.0, "replicate_mode": "sum", "left_bound": 100, "right_bound": 110},
         ]
     )
     curves = build_temperature_curves(df)
-    assert list(curves) == [18]
-    assert curves[18]["temperatures"] == [800.0, 825.0]
-    assert curves[18]["areas"] == [10.0, 15.0]
+    curve_key, curve = next(iter(curves.items()))
+    assert curve_key == pytest.approx(18.0025)
+    assert curve["mz"] == pytest.approx(curve_key)
+    assert curve["mz_rounded"] == 18
+    assert curve["temperatures"] == [800.0, 825.0]
+    assert curve["areas"] == [10.0, 15.0]
+
+
+def test_temperature_curves_keep_close_peaks_with_the_same_nominal_mz_separate():
+    rows = []
+    for temperature, low_mz, high_mz, low_area, high_area in (
+        (400.0, 228.020, 228.100, 1.0, 10.0),
+        (500.0, 228.022, 228.098, 2.0, 20.0),
+        (600.0, 228.021, 228.099, 3.0, 30.0),
+    ):
+        rows.extend(
+            [
+                {
+                    "temperature": temperature,
+                    "file": f"{temperature:.0f}.txt",
+                    "reference_temperature": 600.0,
+                    "mz": low_mz,
+                    "area": low_area,
+                    "replicate_mode": "off",
+                    "left_bound": 100,
+                    "right_bound": 110,
+                },
+                {
+                    "temperature": temperature,
+                    "file": f"{temperature:.0f}.txt",
+                    "reference_temperature": 600.0,
+                    "mz": high_mz,
+                    "area": high_area,
+                    "replicate_mode": "off",
+                    "left_bound": 112,
+                    "right_bound": 122,
+                },
+            ]
+        )
+    result = pd.DataFrame(rows)
+
+    curves = build_temperature_curves(result)
+
+    assert len(curves) == 2
+    assert all(curve["mz"] == pytest.approx(key) for key, curve in curves.items())
+    assert all(curve["mz_rounded"] == 228 for curve in curves.values())
+    assert all(curve["has_nominal_collision"] for curve in curves.values())
+    ordered = sorted(curves.values(), key=lambda curve: curve["mz_exact_mean"])
+    assert ordered[0]["mz_exact_mean"] == pytest.approx(228.021)
+    assert ordered[0]["temperatures"] == [400.0, 500.0, 600.0]
+    assert ordered[0]["areas"] == [1.0, 2.0, 3.0]
+    assert ordered[1]["mz_exact_mean"] == pytest.approx(228.099)
+    assert ordered[1]["temperatures"] == [400.0, 500.0, 600.0]
+    assert ordered[1]["areas"] == [10.0, 20.0, 30.0]
+
+    annotated = annotate_temperature_curve_groups(result, curves=curves)
+    assert annotated["temperature_curve_key"].nunique() == 2
+    assert annotated.groupby("temperature_curve_key").size().tolist() == [3, 3]
+    assert set(annotated["temperature_peak_track"]) == {0, 1}
 
 
 @pytest.mark.parametrize("method", ["sum_counts", "baseline"])

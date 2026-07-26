@@ -930,6 +930,101 @@ def test_temperature_selected_mz_updates_multi_energy_plot_and_interval_card(qap
         widget.deleteLater()
 
 
+def test_temperature_display_keeps_close_precise_peaks_separate_across_energies(qapp):
+    from bl03u_masstool.core.calibration import Calibration
+    from bl03u_masstool.frontends.pyqt_app.temperature.dialog import TemperatureScanDialog
+
+    def curve(exact_mz: float, areas: list[float]) -> dict:
+        rows = pd.DataFrame(
+            {
+                "temperature": [650.0, 750.0, 850.0],
+                "file": ["a.txt", "b.txt", "c.txt"],
+                "mz": [exact_mz] * 3,
+                "area": areas,
+                "raw_area": areas,
+                "photon_normalized_area": areas,
+                "expansion_lambda": [1.0, 1.0, 1.0],
+                "integration_method": ["sum_counts"] * 3,
+                "species": [""] * 3,
+            }
+        )
+        return {
+            "mz": exact_mz,
+            "mz_rounded": 228,
+            "mz_exact_mean": exact_mz,
+            "curve_key": exact_mz,
+            "has_nominal_collision": True,
+            "species": "",
+            "temperatures": [650.0, 750.0, 850.0],
+            "areas": areas,
+            "curve_class": "formation",
+            "curve_class_label": "生成(升高)",
+            "curve_class_reason": "测试",
+            "rows": rows,
+        }
+
+    widget = TemperatureScanDialog(Calibration())
+    try:
+        low_8 = curve(228.020, [1.0, 2.0, 3.0])
+        high_8 = curve(228.100, [10.0, 20.0, 30.0])
+        low_9 = curve(228.022, [4.0, 5.0, 6.0])
+        high_9 = curve(228.098, [40.0, 50.0, 60.0])
+        widget.energy_results = [
+            {
+                "energy": 8.0,
+                "folder": "/tmp/8eV",
+                "folder_label": "8eV",
+                "curves": {228.020: low_8, 228.100: high_8},
+            },
+            {
+                "energy": 9.0,
+                "folder": "/tmp/9eV",
+                "folder_label": "9eV",
+                "curves": {228.022: low_9, 228.098: high_9},
+            },
+        ]
+        widget.result_df = pd.concat(
+            [curve["rows"] for curve in (low_8, high_8, low_9, high_9)],
+            ignore_index=True,
+        )
+
+        widget.curves = widget._build_display_curves()
+        curve_keys = sorted(widget.curves, key=float)
+
+        assert len(curve_keys) == 2
+        assert curve_keys == pytest.approx([228.021, 228.099])
+        assert [
+            len(widget.curves[curve_key]["energy_curves"])
+            for curve_key in curve_keys
+        ] == [2, 2]
+        assert widget.curves[curve_keys[0]]["areas"] == [
+            1.0,
+            2.0,
+            3.0,
+            4.0,
+            5.0,
+            6.0,
+        ]
+        assert widget.curves[curve_keys[1]]["areas"] == [
+            10.0,
+            20.0,
+            30.0,
+            40.0,
+            50.0,
+            60.0,
+        ]
+        assert widget._mz_text_for_key(curve_keys[0]) == "228.021000"
+        assert widget._mz_text_for_key(curve_keys[0]) != widget._mz_text_for_key(
+            curve_keys[1]
+        )
+
+        widget.populate_mz_list()
+        assert widget.current_mz in curve_keys
+        assert widget.energy_interval_table.rowCount() == 2
+    finally:
+        widget.deleteLater()
+
+
 def test_temperature_energy_combo_filters_cached_curves_without_rerun(qapp, tmp_path):
     from bl03u_masstool.core.calibration import Calibration
     from bl03u_masstool.frontends.pyqt_app.temperature.dialog import TemperatureScanDialog
@@ -990,9 +1085,10 @@ def test_temperature_energy_combo_filters_cached_curves_without_rerun(qapp, tmp_
         qapp.processEvents()
 
         assert widget.current_mz == 70
-        assert widget.plot_widget.axes.get_title() == "m/z 70 温度响应曲线"
+        assert widget.plot_widget.axes.get_title() == "m/z 70.000000 温度响应曲线"
         assert widget.curve_table.columnCount() == 3
         assert widget.curve_table.horizontalHeaderItem(0).text() == "650.0"
+        assert widget.curve_table.verticalHeaderItem(0).text() == "精确m/z"
         assert "8.00-9.00 eV" in widget.current_interval_label.text()
 
         widget.scan_folder_combo.setCurrentIndex(widget.scan_folder_combo.findData(widget.ALL_ENERGY_FOLDERS))

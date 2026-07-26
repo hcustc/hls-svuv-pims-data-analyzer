@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 import pandas as pd
+import pytest
 from openpyxl import load_workbook
 
 from bl03u_masstool.core.export_pie_results import export_pie_results_to_excel
@@ -101,7 +102,14 @@ def test_export_pie_results_adds_structure_oriented_species_sheet(tmp_path):
     workbook = load_workbook(output_path)
     assert workbook.sheetnames == ["Sheet1", "物种表"]
     species = pd.read_excel(output_path, sheet_name="物种表")
-    assert species.columns.tolist() == ["m/z", "Formula", "Name", "SMILES", "Structure"]
+    assert species.columns.tolist() == [
+        "精确m/z",
+        "m/z",
+        "Formula",
+        "Name",
+        "SMILES",
+        "Structure",
+    ]
     assert species.loc[0, "m/z"] == 28
     assert species.loc[0, "Formula"] == "C2H4"
     assert species.loc[0, "Name"] == "Ethylene"
@@ -139,3 +147,43 @@ def test_export_species_sheet_keeps_invalid_smiles_without_image(tmp_path):
     species = pd.read_excel(output_path, sheet_name="物种表")
     assert species.loc[0, "SMILES"] == "not-a-smiles"
     assert len(load_workbook(output_path)["物种表"]._images) == 0
+
+
+def test_export_keeps_two_precise_peaks_with_same_nominal_mass(tmp_path):
+    exact_mz_values = [227.58715739409433, 228.02311680380544]
+    dialog = SimpleNamespace(
+        database=[],
+        curves={
+            exact_mz: {
+                "mz": 228,
+                "mz_rounded": 228,
+                "mz_exact_mean": exact_mz,
+                "has_nominal_collision": True,
+            }
+            for exact_mz in exact_mz_values
+        },
+        all_fit_results={
+            exact_mz: {
+                "success": True,
+                "r_squared": 0.9,
+                "model": {
+                    "species": [
+                        {
+                            "species": f"candidate-{index}",
+                            "coefficient": 1.0,
+                            "contribution_percent": 100.0,
+                        }
+                    ]
+                },
+            }
+            for index, exact_mz in enumerate(exact_mz_values)
+        },
+    )
+    output_path = tmp_path / "precise_pie_results.xlsx"
+
+    result = export_pie_results_to_excel(dialog, output_path)
+
+    assert result["success"] is True
+    exported = pd.read_excel(output_path)
+    assert exported["质量数"].tolist() == [228, 228]
+    assert exported["精确m/z"].tolist() == pytest.approx(exact_mz_values)

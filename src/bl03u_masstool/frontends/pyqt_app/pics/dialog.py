@@ -27,7 +27,10 @@ from bl03u_masstool.core.isotope import (
 from bl03u_masstool.core.nist_webbook import default_nist_webbook_client
 from bl03u_masstool.core.output_paths import ensure_output_dir
 from bl03u_masstool.core.pie_analysis import analyze_pie_folder, build_pie_curves, identify_species_for_mz_with_curve, load_species_database, analyze_multiple_pie_folders, merge_pie_segments
-from bl03u_masstool.core.pics_calculator import calc_pics_single_energy
+from bl03u_masstool.core.pics_calculator import (
+    calc_pics_single_energy,
+    extract_peak_height_at_mz,
+)
 from bl03u_masstool.core.elements import get_all_elements_from_database, filter_species_by_elements, COMMON_ELEMENTS, parse_formula as parse_formula_elements, get_elements_from_formula
 from bl03u_masstool.core.normalization import NormalizationSettings, load_normalization_settings, save_normalization_settings
 from bl03u_masstool.core.project_settings import ProjectSettings
@@ -70,7 +73,7 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
         self.new_species_name = ""
         self.new_species_formula = ""
-        self.new_species_mz = 0
+        self.new_species_mz = 0.0
         self.no_mf = 0.0
         self.new_species_mf = 0.0
         self.no_cross_sections: dict[float, float] = {}
@@ -253,10 +256,12 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.txt_new_formula.setToolTip("新物种的分子式，用于从数据库查询光电离截面")
         new_layout.addRow("分子式:", self.txt_new_formula)
 
-        self.spin_new_mz = QtWidgets.QSpinBox()
-        self.spin_new_mz.setToolTip("新物种的质量数，用于从PIE数据中提取该m/z的信号")
-        self.spin_new_mz.setRange(1, 500)
-        new_layout.addRow("质量数 m/z:", self.spin_new_mz)
+        self.spin_new_mz = QtWidgets.QDoubleSpinBox()
+        self.spin_new_mz.setToolTip("待提取峰的精确 m/z；整数值仍可用于普通整质量峰")
+        self.spin_new_mz.setRange(1.0, 500.0)
+        self.spin_new_mz.setDecimals(6)
+        self.spin_new_mz.setSingleStep(0.001)
+        new_layout.addRow("精确 m/z:", self.spin_new_mz)
 
         self.double_new_ie = QtWidgets.QDoubleSpinBox()
         self.double_new_ie.setToolTip("新物种的电离能（eV），留 0 表示未知")
@@ -573,13 +578,16 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
                         continue
 
                     mz_values = tof_to_mz(spectrum.x, a, b, c)
-                    rounded_mz = np.round(mz_values)
-
-                    species_indices = np.where(rounded_mz == species_mz)[0]
-                    no_indices = np.where(rounded_mz == no_mz)[0]
-
-                    species_signal = float(np.max(spectrum.y[species_indices])) if len(species_indices) else 0.0
-                    no_signal = float(np.max(spectrum.y[no_indices])) if len(no_indices) else 0.0
+                    species_signal = extract_peak_height_at_mz(
+                        mz_values,
+                        spectrum.y,
+                        species_mz,
+                    )
+                    no_signal = extract_peak_height_at_mz(
+                        mz_values,
+                        spectrum.y,
+                        no_mz,
+                    )
 
                     if species_signal > 0 or no_signal > 0:
                         rows.append((float(energy), species_signal, no_signal, io_current, float(temp)))
@@ -891,7 +899,8 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 rows.append({
                     "物种名称": self.new_species_name,
                     "分子式": self.new_species_formula,
-                    "质量数": self.new_species_mz,
+                    "质量数": int(round(self.new_species_mz)),
+                    "精确m/z": float(self.new_species_mz),
                     "光子能量(eV)": energy,
                     "温度(°C)": temp,
                     "PICS(Mb)": sigma,
@@ -928,7 +937,7 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
             cross_sections = [float(np.mean(points_by_energy[e])) for e in energies]
 
             record = {
-                "mz": self.new_species_mz,
+                "mz": int(round(self.new_species_mz)),
                 "species": self.new_species_name,
                 "ie": ie,
                 "energies": energies,

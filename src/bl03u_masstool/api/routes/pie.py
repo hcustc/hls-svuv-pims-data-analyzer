@@ -114,40 +114,54 @@ def create_router(deps) -> APIRouter:
             "evidence": job.evidence,
         }
 
+    def resolve_curve(job, mz: float) -> tuple[int | float, dict]:
+        try:
+            resolved = deps._resolve_pie_curve(job.curves, mz)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        if resolved is None:
+            raise HTTPException(status_code=404, detail="curve not found")
+        return resolved
+
     @router.get("/api/pie/curve/{job_id}/{mz}")
-    def pie_curve(job_id: str, mz: int):
+    def pie_curve(job_id: str, mz: float):
         job = deps._get_job(job_id)
         if job.status != "done":
             raise HTTPException(status_code=409, detail=f"job status is {job.status}")
-        curve = job.curves.get(int(mz))
-        if curve is None:
-            raise HTTPException(status_code=404, detail="curve not found")
+        curve_key, curve = resolve_curve(job, mz)
         return {
             "curve": deps._curve_payload(curve),
-            "fit": job.fits.get(int(mz)),
+            "fit": job.fits.get(curve_key),
         }
 
     @router.get("/api/pie/candidates/{job_id}/{mz}")
-    def pie_fit_candidates(job_id: str, mz: int):
+    def pie_fit_candidates(job_id: str, mz: float):
         job = deps._get_job(job_id)
         if job.status != "done":
             raise HTTPException(status_code=409, detail=f"job status is {job.status}")
+        _curve_key, curve = resolve_curve(job, mz)
+        nominal_mz = int(curve.get("mz_rounded", curve["mz"]))
         database_path = Path(job.database_path)
         if not database_path.exists() or not database_path.is_file():
             raise HTTPException(status_code=404, detail="SQLite PICS截面数据库不存在")
-        return {"rows": deps._query_fit_candidates(database_path, int(mz))}
+        return {"rows": deps._query_fit_candidates(database_path, nominal_mz)}
 
     @router.get("/api/pie/candidate_curves/{job_id}/{mz}")
-    def pie_candidate_curves(job_id: str, mz: int, species_ids: str = ""):
+    def pie_candidate_curves(job_id: str, mz: float, species_ids: str = ""):
         job = deps._get_job(job_id)
         if job.status != "done":
             raise HTTPException(status_code=409, detail=f"job status is {job.status}")
+        _curve_key, curve = resolve_curve(job, mz)
+        nominal_mz = int(curve.get("mz_rounded", curve["mz"]))
         database_path = Path(job.database_path)
         if not database_path.exists() or not database_path.is_file():
             raise HTTPException(status_code=404, detail="SQLite PICS截面数据库不存在")
         selected_ids = deps._parse_species_ids(species_ids)
         if not selected_ids:
-            selected_ids = [row["id"] for row in deps._query_fit_candidates(database_path, int(mz))]
+            selected_ids = [
+                row["id"]
+                for row in deps._query_fit_candidates(database_path, nominal_mz)
+            ]
         rows = [
             {
                 "id": int(item["id"]),
@@ -158,25 +172,30 @@ def create_router(deps) -> APIRouter:
                 "cross_sections": [float(value) for value in item["cross_sections"]],
             }
             for item in deps._load_species_records_by_ids(database_path, selected_ids)
-            if int(item["mz"]) == int(mz)
+            if int(item["mz"]) == nominal_mz
         ]
         return {"rows": rows}
 
     @router.post("/api/pie/fit/{job_id}/{mz}")
-    def fit_pie_curve(job_id: str, mz: int, payload: Optional[PieFitPayload] = None):
+    def fit_pie_curve(job_id: str, mz: float, payload: Optional[PieFitPayload] = None):
         job = deps._get_job(job_id)
         if job.status != "done":
             raise HTTPException(status_code=409, detail=f"job status is {job.status}")
-        curve = job.curves.get(int(mz))
-        if curve is None:
-            raise HTTPException(status_code=404, detail="curve not found")
+        curve_key, curve = resolve_curve(job, mz)
+        nominal_mz = int(curve.get("mz_rounded", curve["mz"]))
         database_path = Path(job.database_path)
         selected_ids = payload.species_ids if payload and payload.species_ids else []
         if selected_ids:
             species = deps._load_species_records_by_ids(database_path, selected_ids)
             if not species:
                 raise HTTPException(status_code=400, detail="未找到可拟合的 PICS 候选")
-            wrong_mz = sorted({int(item["mz"]) for item in species if int(item["mz"]) != int(mz)})
+            wrong_mz = sorted(
+                {
+                    int(item["mz"])
+                    for item in species
+                    if int(item["mz"]) != nominal_mz
+                }
+            )
             if wrong_mz:
                 raise HTTPException(status_code=400, detail=f"选择的 PICS m/z 与当前曲线不一致: {wrong_mz}")
             fit_model = deps.fit_species_combination_with_curve(
@@ -193,14 +212,14 @@ def create_router(deps) -> APIRouter:
             database = deps._load_species_database_cached(str(database_path), database_path.stat().st_mtime)
             fit_model = deps.identify_species_for_mz_with_curve(
                 database,
-                int(mz),
+                nominal_mz,
                 curve["energies"],
                 curve["intensities"],
             )
             fit_model["selection_mode"] = "auto"
             fit_model["selected_species_ids"] = []
         with deps.JOBS_LOCK:
-            job.fits[int(mz)] = fit_model
+            job.fits[curve_key] = fit_model
             job.evidence = deps.build_pie_evidence_objects(job.curves, job.fits)
             job.updated_at = time.time()
         return {"fit": fit_model}
