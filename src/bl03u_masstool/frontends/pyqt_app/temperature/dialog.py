@@ -40,6 +40,7 @@ from bl03u_masstool.core.normalization import NormalizationSettings, load_normal
 from bl03u_masstool.core.project_settings import ProjectSettings, ProjectSettingsManager
 from bl03u_masstool.core.temperature_scan import (
     TEMPERATURE_CURVE_CLASS_LABELS,
+    TemperatureCurveKey,
     analyze_temperature_folder,
     build_temperature_curves,
     compute_kr_expansion_factors,
@@ -88,6 +89,7 @@ logger = logging.getLogger(__name__)
 class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
     ALL_ENERGY_FOLDERS = "__all_energy_folders__"
     CACHE_VERSION = 2
+    PEAK_MATCH_TOLERANCE = 0.2
 
     # 曲线分类颜色映射
     CURVE_CLASS_COLORS = {
@@ -96,6 +98,58 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         "intermediate": "#f59e0b",   # 橙色 - 中间体(先升后降)
         "unclassified": "#6b7280",   # 灰色 - 暂未区分
     }
+
+    @staticmethod
+    def _curve_nominal_mz(
+        curve: dict,
+        curve_key: TemperatureCurveKey | None = None,
+    ) -> int:
+        value = curve.get("mz_rounded", curve.get("mz", curve_key))
+        return int(round(float(value)))
+
+    @staticmethod
+    def _curve_exact_mz(
+        curve: dict,
+        curve_key: TemperatureCurveKey | None = None,
+    ) -> float:
+        value = curve.get("mz_exact_mean", curve_key)
+        if value is None:
+            value = curve.get("mz", 0)
+        return float(value)
+
+    @classmethod
+    def _curve_mz_text(
+        cls,
+        curve: dict,
+        curve_key: TemperatureCurveKey | None = None,
+        *,
+        include_nominal: bool = False,
+    ) -> str:
+        nominal_mz = cls._curve_nominal_mz(curve, curve_key)
+        exact_mz = cls._curve_exact_mz(curve, curve_key)
+        has_exact_mz = curve.get("mz_exact_mean") is not None or (
+            curve_key is not None and not float(curve_key).is_integer()
+        )
+        if not has_exact_mz:
+            return str(nominal_mz)
+        exact_text = f"{exact_mz:.6f}"
+        return (
+            f"{exact_text}（检索 m/z {nominal_mz}）"
+            if include_nominal
+            else exact_text
+        )
+
+    def _mz_text_for_key(
+        self,
+        curve_key: TemperatureCurveKey,
+        *,
+        include_nominal: bool = False,
+    ) -> str:
+        return self._curve_mz_text(
+            self.curves.get(curve_key, {}),
+            curve_key,
+            include_nominal=include_nominal,
+        )
 
     def __init__(self, calibration: Calibration, normalization_settings: NormalizationSettings | None = None, parent=None):
         super().__init__(parent)
@@ -111,9 +165,9 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self._temporary_temperature_folder = ""
         self.peak_detection = load_peak_detection_config()
         self.result_df = pd.DataFrame()
-        self.curves: dict[int, dict] = {}
+        self.curves: dict[TemperatureCurveKey, dict] = {}
         self.energy_results: list[dict] = []
-        self.current_mz: int | None = None
+        self.current_mz: TemperatureCurveKey | None = None
         self.worker: WorkerThread | None = None
         self._analysis_request_id = 0
         self.energy_interval_result: dict | None = None
@@ -1544,36 +1598,63 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         unique_values = sorted({round(float(value), 6) for value in values})
         return float(unique_values[0]) if len(unique_values) == 1 else None
 
-    def _energy_interval_summary_for_mz(self, target_mz: int) -> dict:
+    def _energy_interval_summary_for_mz(
+        self,
+        target_mz: TemperatureCurveKey,
+    ) -> dict:
+        display_curve = self.curves.get(target_mz, {})
+        nominal_mz = self._curve_nominal_mz(display_curve, target_mz)
+        matched_curves = {
+            id(item): curve
+            for item, curve in display_curve.get(
+                "energy_curves_all",
+                display_curve.get("energy_curves", []),
+            )
+        }
         rows: list[dict] = []
         for item in self.energy_results:
             energy = item.get("energy")
             if energy is None or not np.isfinite(float(energy)):
                 continue
-            curve = item.get("curves", {}).get(int(target_mz))
+            curve = matched_curves.get(id(item))
             if curve is None:
                 rows.append(
                     {
                         "energy": float(energy),
                         "folder": item.get("folder_label", Path(str(item.get("folder", ""))).name),
-                        "mz": int(target_mz),
+                        "mz": self._curve_exact_mz(display_curve, target_mz),
+                        "mz_rounded": nominal_mz,
+                        "mz_exact_mean": self._curve_exact_mz(display_curve, target_mz),
                         "curve_class": "missing",
                         "curve_class_label": "未检出",
-                        "curve_class_reason": "当前能量未生成该 m/z 曲线",
+                        "curve_class_reason": "当前能量未生成该精确峰曲线",
                         "points": 0,
                         "max_signal": 0.0,
                         "temperature_range": "",
                     }
                 )
                 continue
-            rows.append(self._energy_curve_summary_row(target_mz, float(energy), str(item.get("folder_label", "")), curve))
+            rows.append(
+                self._energy_curve_summary_row(
+                    target_mz,
+                    float(energy),
+                    str(item.get("folder_label", "")),
+                    curve,
+                )
+            )
 
         summary = identify_product_energy_intervals(rows)
-        summary["target_mz"] = int(target_mz)
+        summary["target_mz"] = target_mz
+        summary["target_nominal_mz"] = nominal_mz
         return summary
 
     @staticmethod
-    def _energy_curve_summary_row(target_mz: int, energy: float, folder_label: str, curve: dict) -> dict:
+    def _energy_curve_summary_row(
+        target_mz: TemperatureCurveKey,
+        energy: float,
+        folder_label: str,
+        curve: dict,
+    ) -> dict:
         temperatures = np.asarray(curve.get("temperatures", []), dtype=float)
         areas = np.asarray(curve.get("areas", []), dtype=float)
         valid = np.isfinite(temperatures) & np.isfinite(areas)
@@ -1588,7 +1669,14 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         return {
             "energy": float(energy),
             "folder": folder_label,
-            "mz": int(target_mz),
+            "mz": float(curve.get("mz_exact_mean", curve.get("mz", target_mz))),
+            "mz_rounded": int(
+                curve.get(
+                    "mz_rounded",
+                    round(float(curve.get("mz", target_mz))),
+                )
+            ),
+            "mz_exact_mean": float(curve.get("mz_exact_mean", target_mz)),
             "curve_class": curve.get("curve_class", "unclassified"),
             "curve_class_label": curve.get("curve_class_label", TEMPERATURE_CURVE_CLASS_LABELS["unclassified"]),
             "curve_class_reason": curve.get("curve_class_reason", ""),
@@ -1953,27 +2041,141 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self._show_inline_success(success)
         self._update_action_state()
 
-    def _build_display_curves(self, energy_results: list[dict] | None = None) -> dict[int, dict]:
+    @classmethod
+    def _cluster_energy_curve_records(
+        cls,
+        energy_results: list[dict],
+    ) -> list[dict]:
+        """Match precise peaks across energies without merging same-energy peaks."""
+        records_by_nominal: dict[int, list[dict]] = {}
+        for item_index, item in enumerate(energy_results):
+            for curve_key, curve in sorted(
+                item.get("curves", {}).items(),
+                key=lambda pair: float(pair[0]),
+            ):
+                nominal_mz = cls._curve_nominal_mz(curve, curve_key)
+                exact_mz = cls._curve_exact_mz(curve, curve_key)
+                records_by_nominal.setdefault(nominal_mz, []).append(
+                    {
+                        "item_index": item_index,
+                        "item": item,
+                        "curve_key": curve_key,
+                        "curve": curve,
+                        "exact_mz": exact_mz,
+                    }
+                )
+
+        all_clusters: list[dict] = []
+        for nominal_mz, records in sorted(records_by_nominal.items()):
+            clusters: list[dict] = []
+            item_indexes = sorted({record["item_index"] for record in records})
+            for item_index in item_indexes:
+                item_records = sorted(
+                    (
+                        record
+                        for record in records
+                        if record["item_index"] == item_index
+                    ),
+                    key=lambda record: record["exact_mz"],
+                )
+                candidates: list[tuple[float, int, int]] = []
+                for record_index, record in enumerate(item_records):
+                    for cluster_index, cluster in enumerate(clusters):
+                        distance = abs(
+                            float(record["exact_mz"])
+                            - float(cluster["center_mz"])
+                        )
+                        if distance <= cls.PEAK_MATCH_TOLERANCE:
+                            candidates.append(
+                                (distance, record_index, cluster_index)
+                            )
+                assigned_records: set[int] = set()
+                assigned_clusters: set[int] = set()
+                for _distance, record_index, cluster_index in sorted(candidates):
+                    if (
+                        record_index in assigned_records
+                        or cluster_index in assigned_clusters
+                    ):
+                        continue
+                    cluster = clusters[cluster_index]
+                    cluster["records"].append(item_records[record_index])
+                    cluster["center_mz"] = float(
+                        np.mean(
+                            [
+                                record["exact_mz"]
+                                for record in cluster["records"]
+                            ]
+                        )
+                    )
+                    assigned_records.add(record_index)
+                    assigned_clusters.add(cluster_index)
+                for record_index, record in enumerate(item_records):
+                    if record_index in assigned_records:
+                        continue
+                    clusters.append(
+                        {
+                            "nominal_mz": nominal_mz,
+                            "center_mz": float(record["exact_mz"]),
+                            "records": [record],
+                        }
+                    )
+            all_clusters.extend(
+                sorted(clusters, key=lambda cluster: cluster["center_mz"])
+            )
+        return all_clusters
+
+    def _build_display_curves(
+        self,
+        energy_results: list[dict] | None = None,
+    ) -> dict[TemperatureCurveKey, dict]:
         energy_results = self._visible_energy_results() if energy_results is None else energy_results
         if not energy_results:
             return build_temperature_curves(self.result_df)
 
-        display_curves: dict[int, dict] = {}
-        all_mz = sorted(
-            {
-                int(mz)
-                for item in energy_results
-                for mz in item.get("curves", {}).keys()
-            }
-        )
-        for mz in all_mz:
+        visible_item_ids = {id(item) for item in energy_results}
+        universe = self.energy_results
+        if (
+            not universe
+            or not visible_item_ids.issubset({id(item) for item in universe})
+        ):
+            universe = energy_results
+        clusters = self._cluster_energy_curve_records(universe)
+        cluster_count_by_nominal: dict[int, int] = {}
+        for cluster in clusters:
+            nominal_mz = int(cluster["nominal_mz"])
+            cluster_count_by_nominal[nominal_mz] = (
+                cluster_count_by_nominal.get(nominal_mz, 0) + 1
+            )
+
+        display_curves: dict[TemperatureCurveKey, dict] = {}
+        cluster_track_by_nominal: dict[int, int] = {}
+        for cluster in clusters:
+            nominal_mz = int(cluster["nominal_mz"])
+            peak_cluster = cluster_track_by_nominal.get(nominal_mz, 0)
+            cluster_track_by_nominal[nominal_mz] = peak_cluster + 1
+            all_energy_curves = [
+                (record["item"], record["curve"])
+                for record in cluster["records"]
+            ]
             energy_curves = [
-                (item, item.get("curves", {}).get(mz))
-                for item in energy_results
-                if item.get("curves", {}).get(mz) is not None
+                (item, curve)
+                for item, curve in all_energy_curves
+                if id(item) in visible_item_ids
             ]
             if not energy_curves:
                 continue
+            has_nominal_collision = cluster_count_by_nominal[nominal_mz] > 1
+            exact_mz = float(
+                np.mean(
+                    [record["exact_mz"] for record in cluster["records"]]
+                )
+            )
+            curve_key: TemperatureCurveKey = exact_mz
+            if curve_key in display_curves:
+                raise ValueError(
+                    "Temperature display curve identity collision for precise "
+                    f"m/z {exact_mz:.12g}"
+                )
             class_key, class_label = self._summarize_mz_class([curve for _item, curve in energy_curves])
             rows = []
             temperatures: list[float] = []
@@ -1986,8 +2188,13 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 temperatures.extend(float(value) for value in curve.get("temperatures", []))
                 areas.extend(float(value) for value in curve.get("areas", []))
             combined_rows = pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
-            display_curves[mz] = {
-                "mz": int(mz),
+            display_curves[curve_key] = {
+                "mz": exact_mz,
+                "mz_rounded": nominal_mz,
+                "mz_exact_mean": exact_mz,
+                "curve_key": curve_key,
+                "temperature_peak_cluster": peak_cluster,
+                "has_nominal_collision": has_nominal_collision,
                 "species": str(energy_curves[0][1].get("species", "")),
                 "temperatures": temperatures,
                 "areas": areas,
@@ -1996,10 +2203,15 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 "curve_class_reason": "跨能量汇总分类",
                 "rows": combined_rows,
                 "energy_curves": energy_curves,
+                "energy_curves_all": all_energy_curves,
             }
         return display_curves
 
-    def _apply_energy_view_selection(self, *, preferred_mz: int | None = None) -> None:
+    def _apply_energy_view_selection(
+        self,
+        *,
+        preferred_mz: TemperatureCurveKey | None = None,
+    ) -> None:
         if not self.energy_results:
             return
         self.curves = self._build_display_curves()
@@ -2074,9 +2286,18 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self._show_inline_error(f"分析失败: {message}", lambda: self.run_analysis())
         self._update_action_state()
 
-    def populate_mz_list(self, *args, preferred_mz: int | None = None):
-        if args and preferred_mz is None and isinstance(args[0], int) and args[0] in self.curves:
-            preferred_mz = int(args[0])
+    def populate_mz_list(
+        self,
+        *args,
+        preferred_mz: TemperatureCurveKey | None = None,
+    ):
+        if (
+            args
+            and preferred_mz is None
+            and isinstance(args[0], (int, float))
+            and args[0] in self.curves
+        ):
+            preferred_mz = args[0]
         self.mz_list.clear()
         selected_group = self.curve_group_combo.currentData() if hasattr(self, "curve_group_combo") else "all"
         display_mode = self.curve_display_combo.currentData() if hasattr(self, "curve_display_combo") else "grouped"
@@ -2099,7 +2320,7 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 continue
             items = [
                 (mz, self.curves[mz])
-                for mz in sorted(self.curves)
+                for mz in sorted(self.curves, key=float)
                 if self.curves[mz].get("curve_class", "unclassified") == group_key
                 and self.curve_matches_filter(mz, self.curves[mz])
             ]
@@ -2118,13 +2339,17 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
             for mz, curve in items:
                 child = QtWidgets.QTreeWidgetItem([self.curve_tree_label(mz, curve, include_group=False)])
                 child.setData(0, QtCore.Qt.ItemDataRole.UserRole, mz)
+                child.setToolTip(
+                    0,
+                    self._curve_search_tooltip(curve, mz),
+                )
                 # 设置每条曲线的颜色
                 child.setForeground(0, QtGui.QColor(color))
                 parent.addChild(child)
             parent.setExpanded(True)
 
     def populate_mz_list_flat(self, selected_group: str):
-        for mz in sorted(self.curves):
+        for mz in sorted(self.curves, key=float):
             curve = self.curves[mz]
             if selected_group != "all" and curve.get("curve_class") != selected_group:
                 continue
@@ -2132,13 +2357,21 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 continue
             item = QtWidgets.QTreeWidgetItem([self.curve_tree_label(mz, curve, include_group=True)])
             item.setData(0, QtCore.Qt.ItemDataRole.UserRole, mz)
+            item.setToolTip(
+                0,
+                self._curve_search_tooltip(curve, mz),
+            )
             # 设置曲线颜色
             group_key = curve.get("curve_class", "unclassified")
             color = self.CURVE_CLASS_COLORS.get(group_key, "#6b7280")
             item.setForeground(0, QtGui.QColor(color))
             self.mz_list.addTopLevelItem(item)
 
-    def curve_matches_filter(self, mz: int, curve: dict) -> bool:
+    def curve_matches_filter(
+        self,
+        mz: TemperatureCurveKey,
+        curve: dict,
+    ) -> bool:
         query = self.curve_filter_edit.text().strip().lower() if hasattr(self, "curve_filter_edit") else ""
         if not query:
             return True
@@ -2146,6 +2379,9 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
             str(value)
             for value in (
                 mz,
+                self._curve_mz_text(curve, mz),
+                curve.get("mz_exact_mean", ""),
+                curve.get("mz_rounded", curve.get("mz", "")),
                 curve.get("species", ""),
                 curve.get("curve_class", ""),
                 curve.get("curve_class_label", ""),
@@ -2153,13 +2389,31 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         ).lower()
         return query in haystack
 
-    def curve_tree_label(self, mz: int, curve: dict, *, include_group: bool) -> str:
+    def _curve_search_tooltip(
+        self,
+        curve: dict,
+        curve_key: TemperatureCurveKey,
+    ) -> str:
+        return (
+            f"精确 m/z {self._curve_exact_mz(curve, curve_key):.12g}；"
+            f"物种检索使用整数 m/z "
+            f"{self._curve_nominal_mz(curve, curve_key)}"
+        )
+
+    def curve_tree_label(
+        self,
+        mz: TemperatureCurveKey,
+        curve: dict,
+        *,
+        include_group: bool,
+    ) -> str:
         label = curve.get("species") or ""
         suffix = f" {label}" if label and label != "Unknown" else ""
         energy_count = len(curve.get("energy_curves", []))
         point_count = len(curve.get("temperatures", []))
         count_text = f"{energy_count}能量/{point_count}点" if energy_count > 1 else f"{point_count}点"
-        base = f"{mz}{suffix}  ({count_text})"
+        mz_text = self._curve_mz_text(curve, mz)
+        base = f"{mz_text}{suffix}  ({count_text})"
         if include_group:
             class_label = curve.get("curve_class_label", TEMPERATURE_CURVE_CLASS_LABELS["unclassified"])
             return f"[{class_label}] {base}"
@@ -2174,16 +2428,16 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 return item.child(0)
         return None
 
-    def find_curve_tree_item(self, mz: int | None):
+    def find_curve_tree_item(self, mz: TemperatureCurveKey | None):
         if mz is None:
             return None
         for index in range(self.mz_list.topLevelItemCount()):
             item = self.mz_list.topLevelItem(index)
-            if item.data(0, QtCore.Qt.ItemDataRole.UserRole) == int(mz):
+            if item.data(0, QtCore.Qt.ItemDataRole.UserRole) == mz:
                 return item
             for child_index in range(item.childCount()):
                 child = item.child(child_index)
-                if child.data(0, QtCore.Qt.ItemDataRole.UserRole) == int(mz):
+                if child.data(0, QtCore.Qt.ItemDataRole.UserRole) == mz:
                     return child
         return None
 
@@ -2219,7 +2473,7 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
             if current.childCount() > 0:
                 self.mz_list.setCurrentItem(current.child(0))
             return
-        self.current_mz = int(mz_value)
+        self.current_mz = mz_value
         curve = self.curves[self.current_mz]
         self.energy_interval_result = self._energy_interval_summary_for_mz(self.current_mz)
         self._populate_energy_interval_table(self.energy_interval_result)
@@ -2235,6 +2489,10 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
                     ),
                     "文件夹": rows.get("scan_folder", pd.Series([""] * len(rows))).astype(str),
                     "温度(C)": np.round(rows["temperature"].astype(float), 1),
+                    "精确m/z": np.round(
+                        pd.to_numeric(rows["mz"], errors="coerce"),
+                        6,
+                    ),
                     "积分方式": integration_methods,
                     "原始积分": np.round(rows["raw_area"].astype(float), 4),
                     "IO归一化": np.round(rows["photon_normalized_area"].astype(float), 4),
@@ -2248,6 +2506,10 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
             curve_df = pd.DataFrame(
                 {
                     "温度(C)": np.round(rows["temperature"].astype(float), 1),
+                    "精确m/z": np.round(
+                        pd.to_numeric(rows["mz"], errors="coerce"),
+                        6,
+                    ),
                     "积分方式": integration_methods,
                     "原始积分": np.round(rows["raw_area"].astype(float), 4),
                     "IO归一化": np.round(rows["photon_normalized_area"].astype(float), 4),
@@ -2258,7 +2520,9 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
             curve_df_transposed = curve_df.set_index("温度(C)").T
             self._set_curve_detail_table(curve_df_transposed)
         class_label = curve.get("curve_class_label", "")
-        self.current_curve_label.setText(f"m/z {self.current_mz}")
+        self.current_curve_label.setText(
+            f"m/z {self._mz_text_for_key(self.current_mz)}"
+        )
 
         # 改进状态栏：添加温度范围和最大值信息
         temperatures = np.asarray(curve["temperatures"], dtype=float)
@@ -2329,9 +2593,14 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         x_values = x_values[valid]
         y_values = y_values[valid]
 
-        title = f"m/z {curve['mz']} 温度响应曲线"
+        curve_key = curve.get("curve_key", curve.get("mz"))
+        mz_text = self._curve_mz_text(curve, curve_key)
+        title = f"m/z {mz_text} 温度响应曲线"
         if x_values.size == 0:
-            self.plot_widget.show_empty("无有效数据", title=f"m/z {curve['mz']} 温度曲线")
+            self.plot_widget.show_empty(
+                "无有效数据",
+                title=f"m/z {mz_text} 温度曲线",
+            )
             return
 
         # 根据分类获取颜色
@@ -2354,7 +2623,7 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 ylabel="归一化信号",
                 series=(
                     CurveSeries(
-                        key=f"temperature-{curve['mz']}",
+                        key=f"temperature-{curve_key}",
                         role=SeriesRole.MEASUREMENT,
                         x=x_values,
                         y=y_values,
@@ -2368,8 +2637,9 @@ class TemperatureScanDialog(QtWidgets.QWidget, DataFrameTableMixin):
         )
 
     def update_multi_energy_plot(self, curve: dict) -> None:
-        target_mz = int(curve.get("mz", 0))
-        title = f"m/z {target_mz} 各能量温度响应曲线"
+        curve_key = curve.get("curve_key", curve.get("mz", 0))
+        mz_text = self._curve_mz_text(curve, curve_key)
+        title = f"m/z {mz_text} 各能量温度响应曲线"
 
         x_arrays: list[np.ndarray] = []
         y_arrays: list[np.ndarray] = []

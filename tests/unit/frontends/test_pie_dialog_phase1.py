@@ -141,7 +141,8 @@ def test_project_open_restores_cached_pie_curves_without_reanalysis(qapp, tmp_pa
         while timer.elapsed() < 3000 and not restored.curves:
             qapp.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents, 50)
 
-        assert 28 in restored.curves
+        assert sorted(restored.curves) == pytest.approx([28.015])
+        assert restored._mz_text_for_key(next(iter(restored.curves))) == "28.015000"
         assert restored.analysis_df["normalized_intensity"].tolist() == [1.0, 2.0]
         assert restored._last_analysis_source_info["from_cache"] is True
         assert "自动载入" in restored.status_label.text() or "参数预览" in restored.status_label.text()
@@ -691,6 +692,65 @@ def test_selected_fit_jobs_keep_candidates_scoped_to_each_mz(pie_dialog):
 
     assert [item["species"] for item in jobs[30]["selected_species"]] == ["NO"]
     assert [item["species"] for item in jobs[44]["selected_species"]] == ["CO2"]
+
+
+def test_precise_peak_curves_share_nominal_candidates_without_key_collision(
+    pie_dialog,
+    qapp,
+):
+    exact_mz_values = [227.58715739409433, 228.02311680380544]
+
+    def curve(exact_mz, intensities):
+        rows = pd.DataFrame(
+            {
+                "energy": [10.0, 11.0],
+                "normalized_intensity": intensities,
+                "raw_area": intensities,
+                "photon_normalized_intensity": intensities,
+                "integration_method": ["sum_counts", "sum_counts"],
+            }
+        )
+        return {
+            "mz": exact_mz,
+            "mz_rounded": 228,
+            "mz_exact_mean": exact_mz,
+            "curve_key": exact_mz,
+            "has_nominal_collision": True,
+            "energies": [10.0, 11.0],
+            "intensities": intensities,
+            "rows": rows,
+        }
+
+    pie_dialog.curves = {
+        exact_mz_values[0]: curve(exact_mz_values[0], [1.0, 2.0]),
+        exact_mz_values[1]: curve(exact_mz_values[1], [10.0, 20.0]),
+    }
+    pie_dialog.database = [
+        {
+            "id": 1,
+            "mz": 228,
+            "species": "Nominal-228 candidate",
+            "ie": 7.5,
+            "energies": [10.0, 11.0],
+            "cross_sections": [1.0, 2.0],
+        }
+    ]
+
+    pie_dialog.populate_mz_list()
+    assert pie_dialog.mz_list.count() == 2
+    assert "227.587157" in pie_dialog.mz_list.item(0).text()
+    assert "228.023117" in pie_dialog.mz_list.item(1).text()
+
+    for row, exact_mz in enumerate(exact_mz_values):
+        pie_dialog.mz_list.setCurrentRow(row)
+        qapp.processEvents()
+        assert pie_dialog.current_mz == pytest.approx(exact_mz)
+        assert pie_dialog.fitting_control_widget._current_mz == 228
+        assert pie_dialog.species_table.rowCount() == 1
+        assert (
+            pie_dialog.fitting_control_widget._unified_species_data[0]["species"]
+            == "Nominal-228 candidate"
+        )
 
 
 class TestPerM_zConfiguration:

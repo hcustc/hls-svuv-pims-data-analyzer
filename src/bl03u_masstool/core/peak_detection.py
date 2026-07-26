@@ -688,7 +688,46 @@ def detect_peaks_by_algorithm(
             min_intensity_for_single_vote=min_intensity_for_single_vote,
             mz_tolerance=mz_tolerance,
         )
-    raise ValueError("algorithm must be 'legacy', 'prominence', 'cwt', or 'ensemble'")
+    if algorithm == "adaptive":
+        from .adaptive_peak_detection import detect_peaks_adaptive
+        from .config import PeakDetectionConfig
+
+        peak_config = PeakDetectionConfig(
+            algorithm="adaptive",
+            detection_min_idx=detection_min_idx,
+            threshold_end=threshold_end,
+            min_intensity=min_intensity,
+            nearby_peak_window=nearby_peak_window,
+            duplicate_window=duplicate_window,
+            weak_tail_early_window=weak_tail_early_window,
+            weak_tail_late_window=weak_tail_late_window,
+            weak_tail_ratio=weak_tail_ratio,
+            gaussian_window_max=gaussian_window_max,
+            gaussian_boundary_scale=gaussian_boundary_scale,
+            boundary_padding=boundary_padding,
+            prominence_ratio=prominence_ratio,
+            smoothing_window=smoothing_window,
+            smoothing_poly_order=smoothing_poly_order,
+            baseline_window=baseline_window,
+            baseline_percentile=baseline_percentile,
+            min_peak_width=min_peak_width,
+            max_peak_width=max_peak_width,
+            cwt_snr_threshold=cwt_snr_threshold,
+            cwt_wavelet_max_width=cwt_wavelet_max_width,
+            weak_tail_cutoff_idx=weak_tail_cutoff_idx,
+            vote_threshold=vote_threshold,
+            min_intensity_for_single_vote=min_intensity_for_single_vote,
+            mz_tolerance=mz_tolerance,
+        )
+        return detect_peaks_adaptive(
+            y_data,
+            calibration=calibration,
+            peak_config=peak_config,
+            start_idx=start_idx,
+            end_idx=end_idx,
+            time_offset=time_offset,
+        )
+    raise ValueError("algorithm must be 'legacy', 'prominence', 'cwt', 'ensemble', or 'adaptive'")
 
 
 def _cluster_peaks_by_mz(

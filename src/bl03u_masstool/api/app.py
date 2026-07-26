@@ -221,14 +221,59 @@ def _database_path_from_request(
 
 
 def _curve_payload(curve: dict) -> Dict[str, Any]:
+    exact_mz = float(curve.get("mz_exact_mean", curve["mz"]))
+    nominal_mz = int(
+        round(float(curve.get("mz_rounded", curve.get("mz", exact_mz))))
+    )
     return {
-        "mz": int(curve["mz"]),
-        "mz_exact_mean": float(curve.get("mz_exact_mean", curve["mz"])),
+        "mz": exact_mz,
+        "mz_rounded": nominal_mz,
+        "mz_exact_mean": exact_mz,
+        "curve_key": curve.get("curve_key", exact_mz),
+        "has_nominal_collision": bool(curve.get("has_nominal_collision", False)),
         "species": curve.get("species", ""),
         "energies": [float(value) for value in curve["energies"]],
         "intensities": [float(value) for value in curve["intensities"]],
         "rows": _json_records(curve.get("rows")),
     }
+
+
+def _resolve_pie_curve(
+    curves: Dict[int | float, dict],
+    requested_mz: int | float,
+) -> tuple[int | float, dict] | None:
+    """Resolve an API m/z to one precise curve and reject nominal ambiguity."""
+    requested = float(requested_mz)
+    if requested.is_integer():
+        nominal_mz = int(requested)
+        nominal_matches = [
+            (key, curve)
+            for key, curve in curves.items()
+            if int(round(float(curve.get("mz_rounded", curve.get("mz", key)))))
+            == nominal_mz
+        ]
+        if len(nominal_matches) == 1:
+            return nominal_matches[0]
+        if len(nominal_matches) > 1:
+            exact_values = ", ".join(
+                f"{float(curve.get('mz_exact_mean', key)):.12g}"
+                for key, curve in nominal_matches
+            )
+            raise ValueError(
+                f"名义 m/z {nominal_mz} 包含多条精确 PIE 曲线，请指定：{exact_values}"
+            )
+        return None
+
+    exact_matches = [
+        (key, curve)
+        for key, curve in curves.items()
+        if abs(float(key) - requested) <= 1e-10
+    ]
+    if len(exact_matches) == 1:
+        return exact_matches[0]
+    if len(exact_matches) > 1:
+        raise ValueError(f"m/z {requested_mz} 对应多条精确 PIE 曲线")
+    return None
 
 
 @lru_cache(maxsize=8)
@@ -457,7 +502,10 @@ def _create_session_pics_library(records: List[Dict[str, Any]], filename: str) -
     return result
 
 
-def _pie_summary(analysis_df: pd.DataFrame, curves: Dict[int, dict]) -> Dict[str, Any]:
+def _pie_summary(
+    analysis_df: pd.DataFrame,
+    curves: Dict[int | float, dict],
+) -> Dict[str, Any]:
     energy_count = int(analysis_df["energy"].nunique()) if not analysis_df.empty else 0
     file_count = (
         int(analysis_df.groupby("energy")["file_count"].first().sum())
@@ -469,7 +517,21 @@ def _pie_summary(analysis_df: pd.DataFrame, curves: Dict[int, dict]) -> Dict[str
         "energy_count": energy_count,
         "row_count": len(analysis_df),
         "file_count": file_count,
-        "mz_values": sorted(curves),
+        "mz_values": sorted(curves, key=float),
+        "curves": [
+            {
+                "curve_key": key,
+                "mz": float(curve.get("mz_exact_mean", curve.get("mz", key))),
+                "mz_rounded": int(
+                    curve.get(
+                        "mz_rounded",
+                        round(float(curve.get("mz", key))),
+                    )
+                ),
+                "mz_exact_mean": float(curve.get("mz_exact_mean", key)),
+            }
+            for key, curve in sorted(curves.items(), key=lambda item: float(item[0]))
+        ],
     }
 
 
@@ -480,8 +542,8 @@ def _pie_artifacts(
     database_reference: Dict[str, Any],
     payload: PieStartPayload | None,
     analysis_df: pd.DataFrame,
-    curves: Dict[int, dict],
-    fits: Dict[int, dict] | None = None,
+    curves: Dict[int | float, dict],
+    fits: Dict[int | float, dict] | None = None,
 ) -> tuple[Dict[str, Any], Dict[str, Any]]:
     parameters: Dict[str, Any] = {"peak_source": peak_source, **database_reference}
     if payload is not None:

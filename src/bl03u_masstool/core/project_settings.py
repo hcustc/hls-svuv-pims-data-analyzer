@@ -144,10 +144,10 @@ class ProjectSettings:
     # === Mole Fraction Defaults ===
     mf_mass_disc_exponent: float = 0.77897
     mf_md_preset: str = "光电离"  # 实验条件预设名称
-    mf_parent_mz: int = 0
+    mf_parent_mz: float = 0.0
     mf_parent_initial_mf: float = 0.002
     mf_reference_temperature: float | None = None
-    mf_reference_species_mz: int | None = None
+    mf_reference_species_mz: float | None = None
     mf_reference_species_tm: float | None = None
     mf_reference_species_mf_at_tm: float = 0.001
     mf_photon_energy: float = 10.0

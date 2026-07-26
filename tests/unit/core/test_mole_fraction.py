@@ -16,11 +16,77 @@ from bl03u_masstool.core.mole_fraction import (
     calc_parent_mole_fraction,
     calc_product_mole_fraction,
     compute_all_mole_fractions,
+    extract_signal_from_temperature_curves,
     get_expansion_coefficient,
     get_expansion_coefficient_for_energy,
     load_mole_fraction_settings,
     separate_coexisting_species_signals,
 )
+
+
+def test_temperature_signal_requires_exact_key_when_nominal_mass_is_ambiguous():
+    curves = {
+        228.021: {
+            "mz": 228.021,
+            "mz_rounded": 228,
+            "mz_exact_mean": 228.021,
+            "temperatures": [400.0, 500.0],
+            "areas": [1.0, 2.0],
+        },
+        228.099: {
+            "mz": 228.099,
+            "mz_rounded": 228,
+            "mz_exact_mean": 228.099,
+            "temperatures": [400.0, 500.0],
+            "areas": [10.0, 20.0],
+        },
+    }
+
+    assert extract_signal_from_temperature_curves(curves, 228) == {}
+    assert extract_signal_from_temperature_curves(curves, 228.021) == {
+        400.0: 1.0,
+        500.0: 2.0,
+    }
+    assert extract_signal_from_temperature_curves(curves, 228.023) == {
+        400.0: 1.0,
+        500.0: 2.0,
+    }
+
+
+def test_auto_mole_fraction_matches_parent_across_small_exact_mz_drift():
+    calculator = MoleFractionCalculator()
+    calculator.expansion_coefficients = {400.0: 1.0, 500.0: 1.0}
+    calculator.parent_mz = 228.021
+
+    results, warnings = calc_auto_mole_fractions(
+        calculator,
+        pie_species_data=[
+            {
+                "mz": 228,
+                "curve_key": 228.023,
+                "species": "Parent",
+                "ie": 10.0,
+            }
+        ],
+        temperature_curves={
+            228.021: {
+                "mz": 228.021,
+                "mz_rounded": 228,
+                "curve_key": 228.021,
+                "temperatures": [400.0, 500.0],
+                "areas": [100.0, 80.0],
+            }
+        },
+        parent_mf_results={400.0: 0.01, 500.0: 0.008},
+        available_energies=[12.0],
+        parent_energy=12.0,
+    )
+
+    assert warnings == []
+    assert results[(228.023, "母体", 12.0)] == {
+        400.0: 0.01,
+        500.0: 0.008,
+    }
 
 
 class TestCalcMassDiscrimination:

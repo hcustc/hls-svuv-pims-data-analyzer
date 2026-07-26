@@ -49,10 +49,10 @@ def _optional_float_dict(value):
 @dataclass
 class MoleFractionSettings:
     mass_disc_exponent: float = 0.77897
-    parent_mz: int = 0
+    parent_mz: float = 0.0
     parent_initial_mf: float = 0.002
     reference_temperature: float | None = None
-    reference_species_mz: int | None = None
+    reference_species_mz: float | None = None
     reference_species_tm: float | None = None
     reference_species_mf_at_tm: float = 0.001
     photon_energy: float = 10.0
@@ -300,9 +300,10 @@ def _get_species_from_database(
     database: list[dict],
     mz_index: dict[int, list[int]],
     species_name: str,
-    mz: int,
+    mz: int | float,
 ) -> dict | None:
-    for idx in mz_index.get(mz, []):
+    nominal_mz = int(round(float(mz)))
+    for idx in mz_index.get(nominal_mz, []):
         spec = database[idx]
         if spec.get("species") == species_name or spec.get("name") == species_name:
             return spec
@@ -558,8 +559,8 @@ def calc_isomeric_separation(
 
 
 def extract_signal_from_temperature_curves(
-    temperature_curves: dict[int, dict],
-    mz: int,
+    temperature_curves: dict[int | float, dict],
+    mz: int | float,
     *,
     energy: float | None = None,
 ) -> dict[float, float]:
@@ -568,7 +569,53 @@ def extract_signal_from_temperature_curves(
         if isinstance(energy_curve, dict) and "temperatures" not in energy_curve:
             return extract_signal_from_temperature_curves(energy_curve, mz)
 
-    curve = temperature_curves.get(mz)
+    requested_mz = float(mz)
+    nominal_mz = int(round(requested_mz))
+    candidates: list[tuple[float, dict]] = []
+    for curve_key, candidate in temperature_curves.items():
+        if not isinstance(candidate, dict) or "temperatures" not in candidate:
+            continue
+        candidate_nominal_mz = int(
+            round(
+                float(
+                    candidate.get(
+                        "mz_rounded",
+                        candidate.get("mz", curve_key),
+                    )
+                )
+            )
+        )
+        if candidate_nominal_mz != nominal_mz:
+            continue
+        candidate_exact_mz = float(
+            candidate.get(
+                "curve_key",
+                candidate.get("mz_exact_mean", candidate.get("mz", curve_key)),
+            )
+        )
+        candidates.append((candidate_exact_mz, candidate))
+
+    curve = None
+    if requested_mz.is_integer():
+        # A nominal mass is no longer a unique signal when multiple resolved
+        # peaks occupy it. Never select or sum one of them silently.
+        if len(candidates) == 1:
+            curve = candidates[0][1]
+        elif len(candidates) > 1:
+            return {}
+    elif candidates:
+        candidates.sort(key=lambda item: (abs(item[0] - requested_mz), item[0]))
+        best_distance = abs(candidates[0][0] - requested_mz)
+        if best_distance <= 0.25:
+            if (
+                len(candidates) == 1
+                or abs(
+                    best_distance
+                    - abs(candidates[1][0] - requested_mz)
+                )
+                > 1e-12
+            ):
+                curve = candidates[0][1]
     if curve is None:
         return {}
     if energy is not None and isinstance(curve, dict):
@@ -623,6 +670,12 @@ def compute_all_mole_fractions(
 
     for prod in product_species:
         prod_mz = int(prod.get("mz", 0))
+        prod_signal_mz = float(
+            prod.get(
+                "curve_key",
+                prod.get("mz_exact_mean", prod.get("mz_exact", prod_mz)),
+            )
+        )
         prod_name = str(prod.get("species") or prod.get("name") or f"m/z={prod_mz}")
         prod_mw = prod.get("mw")
         if prod_mw is None:
@@ -636,7 +689,7 @@ def compute_all_mole_fractions(
                 prod_mw = float(prod_mz)
         prod_mw = float(prod_mw)
 
-        prod_signal = extract_signal_from_temperature_curves(curves, prod_mz)
+        prod_signal = extract_signal_from_temperature_curves(curves, prod_signal_mz)
 
         prod_mf = calc_product_mole_fraction(
             prod_signal,
@@ -679,10 +732,10 @@ class MoleFractionCalculator:
         self.mz_index: dict[int, list[int]] = {}
         self.expansion_coefficients: dict[float, float] = {}
         self.mass_disc_exponent: float = 0.77897
-        self.parent_mz: int | None = None
+        self.parent_mz: float | None = None
         self.parent_initial_mf: float = 0.002
         self.reference_temperature: float | None = None
-        self.reference_species_mz: int | None = None
+        self.reference_species_mz: float | None = None
         self.reference_species_tm: float | None = None
         self.identified_species: dict[str, dict] = {}
         self.calibrated_mf: dict[str, dict[float, float]] = {}
@@ -803,8 +856,13 @@ class MoleFractionCalculator:
                 i += 1
                 continue
 
-    def get_species_by_mz(self, mz: int) -> list[dict]:
-        return [spec for spec in self.database if spec["mz"] == mz]
+    def get_species_by_mz(self, mz: int | float) -> list[dict]:
+        nominal_mz = int(round(float(mz)))
+        return [
+            spec
+            for spec in self.database
+            if int(round(float(spec["mz"]))) == nominal_mz
+        ]
 
     def get_cross_section_at_energy(self, species: dict, energy: float) -> float:
         return _interpolate_cross_section(
@@ -1029,9 +1087,9 @@ class MoleFractionCalculator:
 
     def calc_product_mf_auto(
         self,
-        mz: int,
+        mz: int | float,
         species: dict,
-        ref_mz: int,
+        ref_mz: int | float,
         ref_mw: float,
         ref_energy: float,
         ref_signal_data: dict[float, float],
@@ -1089,7 +1147,10 @@ class MoleFractionCalculator:
         if sigma_i == 0 or sigma_A == 0:
             return None
 
-        D_i = self.calc_mass_discrimination(mz, self.mass_disc_exponent)
+        D_i = self.calc_mass_discrimination(
+            float(species.get("mw") or species.get("mz") or round(float(mz))),
+            self.mass_disc_exponent,
+        )
         D_A = self.calc_mass_discrimination(ref_mw, self.mass_disc_exponent)
 
         T_M = self.reference_temperature
@@ -1120,15 +1181,15 @@ class MoleFractionCalculator:
 
     def calc_multi_species_mf_auto(
         self,
-        mz: int,
+        mz: int | float,
         species_list: list[dict],
         energies: list[float],
-        ref_mz: int,
+        ref_mz: int | float,
         ref_mw: float,
         ref_energy: float,
         ref_signal_data: dict[float, float],
         ref_mf_at_tm: float,
-        temperature_curves: dict[int, dict],
+        temperature_curves: dict[int | float, dict],
     ) -> dict:
         result: dict = {}
         warnings: list[str] = []
@@ -1234,7 +1295,7 @@ class MoleFractionCalculator:
                 for species in resolvable_species
             ]
             separated, pure_energies = separate_coexisting_species_signals(
-                mz=mz,
+                mz=int(round(float(mz))),
                 species_at_mz=species_at_mz,
                 energy_scan_data=energy_scan_data,
                 database=self.database,
@@ -1306,11 +1367,11 @@ class MoleFractionCalculator:
 
     def calc_product_mf_from_signal(
         self,
-        mz: int,
+        mz: int | float,
         species: dict,
         energy: float,
         signal_data: dict[float, float],
-        ref_mz: int,
+        ref_mz: int | float,
         ref_mw: float,
         ref_energy: float,
         ref_signal_data: dict[float, float],
@@ -1350,7 +1411,10 @@ class MoleFractionCalculator:
         if sigma_i == 0 or sigma_A == 0:
             return None
 
-        D_i = self.calc_mass_discrimination(mz, self.mass_disc_exponent)
+        D_i = self.calc_mass_discrimination(
+            float(species.get("mw") or species.get("mz") or round(float(mz))),
+            self.mass_disc_exponent,
+        )
         D_A = self.calc_mass_discrimination(ref_mw, self.mass_disc_exponent)
 
         T_M = self.reference_temperature
@@ -1385,11 +1449,11 @@ class MoleFractionCalculator:
     def calc_auto_mole_fractions(
         self,
         pie_species_data: list[dict],
-        temperature_curves: dict[int, dict],
+        temperature_curves: dict[int | float, dict],
         parent_mf_results: dict[float, float] | None = None,
         available_energies: list[float] | None = None,
         parent_energy: float = 10.0,
-    ) -> tuple[dict[tuple[int, str, float], dict[float, float]], list[str]]:
+    ) -> tuple[dict[tuple[float, str, float], dict[float, float]], list[str]]:
         warnings: list[str] = []
 
         if not pie_species_data:
@@ -1403,22 +1467,27 @@ class MoleFractionCalculator:
         if not parent_mf_results:
             return {}, ["请先计算母体摩尔分数"]
 
-        species_by_mz: dict[int, list[dict]] = {}
+        species_by_mz: dict[float, list[dict]] = {}
         for d in pie_species_data:
-            mz = d["mz"]
+            mz = float(
+                d.get(
+                    "curve_key",
+                    d.get("mz_exact_mean", d.get("mz_exact", d["mz"])),
+                )
+            )
             if mz not in species_by_mz:
                 species_by_mz[mz] = []
             species_by_mz[mz].append(d)
 
         all_energies = sorted(available_energies) if available_energies else [parent_energy]
 
-        all_species_mf: dict[tuple[int, str, float], dict[float, float]] = {}
+        all_species_mf: dict[tuple[float, str, float], dict[float, float]] = {}
 
         parent_mz = self.parent_mz
         if parent_mz is None:
             return {}, ["请先设置母体质量数"]
 
-        parent_mw = float(parent_mz)
+        parent_mw = float(round(parent_mz))
         parent_signal = extract_signal_from_temperature_curves(
             temperature_curves, parent_mz
         )
@@ -1433,8 +1502,27 @@ class MoleFractionCalculator:
             self.reference_temperature = reference_temperature
         parent_mf_at_tm = parent_mf_results.get(reference_temperature, 0)
 
+        parent_species_mz = float(parent_mz)
+        parent_candidates = sorted(
+            (
+                abs(float(candidate_mz) - float(parent_mz)),
+                float(candidate_mz),
+            )
+            for candidate_mz in species_by_mz
+            if int(round(float(candidate_mz))) == int(round(float(parent_mz)))
+        )
+        if float(parent_mz).is_integer():
+            if len(parent_candidates) == 1:
+                parent_species_mz = parent_candidates[0][1]
+        elif parent_candidates and parent_candidates[0][0] <= 0.25:
+            if (
+                len(parent_candidates) == 1
+                or abs(parent_candidates[0][0] - parent_candidates[1][0]) > 1e-12
+            ):
+                parent_species_mz = parent_candidates[0][1]
+
         for mz, sp_list in species_by_mz.items():
-            if mz == parent_mz:
+            if mz == parent_species_mz:
                 all_species_mf[(mz, "母体", parent_energy)] = parent_mf_results
                 continue
 
@@ -1499,11 +1587,11 @@ class MoleFractionCalculator:
 def calc_auto_mole_fractions(
     calculator: MoleFractionCalculator,
     pie_species_data: list[dict],
-    temperature_curves: dict[int, dict],
+    temperature_curves: dict[int | float, dict],
     parent_mf_results: dict[float, float],
     available_energies: list[float] | None = None,
     parent_energy: float = 10.0,
-) -> tuple[dict[tuple[int, str, float], dict[float, float]], list[str]]:
+) -> tuple[dict[tuple[float, str, float], dict[float, float]], list[str]]:
     return calculator.calc_auto_mole_fractions(
         pie_species_data,
         temperature_curves,

@@ -52,12 +52,19 @@ def _resolve_output(path: str | Path) -> Path:
     return output
 
 
-def _curve_json_ready(curves: dict[int, dict]) -> dict[str, Any]:
+def _curve_json_ready(curves: dict[int | float, dict]) -> dict[str, Any]:
     ready: dict[str, Any] = {}
     for mz, curve in curves.items():
+        exact_mz = float(curve.get("mz_exact_mean", curve["mz"]))
+        nominal_mz = int(
+            round(float(curve.get("mz_rounded", curve.get("mz", exact_mz))))
+        )
         ready[str(mz)] = {
-            "mz": int(curve["mz"]),
-            "mz_exact_mean": float(curve.get("mz_exact_mean", curve["mz"])),
+            "mz": exact_mz,
+            "mz_rounded": nominal_mz,
+            "mz_exact_mean": exact_mz,
+            "curve_key": curve.get("curve_key", mz),
+            "has_nominal_collision": bool(curve.get("has_nominal_collision", False)),
             "species": curve.get("species", ""),
             "energies": [float(value) for value in curve.get("energies", [])],
             "intensities": [float(value) for value in curve.get("intensities", [])],
@@ -115,13 +122,13 @@ def cmd_pie(args: argparse.Namespace) -> int:
         curves_path = _write_json(args.curves_json, _curve_json_ready(curves))
         outputs["curves_json"] = curves_path
 
-    fits: dict[int, dict[str, Any]] = {}
+    fits: dict[int | float, dict[str, Any]] = {}
     if args.fit_pics:
         database, _ = load_species_database(args.database)
         for mz, curve in curves.items():
-            fits[int(mz)] = identify_species_for_mz_with_curve(
+            fits[mz] = identify_species_for_mz_with_curve(
                 database,
-                int(mz),
+                int(curve.get("mz_rounded", curve["mz"])),
                 curve.get("energies", []),
                 curve.get("intensities", []),
             )

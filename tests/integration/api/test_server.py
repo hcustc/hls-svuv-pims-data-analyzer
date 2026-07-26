@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
+import pytest
 from fastapi.testclient import TestClient
 
 from bl03u_masstool.api import app as server
@@ -220,7 +221,10 @@ def test_upload_pie_curve_uses_allowed_database_root(tmp_path, monkeypatch):
     artifacts = artifacts_response.json()
     assert artifacts["manifest"]["analysis_type"] == "pie"
     assert artifacts["summary"]["curve_count"] == 1
-    assert artifacts["evidence"]["18"]["confidence_level"] == "unfitted"
+    evidence_item = next(iter(artifacts["evidence"].values()))
+    assert evidence_item["mz"] == pytest.approx(18.0)
+    assert evidence_item["mz_rounded"] == 18
+    assert evidence_item["confidence_level"] == "unfitted"
     assert artifacts["manifest"]["input_path"] == "curve.csv"
     assert artifacts["manifest"]["parameters"]["database_scope"] == "custom"
     assert artifacts["manifest"]["parameters"]["database_name"] == "species.sqlite"
@@ -232,8 +236,49 @@ def test_upload_pie_curve_uses_allowed_database_root(tmp_path, monkeypatch):
     fit_response = _client().post(f"/api/pie/fit/{job_id}/18")
     assert fit_response.status_code == 200
     fitted_artifacts = _client().get(f"/api/pie/artifacts/{job_id}").json()
-    assert fitted_artifacts["evidence"]["18"]["candidate_count"] == 1
-    assert fitted_artifacts["evidence"]["18"]["fit"] is not None
+    fitted_evidence = next(iter(fitted_artifacts["evidence"].values()))
+    assert fitted_evidence["candidate_count"] == 1
+    assert fitted_evidence["fit"] is not None
+
+
+def test_uploaded_pie_curve_exposes_each_precise_peak_separately(tmp_path, monkeypatch):
+    monkeypatch.setenv("BL03U_ALLOWED_DATA_ROOTS", str(tmp_path))
+    database = _write_test_pics_db(tmp_path / "species.sqlite")
+    exact_mz_values = [227.58715739409433, 228.02311680380544]
+    curve = (
+        "mz,energy,intensity\n"
+        f"{exact_mz_values[0]},10.0,1.0\n"
+        f"{exact_mz_values[1]},10.0,10.0\n"
+        f"{exact_mz_values[0]},11.0,2.0\n"
+        f"{exact_mz_values[1]},11.0,20.0\n"
+    ).encode()
+
+    response = _client().post(
+        "/api/pie/upload_curve",
+        params={"database": str(database), "filename": "precise-curves.csv"},
+        content=curve,
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["summary"]["curve_count"] == 2
+    assert [item["mz"] for item in payload["summary"]["curves"]] == pytest.approx(
+        exact_mz_values
+    )
+    assert [item["mz_rounded"] for item in payload["summary"]["curves"]] == [
+        228,
+        228,
+    ]
+    job_id = payload["job_id"]
+    for exact_mz in exact_mz_values:
+        curve_response = _client().get(f"/api/pie/curve/{job_id}/{exact_mz}")
+        assert curve_response.status_code == 200
+        assert curve_response.json()["curve"]["mz_exact_mean"] == pytest.approx(exact_mz)
+        assert curve_response.json()["curve"]["energies"] == [10.0, 11.0]
+
+    ambiguous = _client().get(f"/api/pie/curve/{job_id}/228")
+    assert ambiguous.status_code == 409
+    assert "多条精确 PIE 曲线" in ambiguous.json()["detail"]
 
 
 def test_cleanup_jobs_removes_stale_completed_jobs(monkeypatch):

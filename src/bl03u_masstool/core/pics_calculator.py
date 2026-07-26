@@ -16,7 +16,7 @@ class PICSResult:
 class PICSInputData:
     new_species_name: str = ""
     new_species_formula: str = ""
-    new_species_mz: int = 0
+    new_species_mz: float = 0.0
     
     no_mz: int = 30
     no_formula: str = "NO"
@@ -37,6 +37,63 @@ def calc_mass_discrimination(molecular_weight: float, exponent: float = 0.77897)
     return float((molecular_weight / 30.0) ** exponent)
 
 
+def extract_peak_height_at_mz(
+    mz_values,
+    intensities,
+    target_mz: float,
+    *,
+    half_window_da: float = 0.08,
+) -> float:
+    """Extract the local apex nearest an exact m/z without using a 1 Da bin."""
+    mz_array = np.asarray(mz_values, dtype=float)
+    intensity_array = np.asarray(intensities, dtype=float)
+    if mz_array.shape != intensity_array.shape:
+        raise ValueError("m/z and intensity arrays must have the same shape")
+    if mz_array.size == 0:
+        return 0.0
+
+    finite = np.isfinite(mz_array) & np.isfinite(intensity_array)
+    if not np.any(finite):
+        return 0.0
+    mz_array = mz_array[finite]
+    intensity_array = intensity_array[finite]
+    order = np.argsort(mz_array, kind="stable")
+    mz_array = mz_array[order]
+    intensity_array = intensity_array[order]
+
+    target = float(target_mz)
+    half_window = float(half_window_da)
+    if not np.isfinite(target) or half_window <= 0:
+        raise ValueError("target m/z must be finite and half_window_da must be positive")
+
+    local_indices = np.flatnonzero(np.abs(mz_array - target) <= half_window)
+    if local_indices.size == 0:
+        nearest = int(np.argmin(np.abs(mz_array - target)))
+        return float(max(0.0, intensity_array[nearest]))
+
+    local_apices: list[int] = []
+    for index in local_indices:
+        left = intensity_array[index - 1] if index > 0 else -np.inf
+        right = (
+            intensity_array[index + 1]
+            if index + 1 < intensity_array.size
+            else -np.inf
+        )
+        value = intensity_array[index]
+        if value >= left and value >= right and (value > left or value > right):
+            local_apices.append(int(index))
+
+    candidate_indices = local_apices or [int(index) for index in local_indices]
+    selected = min(
+        candidate_indices,
+        key=lambda index: (
+            abs(float(mz_array[index]) - target),
+            -float(intensity_array[index]),
+        ),
+    )
+    return float(max(0.0, intensity_array[selected]))
+
+
 def get_expansion_coefficient(
     temperature: float,
     expansion_coefficients: dict[float, float],
@@ -55,7 +112,7 @@ def calc_pics_single_energy(
     no_signal: float,
     new_species_mf: float,
     no_mf: float,
-    new_species_mz: int,
+    new_species_mz: float,
     no_mz: int = 30,
     no_cross_section: float = 5.0,
     mass_disc_exponent: float = 0.77897,

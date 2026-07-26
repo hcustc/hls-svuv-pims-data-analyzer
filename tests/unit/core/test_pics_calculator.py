@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 from bl03u_masstool.core.pics_calculator import (
@@ -8,7 +9,38 @@ from bl03u_masstool.core.pics_calculator import (
     calc_pics_multi_energy,
     calc_pics_single_energy,
     calc_pics_with_temperature,
+    extract_peak_height_at_mz,
 )
+
+
+def test_exact_mz_peak_height_does_not_mix_a_nominal_mass_collision():
+    mz_values = np.array([227.56, 227.587, 227.61, 228.0, 228.023, 228.05])
+    intensities = np.array([0.0, 2.0, 0.0, 0.0, 100.0, 0.0])
+
+    assert extract_peak_height_at_mz(
+        mz_values,
+        intensities,
+        227.587,
+        half_window_da=0.03,
+    ) == pytest.approx(2.0)
+    assert extract_peak_height_at_mz(
+        mz_values,
+        intensities,
+        228.023,
+        half_window_da=0.03,
+    ) == pytest.approx(100.0)
+
+
+def test_exact_mz_peak_height_chooses_nearest_apex_not_strongest_neighbour():
+    mz_values = np.array([227.96, 227.98, 228.0, 228.04, 228.06])
+    intensities = np.array([0.0, 2.0, 0.0, 100.0, 0.0])
+
+    assert extract_peak_height_at_mz(
+        mz_values,
+        intensities,
+        227.98,
+        half_window_da=0.08,
+    ) == pytest.approx(2.0)
 
 
 def test_calc_pics_single_energy_basic():

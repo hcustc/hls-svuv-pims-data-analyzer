@@ -12,6 +12,8 @@ import json
 import hashlib
 import shutil
 import logging
+import math
+import re
 from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime, timezone
 import tempfile
@@ -25,6 +27,40 @@ TEMP_SUFFIX = '.tmp'
 BACKUP_SUFFIX = '.bak'
 
 logger = logging.getLogger(__name__)
+
+PieCurveKey = int | float
+_PIE_ARRAY_REFERENCE_RE = re.compile(
+    r"^arrays/mz_-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?\.npz$"
+)
+
+
+def parse_pie_curve_key(value: Any) -> PieCurveKey:
+    """Parse a persisted PIE curve key without discarding exact m/z precision."""
+    if isinstance(value, bool):
+        raise ValueError("Boolean is not a valid PIE curve key")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("PIE curve key must be finite")
+        return value
+
+    text = str(value).strip()
+    if not text:
+        raise ValueError("PIE curve key is empty")
+    if re.fullmatch(r"[+-]?\d+", text):
+        return int(text)
+    numeric = float(text)
+    if not math.isfinite(numeric):
+        raise ValueError("PIE curve key must be finite")
+    return numeric
+
+
+def curve_nominal_mz(curves: Dict[PieCurveKey, Dict], curve_key: PieCurveKey) -> int:
+    """Return the nominal mass used only for PICS candidate matching."""
+    curve = curves.get(curve_key, {})
+    value = curve.get("mz_rounded", curve.get("mz", curve_key))
+    return int(round(float(value)))
 
 
 class PieStateManager:
@@ -47,11 +83,11 @@ class PieStateManager:
 
     def save_state(
         self,
-        curves: Dict[int, Dict],
+        curves: Dict[PieCurveKey, Dict],
         database: List[Dict],
         calibration: Any,
-        per_mz_config: Dict[int, Dict],
-        all_fit_results: Dict[int, Dict],
+        per_mz_config: Dict[PieCurveKey, Dict],
+        all_fit_results: Dict[PieCurveKey, Dict],
         global_config_hash: str,
     ) -> Tuple[bool, Optional[str]]:
         """
@@ -147,7 +183,7 @@ class PieStateManager:
 
     def load_state(
         self,
-        curves: Dict[int, Dict],
+        curves: Dict[PieCurveKey, Dict],
         database: List[Dict],
         calibration: Any,
     ) -> Dict[str, Any]:
@@ -237,7 +273,7 @@ class PieStateManager:
             current_per_mz_fps = {}
             for mz_str in per_mz_results.keys():
                 try:
-                    mz = int(mz_str)
+                    curve_key = parse_pie_curve_key(mz_str)
                     result = per_mz_results[mz_str]
                     if result.get('success'):
                         used_species_ids = [
@@ -245,9 +281,11 @@ class PieStateManager:
                             if c.get('species_id') is not None
                         ]
                         current_per_mz_fps[mz_str] = compute_per_mz_pics_fingerprint(
-                            mz, used_species_ids, database
+                            curve_nominal_mz(curves, curve_key),
+                            used_species_ids,
+                            database,
                         )
-                except (ValueError, KeyError):
+                except (TypeError, ValueError, KeyError):
                     pass
 
             # Check array files and validate references
@@ -261,8 +299,7 @@ class PieStateManager:
 
                             # Security: Validate NPZ filename format
                             # Must be arrays/mz_<number>.npz
-                            import re
-                            if not re.match(r'^arrays/mz_\d+\.npz$', npz_file):
+                            if _PIE_ARRAY_REFERENCE_RE.fullmatch(npz_file) is None:
                                 result['success'] = False
                                 result['error'] = f'Invalid array reference format: {ref}'
                                 obsolete_reasons[mz_str] = f'无效的数组引用: {ref}'
@@ -351,7 +388,7 @@ class PieStateManager:
                 'error': str(e),
             }
 
-    def load_mz_arrays(self, mz: int) -> Dict[str, np.ndarray]:
+    def load_mz_arrays(self, mz: PieCurveKey) -> Dict[str, np.ndarray]:
         """
         Load arrays for a specific m/z from NPZ file.
 
@@ -444,7 +481,7 @@ class PieStateManager:
             },
         }
 
-    def _build_configs_dict(self, per_mz_config: Dict[int, Dict]) -> Dict:
+    def _build_configs_dict(self, per_mz_config: Dict[PieCurveKey, Dict]) -> Dict:
         """Build configs dictionary for JSON serialization."""
         return {
             'per_mz_configs': {
@@ -455,8 +492,8 @@ class PieStateManager:
 
     def _build_results_dict(
         self,
-        all_fit_results: Dict[int, Dict],
-        curves: Dict[int, Dict],
+        all_fit_results: Dict[PieCurveKey, Dict],
+        curves: Dict[PieCurveKey, Dict],
         database: List[Dict],
         calibration: Any,
     ) -> Dict:
@@ -472,8 +509,14 @@ class PieStateManager:
         per_mz_results = {}
 
         for mz, result in all_fit_results.items():
+            curve = curves.get(mz, {})
+            nominal_mz = curve_nominal_mz(curves, mz)
+            exact_mz = float(curve.get("mz_exact_mean", mz))
             result_entry = {
-                'mz': mz,
+                'curve_key': mz,
+                'mz': exact_mz,
+                'mz_rounded': nominal_mz,
+                'mz_exact': exact_mz,
                 'success': result.get('success', False),
                 'fit_timestamp': result.get('fit_timestamp'),
                 'fit_config_hash': result.get('fit_config_hash'),
@@ -492,7 +535,11 @@ class PieStateManager:
 
                 # Compute fingerprints at fit time
                 project_fp = compute_project_fingerprint(curves, calibration)
-                per_mz_pics_fp = compute_per_mz_pics_fingerprint(mz, used_species_ids, database)
+                per_mz_pics_fp = compute_per_mz_pics_fingerprint(
+                    nominal_mz,
+                    used_species_ids,
+                    database,
+                )
 
                 # Metrics
                 result_entry['metrics'] = {
@@ -534,7 +581,7 @@ class PieStateManager:
 
     def _save_mz_arrays(
         self,
-        mz: int,
+        mz: PieCurveKey,
         result: Dict,
         curve: Optional[Dict],
         npz_path: str,
@@ -625,7 +672,7 @@ class PieStateManager:
 
 
 def compute_project_fingerprint(
-    curves: Dict[int, Dict],
+    curves: Dict[PieCurveKey, Dict],
     calibration: Any,
 ) -> Dict[str, str]:
     """

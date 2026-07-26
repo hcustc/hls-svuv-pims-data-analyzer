@@ -715,9 +715,75 @@ def analyze_pie_folder(
     )
 
 
-def build_pie_curves(analysis_df: pd.DataFrame) -> dict[int, dict]:
-    """Convert PIE analysis rows into m/z keyed curve objects."""
-    curves: dict[int, dict] = {}
+def _pie_peak_track_series(group: pd.DataFrame) -> pd.Series:
+    """Assign stable ordered peak tracks within one nominal-mass group.
+
+    A reference peak can drift slightly in calibrated m/z between energies or
+    independently analysed segments. Its order among the resolved peaks stays
+    stable, so rank unique peak windows at each energy instead of requiring
+    bit-for-bit equality of the calibrated mass.
+    """
+    if group.empty:
+        return pd.Series(dtype="int64", index=group.index)
+
+    base = group.reset_index().rename(columns={"index": "_original_index"})
+    has_complete_bounds = all(
+        column in base.columns and base[column].notna().all()
+        for column in ("left_bound", "right_bound")
+    )
+    identity_columns = (
+        ["left_bound", "right_bound"] if has_complete_bounds else ["mz"]
+    )
+    identities = base[["energy", *identity_columns]].drop_duplicates()
+    if "mz" in identity_columns:
+        identities["_peak_sort_mz"] = pd.to_numeric(
+            identities["mz"],
+            errors="coerce",
+        )
+    else:
+        mz_means = (
+            base.groupby(
+                ["energy", *identity_columns],
+                dropna=False,
+                as_index=False,
+            )["mz"]
+            .mean()
+            .rename(columns={"mz": "_peak_sort_mz"})
+        )
+        identities = identities.merge(
+            mz_means,
+            on=["energy", *identity_columns],
+            how="left",
+        )
+    identities = identities.sort_values(
+        ["energy", "_peak_sort_mz", *identity_columns],
+        kind="stable",
+    )
+    identities["_pie_peak_track"] = identities.groupby(
+        "energy",
+        sort=False,
+    ).cumcount()
+    tracked = base.merge(
+        identities[["energy", *identity_columns, "_pie_peak_track"]],
+        on=["energy", *identity_columns],
+        how="left",
+        sort=False,
+    )
+    return (
+        tracked.set_index("_original_index")["_pie_peak_track"]
+        .reindex(group.index)
+        .astype("int64")
+    )
+
+
+def build_pie_curves(analysis_df: pd.DataFrame) -> dict[int | float, dict]:
+    """Convert PIE analysis rows into precise-peak PIE curve objects.
+
+    Every curve is identified by its mean calibrated m/z. PICS candidates remain
+    indexed separately by ``mz_rounded`` so broad integer-mass lookup never
+    replaces or reduces the precision of the experimental curve identity.
+    """
+    curves: dict[int | float, dict] = {}
     if analysis_df.empty:
         return curves
     working = analysis_df.copy()
@@ -729,32 +795,54 @@ def build_pie_curves(analysis_df: pd.DataFrame) -> dict[int, dict]:
         working["species"] = ""
     if "integration_method" not in working:
         working["integration_method"] = ""
-    for mz, group in working.groupby("mz_rounded"):
-        group = group.sort_values("energy").reset_index(drop=True)
-        replicate_modes = set(group.get("replicate_mode", pd.Series(dtype=object)).dropna().astype(str))
-        if replicate_modes == {"off"}:
-            ordered = group.copy()
-        else:
-            group["energy_rounded"] = group["energy"].round(2)
-            ordered = group.groupby("energy_rounded", as_index=False).agg(
-                energy=("energy", "mean"),
-                normalized_intensity=("normalized_intensity", "mean"),
-                raw_area=("raw_area", "mean"),
-                photon_normalized_intensity=("photon_normalized_intensity", "mean"),
-                integration_method=("integration_method", _summarize_integration_methods),
-                species=("species", "first"),
-                mz=("mz", "mean"),
-                file_count=("file_count", "first"),
-                io=("io", "first"),
-            ).sort_values("energy")
-        curves[int(mz)] = {
-            "mz": int(mz),
-            "mz_exact_mean": float(ordered["mz"].mean()),
-            "species": str(ordered["species"].iloc[0]) if "species" in ordered else "",
-            "energies": ordered["energy"].astype(float).tolist(),
-            "intensities": ordered["normalized_intensity"].astype(float).tolist(),
-            "rows": ordered,
-        }
+    for nominal_mz, nominal_group in working.groupby("mz_rounded"):
+        nominal_group = nominal_group.copy()
+        nominal_group["_pie_peak_track"] = _pie_peak_track_series(nominal_group)
+        peak_groups = list(
+            nominal_group.groupby(
+                "_pie_peak_track",
+                dropna=False,
+                sort=False,
+            )
+        )
+        has_nominal_collision = len(peak_groups) > 1
+        for _peak_identity, group in peak_groups:
+            group = group.sort_values("energy").reset_index(drop=True)
+            replicate_modes = set(group.get("replicate_mode", pd.Series(dtype=object)).dropna().astype(str))
+            if replicate_modes == {"off"}:
+                ordered = group.copy()
+            else:
+                group["energy_rounded"] = group["energy"].round(2)
+                ordered = group.groupby("energy_rounded", as_index=False).agg(
+                    energy=("energy", "mean"),
+                    normalized_intensity=("normalized_intensity", "mean"),
+                    raw_area=("raw_area", "mean"),
+                    photon_normalized_intensity=("photon_normalized_intensity", "mean"),
+                    integration_method=("integration_method", _summarize_integration_methods),
+                    species=("species", "first"),
+                    mz=("mz", "mean"),
+                    file_count=("file_count", "first"),
+                    io=("io", "first"),
+                ).sort_values("energy")
+            exact_mz = float(ordered["mz"].mean())
+            curve_key = exact_mz
+            if curve_key in curves:
+                raise ValueError(
+                    "PIE curve identity collision for precise m/z "
+                    f"{exact_mz:.12g}; peak bounds must uniquely identify each curve"
+                )
+            ordered = ordered.drop(columns=["_pie_peak_track"], errors="ignore")
+            curves[curve_key] = {
+                "mz": exact_mz,
+                "mz_rounded": int(nominal_mz),
+                "mz_exact_mean": exact_mz,
+                "curve_key": curve_key,
+                "has_nominal_collision": has_nominal_collision,
+                "species": str(ordered["species"].iloc[0]) if "species" in ordered else "",
+                "energies": ordered["energy"].astype(float).tolist(),
+                "intensities": ordered["normalized_intensity"].astype(float).tolist(),
+                "rows": ordered,
+            }
     return curves
 
 
@@ -1064,6 +1152,17 @@ def _aggregate_segment_by_energy(df: pd.DataFrame) -> pd.DataFrame:
     return seg_df.groupby("energy_rounded", as_index=False).agg(**agg_spec)
 
 
+def _pie_peak_identity_series(df: pd.DataFrame) -> pd.Series:
+    """Return ordered precise-peak track IDs independently for each nominal m/z."""
+    identities = pd.Series("", index=df.index, dtype=object)
+    for nominal_mz, group in df.groupby("mz_rounded", sort=False):
+        tracks = _pie_peak_track_series(group)
+        identities.loc[group.index] = tracks.map(
+            lambda value: f"{int(nominal_mz)}:track:{int(value)}"
+        )
+    return identities
+
+
 def _aggregate_segments_by_mz_energy(df: pd.DataFrame) -> pd.DataFrame:
     """Aggregate every m/z-energy group in one Pandas operation.
 
@@ -1074,24 +1173,27 @@ def _aggregate_segments_by_mz_energy(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df.copy()
     seg_df = df.sort_values(["mz_rounded", "energy"]).reset_index(drop=True).copy()
+    if "_pie_peak_key" not in seg_df.columns or seg_df["_pie_peak_key"].isna().any():
+        seg_df["_pie_peak_key"] = _pie_peak_identity_series(seg_df)
     seg_df["energy_rounded"] = seg_df["energy"].round(2)
     agg_spec = _segment_energy_aggregation_spec(
         seg_df,
         include_mz_rounded=False,
     )
     result = seg_df.groupby(
-        ["mz_rounded", "energy_rounded"],
+        ["mz_rounded", "_pie_peak_key", "energy_rounded"],
         as_index=False,
         sort=True,
     ).agg(**agg_spec)
     ordered_columns = [
         "energy",
         "mz_rounded",
+        "_pie_peak_key",
         "energy_rounded",
         *[
             column
             for column in result.columns
-            if column not in {"energy", "mz_rounded", "energy_rounded"}
+            if column not in {"energy", "mz_rounded", "_pie_peak_key", "energy_rounded"}
         ],
     ]
     return result[ordered_columns]
@@ -1119,86 +1221,6 @@ def _scale_factor_from_overlap(ref_df: pd.DataFrame, seg_df: pd.DataFrame) -> fl
     return float(np.median(ref_intensities[valid_mask] / seg_intensities[valid_mask]))
 
 
-def _legacy_representative_peak_bounds(
-    analysis_dfs: list[pd.DataFrame],
-    *,
-    merge_method: str,
-) -> pd.DataFrame:
-    """Preserve the historical representative bounds for rounded duplicate peaks.
-
-    Multiple exact peaks can round to the same integer m/z. Their intensities are
-    averaged, while the legacy merge kept the first peak window after its per-m/z
-    energy sort. This lightweight pass reproduces that metadata choice without
-    repeating the expensive full-column aggregations.
-    """
-    required = {"energy", "mz_rounded", "left_bound", "right_bound"}
-    if not any(required.issubset(df.columns) for df in analysis_dfs if not df.empty):
-        return pd.DataFrame()
-
-    all_mz = sorted(
-        {
-            int(value)
-            for df in analysis_dfs
-            if not df.empty and "mz_rounded" in df
-            for value in df["mz_rounded"].dropna().unique()
-        }
-    )
-    bound_frames: list[pd.DataFrame] = []
-    for target_mz in all_mz:
-        mz_segments: list[dict[str, object]] = []
-        for segment_idx, df in enumerate(analysis_dfs):
-            if df.empty or not required.issubset(df.columns):
-                continue
-            rows = df.loc[
-                df["mz_rounded"] == target_mz,
-                ["energy", "left_bound", "right_bound"],
-            ].copy()
-            if rows.empty:
-                continue
-            rows = rows.sort_values("energy").reset_index(drop=True)
-            rows["energy_rounded"] = rows["energy"].round(2)
-            prepared = rows.groupby("energy_rounded", as_index=False).agg(
-                energy=("energy", "mean"),
-                left_bound=("left_bound", "first"),
-                right_bound=("right_bound", "first"),
-            )
-            prepared["segment_idx"] = segment_idx
-            mz_segments.append(
-                {
-                    "df": prepared,
-                    "min_energy": float(prepared["energy"].min()),
-                    "segment_idx": segment_idx,
-                }
-            )
-        if not mz_segments:
-            continue
-
-        mz_segments.sort(key=lambda item: float(item["min_energy"]))
-        if merge_method == "first_segment_dominant":
-            first = next(
-                (item for item in mz_segments if int(item["segment_idx"]) == 0),
-                mz_segments[0],
-            )
-            ordered = [first] + [item for item in mz_segments if item is not first]
-        else:
-            ordered = mz_segments
-        combined = pd.concat(
-            [item["df"] for item in ordered],
-            ignore_index=True,
-        )
-        combined = combined.sort_values("energy").reset_index(drop=True)
-        final = combined.groupby("energy_rounded", as_index=False).agg(
-            left_bound=("left_bound", "first"),
-            right_bound=("right_bound", "first"),
-        )
-        final["mz_rounded"] = target_mz
-        bound_frames.append(final)
-
-    if not bound_frames:
-        return pd.DataFrame()
-    return pd.concat(bound_frames, ignore_index=True)
-
-
 def merge_pie_segments(
     analysis_dfs: list[pd.DataFrame],
     *,
@@ -1215,27 +1237,30 @@ def merge_pie_segments(
     if len(analysis_dfs) == 1:
         return analysis_dfs[0].copy()
 
-    representative_bounds = _legacy_representative_peak_bounds(
-        analysis_dfs,
-        merge_method=merge_method,
-    )
-
     prepared_segments: list[tuple[int, pd.DataFrame]] = []
-    all_mz: set[int] = set()
+    all_peak_ids: set[tuple[int, str]] = set()
     for df_idx, df in enumerate(analysis_dfs):
         if df.empty or "mz_rounded" not in df.columns:
             continue
         prepared = _aggregate_segments_by_mz_energy(df)
         prepared_segments.append((df_idx, prepared))
-        all_mz.update(prepared["mz_rounded"].dropna().astype(int).unique())
-    if not all_mz:
+        all_peak_ids.update(
+            (int(nominal_mz), str(peak_key))
+            for nominal_mz, peak_key in prepared[["mz_rounded", "_pie_peak_key"]]
+            .drop_duplicates()
+            .itertuples(index=False, name=None)
+        )
+    if not all_peak_ids:
         return _empty_pie_dataframe()
 
     merged_frames: list[pd.DataFrame] = []
-    for target_mz in sorted(all_mz):
+    for target_mz, target_peak_key in sorted(all_peak_ids):
         mz_segments = []
         for df_idx, prepared in prepared_segments:
-            seg_df = prepared[prepared["mz_rounded"] == target_mz].copy()
+            seg_df = prepared[
+                (prepared["mz_rounded"] == target_mz)
+                & (prepared["_pie_peak_key"] == target_peak_key)
+            ].copy()
             if seg_df.empty:
                 continue
             mz_segments.append({
@@ -1286,7 +1311,13 @@ def merge_pie_segments(
 
             scale_factor = 1.0 if best_scale is None else best_scale
             if best_scale is None:
-                logger.debug("No overlap found for m/z %s segment %s; leaving scale factor at 1", target_mz, segment["segment_idx"])
+                logger.debug(
+                    "No overlap found for precise PIE peak %s (nominal m/z %s) "
+                    "segment %s; leaving scale factor at 1",
+                    target_peak_key,
+                    target_mz,
+                    segment["segment_idx"],
+                )
             for column in ("normalized_intensity", "photon_normalized_intensity", "raw_area"):
                 if column in seg_df.columns:
                     seg_df[column] *= scale_factor
@@ -1300,22 +1331,12 @@ def merge_pie_segments(
         return _empty_pie_dataframe()
     combined = pd.concat(merged_frames, ignore_index=True)
     final_combined = _aggregate_segments_by_mz_energy(combined)
-    if not representative_bounds.empty:
-        bound_lookup = representative_bounds.set_index(
-            ["mz_rounded", "energy_rounded"]
-        )
-        row_keys = pd.MultiIndex.from_arrays(
-            [
-                final_combined["mz_rounded"].to_numpy(),
-                final_combined["energy_rounded"].to_numpy(),
-            ],
-            names=["mz_rounded", "energy_rounded"],
-        )
-        for column in ("left_bound", "right_bound"):
-            final_combined[column] = bound_lookup[column].reindex(row_keys).to_numpy()
     return (
-        final_combined.drop(columns=["energy_rounded"], errors="ignore")
-        .sort_values(["mz_rounded", "energy"])
+        final_combined.drop(
+            columns=["energy_rounded", "_pie_peak_key"],
+            errors="ignore",
+        )
+        .sort_values(["mz_rounded", "mz", "energy"])
         .reset_index(drop=True)
     )
 

@@ -51,7 +51,7 @@ from bl03u_masstool.core.pie_analysis import (
     load_species_database,
     merge_pie_segments,
 )
-from bl03u_masstool.core.pie_state import PieStateManager
+from bl03u_masstool.core.pie_state import PieStateManager, parse_pie_curve_key
 from bl03u_masstool.core.pics_calculator import calc_pics_single_energy
 from bl03u_masstool.core.elements import get_all_elements_from_database, filter_species_by_elements, COMMON_ELEMENTS, parse_formula as parse_formula_elements, get_elements_from_formula
 from bl03u_masstool.core.normalization import NormalizationSettings, load_normalization_settings, save_normalization_settings
@@ -103,6 +103,8 @@ from bl03u_masstool.frontends.pyqt_app.pie.result_display_widget import ResultDi
 
 
 logger = logging.getLogger(__name__)
+PieCurveKey = int | float
+
 
 def _run_exhaustive_fit(
     candidates: list[dict],
@@ -138,6 +140,87 @@ def _run_exhaustive_fit(
 class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
     CACHE_VERSION = 1
 
+    @staticmethod
+    def _curve_nominal_mz(curve: dict, curve_key: PieCurveKey | None = None) -> int:
+        value = curve.get("mz_rounded", curve.get("mz", curve_key))
+        return int(round(float(value)))
+
+    @staticmethod
+    def _curve_exact_mz(curve: dict, curve_key: PieCurveKey | None = None) -> float:
+        value = curve.get("mz_exact_mean", curve_key)
+        if value is None:
+            value = curve.get("mz", 0)
+        return float(value)
+
+    @classmethod
+    def _curve_mz_text(
+        cls,
+        curve: dict,
+        curve_key: PieCurveKey | None = None,
+        *,
+        include_nominal: bool = False,
+    ) -> str:
+        nominal_mz = cls._curve_nominal_mz(curve, curve_key)
+        exact_mz = cls._curve_exact_mz(curve, curve_key)
+        has_exact_mz = curve.get("mz_exact_mean") is not None or (
+            curve_key is not None and not float(curve_key).is_integer()
+        )
+        if not has_exact_mz:
+            return str(nominal_mz)
+        exact_text = f"{exact_mz:.6f}"
+        return (
+            f"{exact_text}（检索 m/z {nominal_mz}）"
+            if include_nominal
+            else exact_text
+        )
+
+    def _nominal_mz_for_key(self, curve_key: PieCurveKey) -> int:
+        curve = self.curves.get(curve_key)
+        if curve is None:
+            return int(round(float(curve_key)))
+        return self._curve_nominal_mz(curve, curve_key)
+
+    def _mz_text_for_key(
+        self,
+        curve_key: PieCurveKey,
+        *,
+        include_nominal: bool = False,
+    ) -> str:
+        curve = self.curves.get(curve_key, {})
+        return self._curve_mz_text(
+            curve,
+            curve_key,
+            include_nominal=include_nominal,
+        )
+
+    def _curve_key_from_state(self, value: object) -> PieCurveKey | None:
+        """Resolve a persisted/UI value to the exact current PIE curve key."""
+        try:
+            parsed = parse_pie_curve_key(value)
+        except (TypeError, ValueError):
+            return None
+
+        # An old integer state is ambiguous once that nominal mass contains
+        # multiple precise peaks.  Do not silently attach it to one peak.
+        text = str(value).strip()
+        if isinstance(parsed, int) and "." not in text and "e" not in text.lower():
+            nominal_matches = [
+                key for key in self.curves
+                if self._nominal_mz_for_key(key) == parsed
+            ]
+            if len(nominal_matches) > 1:
+                return None
+            if len(nominal_matches) == 1:
+                return nominal_matches[0]
+
+        for key in self.curves:
+            if type(key) is type(parsed) and key == parsed:
+                return key
+        for key in self.curves:
+            if float(key) == float(parsed):
+                return key
+        return None
+
     def __init__(self, calibration: Calibration, normalization_settings: NormalizationSettings | None = None, parent=None):
         super().__init__(parent)
         self.calibration = calibration
@@ -161,10 +244,10 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.peak_detection = load_peak_detection_config()
         self.database: list[dict] = []
         self.analysis_df = pd.DataFrame()
-        self.curves: dict[int, dict] = {}
-        self.current_mz: int | None = None
+        self.curves: dict[PieCurveKey, dict] = {}
+        self.current_mz: PieCurveKey | None = None
         self.current_fit: dict | None = None
-        self.all_fit_results: dict[int, dict] = {}  # 保存所有拟合结果
+        self.all_fit_results: dict[PieCurveKey, dict] = {}  # 保存所有拟合结果
         self.worker: WorkerThread | None = None
         self._analysis_request_id = 0
         self._autoload_worker: WorkerThread | None = None
@@ -179,7 +262,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self._busy = False
         self._fit_preview_active = False
         # Per-m/z 配置存储（Phase 1）+ 版本管理（Phase 2）
-        self.per_mz_config: dict[int, dict] = {}
+        self.per_mz_config: dict[PieCurveKey, dict] = {}
         # Phase 2: 全局求解配置版本管理
         # 注意：当前拟合函数无可配置的全局求解参数，仅保留接口供未来扩展
         self.global_solver_config = {}
@@ -734,7 +817,9 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
     def _show_result_detail_popup(self):
         """弹出子窗口显示详细数据（曲线数据、拟合明细）"""
         popup = QtWidgets.QDialog(self)
-        popup.setWindowTitle(f"详细数据 - m/z {self.current_mz}")
+        popup.setWindowTitle(
+            f"详细数据 - m/z {self._mz_text_for_key(self.current_mz)}"
+        )
         popup.resize(900, 600)
         popup.setWindowFlags(
             QtCore.Qt.WindowType.Dialog |
@@ -985,7 +1070,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         }
         self.global_solver_config["config_hash"] = self._compute_config_hash(payload)
 
-    def _get_per_mz_config_hash(self, mz: int) -> str:
+    def _get_per_mz_config_hash(self, mz: PieCurveKey) -> str:
         """获取指定 m/z 的当前配置哈希。"""
         if mz not in self.per_mz_config:
             # 无历史配置，使用默认值
@@ -1001,7 +1086,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             payload = self._build_per_mz_config_payload(config)
         return self._compute_config_hash(payload)
 
-    def _get_current_per_mz_config_hash(self, mz: int | None = None) -> str:
+    def _get_current_per_mz_config_hash(self, mz: PieCurveKey | None = None) -> str:
         """获取指定 m/z 的当前候选面板配置哈希（用于检测变化）。"""
         if mz is None:
             mz = self.current_mz
@@ -1018,11 +1103,12 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         payload = self._build_per_mz_config_payload(config)
         return self._compute_config_hash(payload)
 
-    def _get_status_config_hash(self, mz: int) -> str:
+    def _get_status_config_hash(self, mz: PieCurveKey) -> str:
         """Use live panel state for the visible m/z and saved state for all others."""
         if (
             mz == self.current_mz
-            and self.fitting_control_widget._current_mz == mz
+            and self.fitting_control_widget._current_mz
+            == self._nominal_mz_for_key(mz)
             and self.fitting_control_widget._candidates_loaded
         ):
             return self._get_current_per_mz_config_hash(mz)
@@ -1091,7 +1177,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             "locked_ids": config["locked_ids"],
         }
 
-    def _restore_mz_config(self, mz: int) -> None:
+    def _restore_mz_config(self, mz: PieCurveKey) -> None:
         """从 per_mz_config 恢复指定 m/z 的配置到 UI表格"""
         if mz not in self.per_mz_config:
             # 如果没有历史配置，初始化默认配置（全选）
@@ -1124,12 +1210,20 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
     # ---- 候选物种面板方法 ----
 
-    def _populate_candidate_table(self, mz: int):
+    def _populate_candidate_table(self, mz: PieCurveKey):
         """根据选中的m/z填充统一的拟合物种表格"""
+        curve = self.curves.get(mz, {})
+        nominal_mz = self._curve_nominal_mz(curve, mz)
+        display_mz = self._curve_mz_text(curve, mz)
         filtered_db = self.get_filtered_database()
         locked_species = self.fitting_control_widget.get_locked_species()
-        self.fitting_control_widget.populate_unified_species_table(mz, filtered_db, locked_species)
-        self._schedule_missing_ie_lookup(mz)
+        self.fitting_control_widget.populate_unified_species_table(
+            nominal_mz,
+            filtered_db,
+            locked_species,
+            display_mz=display_mz,
+        )
+        self._schedule_missing_ie_lookup(nominal_mz)
 
     @staticmethod
     def _species_ie_cache_key(species: dict) -> str:
@@ -1151,7 +1245,10 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
     def _request_current_ie_lookup(self) -> None:
         if self.current_mz is None:
             return
-        self._schedule_missing_ie_lookup(self.current_mz, force=True)
+        self._schedule_missing_ie_lookup(
+            self._nominal_mz_for_key(self.current_mz),
+            force=True,
+        )
 
     def _schedule_missing_ie_lookup(
         self,
@@ -1410,7 +1507,10 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 if self._species_ie_value(species) is None
             }
             if missing_names:
-                self._schedule_missing_ie_lookup(int(mz), species_names=missing_names)
+                self._schedule_missing_ie_lookup(
+                    self._nominal_mz_for_key(mz),
+                    species_names=missing_names,
+                )
 
     def _get_candidate_panel_state(self) -> dict:
         """从统一的物种表格中获取当前配置状态"""
@@ -1529,7 +1629,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             species_results.append({
                 "id": species_id,
                 "ids": [species_id],
-                "mz": int(species.get("mz", self.current_mz)),
+                "mz": int(species.get("mz", self._nominal_mz_for_key(self.current_mz))),
                 "species": species.get("species", ""),
                 "coefficient": float(c),
                 "ie": ionization_energy,
@@ -1571,7 +1671,8 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.fitting_control_widget.show_fit_result(manual_model, "PREVIEW")
         self._update_result_detail_button()
         self.status_label.setText(
-            f"m/z {self.current_mz} 参数预览 · R²={r_squared:.4f} · 点击拟合后方可确认"
+            f"m/z {self._mz_text_for_key(self.current_mz)} 参数预览 · "
+            f"R²={r_squared:.4f} · 点击拟合后方可确认"
         )
 
     def get_filtered_database(self) -> list:
@@ -1595,7 +1696,11 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         locked_species_snapshot = self.fitting_control_widget.get_locked_species()
         self._fit_all_input_configs = {}
         for mz in mz_list:
-            candidates = [item for item in database_snapshot if item.get("mz") == mz]
+            nominal_mz = self._nominal_mz_for_key(mz)
+            candidates = [
+                item for item in database_snapshot
+                if int(item.get("mz", -1)) == nominal_mz
+            ]
             self._fit_all_input_configs[mz] = {
                 "selected_species": candidates,
                 "coefficients": {
@@ -1632,7 +1737,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         *,
         database: list | None = None,
         locked_species: list[str] | None = None,
-        config_hashes: dict[int, str] | None = None,
+        config_hashes: dict[PieCurveKey, str] | None = None,
         global_hash: str | None = None,
     ) -> dict:
         """拟合指定的质量数曲线"""
@@ -1665,7 +1770,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             results[mz] = fit_result
         return results
 
-    def _fit_curve(self, mz: int, curve: dict, database: list, locked_species: list) -> dict:
+    def _fit_curve(self, mz: PieCurveKey, curve: dict, database: list, locked_species: list) -> dict:
         """拟合单条曲线"""
         energies = np.array(curve.get('energies', []))
         intensities = np.array(curve.get('intensities', []))
@@ -1674,7 +1779,11 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             return {'success': False, 'error': '无数据'}
 
         fit_model = identify_species_for_mz_with_curve(
-            database, mz, energies, intensities, locked_species=locked_species
+            database,
+            self._curve_nominal_mz(curve, mz),
+            energies,
+            intensities,
+            locked_species=locked_species,
         )
 
         if not fit_model or not fit_model.get('species'):
@@ -1725,7 +1834,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         if fitted_count > 0:
             for row in range(self.mz_list.count()):
                 item = self.mz_list.item(row)
-                if int(item.data(QtCore.Qt.ItemDataRole.UserRole)) == first_mz:
+                if item.data(QtCore.Qt.ItemDataRole.UserRole) == first_mz:
                     self._skip_save_config = True
                     self.mz_list.setCurrentItem(item)
                     break
@@ -1784,7 +1893,11 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             else:
                 # 如果没有保存的配置，使用全局自动识别
                 filtered_db = self.get_filtered_database()
-                selected_species = [item for item in filtered_db if item.get("mz") == mz]
+                nominal_mz = self._nominal_mz_for_key(mz)
+                selected_species = [
+                    item for item in filtered_db
+                    if int(item.get("mz", -1)) == nominal_mz
+                ]
                 coefficients = {}
                 locked_ids = []
 
@@ -2007,7 +2120,10 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         species_list = result.get("model", {}).get("species", [])
         names = ", ".join(s.get("species", "?") for s in species_list[:3])
         r2 = result.get("r_squared", 0.0)
-        self.status_label.setText(f"m/z {self.current_mz} 已确认: {names}  R²={r2:.4f}")
+        self.status_label.setText(
+            f"m/z {self._mz_text_for_key(self.current_mz)} 已确认: "
+            f"{names}  R²={r2:.4f}"
+        )
         self._update_action_state()
 
     # ── Force species management (delegated to FittingControlWidget) ───────
@@ -2667,20 +2783,16 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             # Restore per-m/z configurations
             saved_configs = result.get('configs', {})
             for mz_str, config in saved_configs.items():
-                try:
-                    mz_int = int(mz_str)
-                    if mz_int in self.curves:
-                        self.per_mz_config[mz_int] = config
-                except (ValueError, KeyError):
-                    # Skip invalid m/z entries
-                    pass
+                curve_key = self._curve_key_from_state(mz_str)
+                if curve_key is not None:
+                    self.per_mz_config[curve_key] = config
 
             # Phase 2: Recalculate config hashes after restoration to ensure consistency
             # This ensures that restored configs have up-to-date hash values
-            for mz_int in self.per_mz_config:
-                hash_val = self._get_current_per_mz_config_hash(mz_int)
+            for curve_key in self.per_mz_config:
+                hash_val = self._get_current_per_mz_config_hash(curve_key)
                 if hash_val:
-                    self.per_mz_config[mz_int]['config_hash'] = hash_val
+                    self.per_mz_config[curve_key]['config_hash'] = hash_val
 
             self._update_global_config_hash()
 
@@ -2753,6 +2865,27 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         )
         return runtime
 
+    @staticmethod
+    def _load_saved_mz_arrays(
+        manager: PieStateManager,
+        saved_key_text: object,
+        current_curve_key: PieCurveKey,
+    ) -> dict[str, np.ndarray]:
+        """Load arrays using the persisted key, with exact-key fallback.
+
+        Older states used nominal integer filenames for a unique curve. New
+        runtime curves always use exact m/z, so the saved filename must be tried
+        before the current precise key during migration.
+        """
+        try:
+            saved_curve_key = parse_pie_curve_key(saved_key_text)
+        except (TypeError, ValueError):
+            saved_curve_key = current_curve_key
+        arrays = manager.load_mz_arrays(saved_curve_key)
+        if not arrays and float(saved_curve_key) != float(current_curve_key):
+            arrays = manager.load_mz_arrays(current_curve_key)
+        return arrays
+
     def _restore_pie_project_state(self) -> None:
         if not self._has_project_state_context() or not self.project_dir or not self.database or not self.curves:
             return
@@ -2763,16 +2896,20 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             if not state.get("success"):
                 logger.warning("PIE state restore failed: %s", state.get("error", "unknown error"))
                 return
-            restored_results: dict[int, dict] = {}
+            restored_results: dict[PieCurveKey, dict] = {}
             for mz_text, saved_result in (state.get("results") or {}).items():
-                try:
-                    mz = int(mz_text)
-                except (TypeError, ValueError):
+                curve_key = self._curve_key_from_state(mz_text)
+                if curve_key is None:
                     continue
-                if mz not in self.curves:
-                    continue
-                arrays = manager.load_mz_arrays(mz) if saved_result.get("success") else {}
-                restored_results[mz] = self._runtime_fit_result_from_state(saved_result, arrays)
+                arrays = (
+                    self._load_saved_mz_arrays(manager, mz_text, curve_key)
+                    if saved_result.get("success")
+                    else {}
+                )
+                restored_results[curve_key] = self._runtime_fit_result_from_state(
+                    saved_result,
+                    arrays,
+                )
             self.all_fit_results = restored_results
             self.pie_state_dirty = False
         except Exception:
@@ -2808,15 +2945,21 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             all_fit_results = dict(self.all_fit_results)
             if current_state.get('success'):
                 for mz_str, result in current_state.get('results', {}).items():
-                    try:
-                        mz_int = int(mz_str)
-                        if mz_int not in all_fit_results:
-                            arrays = manager.load_mz_arrays(mz_int) if result.get("success") else {}
-                            all_fit_results[mz_int] = self._runtime_fit_result_from_state(
-                                result, arrays
+                    curve_key = self._curve_key_from_state(mz_str)
+                    if curve_key is not None and curve_key not in all_fit_results:
+                        arrays = (
+                            self._load_saved_mz_arrays(
+                                manager,
+                                mz_str,
+                                curve_key,
                             )
-                    except (ValueError, KeyError):
-                        pass  # Skip invalid m/z entries
+                            if result.get("success")
+                            else {}
+                        )
+                        all_fit_results[curve_key] = self._runtime_fit_result_from_state(
+                            result,
+                            arrays,
+                        )
 
             # Save complete state (configs + results + arrays)
             # This ensures atomic transaction - either all-or-nothing
@@ -2866,12 +3009,19 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 current_state = manager.load_state(self.curves, self.database, self.calibration)
                 if current_state.get("success"):
                     for mz_text, saved_result in (current_state.get("results") or {}).items():
-                        try:
-                            mz = int(mz_text)
-                        except (TypeError, ValueError):
+                        curve_key = self._curve_key_from_state(mz_text)
+                        if curve_key is None:
                             continue
-                        arrays = manager.load_mz_arrays(mz) if saved_result.get("success") else {}
-                        all_fit_results[mz] = self._runtime_fit_result_from_state(
+                        arrays = (
+                            self._load_saved_mz_arrays(
+                                manager,
+                                mz_text,
+                                curve_key,
+                            )
+                            if saved_result.get("success")
+                            else {}
+                        )
+                        all_fit_results[curve_key] = self._runtime_fit_result_from_state(
                             saved_result, arrays
                         )
 
@@ -3040,7 +3190,10 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         except Exception:
             logger.exception("Failed to save PIE analysis cache at %s", manifest_path.parent)
 
-    def _load_pie_analysis_cache(self, cache_key: str) -> tuple[pd.DataFrame, dict[int, dict], dict] | None:
+    def _load_pie_analysis_cache(
+        self,
+        cache_key: str,
+    ) -> tuple[pd.DataFrame, dict[PieCurveKey, dict], dict] | None:
         manifest_path, result_path = self._pie_cache_paths(cache_key)
         if not manifest_path.exists() or not result_path.exists():
             return None
@@ -3335,13 +3488,20 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             return bool(self._temporary_selected_segment_folders)
         return bool(self.folder_edit.text().strip())
 
-    def _has_fit_candidates_for_mz(self, mz: int) -> bool:
-        if mz == self.current_mz and self.fitting_control_widget._current_mz == mz:
+    def _has_fit_candidates_for_mz(self, mz: PieCurveKey) -> bool:
+        nominal_mz = self._nominal_mz_for_key(mz)
+        if (
+            mz == self.current_mz
+            and self.fitting_control_widget._current_mz == nominal_mz
+        ):
             ready, _reason = self.fitting_control_widget.get_fit_readiness()
             return ready
         if mz in self.per_mz_config:
             return bool(self.per_mz_config[mz].get("selected_species"))
-        return any(item.get("mz") == mz for item in self.get_filtered_database())
+        return any(
+            int(item.get("mz", -1)) == nominal_mz
+            for item in self.get_filtered_database()
+        )
 
     def _update_action_state(self) -> None:
         busy = getattr(self, "_busy", False)
@@ -3448,7 +3608,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         source_scope: str = "temporary",
         selection_explicit: bool = False,
         progress_callback: Callable[[int, str], None] | None = None,
-    ) -> tuple[pd.DataFrame, dict[int, dict], dict[str, object]]:
+    ) -> tuple[pd.DataFrame, dict[PieCurveKey, dict], dict[str, object]]:
 
         analysis_calibration = calibration or self.calibration
         if progress_callback is not None:
@@ -3688,10 +3848,13 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
     def populate_mz_list(self):
         current_mz = self.current_mz
         self.mz_list.clear()
-        for mz in sorted(self.curves):
+        for mz in sorted(self.curves, key=float):
             curve = self.curves[mz]
             if not self._pie_curve_matches_filter(mz, curve):
                 continue
+            mz_text = self._curve_mz_text(curve, mz)
+            exact_mz = self._curve_exact_mz(curve, mz)
+            nominal_mz = self._curve_nominal_mz(curve, mz)
             label = curve.get("species") or ""
             suffix = f" {label}" if label and label != "Unknown" else ""
 
@@ -3737,24 +3900,29 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 fg_color = QtGui.QColor("#374151")       # 深灰文字
                 bg_color = None                          # 无背景色
 
-            item_text = f"m/z {mz}{suffix}  [{status_str}]  ({len(curve['energies'])}点)"
+            item_text = f"m/z {mz_text}{suffix}  [{status_str}]  ({len(curve['energies'])}点)"
             item = QtWidgets.QListWidgetItem(item_text)
             item.setData(QtCore.Qt.ItemDataRole.UserRole, mz)
             item.setForeground(QtGui.QBrush(fg_color))
             if bg_color:
                 item.setBackground(QtGui.QBrush(bg_color))
-            item.setToolTip(f"m/z {mz}{suffix} | {status_str} | {len(curve['energies'])} 个能量点")
+            item.setToolTip(
+                f"精确 m/z {exact_mz:.12g} | 物种检索使用整数 m/z {nominal_mz}{suffix} | "
+                f"{status_str} | {len(curve['energies'])} 个能量点"
+            )
             self.mz_list.addItem(item)
             if current_mz == mz:
                 self.mz_list.setCurrentItem(item)
         if self.mz_list.count() == 0:
             self.on_mz_selected(None)
 
-    def _selected_mz_values(self) -> list[int]:
-        values: list[int] = []
+    def _selected_mz_values(self) -> list[PieCurveKey]:
+        values: list[PieCurveKey] = []
         for item in self.mz_list.selectedItems():
             try:
-                values.append(int(item.data(QtCore.Qt.ItemDataRole.UserRole)))
+                value = item.data(QtCore.Qt.ItemDataRole.UserRole)
+                numeric = float(value)
+                values.append(int(numeric) if isinstance(value, int) else numeric)
             except (TypeError, ValueError):
                 continue
         return values
@@ -3766,7 +3934,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         )
         self._update_action_state()
 
-    def _pie_curve_matches_filter(self, mz: int, curve: dict) -> bool:
+    def _pie_curve_matches_filter(self, mz: PieCurveKey, curve: dict) -> bool:
         query = self.mz_filter_edit.text().strip().lower() if hasattr(self, "mz_filter_edit") else ""
 
         # Phase 2: 使用哈希推导结果状态以匹配过滤
@@ -3794,6 +3962,8 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             str(value)
             for value in (
                 mz,
+                f"{self._curve_exact_mz(curve, mz):.12g}",
+                self._curve_nominal_mz(curve, mz),
                 curve.get("species", ""),
                 fit_state_text,
             )
@@ -3822,7 +3992,11 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self._update_result_detail_button()
             self._update_action_state()
             return
-        self.current_mz = int(current.data(QtCore.Qt.ItemDataRole.UserRole))
+        value = current.data(QtCore.Qt.ItemDataRole.UserRole)
+        self.current_mz = self._curve_key_from_state(value)
+        if self.current_mz is None:
+            self.status_label.setText("无法解析所选 PIE 曲线的精确 m/z")
+            return
 
         # 检查是否有保存的拟合结果
         if self.current_mz in self.all_fit_results:
@@ -3931,9 +4105,10 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         x_values = x_values[valid]
         y_values = y_values[valid]
 
-        title = f"m/z {curve['mz']} PIE物种识别拟合"
+        mz_text = self._curve_mz_text(curve, curve.get("curve_key"))
+        title = f"m/z {mz_text} PIE物种识别拟合"
         if x_values.size == 0:
-            self.plot_widget.show_empty("无有效数据", title=f"m/z {curve['mz']} PIE")
+            self.plot_widget.show_empty("无有效数据", title=f"m/z {mz_text} PIE")
             return
 
         series: list[CurveSeries] = [
@@ -4023,7 +4198,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             return
         self._fit_single_curve_with_panel_state(self.current_mz)
 
-    def _fit_single_curve_with_panel_state(self, mz: int):
+    def _fit_single_curve_with_panel_state(self, mz: PieCurveKey):
         """用当前右侧面板配置拟合单条曲线，更新图表和结果摘要。"""
         from bl03u_masstool.core.pie_analysis import fit_species_combination_with_curve
 
@@ -4112,7 +4287,8 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self._update_result_detail_button()
 
             self.status_label.setText(
-                f"m/z {mz}: PICS数据库候选 {fit_model.get('candidate_count', 0)} 个，"
+                f"m/z {self._mz_text_for_key(mz)}: "
+                f"PICS数据库候选 {fit_model.get('candidate_count', 0)} 个，"
                 f"命中 {len(results)} 个，R²={fit_model.get('r_squared', 0.0):.4f}"
             )
             fitted_count = sum(1 for r in self.all_fit_results.values() if r.get("success"))
@@ -4123,7 +4299,9 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.populate_mz_list()
             self._update_action_state()
             if not results:
-                self.status_label.setText(f"m/z {mz}: 当前候选无法形成有效拟合")
+                self.status_label.setText(
+                    f"m/z {self._mz_text_for_key(mz)}: 当前候选无法形成有效拟合"
+                )
         except Exception as exc:
             self._fit_preview_active = False
             self.current_fit = None
@@ -4134,14 +4312,16 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             }
             self.fitting_control_widget.clear_fit_result()
             self.result_display_widget.set_result_status("FAILED")
-            self.status_label.setText(f"m/z {mz} 拟合失败: {exc}")
+            self.status_label.setText(
+                f"m/z {self._mz_text_for_key(mz)} 拟合失败: {exc}"
+            )
             self.populate_mz_list()
             self._update_action_state()
         finally:
             final_message = self.status_label.text()
             self.set_busy(False, final_message if "拟合中" not in final_message else "就绪")
 
-    def _fit_multiple_with_panel_state(self, mz_list: list[int]):
+    def _fit_multiple_with_panel_state(self, mz_list: list[PieCurveKey]):
         """Fit selected curves with per-m/z configurations prepared on the UI thread."""
         if self._busy:
             return
@@ -4163,17 +4343,24 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.worker.finished.connect(lambda: self.set_busy(False, self.status_label.text()))
         self.worker.start()
 
-    def _build_selected_fit_jobs(self, mz_list: list[int]) -> dict[int, dict]:
+    def _build_selected_fit_jobs(
+        self,
+        mz_list: list[PieCurveKey],
+    ) -> dict[PieCurveKey, dict]:
         """Snapshot per-m/z inputs without touching Qt widgets from the worker thread."""
         filtered_database = list(self.get_filtered_database())
-        jobs: dict[int, dict] = {}
+        jobs: dict[PieCurveKey, dict] = {}
         for mz in mz_list:
             curve = self.curves.get(mz)
             if not curve:
                 continue
             config = self.per_mz_config.get(mz)
             if config is None:
-                selected = [item for item in filtered_database if item.get("mz") == mz]
+                nominal_mz = self._nominal_mz_for_key(mz)
+                selected = [
+                    item for item in filtered_database
+                    if int(item.get("mz", -1)) == nominal_mz
+                ]
                 coefficients: dict[int, float] = {}
                 locked_ids: list[int] = []
             else:
@@ -4193,7 +4380,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         return jobs
 
     @staticmethod
-    def _fit_multiple_sync(jobs: dict[int, dict], global_hash: str) -> dict:
+    def _fit_multiple_sync(jobs: dict[PieCurveKey, dict], global_hash: str) -> dict:
         """Worker-thread fitting using immutable UI-thread snapshots."""
         from bl03u_masstool.core.pie_analysis import fit_species_combination_with_curve
 
@@ -4272,7 +4459,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         if first_success_mz is not None:
             for row in range(self.mz_list.count()):
                 item = self.mz_list.item(row)
-                if int(item.data(QtCore.Qt.ItemDataRole.UserRole)) == first_success_mz:
+                if item.data(QtCore.Qt.ItemDataRole.UserRole) == first_success_mz:
                     self.mz_list.setCurrentItem(item)
                     break
         self._update_action_state()
@@ -4296,7 +4483,11 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         candidates = panel_state.get("selected_species", [])
         if not candidates:
             filtered = self.get_filtered_database()
-            candidates = [item for item in filtered if item.get("mz") == self.current_mz]
+            nominal_mz = self._nominal_mz_for_key(self.current_mz)
+            candidates = [
+                item for item in filtered
+                if int(item.get("mz", -1)) == nominal_mz
+            ]
         if len(candidates) < 2:
             QtWidgets.QMessageBox.information(self, "提示", "至少需要2个候选物种才能进行组合穷举")
             return
@@ -4355,7 +4546,8 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self._exhaustive_ranked = ranked
         names = ", ".join(best["species_names"])
         self.status_label.setText(
-            f"m/z {self.current_mz}: 最优组合 [{names}] R²={best['r_squared']:.4f} "
+            f"m/z {self._mz_text_for_key(self.current_mz)}: "
+            f"最优组合 [{names}] R²={best['r_squared']:.4f} "
             f"(共 {len(ranked)} 种组合)"
         )
         fitted_count = sum(1 for r in self.all_fit_results.values() if r.get("success"))

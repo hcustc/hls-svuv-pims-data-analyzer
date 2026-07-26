@@ -55,7 +55,7 @@ def validate_pie_ensemble(folder: str | Path) -> dict[str, Any]:
 
     print(f"📊 Analyzing PIE folder: {folder}")
 
-    # 融合方案（不传融合参数到analyze_pie_folder，而是在detect_peaks_ensemble中使用）
+    # 融合方案（analyze_pie_folder 通过统一检测入口调度 ensemble）
     print("   [1/4] Running ensemble detection...")
     ensemble_df = analyze_pie_folder(
         folder,
@@ -63,7 +63,7 @@ def validate_pie_ensemble(folder: str | Path) -> dict[str, Any]:
         recursive=False,
         prefer_gaussian=False,
         photon_normalize=False,
-        algorithm="legacy",  # 这里传legacy，但我们会用ensemble覆盖
+        algorithm="ensemble",
     )
     ensemble_curves = build_pie_curves(ensemble_df)
 
@@ -164,7 +164,7 @@ def validate_temperature_ensemble(folder: str | Path) -> dict[str, Any]:
         folder,
         calibration=calibration,
         prefer_gaussian=False,
-        algorithm="legacy",  # placeholder
+        algorithm="ensemble",
     )
     ensemble_curves = build_temperature_curves(ensemble_df)
 

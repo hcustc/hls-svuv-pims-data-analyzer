@@ -80,7 +80,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.pie_species_data: list[dict] = []
         self.available_energies: list[float] = []
         self.all_species_mf: dict[tuple, dict[float, float]] = {}
-        self.peak_ranges: dict[int, tuple[int, int]] = {}
+        self.peak_ranges: dict[float, tuple[int, int]] = {}
         self._loaded_database_path: str | None = None
         self._project_data_restore_key: tuple | None = None
         self._restoring_project_data = False
@@ -89,6 +89,85 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self._parent_mz_confirmed = False
         self._init_ui()
         self._auto_load_database()
+
+    @staticmethod
+    def _nominal_mz(value: object) -> int:
+        return int(round(float(value)))
+
+    @staticmethod
+    def _is_nominal_mz(value: object) -> bool:
+        numeric = float(value)
+        return abs(numeric - round(numeric)) <= 1e-9
+
+    @staticmethod
+    def _mz_text(value: object) -> str:
+        numeric = float(value)
+        if abs(numeric - round(numeric)) <= 1e-9:
+            return str(int(round(numeric)))
+        return f"{numeric:.6f}".rstrip("0").rstrip(".")
+
+    @classmethod
+    def _peak_exact_mz(cls, peak: dict) -> float:
+        return float(
+            peak.get(
+                "curve_key",
+                peak.get(
+                    "mz_exact_mean",
+                    peak.get("mz_raw", peak.get("mz_rounded", 0.0)),
+                ),
+            )
+        )
+
+    @classmethod
+    def _species_signal_mz(cls, species: dict) -> float:
+        return float(
+            species.get(
+                "curve_key",
+                species.get(
+                    "mz_exact_mean",
+                    species.get("mz_exact", species.get("mz", 0.0)),
+                ),
+            )
+        )
+
+    @classmethod
+    def _resolve_precise_mz_candidate(
+        cls,
+        selector: float,
+        candidates: list[tuple[object, float, int]],
+    ) -> object | None:
+        requested = float(selector)
+        nominal = cls._nominal_mz(requested)
+        matches = [
+            candidate
+            for candidate in candidates
+            if int(candidate[2]) == nominal
+        ]
+        if not matches:
+            return None
+        if cls._is_nominal_mz(requested):
+            return matches[0][0] if len(matches) == 1 else None
+
+        ordered = sorted(
+            matches,
+            key=lambda candidate: (abs(float(candidate[1]) - requested), float(candidate[1])),
+        )
+        if abs(float(ordered[0][1]) - requested) > 0.25:
+            return None
+        if (
+            len(ordered) > 1
+            and abs(
+                abs(float(ordered[0][1]) - requested)
+                - abs(float(ordered[1][1]) - requested)
+            )
+            <= 1e-12
+        ):
+            return None
+        return ordered[0][0]
+
+    @classmethod
+    def _same_signal_mz(cls, left: object, right: object) -> bool:
+        return abs(float(left) - float(right)) <= 1e-6
 
     def _init_ui(self):
         layout = QtWidgets.QVBoxLayout(self)
@@ -318,35 +397,66 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.status_label.setText("已从项目自动恢复: " + "；".join(restored))
         self._refresh_parent_selection_state()
 
-    def _loaded_data_has_mz(self, mz: int) -> bool:
-        if mz <= 0:
-            return False
-        for species in self.pie_species_data:
-            try:
-                species_mz = int(species.get("mz"))
-            except (TypeError, ValueError):
-                species_mz = -1
-            if species_mz == mz:
-                return True
+    def _loaded_signal_mz_values(self) -> list[float]:
+        signal_values: set[float] = set()
         for energy_data in self.temperature_scan_data.values():
             for info in energy_data.values():
-                precomputed = info.get("precomputed_signals", {}) or {}
-                if mz in precomputed:
-                    return True
-                for peak in info.get("peaks_info", []) or []:
+                peaks_info = info.get("peaks_info", []) or []
+                for peak in peaks_info:
                     try:
-                        peak_mz = int(peak.get("mz_rounded"))
+                        value = self._peak_exact_mz(peak)
                     except (TypeError, ValueError):
-                        peak_mz = -1
-                    if peak_mz == mz:
-                        return True
-        return False
+                        continue
+                    if value > 0:
+                        signal_values.add(round(value, 9))
+                if peaks_info:
+                    continue
+                for key in (info.get("precomputed_signals", {}) or {}):
+                    try:
+                        value = float(key)
+                    except (TypeError, ValueError):
+                        continue
+                    if value > 0:
+                        signal_values.add(round(value, 9))
+        if signal_values:
+            return sorted(signal_values)
+
+        pie_values: set[float] = set()
+        for species in self.pie_species_data:
+            try:
+                value = self._species_signal_mz(species)
+            except (TypeError, ValueError):
+                continue
+            if value > 0:
+                pie_values.add(round(value, 9))
+        return sorted(pie_values)
+
+    def _matching_loaded_mz_values(self, mz: float) -> list[float]:
+        requested = float(mz)
+        values = self._loaded_signal_mz_values()
+        nominal_matches = [
+            value for value in values if self._nominal_mz(value) == self._nominal_mz(requested)
+        ]
+        if self._is_nominal_mz(requested):
+            return nominal_matches
+        return sorted(nominal_matches, key=lambda value: abs(value - requested))
+
+    def _loaded_data_has_mz(self, mz: float) -> bool:
+        if mz <= 0:
+            return False
+        matches = self._matching_loaded_mz_values(mz)
+        if self._is_nominal_mz(mz):
+            return len(matches) == 1
+        return bool(matches and abs(matches[0] - float(mz)) <= 0.25)
+
+    def _loaded_data_mz_is_ambiguous(self, mz: float) -> bool:
+        return self._is_nominal_mz(mz) and len(self._matching_loaded_mz_values(mz)) > 1
 
     def _clear_stale_legacy_parent_mz(self) -> bool:
         if not hasattr(self, "spin_parent_mz"):
             return False
-        current_mz = int(self.spin_parent_mz.value())
-        if current_mz != 128:
+        current_mz = float(self.spin_parent_mz.value())
+        if not self._same_signal_mz(current_mz, 128.0):
             return False
         if self._loaded_data_has_mz(current_mz):
             return False
@@ -597,8 +707,10 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         pie_table_layout = QtWidgets.QVBoxLayout(self.pie_table_group)
         pie_table_layout.setContentsMargins(4, 4, 4, 4)
         self.pie_species_table = QtWidgets.QTableWidget()
-        self.pie_species_table.setColumnCount(5)
-        self.pie_species_table.setHorizontalHeaderLabels(["质量数", "物种名称", "电离能(eV)", "贡献比例(%)", "R²"])
+        self.pie_species_table.setColumnCount(6)
+        self.pie_species_table.setHorizontalHeaderLabels(
+            ["质量数", "精确m/z", "物种名称", "电离能(eV)", "贡献比例(%)", "R²"]
+        )
         self.pie_species_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
         self.pie_species_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.pie_species_table.setMaximumHeight(200)
@@ -675,9 +787,11 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         cfg_layout.addWidget(self.parent_selection_banner, 0, 0, 1, 6)
 
         cfg_layout.addWidget(QtWidgets.QLabel("母体分子离子 m/z:"), 1, 0)
-        self.spin_parent_mz = QtWidgets.QSpinBox()
-        self.spin_parent_mz.setToolTip("母体反应物的分子离子质量数；0 表示尚未设置")
-        self.spin_parent_mz.setRange(0, 500)
+        self.spin_parent_mz = QtWidgets.QDoubleSpinBox()
+        self.spin_parent_mz.setToolTip("母体反应物对应的精确峰 m/z；0 表示尚未设置")
+        self.spin_parent_mz.setRange(0.0, 500.0)
+        self.spin_parent_mz.setDecimals(6)
+        self.spin_parent_mz.setSingleStep(0.001)
         self.spin_parent_mz.setSpecialValueText("未设置")
         self.spin_parent_mz.setValue(self.settings.parent_mz)
         self.spin_parent_mz.valueChanged.connect(self._on_parent_mz_changed)
@@ -759,9 +873,12 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         if not values:
             QtWidgets.QMessageBox.information(self, "尚无候选", "请先在“数据加载”中载入温度扫描或 PIE 结果。")
             return
-        labels = [str(value) for value in values]
-        current = int(self.spin_parent_mz.value())
-        initial = values.index(current) if current in values else 0
+        labels = [self._mz_text(value) for value in values]
+        current = float(self.spin_parent_mz.value())
+        initial = min(
+            range(len(values)),
+            key=lambda index: abs(values[index] - current),
+        )
         selected, accepted = QtWidgets.QInputDialog.getItem(
             self,
             "选择母体分子离子",
@@ -772,43 +889,35 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         )
         if not accepted or not selected:
             return
-        self.spin_parent_mz.setValue(int(selected))
+        selected_index = labels.index(selected)
+        self.spin_parent_mz.setValue(float(values[selected_index]))
 
-    def _detected_parent_mz_values(self) -> list[int]:
-        values: set[int] = set()
-        for species in self.pie_species_data:
-            try:
-                mz = int(species.get("mz"))
-            except (TypeError, ValueError):
-                continue
-            if mz > 0:
-                values.add(mz)
-        for energy_data in self.temperature_scan_data.values():
-            for info in energy_data.values():
-                for mz in (info.get("precomputed_signals", {}) or {}).keys():
-                    try:
-                        value = int(mz)
-                    except (TypeError, ValueError):
-                        continue
-                    if value > 0:
-                        values.add(value)
-                for peak in info.get("peaks_info", []) or []:
-                    try:
-                        value = int(peak.get("mz_rounded"))
-                    except (TypeError, ValueError):
-                        continue
-                    if value > 0:
-                        values.add(value)
-        return sorted(values)
+    def _detected_parent_mz_values(self) -> list[float]:
+        return self._loaded_signal_mz_values()
 
     def _confirm_parent_mz(self) -> None:
-        mz = int(self.spin_parent_mz.value())
+        mz = float(self.spin_parent_mz.value())
         if mz <= 0:
             QtWidgets.QMessageBox.warning(self, "尚未设置", "请先输入母体分子离子 m/z，或从已加载数据中选择。")
             return
         has_loaded_data = bool(self.temperature_scan_data or self.pie_species_data)
+        if has_loaded_data and self._loaded_data_mz_is_ambiguous(mz):
+            choices = "、".join(
+                self._mz_text(value) for value in self._matching_loaded_mz_values(mz)
+            )
+            QtWidgets.QMessageBox.warning(
+                self,
+                "m/z 不唯一",
+                f"名义 m/z {self._mz_text(mz)} 下存在多个精确峰：{choices}。"
+                "请点击“从数据选择”指定一个精确峰。",
+            )
+            return
         if has_loaded_data and not self._loaded_data_has_mz(mz):
-            QtWidgets.QMessageBox.warning(self, "数据中未找到", f"已加载数据中没有检测到 m/z {mz}，请检查母体设置。")
+            QtWidgets.QMessageBox.warning(
+                self,
+                "数据中未找到",
+                f"已加载数据中没有检测到 m/z {self._mz_text(mz)}，请检查母体设置。",
+            )
             return
         self._parent_mz_confirmed = True
         self._refresh_parent_selection_state()
@@ -816,9 +925,11 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
     def _refresh_parent_selection_state(self) -> None:
         if not hasattr(self, "spin_parent_mz") or not hasattr(self, "lbl_parent_mz_status"):
             return
-        mz = int(self.spin_parent_mz.value())
+        mz = float(self.spin_parent_mz.value())
         has_loaded_data = bool(self.temperature_scan_data or self.pie_species_data)
         exists_in_data = self._loaded_data_has_mz(mz) if has_loaded_data and mz > 0 else False
+        ambiguous = self._loaded_data_mz_is_ambiguous(mz) if has_loaded_data and mz > 0 else False
+        mz_text = self._mz_text(mz)
         origin_label = {
             "project": "项目预设",
             "manual": "本页设置",
@@ -829,19 +940,26 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         if mz <= 0:
             state = "pending"
             text = "未设置：请从数据选择或手动输入"
+        elif ambiguous:
+            state = "warning"
+            choices = "、".join(
+                self._mz_text(value) for value in self._matching_loaded_mz_values(mz)
+            )
+            text = f"名义 m/z {mz_text} 不唯一，请选择精确峰：{choices}"
+            self._parent_mz_confirmed = False
         elif has_loaded_data and not exists_in_data:
             state = "warning"
-            text = f"{origin_label} m/z {mz}：当前数据中未找到"
+            text = f"{origin_label} m/z {mz_text}：当前数据中未找到"
             self._parent_mz_confirmed = False
         elif not has_loaded_data:
             state = "pending"
-            text = f"{origin_label} m/z {mz}：加载数据后验证"
+            text = f"{origin_label} m/z {mz_text}：加载数据后验证"
         elif self._parent_mz_confirmed:
             state = "complete"
-            text = f"已确认 m/z {mz}，数据中存在"
+            text = f"已确认 m/z {mz_text}，数据中存在"
         else:
             state = "active"
-            text = f"{origin_label} m/z {mz}，数据中存在，请确认"
+            text = f"{origin_label} m/z {mz_text}，数据中存在，请确认"
 
         self.lbl_parent_mz_status.setText(text)
         self.lbl_parent_mz_status.setProperty("selectionState", state)
@@ -861,39 +979,57 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             calc_hint = "请先加载数据，再选择母体分子离子 m/z"
         self.lbl_parent_calc_hint.setText(calc_hint)
 
-    def _available_parent_mz_values(self) -> list[int]:
-        mz_values: set[int] = set()
+    def _available_parent_mz_values(self) -> list[float]:
+        mz_values: set[float] = set()
         if hasattr(self, "spin_parent_mz"):
-            current_mz = int(self.spin_parent_mz.value())
+            current_mz = float(self.spin_parent_mz.value())
             if current_mz > 0:
-                mz_values.add(current_mz)
+                mz_values.add(round(current_mz, 9))
 
-        for energy_data in self.temperature_scan_data.values():
-            for info in energy_data.values():
-                for peak in info.get("peaks_info", []) or []:
-                    mz = peak.get("mz_rounded")
-                    if mz:
-                        mz_values.add(int(mz))
-
-        for species in self.pie_species_data:
-            mz = species.get("mz")
-            if mz:
-                mz_values.add(int(mz))
+        mz_values.update(self._loaded_signal_mz_values())
 
         for config in self.energy_parent_config.values():
             mz = config.get("mz")
             if mz:
-                mz_values.add(int(mz))
+                mz_values.add(float(mz))
 
         return sorted(mz_values)
 
-    def _species_options_for_mz(self, mz: int) -> list[tuple[str, float | None]]:
+    def _species_options_for_mz(self, mz: float) -> list[tuple[str, float | None]]:
         seen: set[str] = set()
         options: list[tuple[str, float | None]] = []
+        nominal_mz = self._nominal_mz(mz)
+        pie_candidates = [
+            species
+            for species in self.pie_species_data
+            if self._nominal_mz(species.get("mz", 0)) == nominal_mz
+        ]
+        if pie_candidates and not self._is_nominal_mz(mz):
+            signal_groups = sorted(
+                {self._species_signal_mz(species) for species in pie_candidates}
+            )
+            selected_group = self._resolve_precise_mz_candidate(
+                float(mz),
+                [
+                    (signal_mz, signal_mz, nominal_mz)
+                    for signal_mz in signal_groups
+                ],
+            )
+            pie_candidates = (
+                [
+                    species
+                    for species in pie_candidates
+                    if selected_group is not None
+                    and self._same_signal_mz(
+                        self._species_signal_mz(species),
+                        selected_group,
+                    )
+                ]
+                if selected_group is not None
+                else []
+            )
 
-        for species in self.pie_species_data:
-            if species.get("mz") != mz:
-                continue
+        for species in pie_candidates:
             name = species.get("species") or species.get("name") or ""
             if not name or name in seen:
                 continue
@@ -901,7 +1037,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             options.append((name, species.get("ie")))
 
         for species in self.database:
-            if species.get("mz") != mz:
+            if self._nominal_mz(species.get("mz", 0)) != nominal_mz:
                 continue
             name = species.get("species") or species.get("name") or ""
             if not name or name in seen:
@@ -912,7 +1048,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         options.sort(key=lambda item: (item[1] if item[1] is not None else float("inf"), item[0]))
         return options
 
-    def _populate_parent_species_combo(self, combo: QtWidgets.QComboBox, mz: int, include_auto: bool = True) -> None:
+    def _populate_parent_species_combo(self, combo: QtWidgets.QComboBox, mz: float, include_auto: bool = True) -> None:
         combo.blockSignals(True)
         combo.clear()
         if include_auto:
@@ -936,11 +1072,12 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         value = self.combo_parent_species.currentData()
         return str(value) if value else None
 
-    def _parent_result_label(self, mz: int, species_name: str | None, energy: float | None = None) -> str:
+    def _parent_result_label(self, mz: float, species_name: str | None, energy: float | None = None) -> str:
         base_name = species_name or "母体"
+        mz_text = self._mz_text(mz)
         if energy is None:
-            return f"{base_name}(母体,m/z={mz})" if species_name else f"母体(m/z={mz})"
-        return f"{base_name}(母体,m/z={mz},E={energy:.2f}eV)"
+            return f"{base_name}(母体,m/z={mz_text})" if species_name else f"母体(m/z={mz_text})"
+        return f"{base_name}(母体,m/z={mz_text},E={energy:.2f}eV)"
 
     def _on_parent_mz_changed(self):
         self.settings.parent_mz = self.spin_parent_mz.value()
@@ -1001,13 +1138,13 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.energy_parent_table.setItem(row, 0, energy_item)
 
             cfg = self.energy_parent_config.get(energy, {})
-            mz = int(cfg.get("mz") or default_mz)
+            mz = float(cfg.get("mz") or default_mz)
 
             mz_combo = QtWidgets.QComboBox()
             mz_combo.setObjectName("TableCellEditor")
             mz_combo.setFixedHeight(24)
             for value in mz_values:
-                mz_combo.addItem(str(value), value)
+                mz_combo.addItem(self._mz_text(value), value)
             self._set_combo_current_data(mz_combo, mz)
             self.energy_parent_table.setCellWidget(row, 1, mz_combo)
 
@@ -1047,7 +1184,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         if mz is None:
             return
         previous_species = species_combo.currentData()
-        self._populate_parent_species_combo(species_combo, int(mz), include_auto=True)
+        self._populate_parent_species_combo(species_combo, float(mz), include_auto=True)
         self._set_combo_current_data(species_combo, previous_species)
         self._on_species_changed_for_parent_config(energy, mz_combo, species_combo)
 
@@ -1062,7 +1199,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             return
         species_name = species_combo.currentData()
         cfg = {
-            "mz": int(mz),
+            "mz": float(mz),
             "species_name": str(species_name) if species_name else None,
         }
         if self._is_default_reference_config(cfg):
@@ -1096,7 +1233,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
                     continue
                 species_name = species_combo.currentData()
                 cfg = {
-                    "mz": int(mz),
+                    "mz": float(mz),
                     "species_name": str(species_name) if species_name else None,
                 }
                 if not self._is_default_reference_config(cfg):
@@ -1116,21 +1253,21 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             cfg = self.energy_parent_config[energy]
             if cfg.get("mz"):
                 return {
-                    "mz": int(cfg["mz"]),
+                    "mz": float(cfg["mz"]),
                     "species_name": cfg.get("species_name"),
                 }
         return {
-            "mz": int(self.spin_parent_mz.value()),
+            "mz": float(self.spin_parent_mz.value()),
             "species_name": self._selected_parent_species_name(),
         }
 
     def _is_default_reference_config(self, cfg: dict) -> bool:
-        default_mz = int(self.spin_parent_mz.value()) if hasattr(self, "spin_parent_mz") else self.settings.parent_mz
+        default_mz = float(self.spin_parent_mz.value()) if hasattr(self, "spin_parent_mz") else self.settings.parent_mz
         default_species = self._selected_parent_species_name()
         cfg_species = cfg.get("species_name")
-        return int(cfg.get("mz") or default_mz) == default_mz and cfg_species == default_species
+        return self._same_signal_mz(cfg.get("mz") or default_mz, default_mz) and cfg_species == default_species
 
-    def _species_ie(self, mz: int, species_name: str | None) -> float | None:
+    def _species_ie(self, mz: float, species_name: str | None) -> float | None:
         for name, ie in self._species_options_for_mz(mz):
             if species_name is None or name == species_name:
                 return ie
@@ -1139,7 +1276,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             return None
         return record.get("ie")
 
-    def _resolved_reference_species_name(self, mz: int, species_name: str | None) -> str | None:
+    def _resolved_reference_species_name(self, mz: float, species_name: str | None) -> str | None:
         if species_name:
             return species_name
         options = self._species_options_for_mz(mz)
@@ -1309,9 +1446,9 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             return
         try:
             ranges = load_peak_ranges(manual_path, calibration=self.calibration)
-            peak_ranges: dict[int, tuple[int, int]] = {}
+            peak_ranges: dict[float, tuple[int, int]] = {}
             for item in ranges:
-                mz = int(round(item.mz))
+                mz = float(item.mz)
                 left = int(item.left_bound)
                 right = int(item.right_bound)
                 if left > right:
@@ -1442,7 +1579,19 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         try:
             df = self._read_table_file(file_path)
             temp_col = self._find_df_column(df, ["temperature", "温度", "温度(°C)", "温度(C)"])
-            mz_col = self._find_df_column(df, ["mz_rounded", "mz", "m/z", "质量数"])
+            exact_mz_col = self._find_df_column(
+                df,
+                [
+                    "temperature_curve_key",
+                    "curve_key",
+                    "mz_exact_mean",
+                    "精确m/z",
+                    "mz",
+                    "m/z",
+                ],
+            )
+            nominal_mz_col = self._find_df_column(df, ["mz_rounded", "质量数"])
+            mz_col = exact_mz_col or nominal_mz_col
             signal_col = self._find_df_column(
                 df,
                 ["area", "normalized_area", "最终强度", "photon_normalized_area", "IO归一化", "raw_area", "原始积分"],
@@ -1460,6 +1609,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             io_col = self._find_df_column(df, ["io", "IO(nA)", "光强"])
             left_col = self._find_df_column(df, ["left_bound", "left_idx", "起始通道"])
             right_col = self._find_df_column(df, ["right_bound", "right_idx", "结束通道"])
+            track_col = self._find_df_column(df, ["temperature_peak_track", "peak_track"])
             default_energy = (
                 self.project_settings.mf_photon_energy
                 if self.project_settings is not None
@@ -1472,7 +1622,11 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 try:
                     temperature = float(row[temp_col])
                     mz_raw = float(row[mz_col])
-                    mz = int(round(mz_raw))
+                    mz = (
+                        int(round(float(row[nominal_mz_col])))
+                        if nominal_mz_col is not None and pd.notna(row.get(nominal_mz_col))
+                        else int(round(mz_raw))
+                    )
                     signal = float(row[signal_col])
                 except Exception:
                     skipped += 1
@@ -1516,25 +1670,56 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
                     except Exception:
                         pass
 
-                info["precomputed_signals"][mz] = float(info["precomputed_signals"].get(mz, 0.0)) + signal
                 peak_map = info["_peak_map"]
-                if mz not in peak_map:
-                    left_idx = 0
-                    right_idx = 0
-                    if left_col is not None and pd.notna(row.get(left_col)):
-                        left_idx = int(float(row[left_col]))
-                    if right_col is not None and pd.notna(row.get(right_col)):
-                        right_idx = int(float(row[right_col]))
-                    peak_map[mz] = {
+                left_idx = 0
+                right_idx = 0
+                if left_col is not None and pd.notna(row.get(left_col)):
+                    left_idx = int(float(row[left_col]))
+                if right_col is not None and pd.notna(row.get(right_col)):
+                    right_idx = int(float(row[right_col]))
+
+                peak_track = None
+                if track_col is not None and pd.notna(row.get(track_col)):
+                    peak_track = int(float(row[track_col]))
+                if peak_track is not None:
+                    peak_identity = ("track", mz, peak_track)
+                elif left_col is not None and right_col is not None:
+                    peak_identity = ("bounds", mz, left_idx, right_idx)
+                else:
+                    peak_identity = ("exact", mz, round(mz_raw, 6))
+
+                if peak_identity not in peak_map:
+                    curve_key = float(mz_raw)
+                    if any(
+                        self._same_signal_mz(
+                            existing_peak.get("curve_key", existing_peak["mz_raw"]),
+                            curve_key,
+                        )
+                        for existing_peak in peak_map.values()
+                    ):
+                        raise ValueError(
+                            "温度扫描结果中存在无法区分的同名义质量峰 "
+                            f"m/z {mz}；请重新导出包含精确m/z或 "
+                            "temperature_curve_key 的结果。"
+                        )
+                    peak_map[peak_identity] = {
                         "index": 0,
                         "mz_raw": mz_raw,
                         "mz_rounded": mz,
+                        "mz_exact_mean": mz_raw,
+                        "curve_key": curve_key,
+                        "temperature_peak_track": peak_track,
                         "left_idx": left_idx,
                         "right_idx": right_idx,
                         "integral": 0.0,
                         "overlapped": False,
                     }
-                peak_map[mz]["integral"] += signal
+                stored_peak = peak_map[peak_identity]
+                curve_key = float(stored_peak["curve_key"])
+                info["precomputed_signals"][curve_key] = (
+                    float(info["precomputed_signals"].get(curve_key, 0.0)) + signal
+                )
+                stored_peak["integral"] += signal
 
             if not loaded:
                 QtWidgets.QMessageBox.warning(self, "提示", "未从温度扫描结果中读取到有效数据")
@@ -1550,7 +1735,10 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
                     if io_values:
                         info["avg_io"] = float(np.mean(io_values))
                     peak_map = info.pop("_peak_map")
-                    info["peaks_info"] = sorted(peak_map.values(), key=lambda item: item["mz_rounded"])
+                    info["peaks_info"] = sorted(
+                        peak_map.values(),
+                        key=lambda item: (item["mz_rounded"], item["mz_exact_mean"]),
+                    )
 
             self.temperature_scan_data = loaded
             self.available_energies = sorted(self.temperature_scan_data.keys())
@@ -1625,6 +1813,10 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
             self.pie_species_data = []
             self.pie_species_table.setRowCount(0)
+            exact_mz_col = self._find_df_column(
+                df,
+                ["精确m/z", "mz_exact_mean", "curve_key", "mz_exact"],
+            )
 
             for _, row in df.iterrows():
                 mz = int(row["质量数"]) if pd.notna(row["质量数"]) else None
@@ -1636,25 +1828,40 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 if mz is None or not species_name:
                     continue
 
-                self.pie_species_data.append({
+                species_record = {
                     "mz": mz,
                     "species": species_name,
                     "ie": ie,
                     "contribution": contribution,
                     "r_squared": r_squared,
-                })
+                }
+                exact_mz = float(mz)
+                if exact_mz_col is not None and pd.notna(row.get(exact_mz_col)):
+                    candidate_exact_mz = float(row[exact_mz_col])
+                    if np.isfinite(candidate_exact_mz):
+                        exact_mz = candidate_exact_mz
+                        species_record["mz_exact_mean"] = exact_mz
+                        species_record["curve_key"] = exact_mz
+                self.pie_species_data.append(species_record)
 
                 table_row = self.pie_species_table.rowCount()
                 self.pie_species_table.insertRow(table_row)
                 self.pie_species_table.setItem(table_row, 0, QtWidgets.QTableWidgetItem(str(mz)))
-                self.pie_species_table.setItem(table_row, 1, QtWidgets.QTableWidgetItem(species_name))
-                self.pie_species_table.setItem(table_row, 2, QtWidgets.QTableWidgetItem(f"{ie:.2f}" if ie is not None else "N/A"))
-                self.pie_species_table.setItem(table_row, 3, QtWidgets.QTableWidgetItem(f"{contribution:.1f}" if contribution is not None else "N/A"))
-                self.pie_species_table.setItem(table_row, 4, QtWidgets.QTableWidgetItem(f"{r_squared:.4f}" if r_squared is not None else "N/A"))
+                self.pie_species_table.setItem(
+                    table_row,
+                    1,
+                    QtWidgets.QTableWidgetItem(self._mz_text(exact_mz)),
+                )
+                self.pie_species_table.setItem(table_row, 2, QtWidgets.QTableWidgetItem(species_name))
+                self.pie_species_table.setItem(table_row, 3, QtWidgets.QTableWidgetItem(f"{ie:.2f}" if ie is not None else "N/A"))
+                self.pie_species_table.setItem(table_row, 4, QtWidgets.QTableWidgetItem(f"{contribution:.1f}" if contribution is not None else "N/A"))
+                self.pie_species_table.setItem(table_row, 5, QtWidgets.QTableWidgetItem(f"{r_squared:.4f}" if r_squared is not None else "N/A"))
 
-            unique_mz = len(set(d["mz"] for d in self.pie_species_data))
+            unique_mz = len(
+                {round(self._species_signal_mz(d), 9) for d in self.pie_species_data}
+            )
             unique_species = len(set(d["species"] for d in self.pie_species_data))
-            self.lbl_pie_status.setText(f"已加载 {unique_mz} 个质量数, {unique_species} 个物种")
+            self.lbl_pie_status.setText(f"已加载 {unique_mz} 条精确 m/z 曲线, {unique_species} 个物种")
             self.lbl_pie_status.setStyleSheet("color: #6495ed;")
             # Auto-expand PIE table group if data is present
             if hasattr(self, "pie_table_group"):
@@ -1670,10 +1877,15 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
                     file_path,
                     message="PIE鉴定结果已登记到项目管理",
                 )
-            self.status_label.setText(f"已加载PIE鉴定结果: {unique_mz} 个质量数")
+            self.status_label.setText(f"已加载PIE鉴定结果: {unique_mz} 条精确 m/z 曲线")
 
             if show_message:
-                QtWidgets.QMessageBox.information(self, "成功", f"加载了 {len(self.pie_species_data)} 条鉴定结果\n{unique_mz} 个质量数, {unique_species} 个物种")
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "成功",
+                    f"加载了 {len(self.pie_species_data)} 条鉴定结果\n"
+                    f"{unique_mz} 条精确 m/z 曲线, {unique_species} 个物种",
+                )
         except Exception as e:
             import traceback
             QtWidgets.QMessageBox.critical(self, "错误", f"加载PIE鉴定结果失败: {e}\n{traceback.format_exc()}")
@@ -1681,12 +1893,13 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
     def _update_ts_table_with_species(self):
         if not self.pie_species_data:
             return
-        species_by_mz: dict[int, list[str]] = {}
+        species_by_mz: dict[int, dict[float, list[str]]] = {}
         for d in self.pie_species_data:
-            mz = d["mz"]
-            if mz not in species_by_mz:
-                species_by_mz[mz] = []
-            species_by_mz[mz].append(d["species"])
+            nominal_mz = self._nominal_mz(d["mz"])
+            signal_mz = self._species_signal_mz(d)
+            species_by_mz.setdefault(nominal_mz, {}).setdefault(signal_mz, []).append(
+                d["species"]
+            )
 
         for energy in self.available_energies:
             if energy not in self.temperature_scan_data:
@@ -1696,9 +1909,31 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 matched_species = []
                 for peak in peaks_info:
                     if not peak.get("overlapped", False):
-                        mz = peak["mz_rounded"]
-                        if mz in species_by_mz:
-                            matched_species.extend(species_by_mz[mz])
+                        nominal_mz = self._nominal_mz(peak["mz_rounded"])
+                        groups = species_by_mz.get(nominal_mz, {})
+                        if not groups:
+                            continue
+                        same_nominal_peaks = [
+                            candidate
+                            for candidate in peaks_info
+                            if self._nominal_mz(candidate["mz_rounded"]) == nominal_mz
+                            and not candidate.get("overlapped", False)
+                        ]
+                        candidates = [
+                            (signal_mz, signal_mz, nominal_mz)
+                            for signal_mz in groups
+                        ]
+                        if (
+                            len(same_nominal_peaks) > 1
+                            and all(self._is_nominal_mz(signal_mz) for signal_mz in groups)
+                        ):
+                            continue
+                        selected_signal_mz = self._resolve_precise_mz_candidate(
+                            self._peak_exact_mz(peak),
+                            candidates,
+                        )
+                        if selected_signal_mz is not None:
+                            matched_species.extend(groups[float(selected_signal_mz)])
                 info["matched_species"] = matched_species
 
     def _energy_from_folder_name(self, folder: str | Path) -> float | None:
@@ -2051,17 +2286,20 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 peak_idx = start + int(np.argmax(segment))
                 peak_integral = float(np.sum(segment))
                 mz_est = self._apply_mz_calibration(peak_idx + 1)
+                exact_mz = float(mz)
                 peaks_info.append({
                     "index": peak_idx,
                     "mz_raw": mz_est,
-                    "mz_rounded": int(round(float(mz))),
+                    "mz_rounded": self._nominal_mz(exact_mz),
+                    "mz_exact_mean": exact_mz,
+                    "curve_key": exact_mz,
                     "left_idx": start,
                     "right_idx": end,
                     "integral": peak_integral,
                     "overlapped": False,
                 })
 
-            peaks_info.sort(key=lambda x: x["mz_rounded"])
+            peaks_info.sort(key=lambda x: (x["mz_rounded"], x["curve_key"]))
             return peaks_info
 
         detection_start = max(3000, 0)
@@ -2132,26 +2370,15 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 "index": pi,
                 "mz_raw": mz_est,
                 "mz_rounded": mz_rounded,
+                "mz_exact_mean": float(mz_est),
+                "curve_key": float(mz_est),
                 "left_idx": left_idx,
                 "right_idx": right_idx,
                 "integral": peak_integral,
                 "overlapped": False,
             })
 
-        peaks_info.sort(key=lambda x: x["mz_rounded"])
-
-        mz_groups: dict[int, list] = {}
-        for peak in peaks_info:
-            mz = peak["mz_rounded"]
-            if mz not in mz_groups:
-                mz_groups[mz] = []
-            mz_groups[mz].append(peak)
-
-        for mz, peaks in mz_groups.items():
-            if len(peaks) > 1:
-                peaks.sort(key=lambda x: -x["integral"])
-                for peak in peaks[1:]:
-                    peak["overlapped"] = True
+        peaks_info.sort(key=lambda x: (x["mz_rounded"], x["curve_key"]))
 
         return peaks_info
 
@@ -2175,9 +2402,13 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
         return left_idx, right_idx
 
-    def _get_precomputed_signal_data(self, mz: int, energies_to_check: list[float]) -> dict[float, float]:
+    def _get_precomputed_signal_data(
+        self,
+        mz: float,
+        energies_to_check: list[float],
+    ) -> dict[float, float]:
         result: dict[float, float] = {}
-        target_mz = int(mz)
+        target_mz = float(mz)
         for energy in energies_to_check:
             if energy not in self.temperature_scan_data:
                 continue
@@ -2185,10 +2416,23 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 if temp in result:
                     continue
                 signals = info.get("precomputed_signals", {})
-                if target_mz not in signals:
+                candidates = []
+                for signal_key in signals:
+                    try:
+                        exact_mz = float(signal_key)
+                    except (TypeError, ValueError):
+                        continue
+                    candidates.append(
+                        (signal_key, exact_mz, self._nominal_mz(exact_mz))
+                    )
+                selected_key = self._resolve_precise_mz_candidate(
+                    target_mz,
+                    candidates,
+                )
+                if selected_key is None:
                     continue
                 try:
-                    signal_val = float(signals[target_mz])
+                    signal_val = float(signals[selected_key])
                 except Exception:
                     continue
                 if np.isfinite(signal_val):
@@ -2204,8 +2448,6 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             energies_to_check = [energy]
         else:
             energies_to_check = self.available_energies
-
-        target_peak = None
 
         for e in energies_to_check:
             if e not in self.temperature_scan_data:
@@ -2223,22 +2465,22 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             if best_temp is None:
                 continue
             peaks_info = self.temperature_scan_data[e][best_temp].get("peaks_info", [])
+            peak_candidates = [
+                (
+                    index,
+                    self._peak_exact_mz(peak),
+                    self._nominal_mz(peak.get("mz_rounded", self._peak_exact_mz(peak))),
+                )
+                for index, peak in enumerate(peaks_info)
+                if not peak.get("overlapped", False)
+            ]
+            target_index = self._resolve_precise_mz_candidate(float(mz), peak_candidates)
+            target_peak = peaks_info[int(target_index)] if target_index is not None else None
 
-            for peak in peaks_info:
-                if peak["mz_rounded"] == mz:
-                    target_peak = peak
-                    break
-            if target_peak is not None:
-                break
-
-        if target_peak is None:
-            return self._get_precomputed_signal_data(int(mz), energies_to_check)
-
-        for e in energies_to_check:
-            if e not in self.temperature_scan_data:
-                continue
             for temp, info in self.temperature_scan_data[e].items():
                 if temp in result:
+                    continue
+                if target_peak is None:
                     continue
                 data = info.get("avg_data", [])
                 if data is None or len(data) == 0:
@@ -2252,19 +2494,20 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 peak_integral = sum(data[left_idx : right_idx + 1])
                 signal_val = peak_integral / io if io > 0 else peak_integral
                 result[float(temp)] = signal_val
+            fallback = self._get_precomputed_signal_data(float(mz), [e])
+            for temp, signal_val in fallback.items():
+                result.setdefault(temp, signal_val)
 
-        if result:
-            return result
-        return self._get_precomputed_signal_data(int(mz), energies_to_check)
+        return result
 
-    def _species_record_matches(self, record: dict, mz: int, species_name: str | None = None) -> bool:
-        if record.get("mz") != mz:
+    def _species_record_matches(self, record: dict, mz: float, species_name: str | None = None) -> bool:
+        if self._nominal_mz(record.get("mz", 0)) != self._nominal_mz(mz):
             return False
         if not species_name:
             return True
         return species_name in {record.get("species"), record.get("name")}
 
-    def _find_species_record(self, mz: int, species_name: str | None = None) -> dict | None:
+    def _find_species_record(self, mz: float, species_name: str | None = None) -> dict | None:
         for record in self.database:
             if self._species_record_matches(record, mz, species_name):
                 return record
@@ -2302,14 +2545,15 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         for energy, cfg in sorted(self.energy_parent_config.items()):
             if energy not in self.temperature_scan_data:
                 continue
-            mz = int(cfg["mz"])
+            mz = float(cfg["mz"])
             signal_data = self._get_signal_from_scan_data(mz, energy)
             if not signal_data:
                 continue
 
             species_name = self._resolved_reference_species_name(mz, cfg.get("species_name"))
             species = {
-                "mz": mz,
+                "mz": self._nominal_mz(mz),
+                "curve_key": mz,
                 "species": species_name or "参考物种",
                 "ie": self._species_ie(mz, species_name),
             }
@@ -2337,7 +2581,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
     def _reference_parent_for_energy(
         self,
         energy: float,
-    ) -> tuple[int, float, float, dict[float, float], float, str | None] | None:
+    ) -> tuple[float, float, float, dict[float, float], float, str | None] | None:
         if self.energy_parent_config and not self.parent_mf_by_energy:
             self._recalculate_parent_mf_by_energy()
 
@@ -2348,8 +2592,8 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             cfg = self.parent_config_by_energy.get(energy, self._get_parent_config_for_energy(energy))
             mf = self.parent_mf_by_energy[energy]
             return (
-                int(cfg["mz"]),
                 float(cfg["mz"]),
+                float(self._nominal_mz(cfg["mz"])),
                 energy,
                 self.parent_signal_by_energy[energy],
                 self._mf_value_at_reference_temperature(mf),
@@ -2375,7 +2619,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
     def _reference_signal_for_candidate(
         self,
-        mz: int,
+        mz: float,
         preferred_energy: float,
         fallback_energy: float,
         fallback_signal: dict[float, float] | None = None,
@@ -2395,14 +2639,14 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self,
         energy: float,
         species_ie: float | None,
-    ) -> tuple[int, float, float, dict[float, float], float, str | None] | None:
+    ) -> tuple[float, float, float, dict[float, float], float, str | None] | None:
         if self.energy_parent_config and not self.parent_mf_by_energy:
             self._recalculate_parent_mf_by_energy()
 
         candidates: list[dict] = []
 
         if self.parent_mf_results:
-            main_parent_mz = int(self.spin_parent_mz.value())
+            main_parent_mz = float(self.spin_parent_mz.value())
             main_parent_energy = float(self.spin_parent_energy.value())
             main_parent_species = self._selected_parent_species_name()
             main_parent_signal = self._get_signal_from_scan_data(main_parent_mz, main_parent_energy)
@@ -2428,7 +2672,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
         for configured_energy, mf in sorted(self.parent_mf_by_energy.items()):
             cfg = self.parent_config_by_energy.get(configured_energy, self._get_parent_config_for_energy(configured_energy))
-            mz = int(cfg["mz"])
+            mz = float(cfg["mz"])
             species_name = cfg.get("species_name")
             signal_info = self._reference_signal_for_candidate(
                 mz,
@@ -2480,8 +2724,8 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             selected = exact_energy_candidates[0] if exact_energy_candidates else candidates[0]
 
         return (
-            int(selected["mz"]),
             float(selected["mz"]),
+            float(self._nominal_mz(selected["mz"])),
             float(selected["signal_energy"]),
             selected["signal_data"],
             float(selected["mf_at_tm"]),
@@ -2564,9 +2808,9 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.txt_warnings.clear()
             warnings: list[str] = []
 
-            species_by_mz: dict[int, list[dict]] = {}
+            species_by_mz: dict[float, list[dict]] = {}
             for d in self.pie_species_data:
-                mz = d["mz"]
+                mz = self._species_signal_mz(d)
                 if mz not in species_by_mz:
                     species_by_mz[mz] = []
                 species_by_mz[mz].append(d)
@@ -2583,22 +2827,42 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             parent_mf_at_tm = self._mf_value_at_reference_temperature(self.parent_mf_results)
             parent_species_name = self._selected_parent_species_name()
 
-            parent_reference_keys = {(parent_mz, parent_species_name or "母体")}
+            species_group_candidates = [
+                (signal_mz, signal_mz, self._nominal_mz(signal_mz))
+                for signal_mz in species_by_mz
+            ]
+
+            def _resolved_species_group(selector: float) -> float:
+                selected_group = self._resolve_precise_mz_candidate(
+                    float(selector),
+                    species_group_candidates,
+                )
+                return (
+                    float(selected_group)
+                    if selected_group is not None
+                    else float(selector)
+                )
+
+            parent_species_mz = _resolved_species_group(parent_mz)
+            parent_reference_keys = {
+                (parent_species_mz, parent_species_name or "母体")
+            }
             if parent_species_name is None:
                 parent_reference_keys.update(
-                    (parent_mz, species["species"])
-                    for species in species_by_mz.get(parent_mz, [])
+                    (parent_species_mz, species["species"])
+                    for species in species_by_mz.get(parent_species_mz, [])
                 )
             self.all_species_mf[(parent_mz, parent_species_name or "母体", parent_energy)] = self.parent_mf_results
             for energy, mf in self.parent_mf_by_energy.items():
                 cfg = self.parent_config_by_energy.get(energy, self._get_parent_config_for_energy(energy))
-                cfg_mz = int(cfg["mz"])
+                cfg_mz = float(cfg["mz"])
+                cfg_species_mz = _resolved_species_group(cfg_mz)
                 label = cfg.get("species_name") or "参考物种"
-                parent_reference_keys.add((cfg_mz, label))
+                parent_reference_keys.add((cfg_species_mz, label))
                 if cfg.get("species_name") is None:
                     parent_reference_keys.update(
-                        (cfg_mz, species["species"])
-                        for species in species_by_mz.get(cfg_mz, [])
+                        (cfg_species_mz, species["species"])
+                        for species in species_by_mz.get(cfg_species_mz, [])
                     )
                 self.all_species_mf[(cfg_mz, label, energy)] = mf
 
@@ -2734,7 +2998,10 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         if sigma_i == 0 or sigma_A == 0:
             return None
 
-        D_i = calc_mass_discrimination(float(species.get("mw") or mz), self._mass_disc_exponent)
+        D_i = calc_mass_discrimination(
+            float(species.get("mw") or species.get("mz") or self._nominal_mz(mz)),
+            self._mass_disc_exponent,
+        )
         D_A = calc_mass_discrimination(float(ref_mw), self._mass_disc_exponent)
 
         T_M = float(self.spin_parent_t0.value())
@@ -2861,7 +3128,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 return result
 
             separated, pure_energies = separate_coexisting_species_signals(
-                mz=mz,
+                mz=self._nominal_mz(mz),
                 species_at_mz=[
                     {"species": s["species"], "ie": s.get("ie")}
                     for s in resolvable_species
@@ -2971,7 +3238,10 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         if sigma_i == 0 or sigma_A == 0:
             return None
 
-        D_i = calc_mass_discrimination(float(species.get("mw") or mz), self._mass_disc_exponent)
+        D_i = calc_mass_discrimination(
+            float(species.get("mw") or species.get("mz") or self._nominal_mz(mz)),
+            self._mass_disc_exponent,
+        )
         D_A = calc_mass_discrimination(float(ref_mw), self._mass_disc_exponent)
 
         T_M = float(self.spin_parent_t0.value())
@@ -3001,23 +3271,28 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             results[T] = max(0.0, float(X_i))
         return results
 
-    def _is_parent_auto_result_key(self, key: tuple[int, str, float]) -> bool:
+    def _is_parent_auto_result_key(self, key: tuple[float, str, float]) -> bool:
         mz, species, energy = key
         cfg = self.parent_config_by_energy.get(energy)
         if cfg:
             cfg_label = cfg.get("species_name") or "参考物种"
-            return int(cfg.get("mz", -1)) == mz and cfg_label == species
+            return self._same_signal_mz(cfg.get("mz", -1), mz) and cfg_label == species
 
         parent_energy = self.spin_parent_energy.value() if hasattr(self, "spin_parent_energy") else None
         parent_mz = self.spin_parent_mz.value() if hasattr(self, "spin_parent_mz") else None
         parent_label = self._selected_parent_species_name() or "母体"
-        return parent_energy == energy and parent_mz == mz and species == parent_label
+        return (
+            parent_energy == energy
+            and parent_mz is not None
+            and self._same_signal_mz(parent_mz, mz)
+            and species == parent_label
+        )
 
     def _auto_result_counts(self) -> tuple[int, int]:
         parent_count = sum(1 for key in self.all_species_mf if self._is_parent_auto_result_key(key))
         return parent_count, max(0, len(self.all_species_mf) - parent_count)
 
-    def _selected_auto_mf_key(self) -> tuple[int, str, float] | None:
+    def _selected_auto_mf_key(self) -> tuple[float, str, float] | None:
         selected = self.auto_mf_table.selectedItems()
         if not selected:
             return None
@@ -3028,11 +3303,11 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         if not mz_item or not species_item or not energy_item:
             return None
         try:
-            return (int(mz_item.text()), species_item.text(), float(energy_item.text()))
+            return (float(mz_item.text()), species_item.text(), float(energy_item.text()))
         except ValueError:
             return None
 
-    def _auto_plot_keys_for_scope(self) -> list[tuple[int, str, float]]:
+    def _auto_plot_keys_for_scope(self) -> list[tuple[float, str, float]]:
         scope = "products"
         if hasattr(self, "combo_auto_plot_scope"):
             scope = self.combo_auto_plot_scope.currentData() or "products"
@@ -3064,12 +3339,15 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.auto_mf_table.insertRow(row)
             result_type = "母体参考" if self._is_parent_auto_result_key((mz, species, energy)) else "产物"
             self.auto_mf_table.setItem(row, 0, QtWidgets.QTableWidgetItem(result_type))
-            self.auto_mf_table.setItem(row, 1, QtWidgets.QTableWidgetItem(str(mz)))
+            self.auto_mf_table.setItem(row, 1, QtWidgets.QTableWidgetItem(self._mz_text(mz)))
             self.auto_mf_table.setItem(row, 2, QtWidgets.QTableWidgetItem(species))
 
             ie = None
             for d in self.pie_species_data:
-                if d["mz"] == mz and d["species"] == species:
+                if (
+                    self._same_signal_mz(self._species_signal_mz(d), mz)
+                    and d["species"] == species
+                ):
                     ie = d.get("ie")
                     break
             self.auto_mf_table.setItem(row, 3, QtWidgets.QTableWidgetItem(f"{ie:.2f}" if ie else "N/A"))
@@ -3188,7 +3466,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         result_type: str,
         label: str,
         values: dict[float, float],
-        mz: int | None = None,
+        mz: float | None = None,
         species: str | None = None,
         energy: float | None = None,
     ) -> None:
@@ -3252,7 +3530,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         if self.parent_mf_by_energy:
             for energy, mf in sorted(self.parent_mf_by_energy.items()):
                 cfg = self.parent_config_by_energy.get(energy, self._get_parent_config_for_energy(energy))
-                mz = int(cfg["mz"])
+                mz = float(cfg["mz"])
                 species_name = cfg.get("species_name") or "参考物种"
                 self._add_result_series(
                     series,
