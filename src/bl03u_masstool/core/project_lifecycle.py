@@ -223,6 +223,7 @@ class ArtifactCategory(Enum):
     INTERMEDIATE = ("intermediate", "中间结果", "spectrum_analysis")  # 寻峰、卡峰范围、高斯拟合
     TEMPERATURE = ("temperature_scan", "温度扫描", "temperature_scan")
     PIE = ("pie", "PIE拟合", "pie_analysis")
+    ISOTOPE_CORRECTION = ("isotope_correction", "同位素贡献校正", "isotope_correction")
     MOLE_FRACTION = ("mole_fraction", "摩尔分数", "mole_fraction")
     PICS = ("pics", "PICS截面数据库", "pics")
     SNAPSHOTS = ("snapshots", "版本快照", "versions")
@@ -253,6 +254,12 @@ PROJECT_DIRECTORIES: tuple[ProjectDirectorySpec, ...] = (
     ProjectDirectorySpec("spectrum_analysis", "谱图分析", "analysis/spectrum", "寻峰、卡峰范围和高斯拟合产物"),
     ProjectDirectorySpec("temperature_scan", "温度扫描", "analysis/temperature_scan", "温度扫描曲线、表格和图像"),
     ProjectDirectorySpec("pie_analysis", "PIE拟合", "analysis/pie", "PIE 曲线、物种拟合和鉴定结果"),
+    ProjectDirectorySpec(
+        "isotope_correction",
+        "同位素贡献校正",
+        "analysis/isotope_correction",
+        "PIE与温度曲线的同位素贡献、剩余曲线和计算参数",
+    ),
     ProjectDirectorySpec("mole_fraction", "摩尔分数", "analysis/mole_fraction", "摩尔分数计算输入、结果和图像"),
     ProjectDirectorySpec("pics", "PICS计算", "analysis/pics", "PICS 计算结果和导入记录"),
     ProjectDirectorySpec("versions", "版本快照", "versions", "项目级 zip 快照和备份"),
@@ -699,8 +706,11 @@ def _field_label(field_name: str) -> str:
         "manual_peak_file": "手动卡峰文件",
         "kr_calibration_folder": "Kr定标扫描目录",
         "kr_calibration_peak_file": "Kr定标卡峰文件",
+        "curve_database_path": "项目曲线数据库",
         "temperature_scan_result_file": "温度扫描结果",
+        "pie_curve_result_file": "PIE曲线结果",
         "pie_identification_result_file": "PIE鉴定结果",
+        "isotope_correction_result_file": "同位素贡献校正结果",
         "mole_fraction_result_file": "摩尔分数结果",
         "calibration_points": "定标点",
     }
@@ -772,8 +782,11 @@ def _registered_artifact_fields(settings: ProjectSettings) -> dict[str, str]:
         "manual_peak_file": settings.manual_peak_file,
         "kr_calibration_folder": settings.kr_calibration_folder,
         "kr_calibration_peak_file": settings.kr_calibration_peak_file,
+        "curve_database_path": settings.curve_database_path,
         "temperature_scan_result_file": settings.temperature_scan_result_file,
+        "pie_curve_result_file": settings.pie_curve_result_file,
         "pie_identification_result_file": settings.pie_identification_result_file,
+        "isotope_correction_result_file": settings.isotope_correction_result_file,
         "mole_fraction_result_file": settings.mole_fraction_result_file,
     }
     for index, folder in enumerate(settings.effective_pie_scan_folders()[1:], start=2):
@@ -801,8 +814,11 @@ def _section_for_registered_field(field_name: str) -> ProjectDirectorySpec:
         "manual_peak_file": "spectrum_analysis",
         "kr_calibration_folder": "raw_data",
         "kr_calibration_peak_file": "spectrum_analysis",
+        "curve_database_path": "pie_analysis",
         "temperature_scan_result_file": "temperature_scan",
+        "pie_curve_result_file": "pie_analysis",
         "pie_identification_result_file": "pie_analysis",
+        "isotope_correction_result_file": "isotope_correction",
         "mole_fraction_result_file": "mole_fraction",
     }
     return directory_spec(mapping.get(field_name, "spectrum_analysis"))
@@ -1174,7 +1190,15 @@ def scan_project_artifacts(settings: ProjectSettings) -> list[ArtifactRecord]:
     # 定义每个产物类型与其相关字段的映射
     artifact_mappings = [
         ("temperature_scan_result", "temperature_scan", "温度扫描", "TemperatureModule", settings.temperature_scan_result_file),
+        ("pie_curve_result", "pie", "PIE曲线", "PIEModule", settings.pie_curve_result_file),
         ("pie_identification_result", "pie", "PIE鉴定", "PIEModule", settings.pie_identification_result_file),
+        (
+            "isotope_correction_result",
+            "isotope_correction",
+            "同位素贡献校正",
+            "IsotopeCorrectionModule",
+            settings.isotope_correction_result_file,
+        ),
         ("mole_fraction_result", "mole_fraction", "摩尔分数", "MoleFractionModule", settings.mole_fraction_result_file),
         ("manual_peak_file", "intermediate", "手动卡峰", "SpectrumModule", settings.manual_peak_file),
     ]

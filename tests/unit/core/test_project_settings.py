@@ -51,8 +51,13 @@ def test_project_settings_round_trip_preserves_nested_yaml_fields(tmp_path):
         pie_scan_folders=["data/pie-low", "data/pie-high"],
         pics_database_path="database/species_database.sqlite",
         manual_peak_file="config/manual.yaml",
+        active_peak_set_id="peak-20260727-example",
+        curve_database_path="output/curve_data.sqlite",
+        curve_storage_mode="shadow",
         temperature_scan_result_file="output/temperature.xlsx",
+        pie_curve_result_file="output/pie_curves.xlsx",
         pie_identification_result_file="output/pie_identification.xlsx",
+        isotope_correction_result_file="output/isotope_corrected.xlsx",
         mole_fraction_result_file="output/mole_fraction.xlsx",
         cal_a=1.2e-7,
         cal_b=2.3e-4,
@@ -114,8 +119,14 @@ def test_project_settings_round_trip_preserves_nested_yaml_fields(tmp_path):
     assert loaded.effective_pie_scan_folders() == settings.pie_scan_folders
     assert loaded.pics_database_path == settings.pics_database_path
     assert loaded.manual_peak_file == settings.manual_peak_file
+    assert loaded.active_peak_set_id == settings.active_peak_set_id
+    assert loaded.curve_database_path == settings.curve_database_path
+    assert loaded.curve_storage_mode == "shadow"
+    assert loaded.effective_curve_storage_mode() == "shadow"
     assert loaded.temperature_scan_result_file == settings.temperature_scan_result_file
+    assert loaded.pie_curve_result_file == settings.pie_curve_result_file
     assert loaded.pie_identification_result_file == settings.pie_identification_result_file
+    assert loaded.isotope_correction_result_file == settings.isotope_correction_result_file
     assert loaded.mole_fraction_result_file == settings.mole_fraction_result_file
     assert loaded.cal_a == settings.cal_a
     assert loaded.cal_b == settings.cal_b
@@ -385,3 +396,9 @@ def test_load_project_settings_warns_when_file_missing(tmp_path, caplog):
 
     assert isinstance(loaded, ProjectSettings)
     assert "Project settings file not found" in caplog.text
+
+
+def test_invalid_curve_storage_mode_falls_back_to_sqlite():
+    settings = ProjectSettings(curve_storage_mode="unexpected")
+
+    assert settings.effective_curve_storage_mode() == "sqlite"

@@ -21,6 +21,13 @@ except ImportError as e:
 pytestmark = pytest.mark.gui
 
 from bl03u_masstool.core.calibration import Calibration
+from bl03u_masstool.core.curve_database import (
+    list_curve_datasets,
+    project_curve_database_path,
+    set_curve_dataset_validity,
+    store_curve_dataset_version,
+)
+from bl03u_masstool.core.curve_repository import RepositoryCurveMapping
 from bl03u_masstool.core.nist_webbook import (
     NistCompoundIonization,
     NistIonizationEnergy,
@@ -49,6 +56,44 @@ def pie_dialog(qapp):
     dialog.show()
     yield dialog
     dialog.deleteLater()
+
+
+def test_pie_sqlite_cache_hit_is_not_invalidated_before_activation(
+    pie_dialog,
+    tmp_path,
+    monkeypatch,
+):
+    activated = []
+    token = {"request_id": 1}
+    pie_dialog.set_project_settings(
+        ProjectSettings(output_dir=str(tmp_path)),
+        activate_project_scope=True,
+        load_cached_results=False,
+    )
+    pie_dialog._autoload_cache_token = token
+    monkeypatch.setattr(
+        pie_dialog,
+        "_discard_stale_pie_curves",
+        lambda _cache_key: pytest.fail(
+            "A verified SQLite cache hit must not be invalidated"
+        ),
+    )
+    monkeypatch.setattr(
+        pie_dialog,
+        "_activate_sqlite_dataset",
+        lambda dataset_id, **kwargs: activated.append(dataset_id),
+    )
+
+    pie_dialog._on_project_pie_cache_loaded(
+        {
+            "cache_key": "analysis-key",
+            "sqlite_dataset_id": 42,
+            "dataset_metadata": {},
+        },
+        token,
+    )
+
+    assert activated == [42]
 
 
 def test_pie_workspace_columns_share_contiguous_splitter_boundaries(pie_dialog, qapp):
@@ -143,9 +188,19 @@ def test_project_open_restores_cached_pie_curves_without_reanalysis(qapp, tmp_pa
 
         assert sorted(restored.curves) == pytest.approx([28.015])
         assert restored._mz_text_for_key(next(iter(restored.curves))) == "28.015000"
-        assert restored.analysis_df["normalized_intensity"].tolist() == [1.0, 2.0]
+        assert restored.analysis_df.empty
+        assert restored.curves[next(iter(restored.curves))][
+            "intensities"
+        ] == [1.0, 2.0]
+        assert restored.curve_database_dataset_id is not None
         assert restored._last_analysis_source_info["from_cache"] is True
+        assert restored._loaded_analysis_cache_key == cache_key
         assert "自动载入" in restored.status_label.text() or "参数预览" in restored.status_label.text()
+        request_id = restored._autoload_request_id
+        worker = restored._autoload_worker
+        assert restored.ensure_project_cache_loaded() is True
+        assert restored._autoload_request_id == request_id
+        assert restored._autoload_worker is worker
         (raw_dir / "10.0eV.txt").write_text(
             "source data changed; cached curves must be invalidated",
             encoding="utf-8",
@@ -1039,3 +1094,242 @@ class TestConfigurationOnMZSwitch:
         # Config should be saved for m/z 46
         assert 46 in pie_dialog.per_mz_config
         assert len(pie_dialog.per_mz_config[46]['selected_species']) == 1
+
+
+@pytest.mark.parametrize(
+    ("storage_mode", "expects_database", "expects_lazy_mapping"),
+    [
+        ("legacy", False, False),
+        ("shadow", True, False),
+        ("sqlite", True, True),
+    ],
+)
+def test_project_curve_storage_modes(
+    qapp,
+    tmp_path,
+    storage_mode,
+    expects_database,
+    expects_lazy_mapping,
+):
+    source = tmp_path / "pie"
+    source.mkdir()
+    settings = ProjectSettings(
+        project_name=f"PIE {storage_mode}",
+        output_dir=str(tmp_path / f"project-{storage_mode}"),
+        pie_scan_folder=str(source),
+        pie_scan_folders=[str(source)],
+        curve_storage_mode=storage_mode,
+    )
+    rows = pd.DataFrame(
+        {
+            "energy": [9.0, 10.0],
+            "mz": [28.01, 28.01],
+            "mz_rounded": [28, 28],
+            "normalized_intensity": [1.0, 2.0],
+            "raw_area": [10.0, 20.0],
+            "photon_normalized_intensity": [1.0, 2.0],
+            "left_bound": [100, 100],
+            "right_bound": [110, 110],
+            "species": ["CO", "CO"],
+        }
+    )
+    curves = {
+        28.01: {
+            "mz": 28.01,
+            "mz_rounded": 28,
+            "mz_exact_mean": 28.01,
+            "energies": [9.0, 10.0],
+            "intensities": [1.0, 2.0],
+            "rows": rows,
+        }
+    }
+    dialog = PIESpeciesFitDialog(Calibration())
+    try:
+        dialog.set_project_settings(
+            settings,
+            activate_project_scope=True,
+            load_cached_results=False,
+        )
+        dialog.on_analysis_complete(
+            (
+                rows,
+                curves,
+                {
+                    "from_cache": True,
+                    "source_scope": "project",
+                    "analysis_provenance": {
+                        "cache_key": f"mode-{storage_mode}",
+                        "peak_source": "manual_peak_file",
+                    },
+                },
+            )
+        )
+
+        assert project_curve_database_path(settings).exists() is expects_database
+        assert isinstance(dialog.curves, RepositoryCurveMapping) is expects_lazy_mapping
+        assert dialog.analysis_df.empty is expects_lazy_mapping
+        if storage_mode == "sqlite":
+            assert "SQLite #" in dialog.curve_source_label.text()
+            assert "有效" in dialog.curve_source_label.text()
+            assert dialog.curve_source_label.property("sourceState") == "valid"
+
+            dataset_id = dialog.curve_database_dataset_id
+            assert dataset_id is not None
+            set_curve_dataset_validity(
+                project_curve_database_path(settings),
+                dataset_id=dataset_id,
+                validity_status="stale",
+                reason="test invalidation",
+            )
+            assert dialog._validate_loaded_project_curve_reference() is False
+            assert not dialog.curves
+            assert "无有效项目结果" in dialog.curve_source_label.text()
+        else:
+            assert "项目内存" in dialog.curve_source_label.text()
+    finally:
+        dialog.deleteLater()
+
+
+def test_temporary_curve_source_is_marked_as_unsaved_memory(qapp):
+    rows = pd.DataFrame(
+        {
+            "energy": [9.0, 10.0],
+            "mz": [44.02, 44.02],
+            "mz_rounded": [44, 44],
+            "normalized_intensity": [0.0, 1.0],
+            "raw_area": [0.0, 10.0],
+            "photon_normalized_intensity": [0.0, 1.0],
+            "left_bound": [100, 100],
+            "right_bound": [110, 110],
+            "species": ["", ""],
+        }
+    )
+    curves = {
+        44.02: {
+            "mz": 44.02,
+            "mz_rounded": 44,
+            "mz_exact_mean": 44.02,
+            "energies": [9.0, 10.0],
+            "intensities": [0.0, 1.0],
+            "rows": rows,
+        }
+    }
+    dialog = PIESpeciesFitDialog(Calibration())
+    try:
+        dialog.on_analysis_complete(
+            (
+                rows,
+                curves,
+                {
+                    "source_scope": "temporary",
+                    "analysis_provenance": {},
+                },
+            )
+        )
+
+        assert dialog.curve_source_label.text() == "当前曲线：临时内存 · 未保存"
+        assert dialog.curve_source_label.property("sourceState") == "memory"
+        assert "未写入项目 curve_data.sqlite" in dialog.curve_source_label.toolTip()
+    finally:
+        dialog.deleteLater()
+
+
+def test_project_generation_creates_new_batch_for_same_key_new_payload(
+    qapp,
+    tmp_path,
+    monkeypatch,
+):
+    source = tmp_path / "pie"
+    source.mkdir()
+    settings = ProjectSettings(
+        project_name="PIE payload revision",
+        output_dir=str(tmp_path / "project"),
+        pie_scan_folder=str(source),
+        pie_scan_folders=[str(source)],
+        curve_storage_mode="sqlite",
+    )
+    database_path = project_curve_database_path(settings)
+
+    def curve_payload(last_intensity):
+        rows = pd.DataFrame(
+            {
+                "energy": [9.0, 10.0],
+                "mz": [28.01, 28.01],
+                "mz_rounded": [28, 28],
+                "normalized_intensity": [1.0, last_intensity],
+                "raw_area": [10.0, last_intensity * 10],
+                "photon_normalized_intensity": [1.0, last_intensity],
+                "left_bound": [100, 100],
+                "right_bound": [110, 110],
+                "species": ["CO", "CO"],
+            }
+        )
+        return rows, {
+            28.01: {
+                "mz": 28.01,
+                "mz_rounded": 28,
+                "mz_exact_mean": 28.01,
+                "energies": [9.0, 10.0],
+                "intensities": [1.0, last_intensity],
+                "rows": rows,
+            }
+        }
+
+    _old_rows, old_curves = curve_payload(2.0)
+    old_id = store_curve_dataset_version(
+        database_path,
+        curve_type="pie",
+        curves=old_curves,
+        dataset_group="pie:project",
+        analysis_key="same-input-key",
+        name="old",
+    )
+    set_curve_dataset_validity(
+        database_path,
+        dataset_id=old_id,
+        validity_status="stale",
+        reason="recompute",
+    )
+    new_rows, new_curves = curve_payload(3.0)
+    critical_messages = []
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox,
+        "critical",
+        lambda *args: critical_messages.append(args),
+    )
+
+    dialog = PIESpeciesFitDialog(Calibration())
+    try:
+        dialog.set_project_settings(
+            settings,
+            activate_project_scope=True,
+            load_cached_results=False,
+        )
+        dialog.on_analysis_complete(
+            (
+                new_rows,
+                new_curves,
+                {
+                    "from_cache": True,
+                    "source_scope": "project",
+                    "analysis_provenance": {
+                        "cache_key": "same-input-key",
+                        "peak_source": "manual_peak_file",
+                    },
+                },
+            )
+        )
+
+        datasets = list_curve_datasets(
+            database_path,
+            curve_type="pie",
+            include_stale=True,
+        )
+        assert len(datasets) == 2
+        assert dialog.curve_database_dataset_id != old_id
+        assert [
+            dataset.dataset_id for dataset in datasets if dataset.is_current
+        ] == [dialog.curve_database_dataset_id]
+        assert critical_messages == []
+    finally:
+        dialog.deleteLater()

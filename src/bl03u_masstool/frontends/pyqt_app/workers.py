@@ -21,11 +21,24 @@ class WorkerThread(QtCore.QThread):
 
     def run(self) -> None:
         try:
-            self.finished_with_result.emit(self._task())
+            if self.isInterruptionRequested():
+                return
+            result = self._task()
+            if not self.isInterruptionRequested():
+                self.finished_with_result.emit(result)
         except Exception as exc:
+            if self.isInterruptionRequested():
+                return
             logger.exception("Background worker task failed")
             self.failed.emit(str(exc))
 
     def report_progress(self, value: int, message: str = "") -> None:
         """Thread-safe callback for tasks that can expose coarse real progress."""
+        if self.isInterruptionRequested():
+            raise InterruptedError("Background task cancellation requested")
         self.progress.emit(max(0, min(100, int(value))), str(message))
+
+    def cancel(self) -> None:
+        """Request cooperative cancellation without destroying a running QThread."""
+        self.requestInterruption()
+        self.quit()

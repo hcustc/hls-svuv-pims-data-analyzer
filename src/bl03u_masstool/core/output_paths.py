@@ -12,6 +12,7 @@ OUTPUT_SUBDIRS = (
     ("exports", "peak_ranges"),
     ("exports", "temperature"),
     ("exports", "pie"),
+    ("exports", "isotope_correction"),
     ("images", "temperature"),
     ("images", "energy"),
     ("logs",),

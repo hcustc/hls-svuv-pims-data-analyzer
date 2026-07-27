@@ -23,8 +23,11 @@ _PROJECT_PATH_FIELDS: tuple[str, ...] = (
     "pie_scan_folder",
     "pics_database_path",
     "manual_peak_file",
+    "curve_database_path",
     "temperature_scan_result_file",
+    "pie_curve_result_file",
     "pie_identification_result_file",
+    "isotope_correction_result_file",
     "mole_fraction_result_file",
     "kr_calibration_folder",
     "kr_calibration_peak_file",
@@ -65,10 +68,15 @@ class ProjectSettings:
     pie_scan_folders: list[str] = field(default_factory=list)
     pics_database_path: str = ""
     manual_peak_file: str = ""
+    active_peak_set_id: str = ""
 
     # === Analysis Artifact Paths ===
+    curve_database_path: str = ""
+    curve_storage_mode: str = "sqlite"
     temperature_scan_result_file: str = ""
+    pie_curve_result_file: str = ""
     pie_identification_result_file: str = ""
+    isotope_correction_result_file: str = ""
     mole_fraction_result_file: str = ""
 
     # === Calibration ===
@@ -154,6 +162,11 @@ class ProjectSettings:
     mf_kr_data: dict[float, float] = field(default_factory=dict)
 
     # === Converters ===
+
+    def effective_curve_storage_mode(self) -> str:
+        """Return the guarded curve persistence mode used by project pages."""
+        mode = str(self.curve_storage_mode or "sqlite").strip().lower()
+        return mode if mode in {"legacy", "shadow", "sqlite"} else "sqlite"
 
     def effective_pie_scan_folders(self) -> list[str]:
         """Return unique configured PIE segment folders with legacy fallback."""
@@ -269,10 +282,15 @@ def _nested_to_flat(data: dict) -> dict:
             "pie_scan_folders": "pie_scan_folders",
             "pics_database_path": "pics_database_path",
             "manual_peak_file": "manual_peak_file",
+            "active_peak_set_id": "active_peak_set_id",
         },
         "analysis_artifacts": {
+            "curve_database_path": "curve_database_path",
+            "curve_storage_mode": "curve_storage_mode",
             "temperature_scan_result_file": "temperature_scan_result_file",
+            "pie_curve_result_file": "pie_curve_result_file",
             "pie_identification_result_file": "pie_identification_result_file",
+            "isotope_correction_result_file": "isotope_correction_result_file",
             "mole_fraction_result_file": "mole_fraction_result_file",
         },
         "calibration": {
@@ -513,10 +531,15 @@ def _flat_to_nested(settings: ProjectSettings) -> dict:
             "pie_scan_folders": d["pie_scan_folders"],
             "pics_database_path": d["pics_database_path"],
             "manual_peak_file": d["manual_peak_file"],
+            "active_peak_set_id": d["active_peak_set_id"],
         },
         "analysis_artifacts": {
+            "curve_database_path": d["curve_database_path"],
+            "curve_storage_mode": d["curve_storage_mode"],
             "temperature_scan_result_file": d["temperature_scan_result_file"],
+            "pie_curve_result_file": d["pie_curve_result_file"],
             "pie_identification_result_file": d["pie_identification_result_file"],
+            "isotope_correction_result_file": d["isotope_correction_result_file"],
             "mole_fraction_result_file": d["mole_fraction_result_file"],
         },
         "calibration": {

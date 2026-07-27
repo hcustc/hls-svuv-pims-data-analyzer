@@ -27,6 +27,7 @@ from bl03u_masstool.core.isotope import (
 )
 from bl03u_masstool.core.nist_webbook import default_nist_webbook_client
 from bl03u_masstool.core.output_paths import ensure_output_dir
+from bl03u_masstool.core.peak_sets import resolve_active_peak_file
 from bl03u_masstool.core.peak_ranges import load_peak_ranges
 from bl03u_masstool.core.pie_analysis import analyze_pie_folder, build_pie_curves, identify_species_for_mz_with_curve, load_species_database, analyze_multiple_pie_folders, merge_pie_segments
 from bl03u_masstool.core.pics_calculator import calc_pics_single_energy
@@ -1441,6 +1442,17 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         """
         ps = self.project_settings
         manual_path = getattr(ps, "manual_peak_file", "") if ps is not None else ""
+        if ps is not None:
+            try:
+                resolved_peak = resolve_active_peak_file(
+                    ps.output_dir,
+                    active_peak_set_id=ps.active_peak_set_id,
+                    configured_peak_file=manual_path,
+                )
+                manual_path = str(resolved_peak) if resolved_peak is not None else ""
+            except (FileNotFoundError, ValueError):
+                self.peak_ranges = {}
+                return
         if not manual_path or not Path(manual_path).exists():
             self.peak_ranges = {}
             return

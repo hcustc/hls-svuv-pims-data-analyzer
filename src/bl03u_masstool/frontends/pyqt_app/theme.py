@@ -582,6 +582,33 @@ QLabel#ContextValue {{
     padding: 1px 2px;
 }}
 
+QLabel#CurveSourceBadge {{
+    background: {t.panel_subtle};
+    border: 1px solid {t.border};
+    border-radius: 5px;
+    color: {t.text_secondary};
+    font-weight: 600;
+    padding: 3px 7px;
+}}
+
+QLabel#CurveSourceBadge[sourceState="valid"] {{
+    background: #f0fdf4;
+    border-color: #86efac;
+    color: #166534;
+}}
+
+QLabel#CurveSourceBadge[sourceState="memory"] {{
+    background: {t.primary_soft};
+    border-color: {t.primary_border};
+    color: {t.primary_hover};
+}}
+
+QLabel#CurveSourceBadge[sourceState="warning"] {{
+    background: {t.warning_bg};
+    border-color: {t.warning_border};
+    color: {t.warning};
+}}
+
 QGroupBox {{
     border: 1px solid {t.border};
     border-radius: 6px;

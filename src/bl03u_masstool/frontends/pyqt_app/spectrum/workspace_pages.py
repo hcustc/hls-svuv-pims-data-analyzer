@@ -8,6 +8,11 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 from PyQt6.QtWidgets import QFileDialog, QHBoxLayout, QLineEdit, QPushButton, QVBoxLayout
 
 from bl03u_masstool.core.calibration import Calibration
+from bl03u_masstool.core.curve_database import (
+    backfill_curve_peak_set_provenance,
+    invalidate_curve_datasets_for_peak_source,
+    project_curve_database_path,
+)
 from bl03u_masstool.core.config import (
     PeakDetectionConfig,
     resolve_species_database_path,
@@ -15,6 +20,17 @@ from bl03u_masstool.core.config import (
     species_database_path,
 )
 from bl03u_masstool.core.normalization import load_normalization_settings
+from bl03u_masstool.core.peak_sets import (
+    activate_peak_set,
+    get_peak_set,
+    import_peak_set,
+    list_peak_sets,
+    migrate_legacy_peak_file,
+    normalize_peak_set_registry_paths,
+    resolve_peak_set_path,
+    verify_peak_set,
+)
+from bl03u_masstool.core.project_peak_generation import generate_project_peak_set
 from bl03u_masstool.core.project_lifecycle import (
     PROJECT_DIRECTORIES,
     PROJECT_SOURCE_SPECS,
@@ -30,12 +46,14 @@ from bl03u_masstool.core.project_lifecycle import (
 )
 from bl03u_masstool.core.project_settings import ProjectSettings, ProjectSettingsManager
 from bl03u_masstool.frontends.pyqt_app.isotope.dialog import IsotopeAbundanceDialog
+from bl03u_masstool.frontends.pyqt_app.isotope_correction.dialog import IsotopeCorrectionDialog
 from bl03u_masstool.frontends.pyqt_app.progress_dialog import ProgressDialog
 from bl03u_masstool.frontends.pyqt_app.worker import (
     ImportWorker,
     MaterializeProjectSourcesWorker,
 )
 from bl03u_masstool.frontends.pyqt_app.worker_manager import WorkerManager
+from bl03u_masstool.frontends.pyqt_app.workers import WorkerThread
 from bl03u_masstool.frontends.pyqt_app.mole_fraction.dialog import MoleFractionDialog
 from bl03u_masstool.frontends.pyqt_app.nist.widget import IonizationEnergyLookupWidget
 from bl03u_masstool.frontends.pyqt_app.normalization.widget import CommonParametersWidget
@@ -89,6 +107,7 @@ class WorkspacePagesMixin:
         self.temperature_page.set_project_settings(
             self.project_settings_manager.get(),
             activate_project_scope=self.project_settings_manager.has_project_path(),
+            load_cached_results=False,
         )
         self.pie_page = PIESpeciesFitDialog(
             self.current_calibration(),
@@ -96,6 +115,12 @@ class WorkspacePagesMixin:
             self.workspace_stack,
         )
         self.pie_page.set_project_settings(
+            self.project_settings_manager.get(),
+            activate_project_scope=self.project_settings_manager.has_project_path(),
+            load_cached_results=False,
+        )
+        self.isotope_correction_page = IsotopeCorrectionDialog(self.workspace_stack)
+        self.isotope_correction_page.set_project_settings(
             self.project_settings_manager.get(),
             activate_project_scope=self.project_settings_manager.has_project_path(),
         )
@@ -135,6 +160,7 @@ class WorkspacePagesMixin:
             ("spectrum", "质谱工作台", self.spectrum_page),
             ("temperature", "温度扫描", self.temperature_page),
             ("pie", "PIE拟合", self.pie_page),
+            ("isotope_correction", "同位素贡献校正", self.isotope_correction_page),
             ("mole_fraction", "摩尔分数", self.mole_fraction_page),
             ("pics", "PICS计算", self.pics_page),
             ("pics_import", "PICS导入", self.pics_import_page),
@@ -146,6 +172,7 @@ class WorkspacePagesMixin:
             "spectrum": "查看质谱、标定、寻峰和维护峰范围",
             "temperature": "生成并比较不同能量下的温度响应曲线",
             "pie": "拟合 PIE 曲线并识别候选物种",
+            "isotope_correction": "按用户指定分子式后处理 PIE 或温度曲线的同位素贡献",
             "mole_fraction": "基于温扫和 PIE 结果计算物种摩尔分数",
             "pics": "计算物种光电离截面",
             "pics_import": "导入外部 PICS 数据",
@@ -158,7 +185,7 @@ class WorkspacePagesMixin:
         }
         nav_groups = [
             ("项目", ("project",)),
-            ("数据处理", ("spectrum", "temperature", "pie", "mole_fraction")),
+            ("数据处理", ("spectrum", "temperature", "pie", "isotope_correction", "mole_fraction")),
             ("PICS 与资料", ("pics", "pics_import", "ionization", "isotope")),
         ]
 
@@ -518,7 +545,34 @@ class WorkspacePagesMixin:
         artifact_group, artifact_layout = _path_group("项目产物")
         self.project_manual_peak_button = _browse_btn()
         self.project_manual_peak_button.setText("导入")
-        _add_path_row(artifact_layout, 0, "manual_peak", "手动卡峰文件", self.project_manual_peak_edit, self.project_manual_peak_button)
+        _add_path_row(
+            artifact_layout,
+            0,
+            "manual_peak",
+            "当前项目卡峰集",
+            self.project_manual_peak_edit,
+            self.project_manual_peak_button,
+        )
+        peak_set_label = QtWidgets.QLabel("历史版本", self.datasource_card)
+        peak_set_label.setFixedWidth(88)
+        self.project_peak_set_combo = QtWidgets.QComboBox(self.datasource_card)
+        self.project_peak_set_combo.setToolTip("选择历史卡峰集后点击“激活”；选择本身不会改变下游分析")
+        self.project_peak_set_activate_button = QPushButton("激活", self.datasource_card)
+        self.project_peak_set_activate_button.setObjectName("BrowseButton")
+        self.project_peak_set_activate_button.setFixedHeight(26)
+        self.project_peak_set_activate_button.setFixedWidth(44)
+        self.project_peak_set_generate_button = QPushButton(
+            "从累计谱自动生成",
+            self.datasource_card,
+        )
+        self.project_peak_set_generate_button.setObjectName("BrowseButton")
+        self.project_peak_set_generate_button.setFixedHeight(26)
+        self.project_peak_set_status = _status_label()
+        artifact_layout.addWidget(peak_set_label, 1, 0)
+        artifact_layout.addWidget(self.project_peak_set_combo, 1, 1)
+        artifact_layout.addWidget(self.project_peak_set_activate_button, 1, 2)
+        artifact_layout.addWidget(self.project_peak_set_generate_button, 1, 3)
+        artifact_layout.addWidget(self.project_peak_set_status, 1, 4)
         card_layout.addWidget(artifact_group)
 
         self.datasource_import_button.clicked.connect(self.import_project_datasource)
@@ -532,6 +586,15 @@ class WorkspacePagesMixin:
         self.project_pie_remove_folder_button.clicked.connect(self.remove_project_pie_folders)
         self.project_pie_clear_folders_button.clicked.connect(self.clear_project_pie_folders)
         self.project_manual_peak_button.clicked.connect(self.import_project_manual_peak_file)
+        self.project_peak_set_activate_button.clicked.connect(
+            self.activate_selected_project_peak_set
+        )
+        self.project_peak_set_generate_button.clicked.connect(
+            self.generate_project_peak_set_from_sum
+        )
+        self.project_peak_set_combo.currentIndexChanged.connect(
+            self._on_project_peak_set_selection_changed
+        )
         # Auto-save and push project paths when edited
         self.project_temperature_folder_edit.editingFinished.connect(self._auto_save_datasource)
 
@@ -726,6 +789,125 @@ class WorkspacePagesMixin:
         self.project_temperature_folder_edit.setText(ps.temperature_scan_folder)
         self._set_project_pie_folders(ps.effective_pie_scan_folders())
         self.project_manual_peak_edit.setText(ps.manual_peak_file)
+        self._refresh_project_peak_sets(ps)
+
+    def _migrate_project_peak_set_if_needed(
+        self,
+        ps: ProjectSettings,
+    ) -> ProjectSettings:
+        """Make a legacy project peak path project-owned and versioned."""
+        if not self.project_settings_manager.has_project_path():
+            return ps
+        root = project_root(ps)
+        normalize_peak_set_registry_paths(root)
+        changed = False
+        record = None
+        if ps.active_peak_set_id:
+            record, approved_path = activate_peak_set(root, ps.active_peak_set_id)
+            configured = (
+                resolve_peak_set_path(root, ps.manual_peak_file)
+                if ps.manual_peak_file
+                else None
+            )
+            if configured is None or configured != approved_path:
+                ps.manual_peak_file = str(approved_path)
+                changed = True
+        elif ps.manual_peak_file:
+            record = migrate_legacy_peak_file(
+                root,
+                ps.manual_peak_file,
+                label=f"旧项目迁移 · {Path(ps.manual_peak_file).stem}",
+            )
+            if record is not None:
+                approved_path = verify_peak_set(root, record)
+                ps.active_peak_set_id = record.peak_set_id
+                ps.manual_peak_file = str(approved_path)
+                ps.temp_peak_source = "manual"
+                changed = True
+
+        if record is not None:
+            backfill_curve_peak_set_provenance(
+                project_curve_database_path(ps),
+                peak_set_id=record.peak_set_id,
+                peak_set_sha256=record.sha256,
+                peak_set_origin=record.origin,
+            )
+        if changed:
+            self.project_settings_manager.set(ps)
+            self.project_settings_manager.save()
+            ps = self.project_settings_manager.reload()
+        return ps
+
+    def _refresh_project_peak_sets(self, ps: ProjectSettings) -> None:
+        if not hasattr(self, "project_peak_set_combo"):
+            return
+        blocker = QtCore.QSignalBlocker(self.project_peak_set_combo)
+        self.project_peak_set_combo.clear()
+        records = []
+        try:
+            records = list_peak_sets(project_root(ps))
+        except Exception:
+            logger.exception("Failed to load project peak-set registry")
+        origin_labels = {
+            "auto_generated": "自动生成",
+            "imported": "导入",
+            "workbench_auto": "工作台自动",
+            "workbench_manual": "工作台手动",
+            "spectrum_workbench": "工作台批准",
+        }
+        for record in records:
+            created = record.created_at.replace("T", " ")[:19]
+            origin = origin_labels.get(record.origin, record.origin or "未知")
+            peak_count = record.metadata.get("peak_count")
+            count_text = f" · {int(peak_count)}峰" if peak_count is not None else ""
+            try:
+                verify_peak_set(project_root(ps), record)
+                verified = "有效"
+            except (FileNotFoundError, ValueError):
+                verified = "校验失败"
+            self.project_peak_set_combo.addItem(
+                f"{record.label}{count_text} · {created} · {origin} · {verified}",
+                record.peak_set_id,
+            )
+        active_index = self.project_peak_set_combo.findData(ps.active_peak_set_id)
+        if active_index >= 0:
+            self.project_peak_set_combo.setCurrentIndex(active_index)
+            active_record = next(
+                (
+                    record
+                    for record in records
+                    if record.peak_set_id == ps.active_peak_set_id
+                ),
+                None,
+            )
+            try:
+                if active_record is None:
+                    raise ValueError("missing record")
+                verify_peak_set(project_root(ps), active_record)
+                self.project_peak_set_status.setText("当前使用 · 校验有效")
+            except (FileNotFoundError, ValueError):
+                self.project_peak_set_status.setText("当前版本校验失败")
+        elif ps.manual_peak_file:
+            self.project_peak_set_combo.insertItem(0, "旧项目文件（尚未版本化）", "")
+            self.project_peak_set_combo.setCurrentIndex(0)
+            self.project_peak_set_status.setText("旧格式")
+        else:
+            self.project_peak_set_combo.insertItem(0, "尚无已批准卡峰集", "")
+            self.project_peak_set_combo.setCurrentIndex(0)
+            self.project_peak_set_status.setText("未设置")
+        self.project_peak_set_activate_button.setEnabled(
+            bool(self.project_peak_set_combo.currentData())
+        )
+        del blocker
+
+    def _on_project_peak_set_selection_changed(self, _index: int) -> None:
+        selected_id = str(self.project_peak_set_combo.currentData() or "")
+        self.project_peak_set_activate_button.setEnabled(bool(selected_id))
+        active_id = str(self.project_settings_manager.get().active_peak_set_id or "")
+        if selected_id and selected_id == active_id:
+            self.project_peak_set_status.setText("当前使用")
+        elif selected_id:
+            self.project_peak_set_status.setText("待激活")
 
     def _collect_project_settings_from_ui(self) -> ProjectSettings:
         """Build a ProjectSettings from all UI fields (does not save)."""
@@ -878,6 +1060,11 @@ class WorkspacePagesMixin:
 
         # Step 3: 现在加载配置（可能是项目级或全局的）
         ps = self.project_settings_manager.get()
+        if self.project_settings_manager.has_project_path():
+            try:
+                ps = self._migrate_project_peak_set_if_needed(ps)
+            except Exception:
+                logger.exception("Failed to migrate or verify project peak set")
 
         # Do NOT auto-fill paths here - only display what's actually saved in config
         # Users must use the import wizard to set up data sources
@@ -994,6 +1181,10 @@ class WorkspacePagesMixin:
         self.project_temperature_folder_edit.clear()
         self._set_project_pie_folders([])
         self.project_manual_peak_edit.clear()
+        if hasattr(self, "project_peak_set_combo"):
+            self.project_peak_set_combo.clear()
+            self.project_peak_set_combo.addItem("尚无已批准卡峰集", "")
+            self.project_peak_set_activate_button.setEnabled(False)
         self._switch_tool_pages_to_standalone(ps)
         self._clear_datasource_row_statuses()
         self.refresh_project_parameter_summary()
@@ -1064,6 +1255,17 @@ class WorkspacePagesMixin:
             # rebase absolute paths from legacy projects to this project root.
             self.project_settings_manager.set_project_path(project_path)
             ps = self.project_settings_manager.get()
+            try:
+                ps = self._migrate_project_peak_set_if_needed(ps)
+            except Exception as exc:
+                logger.exception("Failed to migrate or verify project peak set")
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "项目卡峰集需要处理",
+                    "旧项目卡峰文件未能自动迁移或当前卡峰集校验失败。\n\n"
+                    f"{exc}\n\n"
+                    "PIE和温度曲线生成前将要求重新导入或自动生成卡峰集。",
+                )
 
             # Display loaded settings in UI, including data-source paths.
             self._read_project_settings_to_ui(ps)
@@ -1249,12 +1451,20 @@ class WorkspacePagesMixin:
         source_scope_activation = (
             activate_project_scope if runtime_project_scope else False
         )
+        if runtime_project_scope:
+            self._invalidate_untraceable_project_curves(ps)
+        current_widget = (
+            self.workspace_stack.currentWidget()
+            if hasattr(self, "workspace_stack")
+            else None
+        )
         if hasattr(self, "temperature_page"):
             self.temperature_page.normalization_settings = self.normalization_settings
             self.temperature_page.calibration = calibration
             self.temperature_page.set_project_settings(
                 ps,
                 activate_project_scope=source_scope_activation,
+                load_cached_results=current_widget is self.temperature_page,
             )
         if hasattr(self, "pie_page"):
             self.pie_page.normalization_settings = self.normalization_settings
@@ -1262,6 +1472,12 @@ class WorkspacePagesMixin:
             self.pie_page.set_project_settings(
                 ps,
                 activate_project_scope=source_scope_activation,
+                load_cached_results=current_widget is self.pie_page,
+            )
+        if hasattr(self, "isotope_correction_page"):
+            self.isotope_correction_page.set_project_settings(
+                ps,
+                activate_project_scope=runtime_project_scope,
             )
         if hasattr(self, "mole_fraction_page"):
             self.mole_fraction_page.normalization_settings = self.normalization_settings
@@ -1283,6 +1499,27 @@ class WorkspacePagesMixin:
             self.ionization_page.set_project_settings(ps)
         if hasattr(self, "isotope_page"):
             self.isotope_page.set_project_settings(ps)
+
+    @staticmethod
+    def _invalidate_untraceable_project_curves(ps: ProjectSettings) -> dict[str, int]:
+        try:
+            manual_peak_file = Path(str(ps.manual_peak_file or "")).expanduser()
+            if ps.manual_peak_file and not manual_peak_file.is_absolute():
+                manual_peak_file = project_root(ps) / manual_peak_file
+            peak_set = (
+                get_peak_set(project_root(ps), ps.active_peak_set_id)
+                if ps.active_peak_set_id
+                else None
+            )
+            return invalidate_curve_datasets_for_peak_source(
+                project_curve_database_path(ps),
+                manual_peak_file=manual_peak_file if ps.manual_peak_file else None,
+                active_peak_set_id=ps.active_peak_set_id,
+                peak_set_sha256=peak_set.sha256 if peak_set is not None else "",
+            )
+        except Exception:
+            logger.exception("Failed to validate project curve peak provenance")
+            return {}
 
     def save_function_params(self) -> None:
         """Save function parameters from the current project page."""
@@ -1405,6 +1642,17 @@ class WorkspacePagesMixin:
         destination = result.get("destination", "")
         if field_name and destination:
             setattr(ps, field_name, destination)
+            if field_name == "manual_peak_file":
+                peak_set = import_peak_set(
+                    project_root(ps),
+                    destination,
+                    label=Path(destination).stem,
+                )
+                ps.active_peak_set_id = peak_set.peak_set_id
+                ps.manual_peak_file = str(
+                    verify_peak_set(project_root(ps), peak_set)
+                )
+                ps.temp_peak_source = "manual"
             if field_name == "pie_scan_folder":
                 pie_folders = ps.effective_pie_scan_folders()
                 if destination not in pie_folders:
@@ -1414,6 +1662,8 @@ class WorkspacePagesMixin:
                 ps.pie_multi_folder_mode = len(pie_folders) > 1
         self.project_settings_manager.set(ps)
         self.project_settings_manager.save()
+        ps = self.project_settings_manager.reload()
+        self._invalidate_untraceable_project_curves(ps)
 
         self._read_project_settings_to_ui(ps)
         self._load_project_settings_to_parameter_widgets(ps)
@@ -1570,14 +1820,23 @@ class WorkspacePagesMixin:
             return
 
         try:
-            result = import_project_source(ps, path, "manual_peak", mode="copy")
+            peak_set = import_peak_set(
+                project_root(ps),
+                path,
+                label=Path(path).stem,
+            )
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, "导入手动卡峰文件失败", str(exc))
             return
 
+        ps.active_peak_set_id = peak_set.peak_set_id
+        ps.manual_peak_file = str(verify_peak_set(project_root(ps), peak_set))
+        ps.temp_peak_source = "manual"
         self.project_settings_manager.set_project_path(Path(ps.output_dir))
         self.project_settings_manager.set(ps)
         self.project_settings_manager.save()
+        ps = self.project_settings_manager.reload()
+        self._invalidate_untraceable_project_curves(ps)
 
         self._read_project_settings_to_ui(ps)
         self._apply_settings_to_tools(ps)
@@ -1585,7 +1844,128 @@ class WorkspacePagesMixin:
         self.refresh_project_lifecycle(ps)
         self.refresh_project_parameter_summary()
         self.refresh_project_datasource_page(ps)
-        self.statusbar.showMessage(f"✓ 手动卡峰文件已导入并登记：{result.destination}", 5000)
+        self.statusbar.showMessage(
+            f"✓ 已导入为不可变卡峰集并激活：{peak_set.label}",
+            5000,
+        )
+
+    def generate_project_peak_set_from_sum(self) -> None:
+        ps = self._collect_project_settings_from_ui()
+        ps = self._normalize_project_output_dir(ps)
+        source_folder = Path(str(ps.sum_spectrum_folder or "")).expanduser()
+        if not source_folder.is_absolute():
+            source_folder = project_root(ps) / source_folder
+        if not source_folder.is_dir():
+            QtWidgets.QMessageBox.warning(
+                self,
+                "无法自动生成卡峰集",
+                "项目累计谱目录不存在。请先在质谱工作台登记累计谱，"
+                "或导入现有卡峰文件。",
+            )
+            return
+        running = getattr(self, "_project_peak_generation_worker", None)
+        if running is not None and running.isRunning():
+            return
+        reply = QtWidgets.QMessageBox.question(
+            self,
+            "从累计谱自动生成卡峰集",
+            "将使用项目累计质谱、项目定标和项目寻峰参数创建一个新的"
+            "不可变卡峰版本。\n已有版本不会被覆盖。\n\n是否继续？",
+            QtWidgets.QMessageBox.StandardButton.Yes
+            | QtWidgets.QMessageBox.StandardButton.No,
+            QtWidgets.QMessageBox.StandardButton.No,
+        )
+        if reply != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+
+        self.project_peak_set_generate_button.setEnabled(False)
+        self.project_peak_set_status.setText("正在自动寻峰…")
+        worker = WorkerThread(
+            lambda: generate_project_peak_set(
+                ps,
+                progress_callback=worker.report_progress,
+            ),
+            self,
+        )
+        self._project_peak_generation_worker = worker
+        worker.progress.connect(
+            lambda _value, message: self.project_peak_set_status.setText(message)
+        )
+
+        def on_success(record) -> None:
+            try:
+                approved_path = verify_peak_set(project_root(ps), record)
+                ps.active_peak_set_id = record.peak_set_id
+                ps.manual_peak_file = str(approved_path)
+                ps.temp_peak_source = "manual"
+                self.project_settings_manager.set(ps)
+                self.project_settings_manager.save()
+                saved = self.project_settings_manager.reload()
+                self._invalidate_untraceable_project_curves(saved)
+                self._read_project_settings_to_ui(saved)
+                self._apply_settings_to_tools(saved)
+                self.refresh_project_lifecycle(saved)
+                self.refresh_project_datasource_page(saved)
+                self.statusbar.showMessage(
+                    f"✓ 已自动生成并激活项目卡峰集：{record.label}",
+                    5000,
+                )
+            except Exception as exc:
+                logger.exception("Failed to activate generated peak set")
+                QtWidgets.QMessageBox.critical(
+                    self,
+                    "激活项目卡峰集失败",
+                    str(exc),
+                )
+
+        def on_failure(message: str) -> None:
+            QtWidgets.QMessageBox.critical(
+                self,
+                "自动生成项目卡峰集失败",
+                message,
+            )
+            self.project_peak_set_status.setText("生成失败")
+
+        worker.finished_with_result.connect(on_success)
+        worker.failed.connect(on_failure)
+        worker.finished.connect(
+            lambda: self.project_peak_set_generate_button.setEnabled(True)
+        )
+        worker.finished.connect(
+            lambda: setattr(self, "_project_peak_generation_worker", None)
+        )
+        worker.start()
+
+    def activate_selected_project_peak_set(self) -> None:
+        peak_set_id = str(self.project_peak_set_combo.currentData() or "")
+        if not peak_set_id:
+            QtWidgets.QMessageBox.warning(self, "无法激活", "请选择一个已批准卡峰集。")
+            return
+        ps = self._collect_project_settings_from_ui()
+        try:
+            record, path = activate_peak_set(project_root(ps), peak_set_id)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "卡峰集校验失败", str(exc))
+            return
+        if (
+            ps.active_peak_set_id == record.peak_set_id
+            and ps.manual_peak_file
+            and resolve_peak_set_path(project_root(ps), ps.manual_peak_file) == path
+        ):
+            self.project_peak_set_status.setText("当前使用")
+            return
+        ps.active_peak_set_id = record.peak_set_id
+        ps.manual_peak_file = str(path)
+        ps.temp_peak_source = "manual"
+        self.project_settings_manager.set(ps)
+        self.project_settings_manager.save()
+        ps = self.project_settings_manager.reload()
+        self._invalidate_untraceable_project_curves(ps)
+        self._read_project_settings_to_ui(ps)
+        self._apply_settings_to_tools(ps)
+        self.refresh_project_lifecycle(ps)
+        self.refresh_project_datasource_page(ps)
+        self.statusbar.showMessage(f"✓ 已激活卡峰集：{record.label}", 5000)
 
     def select_project_manual_peak(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -1898,7 +2278,9 @@ class WorkspacePagesMixin:
                 f"母体 m/z={ps.mf_parent_mz}, 光子能量={ps.mf_photon_energy:.4g} eV\n"
                 "分析产物:\n"
                 f"温度扫描结果={'已登记' if ps.temperature_scan_result_file else '未登记'}; "
+                f"PIE曲线结果={'已登记' if ps.pie_curve_result_file else '未登记'}; "
                 f"PIE鉴定结果={'已登记' if ps.pie_identification_result_file else '未登记'}; "
+                f"同位素贡献校正结果={'已登记' if ps.isotope_correction_result_file else '未登记'}; "
                 f"摩尔分数结果={'已登记' if ps.mole_fraction_result_file else '未登记'}"
             )
         except Exception as exc:
@@ -1926,6 +2308,7 @@ class WorkspacePagesMixin:
             "spectrum": self.spectrum_page,
             "temperature": self.temperature_page,
             "pie": self.pie_page,
+            "isotope_correction": self.isotope_correction_page,
             "mole_fraction": self.mole_fraction_page,
             "pics": self.pics_page,
             "pics_import": self.pics_import_page,
@@ -1966,6 +2349,34 @@ class WorkspacePagesMixin:
         if hasattr(self, "pics_page"):
             self.pics_page.normalization_settings = self.normalization_settings
             self.pics_page.calibration = calibration
+        if (
+            page_name in {"temperature", "pie"}
+            and self.project_settings_manager.has_project_path()
+            and hasattr(page, "ensure_project_cache_loaded")
+        ):
+            page.ensure_project_cache_loaded()
+        if (
+            page_name == "isotope_correction"
+            and self.project_settings_manager.has_project_path()
+            and hasattr(page, "ensure_project_source_loaded")
+        ):
+            # Revalidate the two upstream analysis fingerprints first. A dataset
+            # that was conservatively marked stale can become valid again when
+            # the complete current analysis key exactly matches its provenance.
+            for upstream_page in (
+                getattr(self, "temperature_page", None),
+                getattr(self, "pie_page", None),
+            ):
+                if upstream_page is None or not hasattr(
+                    upstream_page,
+                    "ensure_project_cache_loaded",
+                ):
+                    continue
+                upstream_page.ensure_project_cache_loaded()
+                worker = getattr(upstream_page, "_autoload_worker", None)
+                if worker is not None and worker.isRunning():
+                    worker.finished.connect(page.refresh_project_sources)
+            page.ensure_project_source_loaded()
         self.workspace_stack.setCurrentWidget(page)
         if page_name in self.page_buttons:
             self.page_buttons[page_name].setChecked(True)

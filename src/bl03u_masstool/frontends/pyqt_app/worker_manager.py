@@ -64,6 +64,13 @@ class WorkerManager(QObject):
         if self.current_worker:
             self.current_worker.cancel()
 
+    def request_shutdown(self) -> None:
+        """Ask the managed worker and thread to finish without blocking the UI."""
+        self.cancel()
+        if self.current_thread and self.current_thread.isRunning():
+            self.current_thread.requestInterruption()
+            self.current_thread.quit()
+
     def is_running(self) -> bool:
         """Check if a worker is currently running."""
         return self.current_thread is not None and self.current_thread.isRunning()

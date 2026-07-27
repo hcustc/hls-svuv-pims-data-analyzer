@@ -11,9 +11,14 @@ data_sources:
   pie_scan_folders: []
   pics_database_path: ''
   manual_peak_file: ''
+  active_peak_set_id: ''
 analysis_artifacts:
+  curve_database_path: ''
+  curve_storage_mode: sqlite
   temperature_scan_result_file: ''
+  pie_curve_result_file: ''
   pie_identification_result_file: ''
+  isotope_correction_result_file: ''
   mole_fraction_result_file: ''
 calibration:
   a: 3.66334e-07
