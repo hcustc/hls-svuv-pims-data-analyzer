@@ -17,6 +17,25 @@ import pandas as pd
 from PyQt6 import QtCore, QtGui, QtWidgets
 
 from bl03u_masstool.core.calibration import Calibration, tof_to_mz
+from bl03u_masstool.core.curve_database import (
+    get_curve_dataset_state_read_only,
+    list_pie_fit_states,
+    list_curve_datasets_read_only,
+    mark_curve_datasets_stale,
+    project_curve_database_path,
+    reactivate_curve_dataset_for_analysis,
+    replace_species_assignments,
+    set_curve_dataset_validity,
+    save_pie_fit_state,
+    set_current_curve_dataset,
+    store_curve_dataset_version,
+)
+from bl03u_masstool.core.curve_repository import (
+    RepositoryCurveMapping,
+    SQLiteCurveRepository,
+    channel_to_curve,
+    validate_repository_round_trip,
+)
 from bl03u_masstool.core.config import (
     PeakDetectionConfig,
     load_calibration_config,
@@ -40,6 +59,7 @@ from bl03u_masstool.core.nist_webbook import (
     select_species_ionization_energy,
 )
 from bl03u_masstool.core.output_paths import ensure_output_dir
+from bl03u_masstool.core.peak_sets import get_peak_set, resolve_active_peak_file
 from bl03u_masstool.core.pie_analysis import (
     PieSegmentSummary,
     analyze_multiple_pie_folders,
@@ -78,6 +98,9 @@ from bl03u_masstool.core.mole_fraction import (
     save_mole_fraction_settings,
 )
 from bl03u_masstool.frontends.pyqt_app.workers import WorkerThread
+from bl03u_masstool.frontends.pyqt_app.project_peak_workflow import (
+    prepare_project_peak_set,
+)
 from bl03u_masstool.frontends.pyqt_app.project_artifacts import record_project_artifact
 from bl03u_masstool.frontends.pyqt_app.temporary_analysis_settings import (
     TemporaryAnalysisSettingsDialog,
@@ -100,6 +123,7 @@ from bl03u_masstool.frontends.pyqt_app.common.static_plot import StaticCurvePlot
 from bl03u_masstool.frontends.pyqt_app.normalization.widget import CommonParametersDialog
 from bl03u_masstool.frontends.pyqt_app.pie.fitting_control_widget import FittingControlWidget
 from bl03u_masstool.frontends.pyqt_app.pie.result_display_widget import ResultDisplayWidget
+from bl03u_masstool.frontends.pyqt_app.pie.batch_selector import CurveBatchSelectorDialog
 
 
 logger = logging.getLogger(__name__)
@@ -138,7 +162,8 @@ def _run_exhaustive_fit(
 
 
 class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
-    CACHE_VERSION = 1
+    # Version 2 requires explicit peak-source provenance in every cache entry.
+    CACHE_VERSION = 2
 
     @staticmethod
     def _curve_nominal_mz(curve: dict, curve_key: PieCurveKey | None = None) -> int:
@@ -175,7 +200,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         )
 
     def _nominal_mz_for_key(self, curve_key: PieCurveKey) -> int:
-        curve = self.curves.get(curve_key)
+        curve = self._curve_metadata_for_key(curve_key)
         if curve is None:
             return int(round(float(curve_key)))
         return self._curve_nominal_mz(curve, curve_key)
@@ -186,12 +211,24 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         *,
         include_nominal: bool = False,
     ) -> str:
-        curve = self.curves.get(curve_key, {})
+        curve = self._curve_metadata_for_key(curve_key) or {}
         return self._curve_mz_text(
             curve,
             curve_key,
             include_nominal=include_nominal,
         )
+
+    def _curve_metadata_for_key(
+        self,
+        curve_key: PieCurveKey,
+    ) -> dict | None:
+        curves = self.curves
+        if isinstance(curves, RepositoryCurveMapping):
+            try:
+                return curves.metadata(float(curve_key))
+            except KeyError:
+                return None
+        return curves.get(curve_key)
 
     def _curve_key_from_state(self, value: object) -> PieCurveKey | None:
         """Resolve a persisted/UI value to the exact current PIE curve key."""
@@ -245,14 +282,19 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.database: list[dict] = []
         self.analysis_df = pd.DataFrame()
         self.curves: dict[PieCurveKey, dict] = {}
+        self.curve_repository: SQLiteCurveRepository | None = None
         self.current_mz: PieCurveKey | None = None
         self.current_fit: dict | None = None
         self.all_fit_results: dict[PieCurveKey, dict] = {}  # 保存所有拟合结果
+        self.curve_database_dataset_id: int | None = None
         self.worker: WorkerThread | None = None
         self._analysis_request_id = 0
         self._autoload_worker: WorkerThread | None = None
         self._autoload_cache_token: dict | None = None
+        self._project_cache_validated = False
         self._autoload_request_id = 0
+        self._loaded_analysis_cache_key = ""
+        self._analysis_provenance: dict = {}
         self.ie_lookup_worker: WorkerThread | None = None
         self._ie_lookup_cache: dict[str, dict] = {}
         self._ie_lookup_pending: dict[str, dict] = {}
@@ -315,6 +357,10 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.analyze_button.setObjectName("PrimaryButton")
         self.analyze_button.setToolTip("生成PIE曲线")
         self.analyze_button.clicked.connect(self.run_analysis)
+        self.curve_batch_button = QtWidgets.QPushButton("分析批次…")
+        self.curve_batch_button.setObjectName("BrowseButton")
+        self.curve_batch_button.setToolTip("查看、加载或设定项目PIE分析批次")
+        self.curve_batch_button.clicked.connect(self.open_curve_batch_selector)
         self.export_button = QtWidgets.QToolButton()
         self.export_button.setText("导出")
         self.export_button.setObjectName("CommandMenuButton")
@@ -446,10 +492,21 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             QtWidgets.QSizePolicy.Policy.Fixed,
         )
         summary_layout.addWidget(self.parameter_summary_label, stretch=1)
+        self.curve_source_label = QtWidgets.QLabel(
+            "当前曲线：临时内存 · 尚未生成"
+        )
+        self.curve_source_label.setObjectName("CurveSourceBadge")
+        self.curve_source_label.setProperty("sourceState", "empty")
+        self.curve_source_label.setTextInteractionFlags(
+            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self.curve_source_label.setMaximumWidth(330)
+        summary_layout.addWidget(self.curve_source_label)
         self.folder_edit.setMinimumWidth(180)
         folder_row.addWidget(self.folder_edit, stretch=1)
         folder_row.addWidget(self.select_folder_button)
         folder_row.addWidget(self.temporary_segments_button)
+        folder_row.addWidget(self.curve_batch_button)
         folder_row.addWidget(self.analyze_button)
         data_layout.addWidget(folder_row_panel)
 
@@ -1212,7 +1269,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
     def _populate_candidate_table(self, mz: PieCurveKey):
         """根据选中的m/z填充统一的拟合物种表格"""
-        curve = self.curves.get(mz, {})
+        curve = self._curve_metadata_for_key(mz) or {}
         nominal_mz = self._curve_nominal_mz(curve, mz)
         display_mz = self._curve_mz_text(curve, mz)
         filtered_db = self.get_filtered_database()
@@ -1802,6 +1859,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         # 保存所有拟合结果
         self.all_fit_results = results
         self._schedule_ie_for_fit_results(results)
+        self._store_species_assignment_batch(results, assignment_status="candidate")
 
         fitted_count = sum(1 for r in results.values() if r.get('success'))
         total_count = len(self.curves)
@@ -1947,6 +2005,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             if result.get('success'):
                 self.all_fit_results[mz] = result
         self._schedule_ie_for_fit_results(results)
+        self._store_species_assignment_batch(results, assignment_status="candidate")
 
         # Phase 3 Step 3: Mark results dirty when refit completes
         self.pie_state_dirty = True
@@ -2107,6 +2166,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self._fit_preview_active = False
         result["_confirmed"] = True
         result["_confirmed_timestamp"] = time.time()
+        self._store_current_species_assignments(result, assignment_status="confirmed")
 
         # 更新右侧面板确认状态
         self.fitting_control_widget.set_fit_confirmed(True)
@@ -2125,6 +2185,114 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             f"{names}  R²={r2:.4f}"
         )
         self._update_action_state()
+
+    def _store_current_species_assignments(
+        self,
+        result: dict,
+        *,
+        assignment_status: str,
+    ) -> None:
+        if self.current_mz is None:
+            return
+        self._store_species_assignments_for_mz(
+            self.current_mz,
+            result,
+            assignment_status=assignment_status,
+        )
+
+    def _store_species_assignment_batch(
+        self,
+        results: dict,
+        *,
+        assignment_status: str,
+    ) -> None:
+        for mz, result in results.items():
+            if result.get("success") and result.get("model"):
+                self._store_species_assignments_for_mz(
+                    mz,
+                    result,
+                    assignment_status=assignment_status,
+                )
+
+    def _store_species_assignments_for_mz(
+        self,
+        mz: PieCurveKey,
+        result: dict,
+        *,
+        assignment_status: str,
+    ) -> None:
+        if (
+            self.project_settings is None
+            or self.curve_database_dataset_id is None
+        ):
+            return
+        curve = self._curve_metadata_for_key(mz) or {}
+        exact_mz = float(curve.get("mz_exact_mean", mz))
+        nominal_mz = int(round(float(curve.get("mz_rounded", exact_mz))))
+        assignments: list[dict] = []
+        for item in result.get("model", {}).get("species", []):
+            enriched = dict(item)
+            item_name = str(item.get("species") or "").strip().casefold()
+            item_ids = {
+                int(value)
+                for value in ([item.get("id")] + list(item.get("ids") or []))
+                if value is not None and str(value).lstrip("-").isdigit()
+            }
+            for candidate in self.database:
+                try:
+                    candidate_mz = int(candidate.get("mz"))
+                except (TypeError, ValueError):
+                    continue
+                candidate_name = str(candidate.get("species") or "").strip().casefold()
+                candidate_id = candidate.get("id")
+                id_match = (
+                    candidate_id is not None
+                    and str(candidate_id).lstrip("-").isdigit()
+                    and int(candidate_id) in item_ids
+                )
+                if candidate_mz == nominal_mz and (
+                    id_match or (item_name and candidate_name == item_name)
+                ):
+                    enriched["formula"] = (
+                        enriched.get("formula") or candidate.get("formula") or ""
+                    )
+                    enriched["ionization_energy"] = (
+                        enriched.get("ionization_energy")
+                        or enriched.get("ie")
+                        or candidate.get("ionization_energy")
+                        or candidate.get("ie")
+                    )
+                    break
+            assignments.append(enriched)
+        try:
+            replace_species_assignments(
+                project_curve_database_path(self.project_settings),
+                dataset_id=self.curve_database_dataset_id,
+                exact_mz=exact_mz,
+                assignments=assignments,
+                assignment_status=assignment_status,
+                r_squared=result.get("r_squared"),
+            )
+            channel_id = curve.get("channel_id")
+            if channel_id is not None:
+                save_pie_fit_state(
+                    project_curve_database_path(self.project_settings),
+                    dataset_id=self.curve_database_dataset_id,
+                    channel_id=int(channel_id),
+                    config=self.per_mz_config.get(mz, {}),
+                    result=result,
+                    config_hash=str(result.get("fit_config_hash") or ""),
+                    fit_status=(
+                        "confirmed"
+                        if assignment_status == "confirmed"
+                        else "fitted"
+                    ),
+                )
+        except Exception:
+            logger.exception(
+                "Failed to store PIE species assignments for m/z %.12g",
+                exact_mz,
+            )
 
     # ── Force species management (delegated to FittingControlWidget) ───────
 
@@ -2158,6 +2326,11 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
     def _has_project_scope(self) -> bool:
         return self.pie_source_scope == "project"
+
+    def _curve_storage_mode(self) -> str:
+        if self.project_settings is None:
+            return "legacy"
+        return self.project_settings.effective_curve_storage_mode()
 
     def _has_project_state_context(self) -> bool:
         return self._has_project_scope() or bool(self.project_dir)
@@ -2287,17 +2460,16 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         elif previous_scope == "project" and restore_saved:
             self.project_dir = None
             self.per_mz_config = {}
-            self.all_fit_results = {}
-            self.current_fit = None
-            self.current_mz = None
+            self._clear_loaded_pie_curve_view()
             self.folder_edit.setText(self._temporary_pie_folder)
-            self._update_fit_stats(0, 0, None)
 
         if scope == "temporary":
             self._ensure_temporary_settings()
             self._apply_temporary_settings_to_runtime()
 
         self._refresh_pie_source_controls()
+        if not self.curves:
+            self._show_empty_curve_source()
         if hasattr(self, "fit_button"):
             self._update_action_state()
 
@@ -2351,6 +2523,16 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             and bool(self.folder_edit.text().strip())
         )
         self._update_temporary_segment_button()
+        self.curve_batch_button.setVisible(
+            use_project and self._curve_storage_mode() == "sqlite"
+        )
+        self.curve_batch_button.setEnabled(
+            use_project
+            and self._curve_storage_mode() == "sqlite"
+            and not busy
+            and self.project_settings is not None
+            and project_curve_database_path(self.project_settings).is_file()
+        )
         if use_project and not has_project_path:
             self.status_label.setText("项目未登记 PIE 数据源")
 
@@ -2637,17 +2819,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.project_dir = str(project_root(ps))
         if reset_state:
             self.per_mz_config = {}
-            self.all_fit_results = {}
-            self.current_fit = None
-            self.current_mz = None
-            self.analysis_df = pd.DataFrame()
-            self.curves = {}
-            if hasattr(self, "mz_list"):
-                blocker = QtCore.QSignalBlocker(self.mz_list)
-                self.mz_list.clear()
-                del blocker
-            if hasattr(self, "_plot_stack"):
-                self._plot_stack.setCurrentWidget(self._empty_state)
+            self._clear_loaded_pie_curve_view()
         project_folders = ps.effective_pie_scan_folders()
         self.integration_method_label.setText(f"积分方式：{self._integration_method_label(ps.pie_integration_method)}")
         mode = ps.pie_replicate_mode if ps.pie_replicate_mode in {"mean", "sum"} else "off"
@@ -2683,13 +2855,109 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.folder_edit.setText(folder)
             self._start_temporary_segment_scan(folder, open_selector=True)
 
-    def set_project_settings(self, ps: ProjectSettings, *, activate_project_scope: bool | None = None) -> None:
+    def open_curve_batch_selector(self) -> None:
+        if self.project_settings is None:
+            QtWidgets.QMessageBox.warning(self, "PIE分析批次", "当前没有项目上下文")
+            return
+        database_path = project_curve_database_path(self.project_settings)
+        dialog = CurveBatchSelectorDialog(database_path, parent=self)
+        if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return
+        dataset_id = dialog.selected_dataset_id
+        if dataset_id is None:
+            return
+        if dialog.requested_action == "set_current":
+            try:
+                set_current_curve_dataset(database_path, dataset_id)
+            except Exception as exc:
+                QtWidgets.QMessageBox.critical(self, "设置当前批次失败", str(exc))
+                return
+            self.status_label.setText(
+                f"已将数据集 #{dataset_id} 设为项目当前；本页查看对象未改变"
+            )
+            if self.curve_database_dataset_id == dataset_id:
+                self._show_active_curve_source(origin="SQLite 已加载结果")
+            return
+        if dialog.requested_action in {"mark_stale", "archive"}:
+            status = (
+                "stale"
+                if dialog.requested_action == "mark_stale"
+                else "archived"
+            )
+            try:
+                set_curve_dataset_validity(
+                    database_path,
+                    dataset_id=dataset_id,
+                    validity_status=status,
+                    reason=(
+                        "用户在批次管理中标记过期"
+                        if status == "stale"
+                        else "用户在批次管理中归档"
+                    ),
+                )
+            except Exception as exc:
+                QtWidgets.QMessageBox.critical(self, "更新批次状态失败", str(exc))
+                return
+            self.status_label.setText(
+                f"数据集 #{dataset_id} 已{'标记过期' if status == 'stale' else '归档'}"
+            )
+            if self.curve_database_dataset_id == dataset_id:
+                self._clear_loaded_pie_curve_view()
+                self._show_empty_curve_source(
+                    warning=f"正在查看的数据集 #{dataset_id} 已"
+                    f"{'标记过期' if status == 'stale' else '归档'}"
+                )
+            return
+        datasets = list_curve_datasets_read_only(
+            database_path,
+            curve_type="pie",
+            include_stale=True,
+        )
+        dataset = next(
+            (item for item in datasets if item.dataset_id == dataset_id),
+            None,
+        )
+        if dataset is None:
+            QtWidgets.QMessageBox.critical(
+                self,
+                "加载批次失败",
+                f"数据集 #{dataset_id} 已不存在",
+            )
+            return
+        provenance = dataset.metadata.get("analysis_provenance")
+        if not isinstance(provenance, dict):
+            provenance = {}
+        try:
+            self._activate_sqlite_dataset(
+                dataset_id,
+                metadata=dataset.metadata,
+                cache_key=str(provenance.get("cache_key") or ""),
+            )
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "加载批次失败", str(exc))
+            return
+        self.status_label.setText(
+            f"正在查看数据集 #{dataset_id}；未改变项目当前批次"
+        )
+
+    def set_project_settings(
+        self,
+        ps: ProjectSettings,
+        *,
+        activate_project_scope: bool | None = None,
+        load_cached_results: bool = True,
+    ) -> None:
         """Apply ProjectSettings defaults to summary bar and folder controls.
 
         Also loads per-m/z configurations from the new project's state.
         Clears previous project's in-memory state to prevent data leakage.
         """
         self._analysis_request_id += 1
+        # Applying project settings is the explicit invalidation boundary.
+        # Merely switching away from and back to this page must not rescan the
+        # raw folders or reactivate the same SQLite dataset.
+        self._project_cache_validated = False
+        self._autoload_cache_token = None
         has_project_context = bool(
             ps.project_name
             or ps.effective_pie_scan_folders()
@@ -2726,6 +2994,12 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             new_project_dir = str(project_root(ps))
             reset_state = previous_project_dir != new_project_dir
             self._apply_project_pie_source(ps, reset_state=reset_state)
+            had_dataset_reference = self.curve_database_dataset_id is not None
+            valid_reference = self._validate_loaded_project_curve_reference()
+            if not self.curves and (
+                not had_dataset_reference or valid_reference
+            ):
+                self._show_empty_curve_source()
 
         if self._has_project_scope():
             project_folders = ps.effective_pie_scan_folders()
@@ -2746,11 +3020,18 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         if not self._has_project_scope():
             self._apply_temporary_settings_to_runtime()
         self._refresh_pie_source_controls()
-        if self._has_project_scope() and ps.effective_pie_scan_folders() and not self.curves:
+        if self._has_project_scope() and ps.effective_pie_scan_folders() and not load_cached_results:
+            self._autoload_request_id += 1
+            self._autoload_cache_token = None
+            self._project_cache_validated = False
+            self.status_label.setText("进入 PIE 页面后检查项目缓存")
+        elif self._has_project_scope() and ps.effective_pie_scan_folders():
             if not self._try_load_project_pie_cache_async():
                 self.status_label.setText("项目参数已同步")
         else:
             self._autoload_cache_token = None
+            if not self.curves:
+                self._show_empty_curve_source()
         self._update_action_state()
         if not has_project_context and activate_project_scope is False:
             self.project_settings = None
@@ -2889,6 +3170,31 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
     def _restore_pie_project_state(self) -> None:
         if not self._has_project_state_context() or not self.project_dir or not self.database or not self.curves:
             return
+        if (
+            self.project_settings is not None
+            and self.curve_database_dataset_id is not None
+            and isinstance(self.curves, RepositoryCurveMapping)
+        ):
+            try:
+                states = list_pie_fit_states(
+                    project_curve_database_path(self.project_settings),
+                    dataset_id=self.curve_database_dataset_id,
+                )
+                self.per_mz_config = {
+                    float(state["exact_mz"]): dict(state["config"])
+                    for state in states
+                }
+                self.all_fit_results = {
+                    float(state["exact_mz"]): dict(state["result"])
+                    for state in states
+                }
+                self.pie_state_dirty = False
+            except Exception:
+                logger.exception(
+                    "Failed to restore dataset-scoped PIE fitting state for dataset %s",
+                    self.curve_database_dataset_id,
+                )
+            return
         self._load_per_mz_configs()
         try:
             manager = PieStateManager(self.project_dir)
@@ -2931,6 +3237,32 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         """
         if not self._has_project_state_context() or not self.project_dir or not self.database or not self.curves:
             # Cannot save without project context or data
+            return
+        if (
+            isinstance(self.curves, RepositoryCurveMapping)
+            and self.project_settings is not None
+            and self.curve_database_dataset_id is not None
+        ):
+            database_path = project_curve_database_path(self.project_settings)
+            for mz in set(self.per_mz_config) | set(self.all_fit_results):
+                metadata = self._curve_metadata_for_key(mz)
+                if not metadata or metadata.get("channel_id") is None:
+                    continue
+                result = dict(self.all_fit_results.get(mz, {}))
+                save_pie_fit_state(
+                    database_path,
+                    dataset_id=self.curve_database_dataset_id,
+                    channel_id=int(metadata["channel_id"]),
+                    config=self.per_mz_config.get(mz, {}),
+                    result=result,
+                    config_hash=str(result.get("fit_config_hash") or ""),
+                    fit_status=(
+                        "confirmed"
+                        if result.get("_confirmed")
+                        else ("fitted" if result.get("success") else "draft")
+                    ),
+                )
+            self.pie_state_dirty = False
             return
 
         try:
@@ -3084,10 +3416,16 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         if not path.exists():
             return {"name": path.name, "missing": True}
         stat = path.stat()
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
         return {
+            "path": str(path),
             "name": path.name,
             "size": stat.st_size,
             "mtime_ns": stat.st_mtime_ns,
+            "sha256": digest.hexdigest(),
         }
 
     def _pie_folder_fingerprints(self, folders: list[str], *, recursive: bool) -> list[dict]:
@@ -3128,13 +3466,25 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             )
         return fingerprints
 
-    def _pie_cache_parameters(self, folders: list[str], merge_method: str | None) -> dict:
+    def _pie_cache_static_parameters(self, merge_method: str | None) -> dict:
         ps = self._effective_analysis_settings()
         peak_config = ps.to_peak_detection_config()
         calibration = ps.to_calibration()
         normalization = ps.to_normalization_settings()
         photon_mode = "none" if self.photon_correction_check.isChecked() else "off"
-        manual_peak_path = (ps.manual_peak_file or None) if self._has_project_scope() else None
+        manual_peak_path = None
+        if self._has_project_scope():
+            resolved_peak = resolve_active_peak_file(
+                ps.output_dir,
+                active_peak_set_id=ps.active_peak_set_id,
+                configured_peak_file=ps.manual_peak_file,
+            )
+            manual_peak_path = str(resolved_peak) if resolved_peak is not None else None
+        peak_set = (
+            get_peak_set(ps.output_dir, ps.active_peak_set_id)
+            if self._has_project_scope() and ps.active_peak_set_id
+            else None
+        )
         return {
             "calibration": {
                 "a": float(calibration.a),
@@ -3148,19 +3498,45 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             "merge_method": merge_method,
             "replicate_mode": self._current_replicate_mode(),
             "manual_peak": self._path_fingerprint(manual_peak_path),
+            "active_peak_set_id": str(ps.active_peak_set_id or ""),
+            "peak_set_origin": peak_set.origin if peak_set is not None else "",
             "photon_mode": photon_mode,
             "mass_discrimination": 1.0,
             "light_source": str(normalization.light_source),
-            "folders": self._pie_folder_fingerprints(
-                folders,
-                recursive=bool(ps.pie_recursive),
-            ),
         }
 
-    def _pie_cache_key(self, folders: list[str], merge_method: str | None) -> str:
+    def _pie_cache_parameters(
+        self,
+        folders: list[str],
+        merge_method: str | None,
+        *,
+        static_parameters: dict | None = None,
+    ) -> dict:
+        parameters = dict(
+            static_parameters
+            if static_parameters is not None
+            else self._pie_cache_static_parameters(merge_method)
+        )
+        parameters["folders"] = self._pie_folder_fingerprints(
+            folders,
+            recursive=bool(parameters.get("recursive", True)),
+        )
+        return parameters
+
+    def _pie_cache_key(
+        self,
+        folders: list[str],
+        merge_method: str | None,
+        *,
+        static_parameters: dict | None = None,
+    ) -> str:
         payload = {
             "version": self.CACHE_VERSION,
-            "parameters": self._pie_cache_parameters(folders, merge_method),
+            "parameters": self._pie_cache_parameters(
+                folders,
+                merge_method,
+                static_parameters=static_parameters,
+            ),
         }
         encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()[:24]
@@ -3182,6 +3558,10 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 "result_file": result_path.name,
                 "row_count": int(len(self.analysis_df)),
                 "source_info": dict(source_info or {}),
+                "cache_key": cache_key,
+                "analysis_provenance": dict(
+                    (source_info or {}).get("analysis_provenance") or {}
+                ),
             }
             manifest_path.write_text(
                 json.dumps(manifest, ensure_ascii=False, indent=2, default=str),
@@ -3214,6 +3594,9 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 if column in analysis_df:
                     analysis_df[column] = analysis_df[column].fillna("").astype(str)
             source_info = dict(manifest.get("source_info") or {})
+            provenance = dict(manifest.get("analysis_provenance") or {})
+            provenance.setdefault("cache_key", cache_key)
+            source_info["analysis_provenance"] = provenance
             source_info["from_cache"] = True
             return analysis_df, build_pie_curves(analysis_df), source_info
         except Exception:
@@ -3223,22 +3606,38 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
     def _try_load_project_pie_cache_async(self) -> bool:
         if not self._has_project_scope() or self.project_settings is None:
             return False
+        if self._project_cache_validated:
+            return True
+        if (
+            self._autoload_worker is not None
+            and self._autoload_worker.isRunning()
+            and self._autoload_cache_token
+        ):
+            return True
         folders, merge_method = self._analysis_source_selection()
         if not folders:
             return False
         try:
-            cache_key = self._pie_cache_key(folders, merge_method)
-        except Exception:
+            static_parameters = self._pie_cache_static_parameters(merge_method)
+        except (FileNotFoundError, ValueError) as exc:
+            self.status_label.setText(str(exc))
             return False
         self._autoload_request_id += 1
         token = {
             "request_id": self._autoload_request_id,
             "project_dir": str(self.project_dir or ""),
-            "cache_key": cache_key,
+            "folders": list(folders),
         }
         self._autoload_cache_token = token
         self.status_label.setText("正在检查项目 PIE 曲线缓存…")
-        worker = WorkerThread(lambda: self._load_pie_analysis_cache(cache_key), self)
+        worker = WorkerThread(
+            lambda: self._load_project_pie_cache(
+                folders,
+                merge_method,
+                static_parameters,
+            ),
+            self,
+        )
         self._autoload_worker = worker
         worker.finished_with_result.connect(
             lambda result, expected_token=token: self._on_project_pie_cache_loaded(
@@ -3253,23 +3652,178 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         worker.start()
         return True
 
+    def ensure_project_cache_loaded(self) -> bool:
+        """Lazily inspect the project cache when this workspace page is opened."""
+        if self._project_cache_validated:
+            return True
+        worker = self._autoload_worker
+        if worker is not None and worker.isRunning() and self._autoload_cache_token:
+            return True
+        return self._try_load_project_pie_cache_async()
+
+    def _load_project_pie_cache(
+        self,
+        folders: list[str],
+        merge_method: str | None,
+        static_parameters: dict,
+    ) -> dict:
+        cache_key = self._pie_cache_key(
+            folders,
+            merge_method,
+            static_parameters=static_parameters,
+        )
+        database_path = (
+            project_curve_database_path(self.project_settings)
+            if self.project_settings is not None
+            else None
+        )
+        if (
+            self._curve_storage_mode() == "sqlite"
+            and database_path is not None
+            and database_path.is_file()
+        ):
+            datasets = list_curve_datasets_read_only(
+                database_path,
+                curve_type="pie",
+                include_stale=True,
+            )
+            matching = next(
+                (
+                    dataset
+                    for dataset in datasets
+                    if dataset.validity_status != "archived"
+                    and (
+                        dataset.analysis_key == cache_key
+                        or str(
+                            (
+                                dataset.metadata.get("analysis_provenance")
+                                if isinstance(
+                                    dataset.metadata.get("analysis_provenance"),
+                                    dict,
+                                )
+                                else {}
+                            ).get("cache_key")
+                            or ""
+                        )
+                        == cache_key
+                    )
+                ),
+                None,
+            )
+            if matching is not None:
+                if matching.validity_status != "valid":
+                    reactivate_curve_dataset_for_analysis(
+                        database_path,
+                        dataset_id=matching.dataset_id,
+                        analysis_key=cache_key,
+                    )
+                return {
+                    "cache_key": cache_key,
+                    "sqlite_dataset_id": matching.dataset_id,
+                    "dataset_metadata": matching.metadata,
+                }
+        return {
+            "cache_key": cache_key,
+            "cached_result": self._load_pie_analysis_cache(cache_key),
+        }
+
     def _is_current_pie_cache_token(self, token: dict | None) -> bool:
         return bool(token and token == self._autoload_cache_token and self._has_project_scope())
 
     def _on_project_pie_cache_failed(self, expected_token: dict | None) -> None:
         if self._is_current_pie_cache_token(expected_token):
-            self.status_label.setText("项目参数已同步")
+            self._discard_stale_pie_curves("")
+            self.status_label.setText("缓存检查失败，请刷新曲线")
 
     def _on_project_pie_cache_loaded(self, result: object, expected_token: dict | None) -> None:
         if not self._is_current_pie_cache_token(expected_token):
             return
+        self._project_cache_validated = True
+        cache_key = ""
+        if isinstance(result, dict) and result.get("sqlite_dataset_id") is not None:
+            cache_key = str(result.get("cache_key") or "")
+            try:
+                self._activate_sqlite_dataset(
+                    int(result["sqlite_dataset_id"]),
+                    metadata=dict(result.get("dataset_metadata") or {}),
+                    cache_key=cache_key,
+                )
+            except Exception as exc:
+                logger.exception("Failed to load project PIE dataset from SQLite")
+                self.status_label.setText(f"SQLite曲线读取失败：{exc}")
+                self._update_action_state()
+                return
+            self.status_label.setText("已从项目SQLite曲线库按需载入PIE批次")
+            self._update_action_state()
+            return
+        if isinstance(result, dict) and "cached_result" in result:
+            cache_key = str(result.get("cache_key") or "")
+            result = result.get("cached_result")
+        self._discard_stale_pie_curves(cache_key)
         if not result:
-            self.status_label.setText("项目参数已同步")
+            self.status_label.setText("卡峰文件或分析参数已变化，请重新生成曲线")
             self._update_action_state()
             return
         self.on_analysis_complete(result)
         self.status_label.setText("已自动载入项目缓存的 PIE 曲线与拟合状态")
         self._update_action_state()
+
+    def _discard_stale_pie_curves(self, expected_cache_key: str) -> None:
+        if expected_cache_key and self._loaded_analysis_cache_key == expected_cache_key:
+            database_path = (
+                project_curve_database_path(self.project_settings)
+                if self.project_settings is not None
+                else None
+            )
+            dataset_state = (
+                get_curve_dataset_state_read_only(
+                    database_path,
+                    self.curve_database_dataset_id,
+                )
+                if database_path is not None
+                and self.curve_database_dataset_id is not None
+                else None
+            )
+            if (
+                dataset_state is not None
+                and dataset_state.validity_status == "valid"
+            ):
+                return
+        database_path = (
+            project_curve_database_path(self.project_settings)
+            if self.project_settings is not None
+            else None
+        )
+        if self.project_settings is not None:
+            try:
+                mark_curve_datasets_stale(
+                    project_curve_database_path(self.project_settings),
+                    curve_type="pie",
+                    reason="卡峰文件、原始数据或分析参数已变化",
+                )
+            except Exception:
+                logger.exception("Failed to mark PIE curve dataset stale")
+        self._clear_loaded_pie_curve_view()
+        self._show_empty_curve_source(
+            warning="卡峰文件、原始数据或分析参数已变化，请重新生成曲线"
+        )
+
+    def _clear_loaded_pie_curve_view(self) -> None:
+        self.analysis_df = pd.DataFrame()
+        self.curves = {}
+        self.current_mz = None
+        self.current_fit = None
+        self.all_fit_results = {}
+        self.curve_repository = None
+        self.curve_database_dataset_id = None
+        self._loaded_analysis_cache_key = ""
+        self._analysis_provenance = {}
+        self._last_analysis_source_info = {}
+        if hasattr(self, "mz_list"):
+            self.mz_list.clear()
+        if hasattr(self, "_plot_stack"):
+            self._plot_stack.setCurrentWidget(self._empty_state)
+        self._update_fit_stats(0, 0, None)
 
     def run_analysis(self):
         # A user-triggered analysis supersedes any pending project-cache lookup.
@@ -3297,12 +3851,35 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             )
 
         ps = self._effective_analysis_settings()
+        if self._has_project_scope() and not prepare_project_peak_set(
+            self,
+            ps,
+            retry=self.run_analysis,
+            set_busy=self.set_busy,
+            show_error=lambda message: QtWidgets.QMessageBox.warning(
+                self,
+                "项目卡峰集不可用",
+                message,
+            ),
+        ):
+            return
         energy_decimals = ps.pie_energy_decimals
         recursive = ps.pie_recursive
         integration_method = ps.pie_integration_method
         prefer_gaussian = integration_method == "gaussian"
         ps.pie_prefer_gaussian = prefer_gaussian
-        manual_peak_path = (ps.manual_peak_file or None) if self._has_project_scope() else None
+        manual_peak_path = None
+        if self._has_project_scope():
+            try:
+                resolved_peak = resolve_active_peak_file(
+                    ps.output_dir,
+                    active_peak_set_id=ps.active_peak_set_id,
+                    configured_peak_file=ps.manual_peak_file,
+                )
+            except (FileNotFoundError, ValueError) as exc:
+                QtWidgets.QMessageBox.warning(self, "卡峰集不可用", str(exc))
+                return
+            manual_peak_path = str(resolved_peak) if resolved_peak is not None else None
         peak_config = ps.to_peak_detection_config()
         threshold_end = peak_config.threshold_end
         min_intensity = peak_config.min_intensity
@@ -3322,9 +3899,11 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self._begin_analysis_progress(message)
         self._analysis_request_id += 1
         request_id = self._analysis_request_id
+        cache_static_parameters = self._pie_cache_static_parameters(merge_method)
         worker = WorkerThread(
-            lambda: self.run_pie_analysis_sync(
+            lambda: self._run_pie_analysis_with_provenance(
                 folders,
+                cache_static_parameters=cache_static_parameters,
                 calibration=calibration,
                 merge_method=merge_method,
                 recursive=recursive,
@@ -3388,6 +3967,44 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             return
         self.on_analysis_complete(result)
 
+    def _run_pie_analysis_with_provenance(
+        self,
+        folders: list[str],
+        *,
+        cache_static_parameters: dict,
+        **analysis_kwargs,
+    ) -> tuple[pd.DataFrame, dict[PieCurveKey, dict], dict]:
+        result = self.run_pie_analysis_sync(
+            folders,
+            **analysis_kwargs,
+        )
+        analysis_df, curves, source_info = result
+        merge_method = analysis_kwargs.get("merge_method")
+        cache_key = self._pie_cache_key(
+            folders,
+            merge_method,
+            static_parameters=cache_static_parameters,
+        )
+        source_info = dict(source_info or {})
+        source_info["analysis_provenance"] = {
+            "cache_key": cache_key,
+            "curve_type": "pie",
+            "active_peak_set_id": str(
+                cache_static_parameters.get("active_peak_set_id") or ""
+            ),
+            "peak_set_origin": str(
+                cache_static_parameters.get("peak_set_origin") or ""
+            ),
+            "peak_source": (
+                "manual_peak_file"
+                if cache_static_parameters.get("manual_peak")
+                else "auto"
+            ),
+            "manual_peak_file": cache_static_parameters.get("manual_peak"),
+            "analysis_parameters": cache_static_parameters,
+        }
+        return analysis_df, curves, source_info
+
     def _analysis_source_selection(self) -> tuple[list[str], str | None]:
         """Resolve the active source scope without exposing segment mode in this page."""
         if self._has_project_scope():
@@ -3444,6 +4061,198 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         )
         self.parameter_summary_label.setText(text)
         self.parameter_summary_label.setToolTip(text)
+
+    def _set_curve_source_indicator(
+        self,
+        text: str,
+        *,
+        state: str,
+        details: list[str] | None = None,
+    ) -> None:
+        if not hasattr(self, "curve_source_label"):
+            return
+        self.curve_source_label.setText(text)
+        self.curve_source_label.setToolTip("\n".join(details or []))
+        self.curve_source_label.setProperty("sourceState", state)
+        self.curve_source_label.style().unpolish(self.curve_source_label)
+        self.curve_source_label.style().polish(self.curve_source_label)
+
+    def _pie_source_details(self) -> list[str]:
+        details: list[str] = []
+        if self.project_settings is not None and self._has_project_scope():
+            details.append(
+                f"项目曲线库：{project_curve_database_path(self.project_settings)}"
+            )
+            folders = self.project_settings.effective_pie_scan_folders()
+            if folders:
+                details.append("原始 TXT：" + "；".join(folders))
+            peak_set = str(self.project_settings.active_peak_set_id or "").strip()
+            if peak_set:
+                record = get_peak_set(
+                    self.project_settings.output_dir,
+                    peak_set,
+                )
+                origin = {
+                    "auto_generated": "自动生成",
+                    "imported": "导入",
+                    "workbench_auto": "工作台自动",
+                    "workbench_manual": "工作台手动",
+                    "spectrum_workbench": "工作台批准",
+                }.get(record.origin, record.origin) if record is not None else ""
+                details.append(
+                    f"卡峰集：{origin + ' · ' if origin else ''}{peak_set}"
+                )
+        elif hasattr(self, "folder_edit") and self.folder_edit.text().strip():
+            details.append(f"原始 TXT：{self.folder_edit.text().strip()}")
+        cache_key = str(self._loaded_analysis_cache_key or "").strip()
+        if cache_key:
+            details.append(f"analysis_key：{cache_key}")
+        return details
+
+    def _show_empty_curve_source(self, *, warning: str = "") -> None:
+        if self._has_project_scope():
+            if warning:
+                self._set_curve_source_indicator(
+                    "当前曲线：无有效项目结果",
+                    state="warning",
+                    details=[warning, *self._pie_source_details()],
+                )
+            else:
+                self._set_curve_source_indicator(
+                    "当前曲线：项目 SQLite · 尚未载入",
+                    state="empty",
+                    details=self._pie_source_details(),
+                )
+        else:
+            self._set_curve_source_indicator(
+                "当前曲线：临时内存 · 尚未生成",
+                state="empty",
+                details=self._pie_source_details(),
+            )
+
+    def _show_active_curve_source(self, *, origin: str = "") -> None:
+        if not self._has_project_scope():
+            self._set_curve_source_indicator(
+                "当前曲线：临时内存 · 未保存",
+                state="memory",
+                details=[
+                    "正式读取来源：本次运行内存",
+                    "未写入项目 curve_data.sqlite",
+                    *self._pie_source_details(),
+                ],
+            )
+            return
+        if self._curve_storage_mode() != "sqlite":
+            mode_text = (
+                "SQLite 影子校验"
+                if self._curve_storage_mode() == "shadow"
+                else "旧兼容模式"
+            )
+            self._set_curve_source_indicator(
+                f"当前曲线：项目内存 · {mode_text}",
+                state="memory",
+                details=[
+                    "正式绘图来源：本次运行内存",
+                    *self._pie_source_details(),
+                ],
+            )
+            return
+        dataset_id = self.curve_database_dataset_id
+        database_path = (
+            project_curve_database_path(self.project_settings)
+            if self.project_settings is not None
+            else None
+        )
+        dataset_state = (
+            get_curve_dataset_state_read_only(database_path, dataset_id)
+            if database_path is not None and dataset_id is not None
+            else None
+        )
+        if dataset_state is None or dataset_state.validity_status != "valid":
+            reason = (
+                dataset_state.stale_reason
+                if dataset_state is not None
+                else "当前曲线没有可验证的 SQLite 数据集身份"
+            )
+            self._set_curve_source_indicator(
+                "当前曲线：项目结果不可验证",
+                state="warning",
+                details=[reason, *self._pie_source_details()],
+            )
+            return
+        role = "当前结果" if dataset_state.is_current else "历史结果"
+        details = [
+            "正式读取来源：项目 SQLite 曲线库",
+            f"dataset_id：{dataset_state.dataset_id}",
+            f"数据集状态：有效 · {role}",
+        ]
+        if dataset_state.created_at:
+            try:
+                created_text = datetime.fromisoformat(
+                    dataset_state.created_at
+                ).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                created_text = dataset_state.created_at.replace("T", " ")[:19]
+            details.append("生成时间：" + created_text)
+        if origin:
+            details.append(f"处理路径：{origin}")
+        details.extend(self._pie_source_details())
+        peak_record = (
+            get_peak_set(
+                self.project_settings.output_dir,
+                self.project_settings.active_peak_set_id,
+            )
+            if self.project_settings is not None
+            and self.project_settings.active_peak_set_id
+            else None
+        )
+        peak_origin = {
+            "auto_generated": "自动生成",
+            "imported": "导入",
+            "workbench_auto": "工作台自动",
+            "workbench_manual": "工作台手动",
+            "spectrum_workbench": "工作台批准",
+        }.get(peak_record.origin, peak_record.origin) if peak_record is not None else ""
+        self._set_curve_source_indicator(
+            f"当前曲线：SQLite #{dataset_state.dataset_id} · 有效"
+            + (f" · 卡峰：{peak_origin}" if peak_origin else ""),
+            state="valid",
+            details=details,
+        )
+
+    def _validate_loaded_project_curve_reference(self) -> bool:
+        if (
+            not self._has_project_scope()
+            or self.project_settings is None
+            or self.curve_database_dataset_id is None
+        ):
+            return True
+        database_path = project_curve_database_path(self.project_settings)
+        repository_path = (
+            Path(self.curve_repository.database_path)
+            if self.curve_repository is not None
+            else None
+        )
+        state = get_curve_dataset_state_read_only(
+            database_path,
+            self.curve_database_dataset_id,
+        )
+        if (
+            repository_path is not None
+            and repository_path.resolve() == database_path.resolve()
+            and state is not None
+            and state.validity_status == "valid"
+        ):
+            self._show_active_curve_source(origin="SQLite 已加载结果")
+            return True
+        reason = (
+            state.stale_reason
+            if state is not None and state.stale_reason
+            else "当前显示曲线不属于本项目的有效 SQLite 数据集"
+        )
+        self._clear_loaded_pie_curve_view()
+        self._show_empty_curve_source(warning=reason)
+        return False
 
     def _current_replicate_mode(self) -> str:
         if not self.replicate_enabled_check.isChecked():
@@ -3717,6 +4526,102 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             progress_callback(100, "PIE 曲线已生成，正在更新界面…")
         return analysis_df, curves, source_info
 
+    def _store_project_curve_dataset(self) -> str:
+        if (
+            not self._has_project_scope()
+            or self.project_settings is None
+            or not self.curves
+            or bool(self._last_analysis_source_info.get("from_sqlite", False))
+            or self._curve_storage_mode() == "legacy"
+        ):
+            return ""
+        database_path = project_curve_database_path(self.project_settings)
+        folders = self.project_settings.effective_pie_scan_folders()
+        analysis_key = str(
+            self._analysis_provenance.get("cache_key")
+            or self._loaded_analysis_cache_key
+            or self._pie_cache_key(
+                folders,
+                self._last_analysis_source_info.get(
+                    "merge_method",
+                    self.project_settings.pie_merge_method,
+                ),
+            )
+        )
+        dataset_id = store_curve_dataset_version(
+            database_path,
+            curve_type="pie",
+            curves=self.curves,
+            dataset_group="pie:project",
+            analysis_key=analysis_key,
+            name="项目PIE曲线",
+            source_label="\n".join(folders),
+            dataset_role="observed",
+            metadata={
+                "project_name": self.project_settings.project_name,
+                "folder_count": len(folders),
+                "merge_method": self._last_analysis_source_info.get(
+                    "merge_method",
+                    self.project_settings.pie_merge_method,
+                ),
+                "analysis_provenance": self._analysis_provenance,
+            },
+            make_current=False,
+        )
+        repository = SQLiteCurveRepository(database_path, dataset_id, cache_size=32)
+        validate_repository_round_trip(self.curves, repository)
+        if self._curve_storage_mode() == "sqlite":
+            set_curve_dataset_validity(
+                database_path,
+                dataset_id=dataset_id,
+                validity_status="valid",
+            )
+            set_current_curve_dataset(database_path, dataset_id)
+        self.curve_repository = repository
+        self.curve_database_dataset_id = dataset_id
+        self.project_settings.curve_database_path = str(database_path)
+        record_project_artifact(
+            self,
+            "curve_database_path",
+            database_path,
+            project_settings=self.project_settings,
+        )
+        return f"已写入并校验项目曲线库（数据集 #{dataset_id}）"
+
+    def _activate_sqlite_dataset(
+        self,
+        dataset_id: int,
+        *,
+        metadata: dict | None = None,
+        cache_key: str = "",
+    ) -> None:
+        if self.project_settings is None:
+            raise ValueError("当前没有项目上下文")
+        database_path = project_curve_database_path(self.project_settings)
+        repository = SQLiteCurveRepository(database_path, dataset_id, cache_size=32)
+        curves = RepositoryCurveMapping(repository)
+        if not curves:
+            raise ValueError(f"PIE数据集 #{dataset_id} 没有曲线通道")
+        dataset_metadata = dict(metadata or {})
+        provenance = dataset_metadata.get("analysis_provenance")
+        if not isinstance(provenance, dict):
+            provenance = {}
+        provenance = dict(provenance)
+        if cache_key:
+            provenance.setdefault("cache_key", cache_key)
+        source_info = {
+            "from_sqlite": True,
+            "from_cache": True,
+            "source_scope": "project",
+            "folder_count": int(dataset_metadata.get("folder_count", 1) or 1),
+            "merge_method": dataset_metadata.get("merge_method"),
+            "analysis_provenance": provenance,
+        }
+        self.curve_repository = repository
+        self.curve_database_dataset_id = int(dataset_id)
+        self._project_cache_validated = True
+        self.on_analysis_complete((pd.DataFrame(), curves, source_info))
+
     def on_analysis_complete(self, result: object) -> None:
         if isinstance(result, tuple) and len(result) == 3:
             self.analysis_df, self.curves, source_info = result
@@ -3724,25 +4629,74 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.analysis_df, self.curves = result
             source_info = {}
         self._last_analysis_source_info = dict(source_info or {})
+        self._analysis_provenance = dict(
+            self._last_analysis_source_info.get("analysis_provenance") or {}
+        )
+        self._loaded_analysis_cache_key = str(
+            self._analysis_provenance.get("cache_key") or ""
+        )
+        if self._has_project_scope():
+            self._project_cache_validated = True
+        summary_df = self.analysis_df
+        try:
+            database_note = self._store_project_curve_dataset()
+        except Exception as exc:
+            logger.exception("Failed to persist PIE curves to the project database")
+            if self._curve_storage_mode() == "shadow":
+                self.curve_database_dataset_id = None
+                self.curve_repository = None
+                database_note = f"SQLite影子校验失败（仍显示内存结果）：{exc}"
+            else:
+                self.curve_database_dataset_id = None
+                self.curve_repository = None
+                self.analysis_df = pd.DataFrame()
+                self.curves = {}
+                self._restore_analysis_workspace()
+                self.status_label.setText(f"项目SQLite曲线写入或校验失败：{exc}")
+                self._show_empty_curve_source(
+                    warning=f"SQLite曲线写入或校验失败：{exc}"
+                )
+                QtWidgets.QMessageBox.critical(
+                    self,
+                    "PIE曲线未登记",
+                    "项目模式要求SQLite写入并读回校验成功后才能展示曲线。\n\n"
+                    f"{exc}",
+                )
+                self._update_action_state()
+                return
         self._fit_preview_active = False
         self.current_fit = None
         self.all_fit_results = {}  # 重置拟合结果
         if self._has_project_scope():
             if not bool(self._last_analysis_source_info.get("from_cache", False)):
                 try:
-                    folders, merge_method = self._analysis_source_selection()
-                    cache_key = self._pie_cache_key(folders, merge_method)
+                    cache_key = self._loaded_analysis_cache_key
+                    if not cache_key:
+                        folders, merge_method = self._analysis_source_selection()
+                        cache_key = self._pie_cache_key(folders, merge_method)
                     self._save_pie_analysis_cache(cache_key, self._last_analysis_source_info)
                 except Exception:
                     logger.exception("Failed to prepare PIE analysis cache")
+            if (
+                self.curve_repository is not None
+                and self._curve_storage_mode() == "sqlite"
+                and not bool(self._last_analysis_source_info.get("from_sqlite", False))
+            ):
+                self.curves = RepositoryCurveMapping(self.curve_repository)
+                self.analysis_df = pd.DataFrame()
             self._restore_pie_project_state()
         self.populate_mz_list()
         # Switch from empty state to plot display
         if hasattr(self, "_plot_stack"):
             self._plot_stack.setCurrentWidget(self.plot_widget)
-        energy_count = self.analysis_df["energy"].nunique() if not self.analysis_df.empty else 0
-        replicate_note = self._replicate_status_text(self.analysis_df)
-        integration_note = self._integration_status_text(self.analysis_df)
+        if not summary_df.empty and "energy" in summary_df:
+            energy_count = int(summary_df["energy"].nunique())
+        elif isinstance(self.curves, RepositoryCurveMapping):
+            energy_count = self.curves.max_point_count
+        else:
+            energy_count = 0
+        replicate_note = self._replicate_status_text(summary_df)
+        integration_note = self._integration_status_text(summary_df)
         folder_count = int(self._last_analysis_source_info.get("folder_count", 1) or 1)
         auto_discovered = bool(self._last_analysis_source_info.get("auto_discovered", False))
         source_scope = str(
@@ -3765,6 +4719,16 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             f"{len(self.curves)} 条 · {energy_count} 能量点{segment_summary}"
         )
         summary_details = [f"{len(self.curves)} 条 m/z 曲线", f"{energy_count} 个能量点"]
+        peak_source = str(self._analysis_provenance.get("peak_source") or "")
+        if peak_source:
+            summary_details.append(
+                "卡峰来源："
+                + (
+                    "项目手动卡峰文件"
+                    if peak_source == "manual_peak_file"
+                    else "自动寻峰"
+                )
+            )
         if folder_count > 1:
             summary_details.append(
                 f"{source_description} {folder_count} 个 PIE 能段，"
@@ -3786,9 +4750,18 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             (sum(restored_r2) / len(restored_r2)) if restored_r2 else None,
         )
         self._update_action_state()
+        if bool(self._last_analysis_source_info.get("from_sqlite", False)):
+            curve_origin = "SQLite 直接读取"
+        elif bool(self._last_analysis_source_info.get("from_cache", False)):
+            curve_origin = "CSV 缓存导入并校验后读取 SQLite"
+        else:
+            curve_origin = "TXT 原始数据重新计算并写入 SQLite"
+        self._show_active_curve_source(origin=curve_origin)
         if self.curves:
             self.mz_list.setCurrentRow(0)
             message = f"生成 {len(self.curves)} 条PIE曲线，可选择 m/z 后拟合，或点击拟合全部。"
+            if database_note:
+                message = f"{message}\n{database_note}"
             if replicate_note:
                 message = f"{message}\n{replicate_note}"
             if integration_note:
@@ -3849,7 +4822,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         current_mz = self.current_mz
         self.mz_list.clear()
         for mz in sorted(self.curves, key=float):
-            curve = self.curves[mz]
+            curve = self._curve_metadata_for_key(mz) or {}
             if not self._pie_curve_matches_filter(mz, curve):
                 continue
             mz_text = self._curve_mz_text(curve, mz)
@@ -3900,7 +4873,10 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 fg_color = QtGui.QColor("#374151")       # 深灰文字
                 bg_color = None                          # 无背景色
 
-            item_text = f"m/z {mz_text}{suffix}  [{status_str}]  ({len(curve['energies'])}点)"
+            point_count = int(
+                curve.get("point_count", len(curve.get("energies", [])))
+            )
+            item_text = f"m/z {mz_text}{suffix}  [{status_str}]  ({point_count}点)"
             item = QtWidgets.QListWidgetItem(item_text)
             item.setData(QtCore.Qt.ItemDataRole.UserRole, mz)
             item.setForeground(QtGui.QBrush(fg_color))
@@ -3908,7 +4884,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 item.setBackground(QtGui.QBrush(bg_color))
             item.setToolTip(
                 f"精确 m/z {exact_mz:.12g} | 物种检索使用整数 m/z {nominal_mz}{suffix} | "
-                f"{status_str} | {len(curve['energies'])} 个能量点"
+                f"{status_str} | {point_count} 个能量点"
             )
             self.mz_list.addItem(item)
             if current_mz == mz:
@@ -4351,9 +5327,15 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         filtered_database = list(self.get_filtered_database())
         jobs: dict[PieCurveKey, dict] = {}
         for mz in mz_list:
-            curve = self.curves.get(mz)
-            if not curve:
-                continue
+            if isinstance(self.curves, RepositoryCurveMapping):
+                metadata = self.curves.metadata(float(mz))
+                curve = None
+                channel_id = int(metadata["channel_id"])
+            else:
+                curve = self.curves.get(mz)
+                channel_id = None
+                if not curve:
+                    continue
             config = self.per_mz_config.get(mz)
             if config is None:
                 nominal_mz = self._nominal_mz_for_key(mz)
@@ -4372,6 +5354,10 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 locked_ids = [int(value) for value in config.get("locked_ids", [])]
             jobs[mz] = {
                 "curve": curve,
+                "channel_id": channel_id,
+                "repository": (
+                    self.curve_repository if channel_id is not None else None
+                ),
                 "selected_species": selected,
                 "coefficients": coefficients,
                 "locked_ids": locked_ids,
@@ -4385,8 +5371,15 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         from bl03u_masstool.core.pie_analysis import fit_species_combination_with_curve
 
         results = {}
-        for mz, job in jobs.items():
+        for job_index, (mz, job) in enumerate(jobs.items()):
             curve = job["curve"]
+            repository = job.get("repository")
+            if curve is None and repository is not None:
+                curve = channel_to_curve(
+                    repository.load_channel(int(job["channel_id"]))
+                )
+                if job_index and job_index % 20 == 0:
+                    repository.clear_cache()
             selected = job["selected_species"]
             if not selected:
                 results[mz] = {"success": False, "error": "未启用候选物种"}
@@ -4431,6 +5424,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         for mz, result in results.items():
             self.all_fit_results[mz] = result
         self._schedule_ie_for_fit_results(results)
+        self._store_species_assignment_batch(results, assignment_status="candidate")
         self.pie_state_dirty = True
 
         fitted_count = sum(1 for r in self.all_fit_results.values() if r.get("success"))
@@ -4582,6 +5576,17 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.analysis_df.to_excel(path, index=False)
         else:
             self.analysis_df.to_csv(path, index=False, encoding="utf-8-sig")
+        if self._has_project_scope():
+            record_project_artifact(
+                self,
+                "pie_curve_result_file",
+                path,
+                message="PIE曲线结果已登记到项目管理",
+            )
+            message = "PIE曲线数据已导出并登记到项目管理。"
+        else:
+            message = "PIE曲线数据已导出。当前为临时数据模式，结果未登记到项目管理。"
+        QtWidgets.QMessageBox.information(self, "导出完成", message)
 
     def export_plot(self):
         if self.plot_widget is None or self.plot_widget.figure is None:

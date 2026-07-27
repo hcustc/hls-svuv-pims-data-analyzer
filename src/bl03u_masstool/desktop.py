@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 import logging
 
-from PyQt6 import QtWidgets
+from PyQt6 import QtCore, QtWidgets
 
 from bl03u_masstool.core.config import load_calibration_config
 from bl03u_masstool.core.output_paths import ensure_output_structure
@@ -15,6 +15,41 @@ from bl03u_masstool.logging_config import configure_logging
 
 
 logger = logging.getLogger(__name__)
+_previous_qt_message_handler = None
+_qt_message_filter_installed = False
+
+
+def _is_noisy_macos_keymapper_message(context, message: str) -> bool:
+    """Return whether a Qt message is the harmless macOS Esc-key mismatch."""
+    category = str(getattr(context, "category", "") or "")
+    text = str(message or "")
+    return (
+        category == "qt.qpa.keymapper"
+        and "Mismatch between Cocoa" in text
+        and "virtual key 53" in text
+    ) or (
+        text.startswith("qt.qpa.keymapper: Mismatch between Cocoa")
+        and "virtual key 53" in text
+    )
+
+
+def _qt_message_handler(message_type, context, message) -> None:
+    if _is_noisy_macos_keymapper_message(context, message):
+        return
+    if _previous_qt_message_handler is not None:
+        _previous_qt_message_handler(message_type, context, message)
+        return
+    print(str(message), file=sys.stderr)
+
+
+def _install_qt_message_filter() -> None:
+    global _previous_qt_message_handler, _qt_message_filter_installed
+    if _qt_message_filter_installed:
+        return
+    _previous_qt_message_handler = QtCore.qInstallMessageHandler(
+        _qt_message_handler
+    )
+    _qt_message_filter_installed = True
 
 
 def show_help() -> None:
@@ -48,6 +83,7 @@ def main(argv: list[str] | None = None) -> int:
 
     ensure_output_structure()
     logger.info("Starting BL03U desktop app")
+    _install_qt_message_filter()
     app = QtWidgets.QApplication(sys.argv)
     apply_application_theme(app)
 

@@ -24,6 +24,12 @@ from bl03u_masstool.core.project_settings import ProjectSettingsManager
 from bl03u_masstool.core.project_settings import load_project_settings
 from bl03u_masstool.core.project_settings import save_project_settings
 from bl03u_masstool.core.project_lifecycle import project_root
+from bl03u_masstool.core.peak_sets import (
+    create_peak_set,
+    import_peak_set,
+    list_peak_sets,
+    verify_peak_set,
+)
 from bl03u_masstool.frontends.pyqt_app.normalization.widget import FunctionDefaultsWidget
 from bl03u_masstool.frontends.pyqt_app.spectrum.workbench import MainWindow
 from bl03u_masstool.frontends.pyqt_app.temporary_analysis_settings import (
@@ -415,6 +421,50 @@ def test_project_page_omits_workflow_progress_card(qapp):
         window.deleteLater()
 
 
+def test_hidden_curve_pages_defer_cache_loading_until_opened(qapp, monkeypatch):
+    window = MainWindow()
+    try:
+        ps = ProjectSettings(project_name="Lazy cache", output_dir="output")
+        temperature_calls: list[dict] = []
+        pie_calls: list[dict] = []
+        temperature_loads: list[bool] = []
+        pie_loads: list[bool] = []
+        monkeypatch.setattr(
+            window.temperature_page,
+            "set_project_settings",
+            lambda _ps, **kwargs: temperature_calls.append(kwargs),
+        )
+        monkeypatch.setattr(
+            window.pie_page,
+            "set_project_settings",
+            lambda _ps, **kwargs: pie_calls.append(kwargs),
+        )
+        monkeypatch.setattr(
+            window.temperature_page,
+            "ensure_project_cache_loaded",
+            lambda: temperature_loads.append(True) or True,
+        )
+        monkeypatch.setattr(
+            window.pie_page,
+            "ensure_project_cache_loaded",
+            lambda: pie_loads.append(True) or True,
+        )
+
+        window.workspace_stack.setCurrentWidget(window.spectrum_page)
+        window._sync_project_settings_to_tool_pages(ps, activate_project_scope=True)
+
+        assert temperature_calls[-1]["load_cached_results"] is False
+        assert pie_calls[-1]["load_cached_results"] is False
+        assert not temperature_loads
+        assert not pie_loads
+
+        window.switch_workspace_page("temperature")
+        assert temperature_loads == [True]
+        assert not pie_loads
+    finally:
+        window.deleteLater()
+
+
 def test_pie_project_parameter_menu_opens_pie_analysis_defaults(qapp):
     window = MainWindow()
     try:
@@ -586,6 +636,14 @@ def test_temperature_page_owns_analysis_switches(qapp, tmp_path):
     scan_dir = tmp_path / "temperature_scan"
     scan_dir.mkdir()
     (scan_dir / "C24110904-0000.txt").write_text("1 2\n", encoding="utf-8")
+    project_dir = tmp_path / "project"
+    peak_set = create_peak_set(
+        project_dir,
+        content=b"label,peak_index,mz,left_bound,right_bound\nA,1,1,0,2\n",
+        extension=".csv",
+        label="test",
+        origin="imported",
+    )
     settings = NormalizationSettings(light_source="beam_current", expansion_factors={})
     widget = TemperatureScanDialog(Calibration(), settings)
     try:
@@ -595,7 +653,10 @@ def test_temperature_page_owns_analysis_switches(qapp, tmp_path):
         assert widget.export_button.isHidden()
         assert widget.export_plot_button.isHidden()
         ps = ProjectSettings(
+            output_dir=str(project_dir),
             temperature_scan_folder=str(scan_dir),
+            active_peak_set_id=peak_set.peak_set_id,
+            manual_peak_file=str(verify_peak_set(project_dir, peak_set)),
             temperature_photon_normalize=False,
             temperature_kr_correct=True,
             temp_replicate_mode="sum",
@@ -779,6 +840,11 @@ def test_temperature_page_lists_energy_subfolders_for_project_source(qapp, tmp_p
             (9.5, str(high)),
             (14.6, str(range_energy)),
         ]
+        assert widget._generation_analysis_folders() == [
+            (8.0, str(low)),
+            (9.5, str(high)),
+            (14.6, str(range_energy)),
+        ]
         assert widget.run_button.isEnabled()
         assert not hasattr(widget, "workflow_stage_label")
         assert not hasattr(widget, "interval_mz_spin")
@@ -786,7 +852,9 @@ def test_temperature_page_lists_energy_subfolders_for_project_source(qapp, tmp_p
 
         widget.scan_folder_combo.setCurrentIndex(2)
         assert widget._current_temperature_folder() == str(high)
+        assert widget._generation_analysis_folders() == [(9.5, str(high))]
         assert "9.5eV" in widget.summary_data_label.text()
+        assert "选择单个能量时仅生成该能量曲线" in widget.scan_folder_combo.toolTip()
     finally:
         widget.deleteLater()
 
@@ -1069,7 +1137,11 @@ def test_temperature_energy_combo_filters_cached_curves_without_rerun(qapp, tmp_
             output_dir=str(tmp_path / "project"),
             temperature_scan_folder=str(root),
         )
-        widget.set_project_settings(ps, activate_project_scope=True)
+        widget.set_project_settings(
+            ps,
+            activate_project_scope=True,
+            load_cached_results=False,
+        )
         widget.energy_results = [
             {"energy": 8.0, "folder": str(low), "folder_label": "8eV", "curves": {70: curve(70, 8.0, [1.0, 2.0, 3.0])}},
             {"energy": 9.0, "folder": str(high), "folder_label": "9eV", "curves": {70: curve(70, 9.0, [10.0, 20.0, 30.0])}},
@@ -1146,6 +1218,9 @@ def test_temperature_analysis_cache_reuses_integrated_results(qapp, tmp_path):
         widget._analyze_temperature_folder_with_params = fake_analyze
         first = widget._analyze_temperature_folders_with_cache(folders, params)
         assert first["from_cache"] is False
+        assert first["analysis_provenance"]["cache_key"]
+        assert first["analysis_provenance"]["peak_source"] == "sum"
+        assert first["analysis_provenance"]["manual_peak_file"] is None
         assert calls["count"] == 1
         assert (Path(ps.output_dir) / "analysis" / "temperature_scan" / "cache").is_dir()
 
@@ -1156,6 +1231,7 @@ def test_temperature_analysis_cache_reuses_integrated_results(qapp, tmp_path):
         second = widget._analyze_temperature_folders_with_cache(folders, params)
 
         assert second["from_cache"] is True
+        assert second["analysis_provenance"]["cache_key"] == first["analysis_provenance"]["cache_key"]
         assert second["result_df"].shape == first["result_df"].shape
         assert second["energy_results"][0]["folder_label"] == "8eV"
         assert 70 in second["energy_results"][0]["curves"]
@@ -1232,10 +1308,20 @@ def test_temperature_project_open_autoloads_cached_curves(qapp, tmp_path):
     low = root / "8eV"
     low.mkdir(parents=True)
     (low / "a.txt").write_text("1\n2\n", encoding="utf-8")
+    project_dir = tmp_path / "project"
+    peak_set = create_peak_set(
+        project_dir,
+        content=b"label,peak_index,mz,left_bound,right_bound\nA,1,70,0,2\n",
+        extension=".csv",
+        label="test",
+        origin="imported",
+    )
     ps = ProjectSettings(
         project_name="Autoload Cache",
-        output_dir=str(tmp_path / "project"),
+        output_dir=str(project_dir),
         temperature_scan_folder=str(root),
+        active_peak_set_id=peak_set.peak_set_id,
+        manual_peak_file=str(verify_peak_set(project_dir, peak_set)),
         temperature_photon_normalize=False,
         temperature_kr_correct=False,
     )
@@ -1279,14 +1365,279 @@ def test_temperature_project_open_autoloads_cached_curves(qapp, tmp_path):
             QtCore.QThread.msleep(10)
         qapp.processEvents()
 
-        assert not reader.result_df.empty
+        assert reader.result_df.empty
         assert 70 in reader.curves
+        assert reader.curves[70]["areas"] == [1.0, 2.0, 3.0]
+        assert reader.curve_database_dataset_id is not None
         assert reader.current_mz == 70
-        assert "已自动载入" in reader.inline_status_text.text() or "缓存" in reader.inline_status_text.text()
+        assert any(
+            marker in reader.inline_status_text.text()
+            for marker in ("已自动载入", "缓存", "SQLite")
+        )
+        request_id = reader._autoload_request_id
+        worker = reader._autoload_worker
+        assert reader.ensure_project_cache_loaded() is True
+        assert reader._autoload_request_id == request_id
+        assert reader._autoload_worker is worker
     finally:
         if reader._autoload_worker is not None and reader._autoload_worker.isRunning():
             reader._autoload_worker.wait(1000)
         reader.deleteLater()
+
+
+@pytest.mark.parametrize(
+    ("storage_mode", "expects_database", "expects_lazy_mapping"),
+    [
+        ("legacy", False, False),
+        ("shadow", True, False),
+        ("sqlite", True, True),
+    ],
+)
+def test_temperature_project_curve_storage_modes(
+    qapp,
+    tmp_path,
+    storage_mode,
+    expects_database,
+    expects_lazy_mapping,
+):
+    from bl03u_masstool.core.calibration import Calibration
+    from bl03u_masstool.core.curve_database import project_curve_database_path
+    from bl03u_masstool.core.curve_repository import RepositoryCurveMapping
+    from bl03u_masstool.core.temperature_scan import build_temperature_curves
+    from bl03u_masstool.frontends.pyqt_app.temperature.dialog import TemperatureScanDialog
+
+    source = tmp_path / f"temperature-{storage_mode}"
+    source.mkdir()
+    settings = ProjectSettings(
+        project_name=f"Temperature {storage_mode}",
+        output_dir=str(tmp_path / f"project-{storage_mode}"),
+        temperature_scan_folder=str(source),
+        curve_storage_mode=storage_mode,
+    )
+    rows = pd.DataFrame(
+        {
+            "temperature": [650.0, 750.0, 850.0],
+            "file": ["a.txt", "b.txt", "c.txt"],
+            "mz": [70.0, 70.0, 70.0],
+            "area": [1.0, 2.0, 3.0],
+            "raw_area": [1.0, 2.0, 3.0],
+            "photon_normalized_area": [1.0, 2.0, 3.0],
+            "expansion_lambda": [1.0, 1.0, 1.0],
+            "integration_method": ["sum_counts"] * 3,
+            "species": [""] * 3,
+        }
+    )
+    dialog = TemperatureScanDialog(Calibration())
+    try:
+        dialog.set_project_settings(
+            settings,
+            activate_project_scope=True,
+            load_cached_results=False,
+        )
+        dialog.on_analysis_complete(
+            {
+                "result_df": rows,
+                "energy_results": [
+                    {
+                        "energy": 10.0,
+                        "folder": str(source),
+                        "folder_label": source.name,
+                        "result_df": rows,
+                        "curves": build_temperature_curves(rows),
+                    }
+                ],
+                "from_cache": True,
+                "analysis_provenance": {
+                    "cache_key": f"mode-{storage_mode}",
+                    "peak_source": "manual_peak_file",
+                },
+            }
+        )
+
+        assert project_curve_database_path(settings).exists() is expects_database
+        assert isinstance(dialog.curves, RepositoryCurveMapping) is expects_lazy_mapping
+        assert dialog.result_df.empty is expects_lazy_mapping
+        if storage_mode == "sqlite":
+            assert "SQLite #" in dialog.curve_source_label.text()
+            assert "有效" in dialog.curve_source_label.text()
+            assert dialog.curve_source_label.property("sourceState") == "valid"
+        else:
+            assert "项目内存" in dialog.curve_source_label.text()
+    finally:
+        dialog.deleteLater()
+
+
+def test_temperature_sqlite_list_does_not_eagerly_load_all_curves(
+    qapp,
+    tmp_path,
+):
+    from bl03u_masstool.core.calibration import Calibration
+    from bl03u_masstool.core.curve_database import store_curve_dataset_version
+    from bl03u_masstool.core.curve_repository import (
+        RepositoryCurveMapping,
+        SQLiteCurveRepository,
+    )
+    from bl03u_masstool.frontends.pyqt_app.temperature.dialog import (
+        TemperatureScanDialog,
+    )
+
+    curves = {}
+    for index in range(12):
+        exact_mz = 50.0 + index / 100
+        curve_class = "formation" if index % 2 == 0 else "consumption"
+        rows = pd.DataFrame(
+            {
+                "temperature": [650.0, 750.0, 850.0],
+                "scan_energy": [10.0] * 3,
+                "mz": [exact_mz] * 3,
+                "mz_rounded": [round(exact_mz)] * 3,
+                "area": [1.0, 2.0, 3.0],
+                "raw_area": [1.0, 2.0, 3.0],
+                "photon_normalized_area": [1.0, 2.0, 3.0],
+                "expansion_lambda": [1.0, 1.0, 1.0],
+                "integration_method": ["sum_counts"] * 3,
+                "curve_class": [curve_class] * 3,
+                "curve_class_label": [
+                    "生成(升高)" if curve_class == "formation" else "消耗(降低)"
+                ]
+                * 3,
+                "curve_class_reason": ["测试"] * 3,
+            }
+        )
+        curves[exact_mz] = {
+            "mz": exact_mz,
+            "mz_rounded": round(exact_mz),
+            "temperatures": rows["temperature"].tolist(),
+            "areas": rows["area"].tolist(),
+            "curve_class": curve_class,
+            "rows": rows,
+        }
+
+    database_path = tmp_path / "temperature.sqlite"
+    dataset_id = store_curve_dataset_version(
+        database_path,
+        curve_type="temperature",
+        curves=curves,
+        dataset_group="temperature:project",
+        analysis_key="lazy-list",
+        name="Lazy temperature list",
+    )
+    repository = SQLiteCurveRepository(database_path, dataset_id, cache_size=4)
+    mapping = RepositoryCurveMapping(repository)
+    original_load_channel = repository.load_channel
+    loaded_channel_ids = []
+
+    def counted_load_channel(channel_id):
+        loaded_channel_ids.append(channel_id)
+        return original_load_channel(channel_id)
+
+    repository.load_channel = counted_load_channel
+    dialog = TemperatureScanDialog(Calibration())
+    try:
+        dialog.curve_repository = repository
+        dialog.curves = mapping
+        dialog.populate_mz_list()
+
+        # Selecting the first visible item may load that one curve for plotting;
+        # building and grouping the list must not load all twelve payloads.
+        assert len(set(loaded_channel_ids)) <= 1
+        assert dialog.mz_list.topLevelItemCount() == 2
+    finally:
+        dialog.deleteLater()
+
+
+def test_temperature_sqlite_energy_selector_filters_lazy_curve(qapp, tmp_path):
+    from bl03u_masstool.core.calibration import Calibration
+    from bl03u_masstool.core.curve_database import store_curve_dataset_version
+    from bl03u_masstool.core.curve_repository import (
+        RepositoryCurveMapping,
+        SQLiteCurveRepository,
+    )
+    from bl03u_masstool.frontends.pyqt_app.temperature.dialog import (
+        TemperatureScanDialog,
+    )
+
+    root = tmp_path / "temperature"
+    energy_8 = root / "8.0eV"
+    energy_11 = root / "11.0eV"
+    energy_8.mkdir(parents=True)
+    energy_11.mkdir()
+    (energy_8 / "scan.txt").write_text("1\n", encoding="utf-8")
+    (energy_11 / "scan.txt").write_text("1\n", encoding="utf-8")
+    exact_mz = 97.09
+    rows = pd.DataFrame(
+        {
+            "temperature": [300.0, 400.0, 300.0, 400.0],
+            "scan_energy": [8.0, 8.0, 11.0, 11.0],
+            "photon_energy": [8.0, 8.0, 11.0, 11.0],
+            "scan_folder": ["8.0eV", "8.0eV", "11.0eV", "11.0eV"],
+            "mz": [exact_mz] * 4,
+            "mz_rounded": [97] * 4,
+            "area": [1.0, 2.0, 10.0, 20.0],
+            "raw_area": [1.0, 2.0, 10.0, 20.0],
+            "photon_normalized_area": [1.0, 2.0, 10.0, 20.0],
+            "expansion_lambda": [1.0] * 4,
+            "integration_method": ["sum_counts"] * 4,
+            "curve_class": ["formation"] * 4,
+            "curve_class_label": ["生成(升高)"] * 4,
+            "curve_class_reason": ["测试"] * 4,
+        }
+    )
+    database_path = tmp_path / "temperature.sqlite"
+    dataset_id = store_curve_dataset_version(
+        database_path,
+        curve_type="temperature",
+        curves={
+            exact_mz: {
+                "mz": exact_mz,
+                "mz_rounded": 97,
+                "temperatures": rows["temperature"].tolist(),
+                "areas": rows["area"].tolist(),
+                "curve_class": "formation",
+                "rows": rows,
+            }
+        },
+        dataset_group="temperature:project",
+        analysis_key="energy-filter",
+        name="Energy-filter temperature list",
+    )
+    repository = SQLiteCurveRepository(database_path, dataset_id, cache_size=4)
+    dialog = TemperatureScanDialog(Calibration())
+    try:
+        dialog.set_project_settings(
+            ProjectSettings(temperature_scan_folder=str(root)),
+            activate_project_scope=True,
+            load_cached_results=False,
+        )
+        dialog.curve_repository = repository
+        dialog.curves = RepositoryCurveMapping(repository)
+        dialog._refresh_temperature_folder_options()
+        dialog.populate_mz_list(preferred_mz=exact_mz)
+
+        all_curve = dialog._repository_curve_for_energy_selection(
+            dialog.curves[exact_mz]
+        )
+        assert len(all_curve["energy_curves"]) == 2
+        assert all_curve["areas"] == [1.0, 2.0, 10.0, 20.0]
+
+        selected_index = dialog.scan_folder_combo.findData(str(energy_11))
+        assert selected_index >= 0
+        dialog.scan_folder_combo.setCurrentIndex(selected_index)
+        selected_curve = dialog._repository_curve_for_energy_selection(
+            dialog.curves[exact_mz]
+        )
+
+        assert selected_curve["temperatures"] == [300.0, 400.0]
+        assert selected_curve["areas"] == [10.0, 20.0]
+        assert selected_curve["energy_curves"] == []
+        assert "2 个点" in dialog.current_curve_metric_label.text()
+        assert "当前能量 11.0eV" in dialog.summary_label.text()
+        current_item = dialog.find_curve_tree_item(exact_mz)
+        assert current_item is not None
+        assert "当前 11.0eV" in current_item.text(0)
+        assert "2能量/4点" not in current_item.text(0)
+    finally:
+        dialog.deleteLater()
 
 
 def test_temperature_project_cache_autoload_ignores_stale_project_result(qapp, tmp_path):
@@ -1343,6 +1694,53 @@ def test_temperature_project_cache_autoload_ignores_stale_project_result(qapp, t
         widget.deleteLater()
 
 
+def test_temperature_sqlite_cache_hit_is_not_invalidated_before_activation(
+    qapp,
+    tmp_path,
+    monkeypatch,
+):
+    from bl03u_masstool.core.calibration import Calibration
+    from bl03u_masstool.frontends.pyqt_app.temperature.dialog import (
+        TemperatureScanDialog,
+    )
+
+    widget = TemperatureScanDialog(Calibration())
+    activated = []
+    token = {"request_id": 1}
+    try:
+        widget.set_project_settings(
+            ProjectSettings(output_dir=str(tmp_path)),
+            activate_project_scope=True,
+            load_cached_results=False,
+        )
+        widget._autoload_cache_token = token
+        monkeypatch.setattr(
+            widget,
+            "_discard_stale_temperature_curves",
+            lambda _cache_key: pytest.fail(
+                "A verified SQLite cache hit must not be invalidated"
+            ),
+        )
+        monkeypatch.setattr(
+            widget,
+            "_activate_sqlite_temperature_dataset",
+            lambda dataset_id, **kwargs: activated.append(dataset_id),
+        )
+
+        widget._on_project_temperature_cache_loaded(
+            {
+                "cache_key": "analysis-key",
+                "sqlite_dataset_id": 42,
+                "dataset_metadata": {},
+            },
+            token,
+        )
+
+        assert activated == [42]
+    finally:
+        widget.deleteLater()
+
+
 def test_pie_page_owns_photon_mode_switch(qapp, tmp_path, monkeypatch):
     from bl03u_masstool.core.calibration import Calibration
     from bl03u_masstool.core.normalization import NormalizationSettings
@@ -1351,17 +1749,27 @@ def test_pie_page_owns_photon_mode_switch(qapp, tmp_path, monkeypatch):
     pie_dir = tmp_path / "pie_scan"
     pie_dir.mkdir()
     (pie_dir / "8.0eV.txt").write_text("1 2\n", encoding="utf-8")
+    project_dir = tmp_path / "project"
+    peak_set = create_peak_set(
+        project_dir,
+        content=b"label,peak_index,mz,left_bound,right_bound\nA,1,1,0,2\n",
+        extension=".csv",
+        label="test",
+        origin="imported",
+    )
 
     widget = PIESpeciesFitDialog(Calibration(), NormalizationSettings(light_source="beam_current"))
     try:
         ps = ProjectSettings(
             project_name="PIE Switch",
-            output_dir=str(tmp_path / "project"),
+            output_dir=str(project_dir),
             pie_scan_folder=str(pie_dir),
             pie_photon_mode="first",
+            active_peak_set_id=peak_set.peak_set_id,
+            manual_peak_file=str(verify_peak_set(project_dir, peak_set)),
         )
         manager = ProjectSettingsManager()
-        manager.set_project_path(tmp_path / "project")
+        manager.set_project_path(project_dir)
         manager.set(ps)
         widget.set_project_settings(ps, activate_project_scope=True)
 
@@ -1686,7 +2094,17 @@ def test_open_project_restores_data_sources_and_applies_to_tools(qapp, tmp_path,
 
         assert window.project_temperature_folder_edit.text() == str(temperature_folder)
         assert window.project_pie_folder_edit.text() == str(pie_folder)
-        assert window.project_manual_peak_edit.text() == str(manual_peak)
+        saved = load_project_settings(project_dir / "config" / "project.yaml")
+        migrated_peak = Path(window.project_manual_peak_edit.text())
+        assert saved.active_peak_set_id
+        assert migrated_peak.parent == (
+            project_dir
+            / "analysis"
+            / "spectrum"
+            / "manual_peaks"
+            / "peak_sets"
+        )
+        assert migrated_peak.read_bytes() == manual_peak.read_bytes()
         assert window.spectrum_source_scope == "project"
         assert window.projectSourceButton.text() == "项目数据"
         assert window.customSourceButton.text() == "临时数据"
@@ -2385,7 +2803,10 @@ def test_workbench_publish_peak_ranges_registers_project_manual_file(qapp, tmp_p
         saved_path = Path(saved.manual_peak_file)
         manifest_path = saved_path.with_suffix(".manifest.yaml")
         assert saved.temp_peak_source == "manual"
-        assert saved_path == project_dir / "analysis" / "spectrum" / "manual_peaks" / "manual_peak_ranges.csv"
+        assert saved.active_peak_set_id
+        assert saved_path.parent == (
+            project_dir / "analysis" / "spectrum" / "manual_peaks" / "peak_sets"
+        )
         assert saved_path.exists()
         assert manifest_path.exists()
 
@@ -2395,14 +2816,48 @@ def test_workbench_publish_peak_ranges_registers_project_manual_file(qapp, tmp_p
         assert df.loc[0, "peak_index"] == 100
         assert df.loc[0, "left_bound"] == 96
         manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
-        assert manifest["peak_file"] == "manual_peak_ranges.csv"
+        assert manifest["peak_file"] == saved_path.name
+        assert manifest["peak_set_id"] == saved.active_peak_set_id
+        assert manifest["approved"] is True
         assert manifest["source"]["mode"] == "single"
         assert manifest["source"]["path"] == str(source_file)
         assert window.project_manual_peak_edit.text() == str(saved_path)
         assert window._peak_table_dirty is False
+
+        first_content = saved_path.read_bytes()
+        window.peakData.item(0, 4).setText("95.0")
+        window.publish_peak_ranges_to_project()
+        updated = load_project_settings(project_dir / "config" / "project.yaml")
+        records = list_peak_sets(project_dir)
+        assert len(records) == 2
+        assert updated.active_peak_set_id != saved.active_peak_set_id
+        assert Path(updated.manual_peak_file) != saved_path
+        assert saved_path.read_bytes() == first_content
     finally:
         window.project_settings_manager.clear_project_path()
         window.deleteLater()
+
+
+def test_peak_approval_change_summary_reports_candidate_diff(tmp_path):
+    current = tmp_path / "approved.csv"
+    pd.DataFrame(
+        [
+            {"label": "A", "mz": 10.0, "left_bound": 8, "right_bound": 12},
+            {"label": "B", "mz": 20.0, "left_bound": 18, "right_bound": 22},
+        ]
+    ).to_csv(current, index=False)
+    candidate = pd.DataFrame(
+        [
+            {"label": "A", "mz": 10.0, "left_bound": 7, "right_bound": 13},
+            {"label": "C", "mz": 30.0, "left_bound": 28, "right_bound": 32},
+        ]
+    )
+
+    summary = MainWindow._peak_range_change_summary(candidate, str(current))
+
+    assert "新增 1" in summary
+    assert "删除 1" in summary
+    assert "边界修改 1" in summary
 
 
 def test_workbench_auto_find_does_not_overwrite_project_peak_file(qapp, tmp_path, monkeypatch):
@@ -2512,9 +2967,11 @@ def test_workbench_open_project_peak_ranges_rejects_incomplete_project_artifact(
         project_name="Incomplete Peaks",
         system="C6H6",
         output_dir=str(project_dir),
-        manual_peak_file=str(peak_file),
         temp_peak_source="manual",
     )
+    peak_set = import_peak_set(project_dir, peak_file)
+    ps.active_peak_set_id = peak_set.peak_set_id
+    ps.manual_peak_file = str(verify_peak_set(project_dir, peak_set))
     save_project_settings(ps, project_dir / "config" / "project.yaml")
 
     warnings: list[tuple[str, str]] = []
@@ -2534,7 +2991,7 @@ def test_workbench_open_project_peak_ranges_rejects_incomplete_project_artifact(
         assert window._valid_peak_rows() == []
         assert warnings
         assert warnings[0][0] == "项目卡峰不完整"
-        assert "manifest 未写入" in warnings[0][1]
+        assert "CSV 缺少列" in warnings[0][1]
     finally:
         window.project_settings_manager.clear_project_path()
         window.deleteLater()
@@ -2927,8 +3384,13 @@ def test_import_finished_registers_manual_peak_file(qapp, tmp_path):
         )
 
         saved = load_project_settings(project_dir / "config" / "project.yaml")
-        assert saved.manual_peak_file == str(imported_peak)
-        assert window.project_manual_peak_edit.text() == str(imported_peak)
+        approved_path = Path(saved.manual_peak_file)
+        assert saved.active_peak_set_id
+        assert approved_path.parent == (
+            project_dir / "analysis" / "spectrum" / "manual_peaks" / "peak_sets"
+        )
+        assert approved_path.read_bytes() == imported_peak.read_bytes()
+        assert window.project_manual_peak_edit.text() == str(approved_path)
         assert window.datasource_row_status_labels["manual_peak"].text().startswith("✓")
     finally:
         window.project_settings_manager.clear_project_path()
@@ -2959,11 +3421,61 @@ def test_project_manual_peak_button_imports_legacy_file(qapp, tmp_path, monkeypa
         window.import_project_manual_peak_file()
 
         saved = load_project_settings(project_dir / "config" / "project.yaml")
-        imported = project_dir / "analysis" / "spectrum" / "manual_peaks" / legacy_peak.name
+        imported = Path(saved.manual_peak_file)
+        assert saved.active_peak_set_id
+        assert imported.parent == (
+            project_dir / "analysis" / "spectrum" / "manual_peaks" / "peak_sets"
+        )
         assert Path(saved.manual_peak_file) == imported
         assert imported.read_text(encoding="utf-8") == legacy_peak.read_text(encoding="utf-8")
         assert window.project_manual_peak_edit.text() == str(imported)
         assert window.datasource_row_status_labels["manual_peak"].text().startswith("✓")
+    finally:
+        window.project_settings_manager.clear_project_path()
+        window.deleteLater()
+
+
+def test_project_management_switches_between_approved_peak_sets(qapp, tmp_path):
+    project_dir = tmp_path / "Project_Peak_Set_Switch"
+    first = create_peak_set(
+        project_dir,
+        content=b"label,peak_index,mz,left_bound,right_bound\nA,100,28,98,102\n",
+        extension=".csv",
+        label="first",
+        origin="spectrum_workbench",
+    )
+    second = create_peak_set(
+        project_dir,
+        content=b"label,peak_index,mz,left_bound,right_bound\nA,100,28,97,103\n",
+        extension=".csv",
+        label="second",
+        origin="spectrum_workbench",
+    )
+    ps = ProjectSettings(
+        project_name="Peak switch",
+        output_dir=str(project_dir),
+        manual_peak_file=first.peak_file,
+        active_peak_set_id=first.peak_set_id,
+        temp_peak_source="manual",
+    )
+    save_project_settings(ps, project_dir / "config" / "project.yaml")
+
+    window = MainWindow()
+    try:
+        window.project_settings_manager.set_project_path(project_dir)
+        window.project_settings_manager.set(ps)
+        window._read_project_settings_to_ui(ps)
+        second_index = window.project_peak_set_combo.findData(second.peak_set_id)
+        assert second_index >= 0
+
+        window.project_peak_set_combo.setCurrentIndex(second_index)
+        window.activate_selected_project_peak_set()
+
+        saved = load_project_settings(project_dir / "config" / "project.yaml")
+        assert saved.active_peak_set_id == second.peak_set_id
+        assert Path(saved.manual_peak_file) == verify_peak_set(project_dir, second)
+        assert verify_peak_set(project_dir, first).exists()
+        assert verify_peak_set(project_dir, second).exists()
     finally:
         window.project_settings_manager.clear_project_path()
         window.deleteLater()

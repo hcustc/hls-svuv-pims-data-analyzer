@@ -1585,12 +1585,12 @@ class FunctionDefaultsWidget(QtWidgets.QWidget):
         self.temp_peak_source_combo = QtWidgets.QComboBox()
         self.temp_peak_source_combo.addItem("自动寻峰", "auto")
         self.temp_peak_source_combo.addItem("手动卡峰文件", "manual")
-        self.temp_peak_source_combo.setToolTip("自动模式使用寻峰参数；手动模式读取项目管理中的手动卡峰文件")
+        self.temp_peak_source_combo.setVisible(False)
 
         self.temp_reference_mode_combo = QtWidgets.QComboBox()
         self.temp_reference_mode_combo.addItem("Sum 谱参考", "sum")
         self.temp_reference_mode_combo.addItem("独立参考", "individual")
-        self.temp_reference_mode_combo.setToolTip("温度扫描自动寻峰时的参考谱来源")
+        self.temp_reference_mode_combo.setVisible(False)
 
         self.temp_integration_method_combo = QtWidgets.QComboBox()
         self.temp_integration_method_combo.addItem("范围累加", "sum_counts")
@@ -1615,10 +1615,10 @@ class FunctionDefaultsWidget(QtWidgets.QWidget):
         self.temp_replicate_mode_combo.addItem("累加重复采集", "sum")
         self.temp_replicate_mode_combo.setToolTip("仅在确认同一条件多次采集时选择平均或累加")
 
-        form.addWidget(QtWidgets.QLabel("峰来源"), 0, 0)
-        form.addWidget(self.temp_peak_source_combo, 0, 1)
-        form.addWidget(QtWidgets.QLabel("参考模式"), 0, 2)
-        form.addWidget(self.temp_reference_mode_combo, 0, 3)
+        form.addWidget(QtWidgets.QLabel("项目峰来源"), 0, 0)
+        project_peak_hint = QtWidgets.QLabel("当前项目卡峰集（PIE与温扫共用）")
+        project_peak_hint.setToolTip("在项目管理中导入、自动生成或切换卡峰版本")
+        form.addWidget(project_peak_hint, 0, 1, 1, 3)
         form.addWidget(QtWidgets.QLabel("积分方式"), 0, 4)
         form.addWidget(self.temp_integration_method_combo, 0, 5)
         form.addWidget(QtWidgets.QLabel("分类变化阈值"), 1, 0)
@@ -1884,7 +1884,7 @@ class FunctionDefaultsWidget(QtWidgets.QWidget):
         target.vote_threshold = self.peak_detection.vote_threshold
         target.min_intensity_for_single_vote = self.peak_detection.min_intensity_for_single_vote
         target.mz_tolerance = self.peak_detection.mz_tolerance
-        target.temp_peak_source = str(self.temp_peak_source_combo.currentData())
+        target.temp_peak_source = "manual"
         target.temp_reference_mode = str(self.temp_reference_mode_combo.currentData())
         target.temp_integration_method = str(self.temp_integration_method_combo.currentData())
         target.temp_prefer_gaussian = target.temp_integration_method == "gaussian"

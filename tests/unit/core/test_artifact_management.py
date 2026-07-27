@@ -66,6 +66,7 @@ class TestArtifactCategory:
             "intermediate",
             "temperature_scan",
             "pie",
+            "isotope_correction",
             "mole_fraction",
             "pics",
             "snapshots",

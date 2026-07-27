@@ -2,22 +2,39 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from bl03u_masstool.core.project_settings import ProjectSettingsManager
+from bl03u_masstool.core.project_lifecycle import project_root
+from bl03u_masstool.core.project_settings import ProjectSettings, ProjectSettingsManager
 
 
-def record_project_artifact(widget, field_name: str, file_path: str | Path, *, message: str | None = None) -> bool:
+def record_project_artifact(
+    widget,
+    field_name: str,
+    file_path: str | Path,
+    *,
+    message: str | None = None,
+    project_settings: ProjectSettings | None = None,
+) -> bool:
     """Persist an analysis-result path in project settings and refresh the main window if present."""
     if not file_path:
         return False
 
     manager = ProjectSettingsManager()
     settings = manager.get()
+    if (
+        project_settings is not None
+        and project_root(settings).resolve() != project_root(project_settings).resolve()
+    ):
+        return False
     if not hasattr(settings, field_name):
         return False
 
-    setattr(settings, field_name, str(Path(file_path)))
+    normalized_path = str(Path(file_path))
+    already_registered = str(getattr(settings, field_name, "") or "") == normalized_path
+    setattr(settings, field_name, normalized_path)
     manager.set(settings)
     manager.save()
+    if already_registered:
+        return True
 
     window = widget.window() if hasattr(widget, "window") else None
     if window is not None and window is not widget:

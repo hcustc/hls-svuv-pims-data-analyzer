@@ -38,6 +38,11 @@ from bl03u_masstool.core.config import (
     load_peak_detection_config,
 )
 from bl03u_masstool.core.output_paths import ensure_output_dir
+from bl03u_masstool.core.peak_sets import (
+    create_peak_set,
+    resolve_active_peak_file,
+    verify_peak_set,
+)
 from bl03u_masstool.core.peak_detection import add_manual_peak as core_add_manual_peak
 from bl03u_masstool.core.peak_detection import detect_peaks_by_algorithm
 from bl03u_masstool.core.project_lifecycle import ensure_project_structure, project_root
@@ -46,6 +51,8 @@ from bl03u_masstool.core.spectrum_io import read_bl03u_txt, sum_spectra
 from bl03u_masstool.frontends.pyqt_app.spectrum.axis import SpectrumBottomAxis
 from bl03u_masstool.frontends.pyqt_app.spectrum.peak_dialog import PeakDialog
 from bl03u_masstool.frontends.pyqt_app.spectrum.workspace_pages import WorkspacePagesMixin
+from bl03u_masstool.frontends.pyqt_app.worker_manager import WorkerManager
+from bl03u_masstool.frontends.pyqt_app.workers import WorkerThread
 
 
 logger = logging.getLogger(__name__)
@@ -75,12 +82,17 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         self._peak_table_dirty = False
         self._peak_table_dirty_requires_confirm = False
         self._peak_table_state_text = "候选峰未保存到项目"
+        self._peak_candidate_origin = "workbench_manual"
         self._published_project_peak_file = ""
         self.spectrum_source_scope = self._default_spectrum_source_scope()
         self._custom_single_spectrum_file = self.lineEdit.text().strip()
         self._custom_sum_spectrum_folder = self.folder_path.text().strip()
         self.apply_config_defaults()
         self.configure_runtime_ui()
+        self._close_waiting_for_workers = False
+        app = QtWidgets.QApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(self._finish_workers_before_application_exit)
         self.current_time_offset = 0.0
         self.add_core_tools_launcher()
         self.pushButton.clicked.connect(self.plot_graph)
@@ -165,8 +177,8 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         )
         self.openProjectPeaksButton.setFixedHeight(28)
         self.openProjectPeaksButton.clicked.connect(self.open_project_peak_ranges)
-        self.publishProjectPeaksButton = QPushButton("保存到项目")
-        self.publishProjectPeaksButton.setToolTip("将当前卡峰范围发布为项目管理中的手动卡峰文件")
+        self.publishProjectPeaksButton = QPushButton("批准为新版本")
+        self.publishProjectPeaksButton.setToolTip("将当前候选表批准为新的不可变卡峰集并激活")
         self.publishProjectPeaksButton.setMinimumWidth(0)
         self.publishProjectPeaksButton.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Expanding,
@@ -225,10 +237,59 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
 
     def closeEvent(self, event) -> None:
         """Persist window geometry and splitter state before closing."""
+        running_threads = self._running_background_threads()
+        if running_threads:
+            event.ignore()
+            if not self._close_waiting_for_workers:
+                self._close_waiting_for_workers = True
+                self._request_background_shutdown()
+                if self.statusBar() is not None:
+                    self.statusBar().showMessage(
+                        f"正在等待 {len(running_threads)} 个后台任务安全结束…"
+                    )
+            QtCore.QTimer.singleShot(250, self.close)
+            return
+        self._close_waiting_for_workers = False
         self._qsettings.setValue("window/geometry", self.saveGeometry())
         if hasattr(self, "main_splitter"):
             self._qsettings.setValue("window/splitter_state", self.main_splitter.saveState())
         super().closeEvent(event)
+
+    def _running_background_threads(self) -> list[QtCore.QThread]:
+        threads: list[QtCore.QThread] = list(self.findChildren(WorkerThread))
+        for manager in self.findChildren(WorkerManager):
+            thread = manager.current_thread
+            if thread is not None:
+                threads.append(thread)
+        unique: list[QtCore.QThread] = []
+        seen: set[int] = set()
+        for thread in threads:
+            identity = id(thread)
+            if identity in seen or not thread.isRunning():
+                continue
+            seen.add(identity)
+            unique.append(thread)
+        return unique
+
+    def _request_background_shutdown(self) -> None:
+        for worker in self.findChildren(WorkerThread):
+            if worker.isRunning():
+                worker.cancel()
+        for manager in self.findChildren(WorkerManager):
+            manager.request_shutdown()
+
+    def _finish_workers_before_application_exit(self) -> None:
+        """Last-resort cleanup for OS/session exits that bypass closeEvent."""
+        self._request_background_shutdown()
+        deadline = QtCore.QDeadlineTimer(30_000)
+        for thread in self._running_background_threads():
+            remaining = max(0, deadline.remainingTime())
+            if remaining > 0:
+                thread.wait(remaining)
+        for thread in self._running_background_threads():
+            logger.error("Force-stopping background thread during application exit")
+            thread.terminate()
+            thread.wait(1_000)
 
     def configure_runtime_ui(self):
         self.setAccessibleName("BL03U Mass Spectrum Tool")
@@ -399,10 +460,10 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         self.peakProjectMenuButton = self._command_menu_button(
             "项目操作", self.peakProjectActionPanel
         )
-        self.peakProjectMenuButton.setToolTip("打开或保存项目卡峰范围")
+        self.peakProjectMenuButton.setToolTip("打开已批准卡峰集，或将当前候选表批准为新版本")
         project_menu = QMenu(self.peakProjectMenuButton)
         self.openProjectPeaksAction = project_menu.addAction("打开项目卡峰范围…")
-        self.publishProjectPeaksAction = project_menu.addAction("保存当前范围到项目")
+        self.publishProjectPeaksAction = project_menu.addAction("批准当前候选表为新版本…")
         self.openProjectPeaksAction.triggered.connect(self.openProjectPeaksButton.click)
         self.publishProjectPeaksAction.triggered.connect(self.publishProjectPeaksButton.click)
         self.peakProjectMenuButton.setMenu(project_menu)
@@ -1577,17 +1638,21 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         text: str = "当前卡峰范围已修改，尚未保存到项目",
         *,
         require_confirm: bool = True,
+        candidate_origin: str | None = None,
     ) -> None:
         self._peak_table_dirty = True
         self._peak_table_dirty_requires_confirm = require_confirm
         self._peak_table_state_text = text
+        self._peak_candidate_origin = (
+            candidate_origin or "workbench_manual"
+        )
         self._refresh_peak_table_project_state()
 
     def _mark_peak_table_project_saved(self, path: str) -> None:
         self._peak_table_dirty = False
         self._peak_table_dirty_requires_confirm = False
         self._published_project_peak_file = path
-        self._peak_table_state_text = f"项目卡峰范围已保存: {Path(path).name}"
+        self._peak_table_state_text = f"已批准并激活卡峰集: {Path(path).name}"
         self._refresh_peak_table_project_state()
 
     def _refresh_peak_table_project_state(self) -> None:
@@ -2276,6 +2341,48 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
                 f"项目卡峰 manifest 与 CSV 不匹配：{manifest.get('peak_file')} != {peak_file.name}"
             )
 
+    @staticmethod
+    def _peak_range_change_summary(candidate: pd.DataFrame, current_path: str) -> str:
+        if not current_path:
+            return f"首次批准：将创建包含 {len(candidate)} 个峰的新卡峰集。"
+        path = Path(current_path).expanduser()
+        if path.suffix.lower() != ".csv" or not path.is_file():
+            return "当前正式卡峰集不是可直接比较的 CSV；批准后仍会保留原版本。"
+        try:
+            current = pd.read_csv(path)
+            required = {"label", "mz", "left_bound", "right_bound"}
+            if not required.issubset(current.columns) or not required.issubset(candidate.columns):
+                raise ValueError
+
+            def keyed(frame: pd.DataFrame) -> dict[tuple[str, float], tuple[float, float]]:
+                result: dict[tuple[str, float], tuple[float, float]] = {}
+                for _index, row in frame.iterrows():
+                    key = (str(row["label"]), round(float(row["mz"]), 6))
+                    result[key] = (
+                        round(float(row["left_bound"]), 6),
+                        round(float(row["right_bound"]), 6),
+                    )
+                return result
+
+            old = keyed(current)
+            new = keyed(candidate)
+            added = len(new.keys() - old.keys())
+            removed = len(old.keys() - new.keys())
+            changed = sum(
+                old[key] != new[key]
+                for key in old.keys() & new.keys()
+            )
+            unchanged = sum(
+                old[key] == new[key]
+                for key in old.keys() & new.keys()
+            )
+            return (
+                f"相对当前正式版本：新增 {added}，删除 {removed}，"
+                f"边界修改 {changed}，未变 {unchanged}。"
+            )
+        except (OSError, TypeError, ValueError):
+            return "无法自动比较当前正式版本；批准后仍会保留原版本。"
+
     def publish_peak_ranges_to_project(self):
         """Publish current curated ranges as the project-owned manual peak file."""
         try:
@@ -2290,70 +2397,44 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
                 return
 
             source = self._validated_current_spectrum_source_manifest()
+            ps = manager.get()
+            change_summary = self._peak_range_change_summary(
+                df,
+                ps.manual_peak_file,
+            )
 
             reply = QMessageBox.question(
                 self,
-                "保存到项目卡峰范围",
-                "将用当前表格覆盖项目管理中的手动卡峰文件。\n"
-                "后续温度扫描、PIE 和摩尔分数分析将使用这份范围。\n\n是否继续？",
+                "批准为新卡峰集",
+                f"候选状态：{self._peak_table_state_text}\n"
+                f"{change_summary}\n\n"
+                "当前候选表将保存为一个新的不可变卡峰集，并激活为项目正式版本。\n"
+                "已有卡峰集不会被覆盖；后续温度扫描、PIE 和摩尔分数分析将使用新版本。\n\n"
+                "是否批准并激活？",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
             )
             if reply != QMessageBox.StandardButton.Yes:
                 return
 
-            ps = manager.get()
             ensure_project_structure(ps)
-            output_path = project_root(ps) / "analysis" / "spectrum" / "manual_peaks" / "manual_peak_ranges.csv"
-            manifest_path = self._manifest_path_for_peak_file(output_path)
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_csv = output_path.with_name(f".{output_path.name}.tmp")
-            tmp_manifest = manifest_path.with_name(f".{manifest_path.name}.tmp")
-            backup_csv = output_path.with_name(f".{output_path.name}.bak")
-            backup_manifest = manifest_path.with_name(f".{manifest_path.name}.bak")
-            backups: list[tuple[Path, Path]] = []
-            try:
-                df.to_csv(tmp_csv, index=False, encoding="utf-8-sig")
-                self._write_peak_ranges_manifest(output_path, source, manifest_path=tmp_manifest)
-                for backup_path in (backup_csv, backup_manifest):
-                    if backup_path.exists():
-                        backup_path.unlink()
-                for final_path, backup_path in ((output_path, backup_csv), (manifest_path, backup_manifest)):
-                    if final_path.exists():
-                        final_path.replace(backup_path)
-                        backups.append((backup_path, final_path))
-                tmp_csv.replace(output_path)
-                tmp_manifest.replace(manifest_path)
-                self._validate_peak_ranges_artifact(output_path)
-            except Exception:
-                for final_path in (output_path, manifest_path):
-                    try:
-                        if final_path.exists():
-                            final_path.unlink()
-                    except OSError:
-                        logger.debug("Failed to remove partial project peak file: %s", final_path, exc_info=True)
-                for backup_path, final_path in backups:
-                    try:
-                        if backup_path.exists():
-                            backup_path.replace(final_path)
-                    except OSError:
-                        logger.debug("Failed to restore project peak backup: %s", backup_path, exc_info=True)
-                raise
-            else:
-                for backup_path, _final_path in backups:
-                    try:
-                        if backup_path.exists():
-                            backup_path.unlink()
-                    except OSError:
-                        logger.debug("Failed to remove project peak backup: %s", backup_path, exc_info=True)
-            finally:
-                for tmp_path in (tmp_csv, tmp_manifest):
-                    try:
-                        if tmp_path.exists():
-                            tmp_path.unlink()
-                    except OSError:
-                        logger.debug("Failed to remove temporary project peak file: %s", tmp_path, exc_info=True)
+            csv_content = df.to_csv(index=False).encode("utf-8-sig")
+            peak_set = create_peak_set(
+                project_root(ps),
+                content=csv_content,
+                extension=".csv",
+                label=f"工作台批准 · {len(df)} 个峰",
+                origin=self._peak_candidate_origin,
+                manifest=self._peak_ranges_manifest_data(Path("pending.csv"), source),
+                metadata={
+                    "peak_count": int(len(df)),
+                    "candidate_state": self._peak_table_state_text,
+                },
+            )
+            output_path = verify_peak_set(project_root(ps), peak_set)
+            self._validate_peak_ranges_artifact(output_path)
 
+            ps.active_peak_set_id = peak_set.peak_set_id
             ps.manual_peak_file = str(output_path)
             ps.temp_peak_source = "manual"
             manager.set(ps)
@@ -2367,8 +2448,15 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
             manager.set(saved)
             self._sync_project_manual_peak_file_to_ui(saved)
             self._mark_peak_table_project_saved(str(output_path))
-            self.statusbar.showMessage("项目卡峰范围已保存，后续分析将使用手动卡峰文件", 5000)
-            QMessageBox.information(self, "已保存", f"项目卡峰范围已保存：\n{output_path}")
+            self.statusbar.showMessage(
+                f"已批准并激活新卡峰集：{peak_set.label}",
+                5000,
+            )
+            QMessageBox.information(
+                self,
+                "已批准",
+                f"已创建不可变卡峰集：\n{peak_set.peak_set_id}\n\n{output_path}",
+            )
         except (FileNotFoundError, ValueError) as e:
             logger.info("Project peak ranges were not published: %s", e)
             QMessageBox.warning(self, "无法保存项目卡峰范围", str(e))
@@ -2383,9 +2471,13 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
             if not ps.manual_peak_file:
                 QMessageBox.warning(self, "提示", "项目管理中尚未登记手动卡峰文件。")
                 return
-            peak_file = Path(ps.manual_peak_file).expanduser()
-            if not peak_file.exists():
-                QMessageBox.warning(self, "提示", f"项目卡峰文件不存在：\n{peak_file}")
+            peak_file = resolve_active_peak_file(
+                project_root(ps),
+                active_peak_set_id=ps.active_peak_set_id,
+                configured_peak_file=ps.manual_peak_file,
+            )
+            if peak_file is None:
+                QMessageBox.warning(self, "提示", "项目中尚无已批准卡峰集。")
                 return
             try:
                 self._validate_peak_ranges_artifact(peak_file)
@@ -2504,15 +2596,25 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
     def _sync_project_manual_peak_file_to_ui(self, ps) -> None:
         if hasattr(self, "project_manual_peak_edit"):
             self.project_manual_peak_edit.setText(ps.manual_peak_file)
+        if hasattr(self, "_refresh_project_peak_sets"):
+            self._refresh_project_peak_sets(ps)
         if hasattr(self, "project_function_defaults_widget"):
             try:
                 self.project_function_defaults_widget.set_project_settings(ps)
             except Exception:
                 logger.debug("Failed to refresh function defaults after publishing peaks", exc_info=True)
         if hasattr(self, "temperature_page"):
-            self.temperature_page.set_project_settings(ps)
+            self.temperature_page.set_project_settings(
+                ps,
+                load_cached_results=False,
+            )
         if hasattr(self, "pie_page"):
-            self.pie_page.set_project_settings(ps)
+            self.pie_page.set_project_settings(
+                ps,
+                load_cached_results=False,
+            )
+        if hasattr(self, "_invalidate_untraceable_project_curves"):
+            self._invalidate_untraceable_project_curves(ps)
         if hasattr(self, "mole_fraction_page"):
             self.mole_fraction_page.set_project_settings(ps)
         if hasattr(self, "refresh_project_lifecycle"):
@@ -2586,7 +2688,11 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
 
             # 表格是峰标注的单一数据源，避免重复叠加旧标注。
             self.update_plot()
-            self._mark_peak_table_dirty("自动寻峰候选峰，尚未保存到项目", require_confirm=False)
+            self._mark_peak_table_dirty(
+                "自动寻峰候选峰，尚未批准",
+                require_confirm=False,
+                candidate_origin="workbench_auto",
+            )
             mode = self._peak_detection_preset_label()
             self.statusbar.showMessage(f"{mode} 自动寻峰完成：{len(peaks)} 个候选峰", 4000)
 
