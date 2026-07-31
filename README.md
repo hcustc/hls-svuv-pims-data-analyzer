@@ -85,6 +85,9 @@ bl03u --help
 python -m pytest
 ```
 
+提交、推送或创建 Pull Request 前，请按
+[`docs/pre_commit_checklist.md`](docs/pre_commit_checklist.md) 执行必检项和对应的条件检查。
+
 真实仪器数据回归测试使用本地可选数据目录，不随 Git 上传。默认查找
 `tests/fixtures/bl03u_sample/`；也可以指定：
 

@@ -10,7 +10,13 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 pytest.importorskip("PyQt6")
-from PyQt6 import QtWidgets
+try:
+    from PyQt6 import QtWidgets
+except ImportError as exc:
+    pytest.skip(
+        f"PyQt6 display libraries not available: {exc}",
+        allow_module_level=True,
+    )
 
 pytestmark = pytest.mark.gui
 

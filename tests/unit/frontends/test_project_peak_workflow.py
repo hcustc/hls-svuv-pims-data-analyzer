@@ -7,8 +7,15 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PyQt6")
+try:
+    from PyQt6 import QtWidgets
+except ImportError as exc:
+    pytest.skip(
+        f"PyQt6 display libraries not available: {exc}",
+        allow_module_level=True,
+    )
 
-from PyQt6 import QtWidgets
+pytestmark = pytest.mark.gui
 
 from bl03u_masstool.core.peak_sets import create_peak_set, verify_peak_set
 from bl03u_masstool.core.project_settings import ProjectSettings
