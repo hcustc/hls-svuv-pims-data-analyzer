@@ -24,6 +24,7 @@ class PieStartPayload(BaseModel):
     gaussian: bool = False
     integration_method: str = "sum_counts"
     photon_mode: Optional[str] = None
+    normalize_by_time: Optional[bool] = None
     light_source: Optional[str] = None
     mass_discrimination: Optional[float] = None
     replicate_mode: str = "off"

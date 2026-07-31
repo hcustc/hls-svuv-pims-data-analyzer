@@ -19,7 +19,9 @@ def record_project_artifact(
         return False
 
     manager = ProjectSettingsManager()
-    settings = manager.get()
+    if not manager.has_project_path():
+        return False
+    settings = manager.snapshot()
     if (
         project_settings is not None
         and project_root(settings).resolve() != project_root(project_settings).resolve()
@@ -31,8 +33,7 @@ def record_project_artifact(
     normalized_path = str(Path(file_path))
     already_registered = str(getattr(settings, field_name, "") or "") == normalized_path
     setattr(settings, field_name, normalized_path)
-    manager.set(settings)
-    manager.save()
+    settings = manager.replace_and_save(settings)
     if already_registered:
         return True
 
@@ -40,12 +41,6 @@ def record_project_artifact(
     if window is not None and window is not widget:
         if hasattr(window, "_read_project_settings_to_ui"):
             window._read_project_settings_to_ui(settings)
-        if hasattr(window, "_sync_project_settings_to_tool_pages"):
-            window._sync_project_settings_to_tool_pages(settings)
-        if hasattr(window, "refresh_project_lifecycle"):
-            window.refresh_project_lifecycle(settings)
-        if hasattr(window, "refresh_project_parameter_summary"):
-            window.refresh_project_parameter_summary()
         statusbar = getattr(window, "statusbar", None)
         if message and statusbar is not None:
             statusbar.showMessage(message, 4000)

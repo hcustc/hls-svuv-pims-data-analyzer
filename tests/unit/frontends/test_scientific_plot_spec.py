@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+from dataclasses import replace
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -19,6 +21,7 @@ from bl03u_masstool.frontends.pyqt_app.common.plot_spec import (
     PlotProfile,
     ScientificPlotSpec,
     SeriesRole,
+    VerticalReference,
 )
 from bl03u_masstool.frontends.pyqt_app.common.static_plot import (
     StaticCurvePlot,
@@ -129,6 +132,58 @@ def test_publication_export_restores_screen_plot(qapp, tmp_path):
         "Allene",
         "Propyne",
     ]
+
+
+def test_vertical_reference_and_nearest_point_cursor(qapp):
+    widget = StaticCurvePlot("x", "y")
+    spec = replace(
+        _pie_spec(),
+        vertical_references=(
+            VerticalReference(
+                key="candidate-ie",
+                x=7.2,
+                label="IE · CH2O 7.2000 eV",
+                emphasized=True,
+            ),
+        ),
+    )
+    widget.render_spec(spec)
+
+    reference = next(
+        line for line in widget.axes.lines
+        if line.get_label() == "IE · CH2O 7.2000 eV"
+    )
+    assert list(reference.get_xdata()) == pytest.approx([7.2, 7.2])
+    assert reference.get_linewidth() > 1.0
+
+    widget.set_nearest_point_cursor(
+        [7.0, 7.2, 7.4],
+        [0.0, 0.25, 0.5],
+        x_label="E",
+        y_label="I",
+        x_unit="eV",
+    )
+    widget._on_cursor_motion(
+        SimpleNamespace(inaxes=widget.axes, xdata=7.19)
+    )
+    assert widget._cursor_index == 1
+    assert widget._cursor_marker.get_visible()
+    assert "E = 7.2000 eV" in widget._cursor_annotation.get_text()
+    assert "点击锁定" in widget._cursor_annotation.get_text()
+
+    widget._on_cursor_click(
+        SimpleNamespace(inaxes=widget.axes, xdata=7.19, button=1)
+    )
+    assert widget._cursor_locked
+    widget._on_cursor_motion(
+        SimpleNamespace(inaxes=widget.axes, xdata=7.4)
+    )
+    assert widget._cursor_index == 1
+    widget._on_cursor_click(
+        SimpleNamespace(inaxes=widget.axes, xdata=7.4, button=1)
+    )
+    assert not widget._cursor_locked
+    assert widget._cursor_index == 2
 
 
 def test_analysis_progress_state_reports_real_stage(qapp):

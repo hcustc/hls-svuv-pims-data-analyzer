@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -13,6 +13,11 @@ CORRECTION_MODES = {
     "manual_fraction": "按母峰比例",
     "max_compatible": "最大非负相容贡献",
 }
+
+# Isotope pairs are molecule-specific scientific assumptions.  Projects may
+# configure them explicitly, but the application must not silently impose one
+# compound's channels on unrelated data.
+DEFAULT_ISOTOPE_QC_PAIRS: tuple[dict[str, object], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -61,6 +66,9 @@ class IsotopeCorrectionResult:
     pattern_table: pd.DataFrame
     pattern_rank: int
     pattern_condition_number: float
+    diagnostic_table: pd.DataFrame
+    sensitivity_table: pd.DataFrame
+    scientific_note: str
 
 
 def nominal_isotope_pattern(
@@ -120,6 +128,8 @@ def infer_curve_columns(data: pd.DataFrame, source_type: str) -> dict[str, objec
         ("area", "normalized_area", "photon_normalized_area", "raw_area", "强度")
         if source_type == "temperature"
         else (
+            "merged_intensity",
+            "io_time_normalized_intensity",
             "normalized_intensity",
             "photon_normalized_intensity",
             "raw_area",
@@ -182,6 +192,8 @@ def prepare_curve_matrix(
     mz_min: int | None = None,
     mz_max: int | None = None,
     aggregation: str = "mean",
+    peak_track_column: str | None = None,
+    peak_track_selection: Mapping[int, object] | None = None,
 ) -> pd.DataFrame:
     """Convert a long exported result table into axis × nominal-mass signals."""
 
@@ -195,17 +207,62 @@ def prepare_curve_matrix(
     if resolved_mass_column not in data:
         raise ValueError(f"结果表缺少质量列: {resolved_mass_column}")
 
+    track_column = peak_track_column
+    if track_column is None and "peak_track" in data.columns:
+        track_column = "peak_track"
+    if track_column is not None and track_column not in data.columns:
+        raise ValueError(f"结果表缺少峰轨道列: {track_column}")
+
+    working_data: dict[str, object] = {
+        "_axis": pd.to_numeric(data[axis_column], errors="coerce"),
+        "_mz": pd.to_numeric(data[resolved_mass_column], errors="coerce"),
+        "_intensity": pd.to_numeric(data[intensity_column], errors="coerce"),
+    }
+    if track_column is not None:
+        working_data["_peak_track"] = data[track_column]
+    elif {"left_bound", "right_bound"}.issubset(data.columns):
+        working_data["_peak_track"] = list(
+            zip(data["left_bound"].tolist(), data["right_bound"].tolist())
+        )
+        track_column = "__peak_geometry__"
     working = pd.DataFrame(
-        {
-            "_axis": pd.to_numeric(data[axis_column], errors="coerce"),
-            "_mz": pd.to_numeric(data[resolved_mass_column], errors="coerce"),
-            "_intensity": pd.to_numeric(data[intensity_column], errors="coerce"),
-        }
+        working_data
     ).dropna()
     if working.empty:
         raise ValueError("所选坐标、质量和信号列没有有效数值")
 
     working["_nominal_mz"] = np.rint(working["_mz"]).astype(int)
+    selection = {
+        int(round(float(key))): value
+        for key, value in dict(peak_track_selection or {}).items()
+    }
+    if "_peak_track" in working.columns:
+        collision_masses = [
+            int(mass)
+            for mass, group in working.groupby("_nominal_mz", sort=True)
+            if group["_peak_track"].nunique(dropna=True) > 1
+        ]
+        missing_selection = [
+            mass for mass in collision_masses if mass not in selection
+        ]
+        if missing_selection:
+            masses_text = "、".join(str(value) for value in missing_selection)
+            raise ValueError(
+                "同一名义质量存在多个精确峰轨道，不能自动平均："
+                f"m/z {masses_text}。请为每个碰撞质量选择具体 peak_track。"
+            )
+        if selection:
+            keep = np.ones(len(working), dtype=bool)
+            for mass, selected_track in selection.items():
+                mass_mask = working["_nominal_mz"].to_numpy() == mass
+                track_mask = (
+                    working["_peak_track"].astype(str).to_numpy()
+                    == str(selected_track)
+                )
+                keep &= ~mass_mask | track_mask
+            working = working.loc[keep]
+            if working.empty:
+                raise ValueError("所选 peak_track 没有可用数据")
     if mz_min is not None:
         working = working[working["_nominal_mz"] >= int(mz_min)]
     if mz_max is not None:
@@ -225,6 +282,92 @@ def prepare_curve_matrix(
     matrix.columns = [int(column) for column in matrix.columns]
     matrix.columns.name = "mz"
     return matrix
+
+
+def evaluate_isotope_qc_pairs(
+    curve_matrix: pd.DataFrame,
+    pairs: Sequence[Mapping[str, object]] = DEFAULT_ISOTOPE_QC_PAIRS,
+    *,
+    relative_tolerance: float = 0.20,
+    min_valid_points: int = 3,
+) -> pd.DataFrame:
+    """Compare observed isotope pairs with formula-derived theoretical ratios."""
+    if relative_tolerance < 0:
+        raise ValueError("relative_tolerance must be non-negative")
+    rows: list[dict[str, object]] = []
+    for pair in pairs:
+        light_mz = int(pair["light_mz"])
+        heavy_mz = int(pair["heavy_mz"])
+        formula = str(pair["formula"])
+        shift = heavy_mz - light_mz
+        if shift <= 0:
+            raise ValueError("同位素核验重峰质量必须大于轻峰质量")
+        theoretical = float(
+            nominal_isotope_pattern(formula, max_shift=shift).get(shift, 0.0)
+        )
+        status = "pass"
+        reason = ""
+        valid_count = 0
+        observed_median = float("nan")
+        observed_mad = float("nan")
+        relative_error = float("nan")
+        if light_mz not in curve_matrix.columns or heavy_mz not in curve_matrix.columns:
+            status = "missing"
+            reason = "缺少轻峰或重峰通道"
+        else:
+            light = pd.to_numeric(curve_matrix[light_mz], errors="coerce").to_numpy(
+                dtype=float
+            )
+            heavy = pd.to_numeric(curve_matrix[heavy_mz], errors="coerce").to_numpy(
+                dtype=float
+            )
+            valid = (
+                np.isfinite(light)
+                & np.isfinite(heavy)
+                & (light > 0)
+                & (heavy >= 0)
+            )
+            ratios = heavy[valid] / light[valid]
+            valid_count = int(ratios.size)
+            if valid_count < int(min_valid_points):
+                status = "fail"
+                reason = (
+                    f"有效点数 {valid_count} 少于要求 {int(min_valid_points)}"
+                )
+            else:
+                observed_median = float(np.median(ratios))
+                observed_mad = float(
+                    np.median(np.abs(ratios - observed_median))
+                )
+                relative_error = (
+                    abs(observed_median - theoretical) / theoretical
+                    if theoretical > 0
+                    else float("inf")
+                )
+                if relative_error > float(relative_tolerance):
+                    status = "fail"
+                    reason = (
+                        f"相对偏差 {relative_error:.1%} 超过"
+                        f" {float(relative_tolerance):.1%}"
+                    )
+        rows.append(
+            {
+                "light_mz": light_mz,
+                "heavy_mz": heavy_mz,
+                "formula": formula,
+                "theoretical_heavy_to_light": theoretical,
+                "theoretical_light_to_heavy": (
+                    1.0 / theoretical if theoretical > 0 else float("inf")
+                ),
+                "observed_heavy_to_light_median": observed_median,
+                "observed_ratio_mad": observed_mad,
+                "relative_error": relative_error,
+                "valid_point_count": valid_count,
+                "status": status,
+                "reason": reason,
+            }
+        )
+    return pd.DataFrame(rows)
 
 
 def apply_isotope_correction(
@@ -344,6 +487,24 @@ def apply_isotope_correction(
         if rank == len(hypothesis_list)
         else float("inf")
     )
+    diagnostic_table = _build_numerical_diagnostic_table(
+        matrix.index,
+        values,
+        pattern_matrix,
+        source_amplitudes,
+        axis_name=axis_name,
+        rank=rank,
+        condition_number=condition_number,
+    )
+    sensitivity_table = _build_coefficient_sensitivity_table(
+        matrix.index,
+        values,
+        pattern_matrix,
+        source_amplitudes,
+        hypothesis_list,
+        axis_name=axis_name,
+        mode=mode,
+    )
     return IsotopeCorrectionResult(
         axis_name=axis_name,
         mode=mode,
@@ -353,6 +514,12 @@ def apply_isotope_correction(
         pattern_table=pattern_table,
         pattern_rank=rank,
         pattern_condition_number=condition_number,
+        diagnostic_table=diagnostic_table,
+        sensitivity_table=sensitivity_table,
+        scientific_note=(
+            "质量峰存在可重复的系统质量偏移是可预见的；精确质量偏差不能单独用于"
+            "排除分子式。归属还必须结合标定兼容性、同位素闭合和PIE形状。"
+        ),
     )
 
 
@@ -435,6 +602,99 @@ def _maximum_compatible_amplitudes(pattern_matrix: np.ndarray, observed: np.ndar
     if not result.success:
         raise ValueError(f"最大非负相容贡献求解失败: {result.message}")
     return np.asarray(result.x, dtype=float)
+
+
+def _build_numerical_diagnostic_table(
+    axis_values,
+    observed: np.ndarray,
+    pattern_matrix: np.ndarray,
+    source_amplitudes: np.ndarray,
+    *,
+    axis_name: str,
+    rank: int,
+    condition_number: float,
+) -> pd.DataFrame:
+    full_modeled = source_amplitudes @ pattern_matrix.T
+    closure = observed - full_modeled
+    rows: list[dict[str, object]] = []
+    for axis_index, axis_value in enumerate(axis_values):
+        observed_norm = float(np.linalg.norm(observed[axis_index], ord=1))
+        closure_norm = float(np.linalg.norm(closure[axis_index], ord=1))
+        rows.append(
+            {
+                axis_name: float(axis_value),
+                "observed_total": float(np.sum(observed[axis_index])),
+                "full_modeled_total": float(np.sum(full_modeled[axis_index])),
+                "closure_l1": closure_norm,
+                "relative_closure_error": (
+                    closure_norm / observed_norm
+                    if observed_norm > 0
+                    else float("nan")
+                ),
+                "minimum_closure_residual": float(np.min(closure[axis_index])),
+                "matrix_rank": int(rank),
+                "condition_number": float(condition_number),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _build_coefficient_sensitivity_table(
+    axis_values,
+    observed: np.ndarray,
+    pattern_matrix: np.ndarray,
+    source_amplitudes: np.ndarray,
+    hypotheses: Sequence[IsotopeHypothesis],
+    *,
+    axis_name: str,
+    mode: str,
+) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    for axis_index, axis_value in enumerate(axis_values):
+        base = source_amplitudes[axis_index]
+        if mode == "max_compatible":
+            elasticities = np.zeros(len(hypotheses), dtype=float)
+            for mass_index, observed_value in enumerate(observed[axis_index]):
+                delta = max(abs(float(observed_value)) * 0.01, 1e-9)
+                perturbed = observed[axis_index].copy()
+                perturbed[mass_index] += delta
+                shifted = _maximum_compatible_amplitudes(
+                    pattern_matrix,
+                    perturbed,
+                )
+                for hypothesis_index, base_value in enumerate(base):
+                    denominator = max(abs(float(base_value)), 1e-12)
+                    input_fraction = delta / max(
+                        abs(float(observed_value)),
+                        delta,
+                    )
+                    elasticity = (
+                        abs(float(shifted[hypothesis_index] - base_value))
+                        / denominator
+                        / input_fraction
+                    )
+                    elasticities[hypothesis_index] = max(
+                        elasticities[hypothesis_index],
+                        elasticity,
+                    )
+        else:
+            elasticities = np.ones(len(hypotheses), dtype=float)
+        for hypothesis_index, hypothesis in enumerate(hypotheses):
+            rows.append(
+                {
+                    axis_name: float(axis_value),
+                    "hypothesis": f"H{hypothesis_index + 1}",
+                    "label": hypothesis.display_name,
+                    "formula": hypothesis.formula,
+                    "parent_mz": hypothesis.parent_mz,
+                    "source_amplitude": float(base[hypothesis_index]),
+                    "max_coefficient_elasticity": float(
+                        elasticities[hypothesis_index]
+                    ),
+                    "mode": mode,
+                }
+            )
+    return pd.DataFrame(rows)
 
 
 def _build_curve_table(
@@ -566,9 +826,11 @@ def _build_component_tables(
 
 __all__ = [
     "CORRECTION_MODES",
+    "DEFAULT_ISOTOPE_QC_PAIRS",
     "IsotopeCorrectionResult",
     "IsotopeHypothesis",
     "apply_isotope_correction",
+    "evaluate_isotope_qc_pairs",
     "infer_curve_columns",
     "nominal_isotope_pattern",
     "prepare_curve_matrix",

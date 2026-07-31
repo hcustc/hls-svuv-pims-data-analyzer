@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import yaml
 
 from .config import project_path, writable_project_path
@@ -19,6 +20,7 @@ class NormalizationSettings:
     temperature_photon_normalize: bool = True
     temperature_kr_correct: bool = False
     pie_photon_mode: str = "first"
+    pie_time_normalize: bool = True
     mass_discrimination: float = 1.0
     kr_calibration_folder: str = ""
     kr_calibration_peak_file: str = ""
@@ -40,6 +42,54 @@ def extract_light_intensity(metadata_lines: list[str], source: str = "io", fallb
             if value is not None and value > 0:
                 return value
     return fallback
+
+
+def extract_acquisition_time_s(
+    metadata_lines: list[str],
+    fallback: float | None = None,
+) -> float | None:
+    """Extract per-spectrum acquisition time in seconds.
+
+    Only explicit acquisition-like header keys are accepted.  This avoids
+    accidentally interpreting a timestamp or a scan sequence number as an
+    exposure.  Invalid or non-positive values are never silently replaced.
+    """
+    keys = {
+        "time",
+        "acquisitiontime",
+        "acquisition_time",
+        "scantime",
+        "scan_time",
+        "integrationtime",
+        "integration_time",
+        "exposuretime",
+        "exposure_time",
+        "采集时间",
+        "扫描时间",
+        "积分时间",
+    }
+    for line in metadata_lines:
+        text = str(line).strip()
+        separator = ":" if ":" in text else "=" if "=" in text else None
+        if separator is None:
+            continue
+        key, raw_value = text.split(separator, 1)
+        compact_key = key.replace(" ", "").lower()
+        if compact_key not in keys:
+            continue
+        value = extract_first_number(raw_value)
+        if value is None or not np.isfinite(value) or value <= 0:
+            return None
+        compact_value = raw_value.replace(" ", "").lower()
+        if "ms" in compact_value:
+            return float(value) / 1000.0
+        if "min" in compact_value:
+            return float(value) * 60.0
+        return float(value)
+    if fallback is None:
+        return None
+    fallback_value = float(fallback)
+    return fallback_value if np.isfinite(fallback_value) and fallback_value > 0 else None
 
 
 def load_normalization_settings(path: str | Path = DEFAULT_NORMALIZATION_CONFIG) -> NormalizationSettings:

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from copy import deepcopy
+from dataclasses import asdict
 import logging
-import os
 from pathlib import Path
 
 from PyQt6 import QtCore, QtGui, QtWidgets
@@ -14,17 +15,12 @@ from bl03u_masstool.core.curve_database import (
     project_curve_database_path,
 )
 from bl03u_masstool.core.config import (
-    PeakDetectionConfig,
     resolve_species_database_path,
-    save_peak_detection_config,
-    species_database_path,
 )
-from bl03u_masstool.core.normalization import load_normalization_settings
 from bl03u_masstool.core.peak_sets import (
     activate_peak_set,
     get_peak_set,
     import_peak_set,
-    list_peak_sets,
     migrate_legacy_peak_file,
     normalize_peak_set_registry_paths,
     resolve_peak_set_path,
@@ -32,31 +28,31 @@ from bl03u_masstool.core.peak_sets import (
 )
 from bl03u_masstool.core.project_peak_generation import generate_project_peak_set
 from bl03u_masstool.core.project_lifecycle import (
-    PROJECT_DIRECTORIES,
-    PROJECT_SOURCE_SPECS,
     DataSourceValidationStatus,
-    collect_project_files,
     ensure_project_structure,
     get_data_source_validation_status,
-    import_project_source,
-    materialize_project_data_sources,
     project_root,
     sanitize_project_slug,
     validate_all_data_sources,
 )
-from bl03u_masstool.core.project_settings import ProjectSettings, ProjectSettingsManager
+from bl03u_masstool.core.project_settings import (
+    ProjectSettings,
+    ProjectSettingsManager,
+    derive_project_compatibility_fields,
+    load_factory_project_settings,
+)
 from bl03u_masstool.frontends.pyqt_app.isotope.dialog import IsotopeAbundanceDialog
 from bl03u_masstool.frontends.pyqt_app.isotope_correction.dialog import IsotopeCorrectionDialog
 from bl03u_masstool.frontends.pyqt_app.progress_dialog import ProgressDialog
-from bl03u_masstool.frontends.pyqt_app.worker import (
-    ImportWorker,
-    MaterializeProjectSourcesWorker,
-)
+from bl03u_masstool.frontends.pyqt_app.worker import ImportWorker
 from bl03u_masstool.frontends.pyqt_app.worker_manager import WorkerManager
 from bl03u_masstool.frontends.pyqt_app.workers import WorkerThread
 from bl03u_masstool.frontends.pyqt_app.mole_fraction.dialog import MoleFractionDialog
 from bl03u_masstool.frontends.pyqt_app.nist.widget import IonizationEnergyLookupWidget
-from bl03u_masstool.frontends.pyqt_app.normalization.widget import CommonParametersWidget
+from bl03u_masstool.frontends.pyqt_app.normalization.widget import (
+    AutoSelectDoubleSpinBox,
+    CommonParametersWidget,
+)
 from bl03u_masstool.frontends.pyqt_app.pics.dialog import PICSCalculatorDialog
 from bl03u_masstool.frontends.pyqt_app.pics.import_widget import PICSImportWidget
 from bl03u_masstool.frontends.pyqt_app.pie.dialog import PIESpeciesFitDialog
@@ -98,14 +94,16 @@ class WorkspacePagesMixin:
         self.spectrum_page.setLayout(self.verticalLayout_7)
         self.workspace_stack.addWidget(self.spectrum_page)
 
-        self.normalization_settings = load_normalization_settings()
+        self.normalization_settings = (
+            load_factory_project_settings().to_normalization_settings()
+        )
         self.temperature_page = TemperatureScanDialog(
             self.current_calibration(),
             self.normalization_settings,
             self.workspace_stack,
         )
         self.temperature_page.set_project_settings(
-            self.project_settings_manager.get(),
+            self.project_settings_manager.snapshot(),
             activate_project_scope=self.project_settings_manager.has_project_path(),
             load_cached_results=False,
         )
@@ -115,13 +113,13 @@ class WorkspacePagesMixin:
             self.workspace_stack,
         )
         self.pie_page.set_project_settings(
-            self.project_settings_manager.get(),
+            self.project_settings_manager.snapshot(),
             activate_project_scope=self.project_settings_manager.has_project_path(),
             load_cached_results=False,
         )
         self.isotope_correction_page = IsotopeCorrectionDialog(self.workspace_stack)
         self.isotope_correction_page.set_project_settings(
-            self.project_settings_manager.get(),
+            self.project_settings_manager.snapshot(),
             activate_project_scope=self.project_settings_manager.has_project_path(),
         )
         self.mole_fraction_page = MoleFractionDialog(
@@ -130,24 +128,24 @@ class WorkspacePagesMixin:
             self.workspace_stack,
         )
         self.mole_fraction_page.set_project_settings(
-            self.project_settings_manager.get(),
+            self.project_settings_manager.snapshot(),
             activate_project_scope=self.project_settings_manager.has_project_path(),
         )
         self.ionization_page = IonizationEnergyLookupWidget(self.workspace_stack)
-        self.ionization_page.set_project_settings(self.project_settings_manager.get())
+        self.ionization_page.set_project_settings(self.project_settings_manager.snapshot())
         self.isotope_page = IsotopeAbundanceDialog(self.workspace_stack)
-        self.isotope_page.set_project_settings(self.project_settings_manager.get())
+        self.isotope_page.set_project_settings(self.project_settings_manager.snapshot())
         self.pics_page = PICSCalculatorDialog(
             self.current_calibration(),
             self.normalization_settings,
             self.workspace_stack,
         )
         self.pics_page.set_project_settings(
-            self.project_settings_manager.get(),
+            self.project_settings_manager.snapshot(),
             activate_project_scope=self.project_settings_manager.has_project_path(),
         )
         self.pics_import_page = PICSImportWidget(self.workspace_stack)
-        self.pics_import_page.set_project_settings(self.project_settings_manager.get())
+        self.pics_import_page.set_project_settings(self.project_settings_manager.snapshot())
         self.pics_import_page.import_completed.connect(
             lambda _result: self._refresh_pics_database_consumers()
         )
@@ -261,39 +259,106 @@ class WorkspacePagesMixin:
         self._build_datasource_card(self.project_identity_page)
         identity_layout.addWidget(self.project_identity_card)
         identity_layout.addWidget(self.datasource_card)
+        identity_layout.addStretch(1)
 
         settings_scroll.setWidget(settings_content)
         settings_page_layout = QVBoxLayout(self.project_identity_page)
         settings_page_layout.setContentsMargins(0, 0, 0, 0)
         settings_page_layout.addWidget(settings_scroll)
 
-        # --- Tab 2: 通用参数 ---
+        # --- Tab 2: 定标与卡峰 ---
+        self.project_baseline_page = QtWidgets.QWidget(self.project_tabs)
+        self._build_project_baseline_page(self.project_baseline_page)
+
+        # --- Tab 3: 项目分析参数 ---
+        self.project_analysis_page = QtWidgets.QWidget(self.project_tabs)
+        analysis_layout = QVBoxLayout(self.project_analysis_page)
+        analysis_layout.setContentsMargins(6, 6, 6, 6)
+        analysis_layout.setSpacing(8)
+
         self.project_common_parameters_widget = CommonParametersWidget(
             self.normalization_settings,
             self.current_calibration(),
-            self.project_tabs,
+            self.project_analysis_page,
+            show_actions=False,
+            show_calibration=False,
+            show_kr_expansion=False,
+            show_mass_response=False,
+            show_element_filter=False,
+            embedded=True,
+        )
+        self.project_common_parameters_widget.settings_saved.connect(
+            self.on_project_common_parameters_saved
+        )
+
+        from bl03u_masstool.frontends.pyqt_app.normalization.widget import FunctionDefaultsWidget
+
+        self.project_function_defaults_widget = FunctionDefaultsWidget(
+            self.project_analysis_page,
             show_actions=False,
         )
-        self.project_common_parameters_widget.settings_saved.connect(self.on_project_common_parameters_saved)
-        # 立即设置ProjectSettings
-        self.project_common_parameters_widget.set_project_settings(ProjectSettingsManager().get())
+        self.project_function_defaults_widget.settings_saved.connect(
+            self.on_project_common_parameters_saved
+        )
+        self.project_function_defaults_widget.navigate_requested.connect(
+            self.switch_workspace_page
+        )
 
-        # --- Tab 3: 功能默认参数 ---
-        # 集成原有的 PeakDetectionWidget 和功能参数页面
-        from bl03u_masstool.frontends.pyqt_app.normalization.widget import FunctionDefaultsWidget
-        self.project_function_defaults_widget = FunctionDefaultsWidget(self.project_tabs)
-        self.project_function_defaults_widget.settings_saved.connect(self.on_project_common_parameters_saved)
-        self.project_function_defaults_widget.navigate_requested.connect(self.switch_workspace_page)
-        self.project_function_defaults_widget.set_project_settings(ProjectSettingsManager().get())
+        # Keep FunctionDefaultsWidget's tab hierarchy intact.  Moving pages out
+        # of a QTabWidget leaves their hidden state behind and caused the short
+        # normalization card to be vertically centred in an otherwise empty
+        # page.  The common card now lives directly at the top of the existing
+        # "通用分析" page.
+        self.project_analysis_tabs = (
+            self.project_function_defaults_widget.tabs
+        )
+        self.project_common_analysis_page = self.project_analysis_tabs.widget(
+            0
+        )
+        common_analysis_layout = self.project_common_analysis_page.layout()
+        common_analysis_layout.insertWidget(
+            0,
+            self.project_common_parameters_widget,
+        )
+        analysis_layout.addWidget(
+            self.project_function_defaults_widget,
+            stretch=1,
+        )
+        analysis_action = QHBoxLayout()
+        analysis_action.addStretch(1)
+        self.project_analysis_save_button = QPushButton(
+            "保存并应用项目参数",
+            self.project_analysis_page,
+        )
+        self.project_analysis_save_button.setObjectName("PrimaryButton")
+        self.project_analysis_save_button.clicked.connect(
+            self.save_and_apply_project_settings
+        )
+        analysis_action.addWidget(self.project_analysis_save_button)
+        self.project_analysis_unsaved_hint = QtWidgets.QLabel(
+            "离开项目管理时如有未保存修改，将提示保存、放弃或取消。",
+            self.project_analysis_page,
+        )
+        self.project_analysis_unsaved_hint.setObjectName("HintLabel")
+        analysis_action.insertWidget(0, self.project_analysis_unsaved_hint)
+        analysis_layout.addLayout(analysis_action)
 
         self.project_tabs.addTab(self.project_identity_page, "项目与数据")
-        self.project_tabs.addTab(self.project_common_parameters_widget, "共享参数")
-        self.project_tabs.addTab(self.project_function_defaults_widget, "分析默认值")
+        self.project_tabs.addTab(self.project_baseline_page, "定标与卡峰")
+        self.project_tabs.addTab(self.project_analysis_page, "项目分析参数")
         self.project_tabs.currentChanged.connect(self._on_project_tab_changed)
         page_layout.addWidget(self.project_tabs, stretch=1)
 
         self.load_project_settings()
-        self.refresh_project_parameter_summary()
+        if (
+            self.project_settings_manager.has_project_path()
+            and hasattr(self, "open_project_peak_ranges")
+        ):
+            self.open_project_peak_ranges(
+                settings=self.project_settings_manager.snapshot(),
+                prompt_before_replace=False,
+                show_feedback=False,
+            )
 
     # ── Tab 1: Project Identity ──────────────────────────────────────────
 
@@ -358,13 +423,13 @@ class WorkspacePagesMixin:
         action_layout.addWidget(self.project_close_button)
         action_layout.addSpacing(12)
 
-        self.project_save_and_apply_button = QPushButton("保存并应用", action_bar)
+        self.project_save_and_apply_button = QPushButton("保存项目", action_bar)
 
         self.project_save_and_apply_button.setToolTip(
-            "保存项目设置 → 创建项目文件夹 → 同步参数到各工具页面。完整初始化和配置。"
+            "保存项目身份并创建项目结构；不会复制任何外部数据。"
         )
 
-        self.project_save_and_apply_button.setFixedHeight(28)
+        self.project_save_and_apply_button.setFixedHeight(32)
         action_layout.addWidget(self.project_save_and_apply_button)
 
         self.project_save_and_apply_button.setObjectName("PrimaryButton")
@@ -406,7 +471,7 @@ class WorkspacePagesMixin:
         self.project_new_button.clicked.connect(self.new_project)
         self.project_open_button.clicked.connect(self.open_project)
         self.project_close_button.clicked.connect(self.close_current_project)
-        self.project_save_and_apply_button.clicked.connect(self.save_and_apply_project_settings)
+        self.project_save_and_apply_button.clicked.connect(self.save_project)
         self.project_output_dir_button.clicked.connect(
             self.select_project_output_parent_folder
         )
@@ -416,6 +481,10 @@ class WorkspacePagesMixin:
     def _build_datasource_card(self, parent):
         self.datasource_card = QtWidgets.QFrame(parent)
         self.datasource_card.setObjectName("ProjectCard")
+        self.datasource_card.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
 
         card_layout = QVBoxLayout(self.datasource_card)
         card_layout.setContentsMargins(10, 8, 10, 10)
@@ -433,7 +502,7 @@ class WorkspacePagesMixin:
         datasource_title = QtWidgets.QLabel("项目数据源", self.datasource_card)
         datasource_title.setObjectName("ProjectTitle")
         datasource_hint = QtWidgets.QLabel(
-            "选择温度扫描目录，并为 PIE 登记一段或多段能区目录；多段数据将在重叠能区自动缩放拼接。",
+            "这里只显示项目内已登记的数据。外部数据只能通过“导入项目数据”复制并登记。",
             self.datasource_card,
         )
         datasource_hint.setObjectName("ProjectHint")
@@ -460,7 +529,8 @@ class WorkspacePagesMixin:
         self.datasource_row_status_labels: dict[str, QtWidgets.QLabel] = {}
 
         self.project_temperature_folder_edit = QLineEdit(self.datasource_card)
-        self.project_temperature_folder_edit.setPlaceholderText("选择温度扫描 txt 文件目录")
+        self.project_temperature_folder_edit.setPlaceholderText("尚未导入温度扫描数据")
+        self.project_temperature_folder_edit.setReadOnly(True)
         self.project_pie_folder_edit = QLineEdit(self.datasource_card)
         self.project_pie_folder_edit.setPlaceholderText("尚未选择 PIE 扫描目录")
         self.project_pie_folder_edit.setReadOnly(True)
@@ -542,226 +612,108 @@ class WorkspacePagesMixin:
         analysis_layout.addWidget(pie_segment_actions, 2, 2)
         card_layout.addWidget(analysis_group)
 
-        artifact_group, artifact_layout = _path_group("项目产物")
+        artifact_group, artifact_layout = _path_group("当前项目卡峰范围")
+        self.project_baseline_artifact_group = artifact_group
         self.project_manual_peak_button = _browse_btn()
         self.project_manual_peak_button.setText("导入")
         _add_path_row(
             artifact_layout,
             0,
             "manual_peak",
-            "当前项目卡峰集",
+            "当前卡峰范围",
             self.project_manual_peak_edit,
             self.project_manual_peak_button,
         )
-        peak_set_label = QtWidgets.QLabel("历史版本", self.datasource_card)
-        peak_set_label.setFixedWidth(88)
-        self.project_peak_set_combo = QtWidgets.QComboBox(self.datasource_card)
-        self.project_peak_set_combo.setToolTip("选择历史卡峰集后点击“激活”；选择本身不会改变下游分析")
-        self.project_peak_set_activate_button = QPushButton("激活", self.datasource_card)
-        self.project_peak_set_activate_button.setObjectName("BrowseButton")
-        self.project_peak_set_activate_button.setFixedHeight(26)
-        self.project_peak_set_activate_button.setFixedWidth(44)
         self.project_peak_set_generate_button = QPushButton(
             "从累计谱自动生成",
             self.datasource_card,
         )
         self.project_peak_set_generate_button.setObjectName("BrowseButton")
         self.project_peak_set_generate_button.setFixedHeight(26)
-        self.project_peak_set_status = _status_label()
-        artifact_layout.addWidget(peak_set_label, 1, 0)
-        artifact_layout.addWidget(self.project_peak_set_combo, 1, 1)
-        artifact_layout.addWidget(self.project_peak_set_activate_button, 1, 2)
-        artifact_layout.addWidget(self.project_peak_set_generate_button, 1, 3)
-        artifact_layout.addWidget(self.project_peak_set_status, 1, 4)
-        card_layout.addWidget(artifact_group)
-
+        self.project_peak_set_generate_button.setMaximumWidth(150)
+        generation_label = QtWidgets.QLabel("创建卡峰范围", self.datasource_card)
+        generation_label.setFixedWidth(88)
+        generation_hint = QtWidgets.QLabel(
+            "也可以在质谱工作台调整后保存到项目；历史快照由软件自动保留",
+            self.datasource_card,
+        )
+        generation_hint.setObjectName("ProjectHint")
+        generation_hint.setWordWrap(True)
+        artifact_layout.addWidget(generation_label, 1, 0)
+        artifact_layout.addWidget(self.project_peak_set_generate_button, 1, 1)
+        artifact_layout.addWidget(generation_hint, 1, 2, 1, 2)
         self.datasource_import_button.clicked.connect(self.import_project_datasource)
         self.project_temperature_folder_button.clicked.connect(
-            lambda: self.select_project_folder(self.project_temperature_folder_edit, "选择温度扫描目录")
+            lambda: self.import_project_datasource("temperature_scan")
         )
         self.project_pie_folder_button.clicked.connect(
-            self.select_project_pie_primary_folder
+            lambda: self.import_project_datasource("pie_scan")
         )
-        self.project_pie_add_folder_button.clicked.connect(self.add_project_pie_folder)
+        self.project_pie_add_folder_button.clicked.connect(
+            lambda: self.import_project_datasource("pie_scan")
+        )
         self.project_pie_remove_folder_button.clicked.connect(self.remove_project_pie_folders)
         self.project_pie_clear_folders_button.clicked.connect(self.clear_project_pie_folders)
         self.project_manual_peak_button.clicked.connect(self.import_project_manual_peak_file)
-        self.project_peak_set_activate_button.clicked.connect(
-            self.activate_selected_project_peak_set
-        )
         self.project_peak_set_generate_button.clicked.connect(
             self.generate_project_peak_set_from_sum
         )
-        self.project_peak_set_combo.currentIndexChanged.connect(
-            self._on_project_peak_set_selection_changed
+
+    def _build_project_baseline_page(self, parent: QtWidgets.QWidget) -> None:
+        layout = QVBoxLayout(parent)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(10)
+
+        calibration_group = QtWidgets.QGroupBox(
+            "项目质量定标  m/z = A·x² + B·x + C",
+            parent,
         )
-        # Auto-save and push project paths when edited
-        self.project_temperature_folder_edit.editingFinished.connect(self._auto_save_datasource)
+        calibration_layout = QtWidgets.QGridLayout(calibration_group)
+        self.project_calibration_edits = []
+        for column, (label, name) in enumerate(
+            (("A（二次项）", "a"), ("B（一次项）", "b"), ("C（常数项）", "c"))
+        ):
+            edit = AutoSelectDoubleSpinBox(calibration_group)
+            edit.setObjectName(f"ProjectCalibration{name.upper()}Edit")
+            edit.setRange(-1_000_000, 1_000_000)
+            edit.setDecimals(18)
+            edit.setSingleStep(0.000000001)
+            edit.setButtonSymbols(
+                QtWidgets.QAbstractSpinBox.ButtonSymbols.NoButtons
+            )
+            calibration_layout.addWidget(QtWidgets.QLabel(label), 0, column)
+            calibration_layout.addWidget(edit, 1, column)
+            calibration_layout.setColumnStretch(column, 1)
+            self.project_calibration_edits.append(edit)
 
-    # ── Tab 4: Function Params ───────────────────────────────────────────
+        self.project_calibration_points_status = QtWidgets.QLabel(
+            "定标点：0 个（由质谱工作台维护）",
+            calibration_group,
+        )
+        self.project_calibration_points_status.setObjectName("ProjectHint")
+        calibration_layout.addWidget(
+            self.project_calibration_points_status,
+            2,
+            0,
+            1,
+            3,
+        )
+        layout.addWidget(calibration_group)
+        layout.addWidget(self.project_baseline_artifact_group)
+        layout.addStretch(1)
 
-    def _build_function_params_card(self, parent):
-        self.function_params_card = QtWidgets.QFrame(parent)
-        self.function_params_card.setObjectName("ProjectCard")
-
-        card_layout = QVBoxLayout(self.function_params_card)
-        card_layout.setContentsMargins(10, 8, 10, 10)
-        card_layout.setSpacing(8)
-
-        params_grid = QtWidgets.QGridLayout()
-        params_grid.setContentsMargins(0, 0, 0, 0)
-        params_grid.setHorizontalSpacing(10)
-        params_grid.setVerticalSpacing(8)
-        params_grid.setColumnStretch(0, 1)
-        params_grid.setColumnStretch(1, 1)
-
-        # -- PIE defaults --
-        pie_group = QtWidgets.QGroupBox("PIE 分析默认参数", self.function_params_card)
-        pie_layout = QtWidgets.QGridLayout(pie_group)
-        pie_layout.setHorizontalSpacing(8)
-        pie_layout.setVerticalSpacing(6)
-
-        self.fp_pie_energy_decimals = QtWidgets.QSpinBox()
-        self.fp_pie_energy_decimals.setToolTip("光子能量分组时保留的小数位数。值越大能量分组越细，典型值 1-2")
-        self.fp_pie_energy_decimals.setRange(0, 6)
-        self.fp_pie_energy_decimals.setValue(1)
-        self.fp_pie_recursive = QtWidgets.QCheckBox("递归扩展拟合")
-        self.fp_pie_recursive.setToolTip("启用后先用高能段数据拟合，再逐步扩展到低能区，提高低信号区拟合稳定性")
-        self.fp_pie_integration_method = QtWidgets.QComboBox()
-        self.fp_pie_integration_method.setToolTip("PIE 原始积分信号的默认计算方式；高斯拟合不可用时回退范围累加，并在结果中记录实际方式")
-        self.fp_pie_integration_method.addItem("范围累加", "sum_counts")
-        self.fp_pie_integration_method.addItem("扣基线积分", "baseline")
-        self.fp_pie_integration_method.addItem("高斯", "gaussian")
-        self.fp_pie_merge_method = QtWidgets.QComboBox()
-        self.fp_pie_merge_method.setToolTip("低能段为主：以低能段信号为基准缩放其他段；简单拼接：直接按能量排序不缩放")
-        self.fp_pie_merge_method.addItem("低能段为主", "low_energy_dominant")
-        self.fp_pie_merge_method.addItem("第一组为主", "first_segment_dominant")
-        self.fp_pie_merge_method.addItem("简单拼接", "mean")
-
-        pie_layout.addWidget(QtWidgets.QLabel("能量分组小数位"), 0, 0)
-        pie_layout.addWidget(self.fp_pie_energy_decimals, 0, 1)
-        pie_layout.addWidget(self.fp_pie_recursive, 0, 2)
-        pie_layout.addWidget(QtWidgets.QLabel("积分方式"), 0, 3)
-        pie_layout.addWidget(self.fp_pie_integration_method, 0, 4)
-        pie_layout.addWidget(QtWidgets.QLabel("能段合并方式"), 1, 0)
-        pie_layout.addWidget(self.fp_pie_merge_method, 1, 1)
-        params_grid.addWidget(pie_group, 0, 0)
-
-        # -- Temperature Scan defaults --
-        temp_group = QtWidgets.QGroupBox("温度扫描默认参数", self.function_params_card)
-        temp_layout = QtWidgets.QGridLayout(temp_group)
-        temp_layout.setHorizontalSpacing(8)
-        temp_layout.setVerticalSpacing(6)
-
-        self.fp_temp_reference_mode = QtWidgets.QComboBox()
-        self.fp_temp_reference_mode.setToolTip("Sum谱参考：所有温度累加后统一寻峰；独立参考：每个温度点独立寻峰")
-        self.fp_temp_reference_mode.addItem("Sum谱参考", "sum")
-        self.fp_temp_reference_mode.addItem("独立参考", "individual")
-        self.fp_temp_integration_method = QtWidgets.QComboBox()
-        self.fp_temp_integration_method.setToolTip("温度扫描原始积分信号的默认计算方式；高斯拟合不可用时回退范围累加，并在结果中记录实际方式")
-        self.fp_temp_integration_method.addItem("范围累加", "sum_counts")
-        self.fp_temp_integration_method.addItem("扣基线积分", "baseline")
-        self.fp_temp_integration_method.addItem("高斯", "gaussian")
-        temp_layout.addWidget(QtWidgets.QLabel("参考模式"), 0, 0)
-        temp_layout.addWidget(self.fp_temp_reference_mode, 0, 1)
-        temp_layout.addWidget(QtWidgets.QLabel("积分方式"), 0, 2)
-        temp_layout.addWidget(self.fp_temp_integration_method, 0, 3)
-        params_grid.addWidget(temp_group, 0, 1)
-
-        # -- PICS defaults --
-        pics_group = QtWidgets.QGroupBox("PICS 计算默认参数", self.function_params_card)
-        pics_layout = QtWidgets.QGridLayout(pics_group)
-        pics_layout.setHorizontalSpacing(8)
-        pics_layout.setVerticalSpacing(6)
-
-        self.fp_pics_no_mz = QtWidgets.QSpinBox()
-        self.fp_pics_no_mz.setToolTip("参考物种NO的质量数，用于PICS计算中信号比的分母")
-        self.fp_pics_no_mz.setRange(1, 1000)
-        self.fp_pics_no_mz.setValue(30)
-        self.fp_pics_no_formula = QLineEdit()
-        self.fp_pics_no_formula.setToolTip("参考物种NO的分子式，用于从数据库自动匹配光电离截面")
-        self.fp_pics_no_formula.setText("NO")
-        self.fp_pics_no_mf = QtWidgets.QDoubleSpinBox()
-        self.fp_pics_no_mf.setToolTip("NO在反应器中的输入摩尔分数（已知量）")
-        self.fp_pics_no_mf.setRange(0, 1)
-        self.fp_pics_no_mf.setDecimals(6)
-        self.fp_pics_no_mf.setValue(0.01)
-        self.fp_pics_new_species_mf = QtWidgets.QDoubleSpinBox()
-        self.fp_pics_new_species_mf.setToolTip("高于此摩尔分数的物种将被认定为'已观测到的新物种'")
-        self.fp_pics_new_species_mf.setRange(0, 1)
-        self.fp_pics_new_species_mf.setDecimals(6)
-        self.fp_pics_new_species_mf.setValue(0.002)
-
-        pics_layout.addWidget(QtWidgets.QLabel("NO m/z"), 0, 0)
-        pics_layout.addWidget(self.fp_pics_no_mz, 0, 1)
-        pics_layout.addWidget(QtWidgets.QLabel("NO分子式"), 0, 2)
-        pics_layout.addWidget(self.fp_pics_no_formula, 0, 3)
-        pics_layout.addWidget(QtWidgets.QLabel("NO摩尔分数"), 1, 0)
-        pics_layout.addWidget(self.fp_pics_no_mf, 1, 1)
-        pics_layout.addWidget(QtWidgets.QLabel("新物种阈值"), 1, 2)
-        pics_layout.addWidget(self.fp_pics_new_species_mf, 1, 3)
-        params_grid.addWidget(pics_group, 1, 0)
-
-        # -- Mole Fraction defaults --
-        mf_group = QtWidgets.QGroupBox("摩尔分数默认值", self.function_params_card)
-        mf_layout = QtWidgets.QGridLayout(mf_group)
-        mf_layout.setHorizontalSpacing(8)
-        mf_layout.setVerticalSpacing(6)
-
-        self.fp_mf_mass_disc_exponent = QtWidgets.QDoubleSpinBox()
-        self.fp_mf_mass_disc_exponent.setToolTip("质量响应因子公式 D_i = (MW/30)^n 中的指数n，值取决于离子源类型和质量分析器特性")
-        self.fp_mf_mass_disc_exponent.setRange(0, 10)
-        self.fp_mf_mass_disc_exponent.setDecimals(6)
-        self.fp_mf_mass_disc_exponent.setValue(0.77897)
-        self.fp_mf_parent_mz = QtWidgets.QDoubleSpinBox()
-        self.fp_mf_parent_mz.setToolTip("母体物种（反应物）对应的精确峰 m/z")
-        self.fp_mf_parent_mz.setRange(0.0, 1000.0)
-        self.fp_mf_parent_mz.setDecimals(6)
-        self.fp_mf_parent_mz.setSingleStep(0.001)
-        self.fp_mf_parent_mz.setSpecialValueText("未设置")
-        self.fp_mf_parent_mz.setValue(0)
-        self.fp_mf_parent_initial_mf = QtWidgets.QDoubleSpinBox()
-        self.fp_mf_parent_initial_mf.setToolTip("母体物种在参考温度T₀处的摩尔分数（已知或假设值）")
-        self.fp_mf_parent_initial_mf.setRange(0, 1)
-        self.fp_mf_parent_initial_mf.setDecimals(6)
-        self.fp_mf_parent_initial_mf.setValue(0.002)
-        self.fp_mf_photon_energy = QtWidgets.QDoubleSpinBox()
-        self.fp_mf_photon_energy.setToolTip("实验使用的VUV光子能量 (eV)")
-        self.fp_mf_photon_energy.setRange(0, 100)
-        self.fp_mf_photon_energy.setDecimals(4)
-        self.fp_mf_photon_energy.setValue(10.0)
-        self.fp_mf_reference_temperature = QtWidgets.QSpinBox()
-        self.fp_mf_reference_temperature.setToolTip("参考温度T₀ (°C)：在此温度下母体摩尔分数为已知的初始值")
-        self.fp_mf_reference_temperature.setRange(0, 2000)
-        self.fp_mf_reference_temperature.setValue(550)
-
-        mf_layout.addWidget(QtWidgets.QLabel("质量响应指数"), 0, 0)
-        mf_layout.addWidget(self.fp_mf_mass_disc_exponent, 0, 1)
-        mf_layout.addWidget(QtWidgets.QLabel("母体 m/z"), 0, 2)
-        mf_layout.addWidget(self.fp_mf_parent_mz, 0, 3)
-        mf_layout.addWidget(QtWidgets.QLabel("母体初始摩尔分数"), 1, 0)
-        mf_layout.addWidget(self.fp_mf_parent_initial_mf, 1, 1)
-        mf_layout.addWidget(QtWidgets.QLabel("光子能量 (eV)"), 1, 2)
-        mf_layout.addWidget(self.fp_mf_photon_energy, 1, 3)
-        mf_layout.addWidget(QtWidgets.QLabel("参考温度 T₀ (°C)"), 2, 0)
-        mf_layout.addWidget(self.fp_mf_reference_temperature, 2, 1)
-        params_grid.addWidget(mf_group, 1, 1)
-        card_layout.addLayout(params_grid)
-
-        # Save button for function params
-        fp_action_bar = QtWidgets.QWidget(self.function_params_card)
-        fp_action_bar.setObjectName("ProjectActionBar")
-        fp_btn_row = QHBoxLayout(fp_action_bar)
-        fp_btn_row.setContentsMargins(8, 6, 8, 6)
-        fp_btn_row.setSpacing(8)
-        fp_hint = QtWidgets.QLabel("保存后写入项目配置，并在应用或切换工具页时同步为默认参数。", fp_action_bar)
-        fp_hint.setObjectName("ProjectHint")
-        fp_hint.setWordWrap(True)
-        fp_btn_row.addWidget(fp_hint, stretch=1)
-        self.fp_save_button = QPushButton("保存功能参数", fp_action_bar)
-        self.fp_save_button.clicked.connect(self.save_function_params)
-        fp_btn_row.addWidget(self.fp_save_button)
-        card_layout.addWidget(fp_action_bar)
+        action = QHBoxLayout()
+        action.addStretch(1)
+        self.project_baseline_save_button = QPushButton(
+            "保存并应用项目参数",
+            parent,
+        )
+        self.project_baseline_save_button.setObjectName("PrimaryButton")
+        self.project_baseline_save_button.clicked.connect(
+            self.save_and_apply_project_settings
+        )
+        action.addWidget(self.project_baseline_save_button)
+        layout.addLayout(action)
 
     def _route_common_parameter_buttons(self) -> None:
         for page in (self.temperature_page, self.pie_page):
@@ -789,6 +741,15 @@ class WorkspacePagesMixin:
         self.project_temperature_folder_edit.setText(ps.temperature_scan_folder)
         self._set_project_pie_folders(ps.effective_pie_scan_folders())
         self.project_manual_peak_edit.setText(ps.manual_peak_file)
+        if hasattr(self, "project_calibration_edits"):
+            for edit, value in zip(
+                self.project_calibration_edits,
+                (ps.cal_a, ps.cal_b, ps.cal_c),
+            ):
+                edit.setValue(value)
+            self.project_calibration_points_status.setText(
+                f"定标点：{len(ps.calibration_points)} 个（由质谱工作台维护）"
+            )
         self._refresh_project_peak_sets(ps)
 
     def _migrate_project_peak_set_if_needed(
@@ -833,94 +794,53 @@ class WorkspacePagesMixin:
                 peak_set_origin=record.origin,
             )
         if changed:
-            self.project_settings_manager.set(ps)
-            self.project_settings_manager.save()
-            ps = self.project_settings_manager.reload()
+            ps = self.project_settings_manager.replace_and_save(ps)
         return ps
 
     def _refresh_project_peak_sets(self, ps: ProjectSettings) -> None:
-        if not hasattr(self, "project_peak_set_combo"):
-            return
-        blocker = QtCore.QSignalBlocker(self.project_peak_set_combo)
-        self.project_peak_set_combo.clear()
-        records = []
-        try:
-            records = list_peak_sets(project_root(ps))
-        except Exception:
-            logger.exception("Failed to load project peak-set registry")
-        origin_labels = {
-            "auto_generated": "自动生成",
-            "imported": "导入",
-            "workbench_auto": "工作台自动",
-            "workbench_manual": "工作台手动",
-            "spectrum_workbench": "工作台批准",
-        }
-        for record in records:
-            created = record.created_at.replace("T", " ")[:19]
-            origin = origin_labels.get(record.origin, record.origin or "未知")
-            peak_count = record.metadata.get("peak_count")
-            count_text = f" · {int(peak_count)}峰" if peak_count is not None else ""
-            try:
-                verify_peak_set(project_root(ps), record)
-                verified = "有效"
-            except (FileNotFoundError, ValueError):
-                verified = "校验失败"
-            self.project_peak_set_combo.addItem(
-                f"{record.label}{count_text} · {created} · {origin} · {verified}",
-                record.peak_set_id,
-            )
-        active_index = self.project_peak_set_combo.findData(ps.active_peak_set_id)
-        if active_index >= 0:
-            self.project_peak_set_combo.setCurrentIndex(active_index)
-            active_record = next(
-                (
-                    record
-                    for record in records
-                    if record.peak_set_id == ps.active_peak_set_id
-                ),
-                None,
-            )
-            try:
-                if active_record is None:
-                    raise ValueError("missing record")
-                verify_peak_set(project_root(ps), active_record)
-                self.project_peak_set_status.setText("当前使用 · 校验有效")
-            except (FileNotFoundError, ValueError):
-                self.project_peak_set_status.setText("当前版本校验失败")
-        elif ps.manual_peak_file:
-            self.project_peak_set_combo.insertItem(0, "旧项目文件（尚未版本化）", "")
-            self.project_peak_set_combo.setCurrentIndex(0)
-            self.project_peak_set_status.setText("旧格式")
-        else:
-            self.project_peak_set_combo.insertItem(0, "尚无已批准卡峰集", "")
-            self.project_peak_set_combo.setCurrentIndex(0)
-            self.project_peak_set_status.setText("未设置")
-        self.project_peak_set_activate_button.setEnabled(
-            bool(self.project_peak_set_combo.currentData())
-        )
-        del blocker
+        """Refresh the single current peak-range status.
 
-    def _on_project_peak_set_selection_changed(self, _index: int) -> None:
-        selected_id = str(self.project_peak_set_combo.currentData() or "")
-        self.project_peak_set_activate_button.setEnabled(bool(selected_id))
-        active_id = str(self.project_settings_manager.get().active_peak_set_id or "")
-        if selected_id and selected_id == active_id:
-            self.project_peak_set_status.setText("当前使用")
-        elif selected_id:
-            self.project_peak_set_status.setText("待激活")
+        Historical snapshots remain in the registry for provenance, but are
+        intentionally not exposed as project files for users to manage.
+        """
+        status = self.datasource_row_status_labels.get("manual_peak")
+        if status is None:
+            return
+        if not ps.manual_peak_file:
+            status.setText("未设置")
+            return
+        try:
+            record = get_peak_set(project_root(ps), ps.active_peak_set_id)
+            if record is None:
+                raise ValueError("missing active peak snapshot")
+            verify_peak_set(project_root(ps), record)
+            status.setText("✓ 当前")
+        except (FileNotFoundError, ValueError):
+            status.setText("⚠ 不可用")
 
     def _collect_project_settings_from_ui(self) -> ProjectSettings:
         """Build a ProjectSettings from all UI fields (does not save)."""
-        ps = self.project_settings_manager.get()
+        ps = deepcopy(
+            getattr(self, "_project_draft", None)
+            or self.project_settings_manager.snapshot()
+        )
         ps.project_name = self.project_name_edit.text().strip()
         ps.system = self.project_system_edit.text().strip()
         ps.description = self.project_description_edit.text().strip()
         ps.output_dir = self.project_output_dir_edit.text().strip() or "output"
         ps.temperature_scan_folder = self.project_temperature_folder_edit.text().strip()
         pie_folders = self._project_pie_folders_from_ui()
-        ps.pie_scan_folders = pie_folders
-        ps.pie_scan_folder = pie_folders[0] if pie_folders else ""
+        if not (
+            not ps.pie_scan_folders
+            and pie_folders == ([ps.pie_scan_folder] if ps.pie_scan_folder else [])
+        ):
+            ps.pie_scan_folders = pie_folders
+            ps.pie_scan_folder = pie_folders[0] if pie_folders else ""
         ps.pie_multi_folder_mode = len(pie_folders) > 1
+        if hasattr(self, "project_calibration_edits"):
+            ps.cal_a, ps.cal_b, ps.cal_c = (
+                edit.value() for edit in self.project_calibration_edits
+            )
         # PICS database path is never modified from UI (read-only)
         return ps
 
@@ -932,8 +852,7 @@ class WorkspacePagesMixin:
             self.project_function_defaults_widget.apply_to_settings(ps)
         if hasattr(self, "project_peak_detection_widget"):
             self.project_peak_detection_widget.apply_to_settings(ps)
-        ps.pie_multi_folder_mode = len(ps.effective_pie_scan_folders()) > 1
-        return ps
+        return derive_project_compatibility_fields(ps)
 
     def _sync_project_page_edits_to_runtime(
         self,
@@ -941,69 +860,23 @@ class WorkspacePagesMixin:
         save_project: bool = True,
         sync_tools: bool = True,
     ) -> ProjectSettings:
-        """Collect current project-page edits before another tool consumes settings."""
+        """Compatibility helper that now updates only the shared project draft."""
         ps = self._collect_project_settings_from_ui()
-        self._collect_all_project_parameters_from_ui(ps)
-        self.project_settings_manager.set(ps)
-        self._sync_peak_detection_to_global_config(ps)
-        if save_project and self.project_settings_manager.has_project_path():
-            try:
-                self.project_settings_manager.save()
-            except Exception as exc:
-                logger.exception("Failed to save project settings while synchronizing the UI")
-                if hasattr(self, "statusbar"):
-                    self.statusbar.showMessage(f"项目设置自动保存失败：{exc}", 8000)
-        self._apply_project_runtime_settings(ps)
-        if sync_tools:
-            self._sync_project_settings_to_tool_pages(ps)
-        return ps
+        ps = self._collect_all_project_parameters_from_ui(ps)
+        self._project_draft = deepcopy(ps)
+        self._load_project_settings_to_parameter_widgets(self._project_draft)
+        return deepcopy(self._project_draft)
 
     def _on_project_tab_changed(self, _index: int) -> None:
         if not hasattr(self, "project_common_parameters_widget") or not hasattr(self, "project_function_defaults_widget"):
             return
-        ps = self._sync_project_page_edits_to_runtime(save_project=True, sync_tools=True)
-        self.refresh_project_parameter_summary()
+        ps = self._sync_project_page_edits_to_runtime(
+            save_project=False,
+            sync_tools=False,
+        )
+        if hasattr(self, "statusbar") and self._project_draft_is_dirty():
+            self.statusbar.showMessage("项目参数草稿尚未保存", 2500)
         self.refresh_project_datasource_page(ps)
-
-    @staticmethod
-    def _sync_peak_detection_to_global_config(ps: ProjectSettings) -> None:
-        """Write ProjectSettings peak detection values to the global config file.
-
-        Project-scoped tools consume ProjectSettings directly. Keep the legacy
-        global YAML in step so non-project consumers and older helper paths do
-        not keep stale peak-detection defaults.
-        """
-        try:
-            peak_config = PeakDetectionConfig(
-                algorithm=str(ps.peak_algorithm),
-                detection_min_idx=int(ps.detection_min_idx),
-                threshold_end=float(ps.threshold_end),
-                min_intensity=float(ps.min_intensity),
-                nearby_peak_window=int(ps.nearby_peak_window),
-                duplicate_window=int(ps.duplicate_window),
-                weak_tail_early_window=int(ps.weak_tail_early_window),
-                weak_tail_late_window=int(ps.weak_tail_late_window),
-                weak_tail_ratio=float(ps.weak_tail_ratio),
-                gaussian_window_max=int(ps.gaussian_window_max),
-                gaussian_boundary_scale=float(ps.gaussian_boundary_scale),
-                boundary_padding=int(ps.boundary_padding),
-                prominence_ratio=float(ps.prominence_ratio),
-                smoothing_window=int(ps.smoothing_window),
-                smoothing_poly_order=int(ps.smoothing_poly_order),
-                baseline_window=int(ps.baseline_window),
-                baseline_percentile=float(ps.baseline_percentile),
-                min_peak_width=int(ps.min_peak_width),
-                max_peak_width=int(ps.max_peak_width),
-                cwt_snr_threshold=float(ps.cwt_snr_threshold),
-                cwt_wavelet_max_width=int(ps.cwt_wavelet_max_width),
-                weak_tail_cutoff_idx=int(ps.weak_tail_cutoff_idx),
-                vote_threshold=float(ps.vote_threshold),
-                min_intensity_for_single_vote=float(ps.min_intensity_for_single_vote),
-                mz_tolerance=float(ps.mz_tolerance),
-            )
-            save_peak_detection_config(peak_config)
-        except Exception:
-            pass
 
     def _load_project_settings_to_parameter_widgets(self, ps: ProjectSettings) -> None:
         if hasattr(self, "project_common_parameters_widget"):
@@ -1014,52 +887,83 @@ class WorkspacePagesMixin:
             self.project_peak_detection_widget.set_project_settings(ps)
 
     def _apply_project_runtime_settings(self, ps: ProjectSettings) -> None:
-        """Make the active desktop runtime use the project file as source of truth."""
+        """Refresh project-owned settings without overwriting temporary spectra."""
         self.normalization_settings = ps.to_normalization_settings()
         calibration = ps.to_calibration()
-        previous_plot_calibration = getattr(self, "current_plot_calibration", None)
-        self.lineEdit_4.setText(format(calibration.a, ".17g"))
-        self.lineEdit_5.setText(format(calibration.b, ".17g"))
-        self.lineEdit_6.setText(format(calibration.c, ".17g"))
+        _, temporary_reset = self._ensure_temporary_spectrum_settings(
+            ps,
+            reset_if_context_changed=True,
+        )
+        if getattr(self, "spectrum_source_scope", "custom") == "project":
+            self._activate_spectrum_calibration(
+                calibration,
+                self._settings_calibration_points(ps),
+            )
+        elif temporary_reset:
+            self._activate_temporary_spectrum_calibration()
         if hasattr(self, "project_common_parameters_widget"):
             self.project_common_parameters_widget.settings = self.normalization_settings
             self.project_common_parameters_widget.calibration = calibration
-        if getattr(self, "current_plot_x", None) is not None and self.current_plot_x.size:
-            self.refresh_current_plot_calibration(previous_plot_calibration)
-        elif hasattr(self, "p2"):
-            self.refresh_plot_axis_mode()
+
+    def _set_project_draft(
+        self,
+        settings: ProjectSettings,
+        *,
+        committed: bool,
+    ) -> None:
+        self._project_draft = deepcopy(settings)
+        if committed:
+            self._project_committed = deepcopy(settings)
+        self._read_project_settings_to_ui(self._project_draft)
+        self._load_project_settings_to_parameter_widgets(self._project_draft)
+
+    def _project_draft_is_dirty(self) -> bool:
+        committed = getattr(self, "_project_committed", None)
+        draft = getattr(self, "_project_draft", None)
+        if committed is None or draft is None:
+            return False
+        return asdict(draft) != asdict(committed)
+
+    def _confirm_project_draft_resolution(self) -> bool:
+        """Resolve unsaved edits before replacing or leaving the project draft."""
+        if not hasattr(self, "project_common_parameters_widget"):
+            return True
+        self._sync_project_page_edits_to_runtime(
+            save_project=False,
+            sync_tools=False,
+        )
+        if not self._project_draft_is_dirty():
+            return True
+
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle("项目参数尚未保存")
+        box.setText("当前项目草稿包含未保存修改。")
+        box.setInformativeText("请选择保存并应用、放弃修改或取消当前操作。")
+        box.setIcon(QtWidgets.QMessageBox.Icon.Warning)
+        box.setStandardButtons(
+            QtWidgets.QMessageBox.StandardButton.Save
+            | QtWidgets.QMessageBox.StandardButton.Discard
+            | QtWidgets.QMessageBox.StandardButton.Cancel
+        )
+        box.button(QtWidgets.QMessageBox.StandardButton.Save).setText(
+            "保存并应用"
+        )
+        box.button(QtWidgets.QMessageBox.StandardButton.Discard).setText(
+            "放弃"
+        )
+        result = box.exec()
+        if result == QtWidgets.QMessageBox.StandardButton.Cancel:
+            return False
+        if result == QtWidgets.QMessageBox.StandardButton.Discard:
+            self._set_project_draft(self._project_committed, committed=True)
+            return True
+        if self.project_settings_manager.has_project_path():
+            return bool(self.save_and_apply_project_settings())
+        return bool(self.save_project())
 
     def load_project_settings(self) -> None:
-        """加载项目配置。
-
-        流程：
-        1. 检查当前项目路径（从 UI 或 ProjectSettings）
-        2. 如果项目配置存在，自动设置项目路径
-        3. 加载项目级或全局配置
-        4. 同步到所有UI元素
-        """
-        from pathlib import Path
-
-        # Step 1: 获取当前项目路径
-        current_output_dir = self.project_output_dir_edit.text().strip()
-
-        # 如果UI中没有项目路径，尝试从manager获取
-        if not current_output_dir or current_output_dir == "output":
-            # 先get一次（可能是全局配置）
-            ps_temp = self.project_settings_manager.get()
-            if ps_temp and ps_temp.output_dir and ps_temp.output_dir.strip() != "output":
-                current_output_dir = ps_temp.output_dir
-
-        # Step 2: 如果有有效的项目路径，设置它
-        if current_output_dir and current_output_dir.strip() != "output":
-            project_path = Path(current_output_dir)
-            # 检查项目级配置文件是否存在
-            project_config = project_path / "config" / "project.yaml"
-            if project_config.exists():
-                self.project_settings_manager.set_project_path(project_path)
-
-        # Step 3: 现在加载配置（可能是项目级或全局的）
-        ps = self.project_settings_manager.get()
+        """Load the active project, or an isolated bundled factory snapshot."""
+        ps = self.project_settings_manager.snapshot()
         if self.project_settings_manager.has_project_path():
             try:
                 ps = self._migrate_project_peak_set_if_needed(ps)
@@ -1068,25 +972,15 @@ class WorkspacePagesMixin:
 
         # Do NOT auto-fill paths here - only display what's actually saved in config
         # Users must use the import wizard to set up data sources
-        self._read_project_settings_to_ui(ps)
-        # NOTE: 功能参数现在在 FunctionDefaultsWidget 中管理
-        # self._load_function_params_to_ui(ps)
-        # 同步ProjectSettings到参数widgets
-        self._load_project_settings_to_parameter_widgets(ps)
+        self._set_project_draft(ps, committed=True)
         self._apply_project_runtime_settings(ps)
         self.update_project_title()
-        self.refresh_project_lifecycle()
         self.refresh_project_datasource_page()
-
-    def _load_function_params_to_ui(self, ps: ProjectSettings) -> None:
-        """DEPRECATED: 功能参数现在在 FunctionDefaultsWidget 中管理"""
-        # 保留此方法以维持向后兼容性，但内容已移到 FunctionDefaultsWidget
-        pass
 
     def refresh_project_datasource_page(self, ps: ProjectSettings | None = None) -> None:
         """Refresh data source validation status on the data import page"""
         if ps is None:
-            ps = self.project_settings_manager.get()
+            ps = self.project_settings_manager.snapshot()
 
         validation_records = validate_all_data_sources(ps)
         validation_status = get_data_source_validation_status(ps, validation_records)
@@ -1130,20 +1024,15 @@ class WorkspacePagesMixin:
                 lbl.setText("—")
                 lbl.setStyleSheet("")
 
-    def _collect_function_params_from_ui(self, ps: ProjectSettings) -> None:
-        """Deprecated: Use FunctionDefaultsWidget.apply_to_settings() instead.
-
-        This method was deprecated after Phase 3 UI refactoring when function
-        parameters were moved to FunctionDefaultsWidget. It now delegates to the
-        widget so older call sites still persist the current parameter edits.
-        """
-        self._collect_all_project_parameters_from_ui(ps)
-
     def _switch_tool_pages_to_standalone(self, ps: ProjectSettings) -> None:
         """Refresh tool pages after the project scope is removed."""
         self._load_project_settings_to_parameter_widgets(ps)
+        self._temporary_spectrum_settings = None
+        self._temporary_spectrum_context_key = None
         self.apply_config_defaults()
-        self.normalization_settings = load_normalization_settings()
+        self.normalization_settings = (
+            load_factory_project_settings().to_normalization_settings()
+        )
         calibration = self.current_calibration()
 
         if hasattr(self, "set_spectrum_source_scope"):
@@ -1158,7 +1047,7 @@ class WorkspacePagesMixin:
 
     def _refresh_pics_database_consumers(self) -> None:
         """Reload every desktop consumer after PICS records are imported."""
-        ps = self.project_settings_manager.get()
+        ps = self.project_settings_manager.snapshot()
         database_path = resolve_species_database_path(ps.pics_database_path)
         if hasattr(self, "pics_page"):
             self.pics_page.refresh_database()
@@ -1169,11 +1058,13 @@ class WorkspacePagesMixin:
 
     def new_project(self) -> None:
         """清空表单，准备创建新项目"""
+        if not self._confirm_project_draft_resolution():
+            return
         self._creating_new_project = True
         self._opened_project_root = None
         self.project_settings_manager.clear_project_path()
-        ps = ProjectSettings()
-        self.project_settings_manager.set(ps)
+        ps = load_factory_project_settings()
+        self._set_project_draft(ps, committed=True)
         self.project_name_edit.clear()
         self.project_system_edit.clear()
         self.project_description_edit.clear()
@@ -1181,36 +1072,35 @@ class WorkspacePagesMixin:
         self.project_temperature_folder_edit.clear()
         self._set_project_pie_folders([])
         self.project_manual_peak_edit.clear()
-        if hasattr(self, "project_peak_set_combo"):
-            self.project_peak_set_combo.clear()
-            self.project_peak_set_combo.addItem("尚无已批准卡峰集", "")
-            self.project_peak_set_activate_button.setEnabled(False)
+        if hasattr(self, "detach_project_peak_ranges"):
+            self.detach_project_peak_ranges()
         self._switch_tool_pages_to_standalone(ps)
         self._clear_datasource_row_statuses()
-        self.refresh_project_parameter_summary()
         self.project_name_edit.setFocus()
         self.update_project_title()
         if hasattr(self, "project_close_button"):
             self.project_close_button.setEnabled(False)
-        self.statusbar.showMessage("已清空表单，请填写项目信息并点击'保存并应用'", 3000)
+        self._sync_project_page_edits_to_runtime(save_project=False, sync_tools=False)
+        self.statusbar.showMessage("已创建项目草稿，请填写项目信息并点击“保存项目”", 3000)
 
     def close_current_project(self) -> None:
         """Close the active project without touching files on disk."""
+        if not self._confirm_project_draft_resolution():
+            return
         self._creating_new_project = False
         self._opened_project_root = None
         self.project_settings_manager.clear_project_path()
-        ps = ProjectSettings()
-        self.project_settings_manager.set(ps)
-
-        self._read_project_settings_to_ui(ps)
+        ps = load_factory_project_settings()
+        self._set_project_draft(ps, committed=True)
         self.project_name_edit.clear()
         self.project_system_edit.clear()
         self.project_description_edit.clear()
         self.project_output_dir_edit.clear()
+        if hasattr(self, "detach_project_peak_ranges"):
+            self.detach_project_peak_ranges()
         self._switch_tool_pages_to_standalone(ps)
 
         self._clear_datasource_row_statuses()
-        self.refresh_project_parameter_summary()
         self.update_project_title()
         if hasattr(self, "project_close_button"):
             self.project_close_button.setEnabled(False)
@@ -1218,6 +1108,8 @@ class WorkspacePagesMixin:
 
     def open_project(self) -> None:
         """打开已有项目（选择项目根目录或配置文件）"""
+        if not self._confirm_project_draft_resolution():
+            return
         project_path = QtWidgets.QFileDialog.getExistingDirectory(
             self,
             "选择项目根目录或包含 config/project.yaml 的文件夹",
@@ -1253,42 +1145,52 @@ class WorkspacePagesMixin:
 
             # The selected folder is authoritative: resolve relative paths and
             # rebase absolute paths from legacy projects to this project root.
-            self.project_settings_manager.set_project_path(project_path)
-            ps = self.project_settings_manager.get()
+            ps = self.project_settings_manager.activate_project(project_path)
             try:
                 ps = self._migrate_project_peak_set_if_needed(ps)
             except Exception as exc:
                 logger.exception("Failed to migrate or verify project peak set")
                 QtWidgets.QMessageBox.warning(
                     self,
-                    "项目卡峰集需要处理",
-                    "旧项目卡峰文件未能自动迁移或当前卡峰集校验失败。\n\n"
+                    "项目卡峰范围需要处理",
+                    "旧项目卡峰文件未能自动迁移或当前卡峰范围校验失败。\n\n"
                     f"{exc}\n\n"
-                    "PIE和温度曲线生成前将要求重新导入或自动生成卡峰集。",
+                    "PIE和温度曲线生成前将要求重新导入或自动生成卡峰范围。",
                 )
 
             # Display loaded settings in UI, including data-source paths.
-            self._read_project_settings_to_ui(ps)
+            self._set_project_draft(ps, committed=True)
 
-            # Load to all parameter widgets and desktop runtime.
-            self._load_project_settings_to_parameter_widgets(ps)
+            # Load to desktop runtime.
             self._apply_project_runtime_settings(ps)
 
             self._apply_settings_to_tools(ps)
+            peak_ranges_loaded = False
+            if hasattr(self, "open_project_peak_ranges"):
+                peak_ranges_loaded = self.open_project_peak_ranges(
+                    settings=ps,
+                    prompt_before_replace=True,
+                    show_feedback=False,
+                )
             self.update_project_title()
             if hasattr(self, "project_close_button"):
                 self.project_close_button.setEnabled(True)
-            self.refresh_project_lifecycle(ps)
-            self.refresh_project_parameter_summary()
             self.refresh_project_datasource_page(ps)
 
             if getattr(self, "current_data_source_status", None) == DataSourceValidationStatus.UNCONFIGURED:
+                peak_message = "；已自动加载卡峰范围" if peak_ranges_loaded else ""
                 self.statusbar.showMessage(
-                    f"✓ 已加载项目：{ps.project_name or project_path.name}；尚未登记数据源，请点击“导入项目数据”",
+                    f"✓ 已加载项目：{ps.project_name or project_path.name}{peak_message}；"
+                    "尚未登记数据源，请点击“导入项目数据”",
                     7000,
                 )
             else:
-                self.statusbar.showMessage(f"✓ 已加载并应用项目：{ps.project_name or project_path.name}", 4000)
+                peak_message = "；已自动加载卡峰范围" if peak_ranges_loaded else ""
+                self.statusbar.showMessage(
+                    f"✓ 已加载并应用项目：{ps.project_name or project_path.name}"
+                    f"{peak_message}",
+                    4000,
+                )
 
         except Exception as exc:
             QtWidgets.QMessageBox.critical(
@@ -1302,123 +1204,142 @@ class WorkspacePagesMixin:
             if hasattr(self, "project_open_button"):
                 self.project_open_button.setEnabled(True)
 
-    def save_and_apply_project_settings(self) -> None:
-        """Save project settings, create project structure, and sync to tools.
+    def save_project(self) -> bool:
+        """Create/save project identity without copying any external data."""
+        draft = self._collect_project_settings_from_ui()
+        draft = self._collect_all_project_parameters_from_ui(draft)
+        draft = self._normalize_project_output_dir(draft)
+        if not draft.project_name:
+            QtWidgets.QMessageBox.warning(self, "项目名为空", "请先填写项目名。")
+            return False
 
-        This is the complete operation: initialize + apply to all tool pages.
-        """
-        ps = self._collect_project_settings_from_ui()
-        ps = self._normalize_project_output_dir(ps)
-        self._collect_all_project_parameters_from_ui(ps)
-        self._sync_peak_detection_to_global_config(ps)
-
-        # Step 1: Create project directory structure
+        if self.project_settings_manager.has_project_path():
+            settings = self.project_settings_manager.snapshot()
+            settings.project_name = draft.project_name
+            settings.system = draft.system
+            settings.description = draft.description
+            settings.output_dir = str(
+                self.project_settings_manager.get_project_config_path().parent.parent
+            )
+        else:
+            settings = load_factory_project_settings()
+            settings.project_name = draft.project_name
+            settings.system = draft.system
+            settings.description = draft.description
+            settings.output_dir = draft.output_dir
         try:
-            ensure_project_structure(ps)
+            ensure_project_structure(settings)
+            self.project_settings_manager.set_project_path(Path(settings.output_dir))
+            saved = self.project_settings_manager.replace_and_save(settings)
         except Exception as exc:
-            QtWidgets.QMessageBox.critical(self, "初始化项目失败", str(exc))
-            return
+            logger.exception("Failed to save project identity")
+            QtWidgets.QMessageBox.critical(self, "保存项目失败", str(exc))
+            return False
 
-        self._materialize_project_sources_async(ps, sync_tools=True)
-
-    def _materialize_project_sources_async(self, ps: ProjectSettings, *, sync_tools: bool) -> None:
-        """Copy external project sources in a worker, then finalize on the UI thread."""
-        self._pending_materialize_settings = ps
-        self._pending_materialize_sync_tools = sync_tools
-        if not hasattr(self, "_materialize_worker_manager"):
-            self._materialize_worker_manager = WorkerManager(self)
-
-        worker = MaterializeProjectSourcesWorker(ps, mode="copy")
-        worker.progress.connect(self._on_materialize_progress)
-        worker.finished.connect(self._on_materialize_finished)
-        worker.error.connect(self._on_materialize_error)
-        worker.cancelled.connect(self._on_materialize_cancelled)
-
-        self._materialize_progress_dialog = ProgressDialog(self, "导入项目数据")
-        self._materialize_progress_dialog.rejected.connect(self._materialize_worker_manager.cancel)
-        self._materialize_progress_dialog.show()
-        self.project_save_and_apply_button.setEnabled(False)
-        self.statusbar.showMessage("正在后台导入项目数据源...")
-        self._materialize_worker_manager.run_worker(worker)
-
-    def _on_materialize_progress(self, percent: int, message: str) -> None:
-        if hasattr(self, "_materialize_progress_dialog"):
-            self._materialize_progress_dialog.update(percent, message)
-
-    def _on_materialize_finished(self, _result: dict) -> None:
-        if hasattr(self, "_materialize_progress_dialog"):
-            self._materialize_progress_dialog.close()
-        self.project_save_and_apply_button.setEnabled(True)
-        ps = self._pending_materialize_settings
-        sync_tools = bool(self._pending_materialize_sync_tools)
-        self._finalize_project_settings(ps, sync_tools=sync_tools)
-
-    def _on_materialize_error(self, message: str) -> None:
-        if hasattr(self, "_materialize_progress_dialog"):
-            self._materialize_progress_dialog.close()
-        self.project_save_and_apply_button.setEnabled(True)
-        QtWidgets.QMessageBox.critical(self, "导入项目数据源失败", message)
-        self.statusbar.showMessage("项目数据导入失败", 5000)
-
-    def _on_materialize_cancelled(self) -> None:
-        if hasattr(self, "_materialize_progress_dialog"):
-            self._materialize_progress_dialog.close()
-        self.project_save_and_apply_button.setEnabled(True)
-        self.statusbar.showMessage("项目数据导入已取消", 3000)
-
-    def _finalize_project_settings(self, ps: ProjectSettings, *, sync_tools: bool) -> None:
-        # Set project config path (before saving)
-        from pathlib import Path
-        self.project_settings_manager.set_project_path(Path(ps.output_dir))
-
-        # Save configuration to project-specific location
-        self.project_settings_manager.set(ps)
-        self.project_settings_manager.save()
         self._creating_new_project = False
-        self._opened_project_root = Path(ps.output_dir).resolve()
-
-        # Read settings back to UI
-        self._read_project_settings_to_ui(ps)
-        self._load_project_settings_to_parameter_widgets(ps)
-        self._apply_project_runtime_settings(ps)
-
-        if sync_tools:
-            self._apply_settings_to_tools(ps)
-
-        # Refresh UI
+        self._opened_project_root = Path(saved.output_dir).resolve()
+        self._set_project_draft(saved, committed=True)
+        self._apply_settings_to_tools(deepcopy(saved))
         self.update_project_title()
+        self.refresh_project_datasource_page(saved)
         if hasattr(self, "project_close_button"):
             self.project_close_button.setEnabled(True)
-        self.refresh_project_lifecycle(ps)
-        self.refresh_project_parameter_summary()
-        message = "[成功] 项目已保存、初始化并应用到工具" if sync_tools else f"✓ 项目已初始化：{project_root(ps)}"
-        self.statusbar.showMessage(message, 3000)
+        self.statusbar.showMessage(
+            "✓ 项目已保存；尚未复制任何数据，可继续“导入项目数据”",
+            5000,
+        )
+        return True
 
-    def initialize_project_structure(self) -> None:
-        """Initialize project structure only (create folders, save config).
+    def save_and_apply_project_settings(self) -> bool:
+        """Atomically save the shared baseline/analysis draft and broadcast it."""
+        if not self.project_settings_manager.has_project_path():
+            QtWidgets.QMessageBox.warning(
+                self,
+                "尚未保存项目",
+                "请先在“项目与数据”中保存项目，再保存并应用项目参数。",
+            )
+            return False
 
-        Does NOT sync to tool pages. Use this for lightweight initialization.
-        Use save_and_apply_project_settings() for complete setup including tools.
-        """
-        ps = self._collect_project_settings_from_ui()
-        ps = self._normalize_project_output_dir(ps)
-        self._collect_all_project_parameters_from_ui(ps)
-        self._sync_peak_detection_to_global_config(ps)
-
-        # Create project directory structure
+        draft = self._collect_project_settings_from_ui()
+        draft = self._collect_all_project_parameters_from_ui(draft)
+        active_root = (
+            self.project_settings_manager.get_project_config_path().parent.parent
+        )
+        draft.output_dir = str(active_root)
+        self._project_draft = deepcopy(draft)
         try:
-            ensure_project_structure(ps)
+            saved = self.project_settings_manager.replace_and_save(draft)
         except Exception as exc:
-            QtWidgets.QMessageBox.critical(self, "初始化项目失败", str(exc))
-            return
+            logger.exception("Failed to save the project parameter transaction")
+            QtWidgets.QMessageBox.critical(
+                self,
+                "保存项目参数失败",
+                f"{exc}\n\n已提交配置未改变，当前界面草稿仍保留。",
+            )
+            return False
 
-        self._materialize_project_sources_async(ps, sync_tools=False)
+        self._set_project_draft(saved, committed=True)
+        self._apply_project_runtime_settings(saved)
+        self._sync_project_settings_to_tool_pages(
+            deepcopy(saved),
+            activate_project_scope=None,
+        )
+        self.update_project_title()
+        self.refresh_project_datasource_page(saved)
+        self.statusbar.showMessage(
+            "✓ 定标、卡峰和分析参数已保存并应用",
+            4000,
+        )
+        return True
 
-    def apply_project_settings_to_tools(self) -> None:
-        """Sync project settings to tool pages (light version, no save/init)."""
-        ps = self._sync_project_page_edits_to_runtime(save_project=False, sync_tools=False)
-        self._apply_settings_to_tools(ps)
-        self.statusbar.showMessage("项目设置已应用到工具", 3000)
+    def apply_analysis_settings_from_tool(
+        self,
+        page: str,
+        edited_settings: ProjectSettings,
+    ) -> ProjectSettings | None:
+        """Persist one tool's whitelisted analysis parameters and broadcast them."""
+        from bl03u_masstool.frontends.pyqt_app.temporary_analysis_settings import (
+            ANALYSIS_PARAMETER_FIELDS,
+        )
+
+        if page not in ANALYSIS_PARAMETER_FIELDS:
+            raise ValueError(f"Unknown analysis settings page: {page}")
+        if not self.project_settings_manager.has_project_path():
+            QtWidgets.QMessageBox.warning(
+                self,
+                "尚未打开项目",
+                "项目参数只能保存到当前活动项目。",
+            )
+            return None
+        patch = {
+            field_name: deepcopy(getattr(edited_settings, field_name))
+            for field_name in ANALYSIS_PARAMETER_FIELDS[page]
+        }
+        try:
+            saved = self.project_settings_manager.update_module_settings(page, patch)
+        except Exception as exc:
+            logger.exception("Failed to save %s analysis settings", page)
+            QtWidgets.QMessageBox.critical(
+                self,
+                "保存项目参数失败",
+                str(exc),
+            )
+            return None
+
+        self._set_project_draft(saved, committed=True)
+        self._apply_project_runtime_settings(saved)
+        self._sync_project_settings_to_tool_pages(
+            deepcopy(saved),
+            activate_project_scope=None,
+        )
+        self.update_project_title()
+        self.refresh_project_datasource_page(saved)
+        label = "温度扫描" if page == "temperature" else "PIE"
+        self.statusbar.showMessage(
+            f"✓ {label}项目参数已保存并同步",
+            4000,
+        )
+        return deepcopy(saved)
 
     def _apply_settings_to_tools(self, ps: ProjectSettings) -> None:
         """Internal method: sync project settings to all tool pages."""
@@ -1442,7 +1363,7 @@ class WorkspacePagesMixin:
         )
         if calibration is None:
             # ProjectSettings is authoritative only while a project is active;
-            # standalone tools continue to use the global workbench calibration.
+            # Standalone tools continue to use the current session calibration.
             calibration = (
                 ps.to_calibration()
                 if runtime_project_scope
@@ -1462,7 +1383,7 @@ class WorkspacePagesMixin:
             self.temperature_page.normalization_settings = self.normalization_settings
             self.temperature_page.calibration = calibration
             self.temperature_page.set_project_settings(
-                ps,
+                deepcopy(ps),
                 activate_project_scope=source_scope_activation,
                 load_cached_results=current_widget is self.temperature_page,
             )
@@ -1470,35 +1391,35 @@ class WorkspacePagesMixin:
             self.pie_page.normalization_settings = self.normalization_settings
             self.pie_page.calibration = calibration
             self.pie_page.set_project_settings(
-                ps,
+                deepcopy(ps),
                 activate_project_scope=source_scope_activation,
                 load_cached_results=current_widget is self.pie_page,
             )
         if hasattr(self, "isotope_correction_page"):
             self.isotope_correction_page.set_project_settings(
-                ps,
+                deepcopy(ps),
                 activate_project_scope=runtime_project_scope,
             )
         if hasattr(self, "mole_fraction_page"):
             self.mole_fraction_page.normalization_settings = self.normalization_settings
             self.mole_fraction_page.calibration = calibration
             self.mole_fraction_page.set_project_settings(
-                ps,
+                deepcopy(ps),
                 activate_project_scope=runtime_project_scope,
             )
         if hasattr(self, "pics_page"):
             self.pics_page.normalization_settings = self.normalization_settings
             self.pics_page.calibration = calibration
             self.pics_page.set_project_settings(
-                ps,
+                deepcopy(ps),
                 activate_project_scope=runtime_project_scope,
             )
         if hasattr(self, "pics_import_page"):
-            self.pics_import_page.set_project_settings(ps)
+            self.pics_import_page.set_project_settings(deepcopy(ps))
         if hasattr(self, "ionization_page"):
-            self.ionization_page.set_project_settings(ps)
+            self.ionization_page.set_project_settings(deepcopy(ps))
         if hasattr(self, "isotope_page"):
-            self.isotope_page.set_project_settings(ps)
+            self.isotope_page.set_project_settings(deepcopy(ps))
 
     @staticmethod
     def _invalidate_untraceable_project_curves(ps: ProjectSettings) -> dict[str, int]:
@@ -1521,44 +1442,9 @@ class WorkspacePagesMixin:
             logger.exception("Failed to validate project curve peak provenance")
             return {}
 
-    def save_function_params(self) -> None:
-        """Save function parameters from the current project page."""
-        ps = self._collect_project_settings_from_ui()
-        self._collect_function_params_from_ui(ps)
-        self.project_settings_manager.set(ps)
-        self.project_settings_manager.save()
-
-        # Phase 3 Step 2: Persist PIE configuration state after ProjectSettings save
-        if hasattr(self, "pie_page"):
-            success, error = self.pie_page.persist_per_mz_config_state()
-            if not success:
-                self.statusbar.showMessage(f"功能参数已保存，但 PIE 配置保存失败: {error}", 5000)
-            else:
-                self.statusbar.showMessage("功能参数已保存，项目摘要已更新", 3000)
-        else:
-            self.statusbar.showMessage("功能参数已保存，项目摘要已更新", 3000)
-
-        self._sync_project_settings_to_tool_pages(ps)
-        self.update_project_title()
-        self.refresh_project_lifecycle(ps)
-        self.refresh_project_parameter_summary()
-
     def _auto_save_datasource(self) -> None:
-        """Auto-save data source settings and sync to tool pages."""
-        ps = self._collect_project_settings_from_ui()
-        self.project_settings_manager.set(ps)
-        self.project_settings_manager.save()
-        if hasattr(self, "apply_project_spectrum_paths"):
-            self.apply_project_spectrum_paths(ps)
-
-        # Phase 3 Step 2: Persist PIE configuration state after ProjectSettings save
-        if hasattr(self, "pie_page"):
-            self.pie_page.persist_per_mz_config_state()
-
-        # Sync project settings to all tool pages (Temperature, PIE, etc.)
-        self._sync_project_settings_to_tool_pages(ps)
-        self.refresh_project_lifecycle(ps)
-        self.refresh_project_datasource_page(ps)
+        """Refresh the shared project draft from the current data-source UI."""
+        self._project_draft = self._collect_project_settings_from_ui()
 
     def _push_path_to_tool(self, kind: str) -> None:
         """Push a single path field from project management to the corresponding editable tool page.
@@ -1566,19 +1452,16 @@ class WorkspacePagesMixin:
         if hasattr(self, "apply_project_spectrum_paths"):
             self.apply_project_spectrum_paths(self._collect_project_settings_from_ui())
 
-    def import_project_datasource(self) -> None:
+    def import_project_datasource(self, source_key: str | None = None) -> None:
         """Import a raw data source into the active project in the background."""
-        ps = self._collect_project_settings_from_ui()
-        ps = self._normalize_project_output_dir(ps)
-        try:
-            ensure_project_structure(ps)
-        except Exception as exc:
-            QtWidgets.QMessageBox.critical(self, "初始化项目失败", str(exc))
+        if not self.project_settings_manager.has_project_path():
+            QtWidgets.QMessageBox.warning(
+                self,
+                "尚未保存项目",
+                "请先保存项目；导入操作不会替代项目创建。",
+            )
             return
-
-        self.project_settings_manager.set_project_path(Path(ps.output_dir))
-        self.project_settings_manager.set(ps)
-        self.project_settings_manager.save()
+        ps = self.project_settings_manager.snapshot()
 
         source_items = [
             ("温度扫描目录", "temperature_scan"),
@@ -1587,19 +1470,25 @@ class WorkspacePagesMixin:
             ("Kr定标扫描目录", "kr_calibration"),
             ("Kr定标卡峰文件", "kr_calibration_peak"),
         ]
-        labels = [label for label, _source_key in source_items]
-        label, ok = QtWidgets.QInputDialog.getItem(
-            self,
-            "导入项目数据源",
-            "选择要导入的数据源类型：",
-            labels,
-            0,
-            False,
-        )
-        if not ok or not label:
-            return
+        source_labels = {key: label for label, key in source_items}
+        if source_key is None:
+            labels = [label for label, _source_key in source_items]
+            label, ok = QtWidgets.QInputDialog.getItem(
+                self,
+                "导入项目数据源",
+                "选择要导入的数据源类型：",
+                labels,
+                0,
+                False,
+            )
+            if not ok or not label:
+                return
+            source_key = dict(source_items)[label]
+        elif source_key not in source_labels:
+            raise ValueError(f"Unknown project source type: {source_key}")
+        else:
+            label = source_labels[source_key]
 
-        source_key = dict(source_items)[label]
         start_dir = self._dialog_start_dir(ps.output_dir)
         if source_key in {"manual_peak", "kr_calibration_peak"}:
             source_path, _ = QFileDialog.getOpenFileName(
@@ -1622,6 +1511,9 @@ class WorkspacePagesMixin:
         worker.error.connect(self._on_import_error)
         worker.cancelled.connect(self._on_import_cancelled)
 
+        self._import_project_config_path = (
+            self.project_settings_manager.get_project_config_path()
+        )
         self._import_progress_dialog = ProgressDialog(self, "导入项目数据源")
         self._import_progress_dialog.rejected.connect(lambda: self._worker_manager.cancel())
         self._import_progress_dialog.show()
@@ -1637,40 +1529,78 @@ class WorkspacePagesMixin:
         if hasattr(self, "_import_progress_dialog"):
             self._import_progress_dialog.close()
 
-        ps = self.project_settings_manager.get()
-        field_name = result.get("field_name", "")
-        destination = result.get("destination", "")
-        if field_name and destination:
-            setattr(ps, field_name, destination)
-            if field_name == "manual_peak_file":
-                peak_set = import_peak_set(
-                    project_root(ps),
-                    destination,
-                    label=Path(destination).stem,
-                )
-                ps.active_peak_set_id = peak_set.peak_set_id
-                ps.manual_peak_file = str(
-                    verify_peak_set(project_root(ps), peak_set)
-                )
-                ps.temp_peak_source = "manual"
-            if field_name == "pie_scan_folder":
-                pie_folders = ps.effective_pie_scan_folders()
-                if destination not in pie_folders:
-                    pie_folders.append(destination)
-                ps.pie_scan_folders = pie_folders
-                ps.pie_scan_folder = pie_folders[0]
-                ps.pie_multi_folder_mode = len(pie_folders) > 1
-        self.project_settings_manager.set(ps)
-        self.project_settings_manager.save()
-        ps = self.project_settings_manager.reload()
+        manager = self.project_settings_manager
+        expected_config_path = getattr(self, "_import_project_config_path", None)
+        project_is_active = manager.has_project_path()
+        if project_is_active and expected_config_path is not None:
+            project_is_active = (
+                manager.get_project_config_path() == expected_config_path
+            )
+        self._import_project_config_path = None
+        if not project_is_active:
+            label = result.get("label") or "数据源"
+            self.statusbar.showMessage(
+                f"{label}处理已完成，但原项目已关闭或切换，结果未登记",
+                6000,
+            )
+            return
+
+        try:
+            ps = manager.snapshot()
+            field_name = result.get("field_name", "")
+            destination = result.get("destination", "")
+            if field_name and destination:
+                setattr(ps, field_name, destination)
+                if field_name == "manual_peak_file":
+                    peak_set = import_peak_set(
+                        project_root(ps),
+                        destination,
+                        label=Path(destination).stem,
+                    )
+                    ps.active_peak_set_id = peak_set.peak_set_id
+                    ps.manual_peak_file = str(
+                        verify_peak_set(project_root(ps), peak_set)
+                    )
+                    ps.temp_peak_source = "manual"
+                if field_name == "pie_scan_folder":
+                    pie_folders = ps.effective_pie_scan_folders()
+                    if destination not in pie_folders:
+                        pie_folders.append(destination)
+                    ps.pie_scan_folders = pie_folders
+                    ps.pie_scan_folder = pie_folders[0]
+                    ps.pie_multi_folder_mode = len(pie_folders) > 1
+            ps = manager.replace_and_save(ps)
+        except Exception as exc:
+            logger.exception("Failed to register imported data in the active project")
+            QtWidgets.QMessageBox.critical(
+                self,
+                "登记导入结果失败",
+                "数据处理已完成，但无法登记到当前项目。\n"
+                f"错误信息：{exc}",
+            )
+            self.statusbar.showMessage("导入结果未能登记到项目", 6000)
+            return
         self._invalidate_untraceable_project_curves(ps)
 
-        self._read_project_settings_to_ui(ps)
-        self._load_project_settings_to_parameter_widgets(ps)
-        self._apply_settings_to_tools(ps)
+        data_fields = {
+            "temperature_scan_folder",
+            "pie_scan_folder",
+            "pie_scan_folders",
+            "pie_multi_folder_mode",
+            "manual_peak_file",
+            "active_peak_set_id",
+            "kr_calibration_folder",
+            "kr_calibration_peak_file",
+            "temp_peak_source",
+        }
+        draft = deepcopy(getattr(self, "_project_draft", ps))
+        for name in data_fields:
+            setattr(draft, name, deepcopy(getattr(ps, name)))
+        self._project_draft = draft
+        self._project_committed = deepcopy(ps)
+        self._read_project_settings_to_ui(draft)
+        self._sync_project_settings_to_tool_pages(deepcopy(ps))
         self.update_project_title()
-        self.refresh_project_lifecycle(ps)
-        self.refresh_project_parameter_summary()
         self.refresh_project_datasource_page(ps)
 
         label = result.get("label") or "数据源"
@@ -1678,12 +1608,14 @@ class WorkspacePagesMixin:
         self.statusbar.showMessage(f"✓ {label}已{action}并登记：{destination}", 5000)
 
     def _on_import_error(self, message: str) -> None:
+        self._import_project_config_path = None
         if hasattr(self, "_import_progress_dialog"):
             self._import_progress_dialog.close()
         QtWidgets.QMessageBox.critical(self, "导入数据源失败", message)
         self.statusbar.showMessage("导入数据源失败", 5000)
 
     def _on_import_cancelled(self) -> None:
+        self._import_project_config_path = None
         if hasattr(self, "_import_progress_dialog"):
             self._import_progress_dialog.close()
         self.statusbar.showMessage("数据源导入已取消", 3000)
@@ -1784,12 +1716,32 @@ class WorkspacePagesMixin:
             for index, folder in enumerate(self._project_pie_folders_from_ui())
             if index not in selected_rows
         ]
-        self._set_project_pie_folders(folders)
-        self._auto_save_datasource()
+        self._update_registered_pie_folders(folders)
 
     def clear_project_pie_folders(self) -> None:
-        self._set_project_pie_folders([])
-        self._auto_save_datasource()
+        self._update_registered_pie_folders([])
+
+    def _update_registered_pie_folders(self, folders: list[str]) -> None:
+        """Cancel PIE registrations without deleting already copied files."""
+        if not self.project_settings_manager.has_project_path():
+            return
+        committed = self.project_settings_manager.snapshot()
+        committed.pie_scan_folders = list(folders)
+        committed.pie_scan_folder = folders[0] if folders else ""
+        saved = self.project_settings_manager.replace_and_save(committed)
+        draft = deepcopy(getattr(self, "_project_draft", saved))
+        draft.pie_scan_folders = list(saved.pie_scan_folders)
+        draft.pie_scan_folder = saved.pie_scan_folder
+        draft.pie_multi_folder_mode = saved.pie_multi_folder_mode
+        self._project_draft = draft
+        self._project_committed = deepcopy(saved)
+        self._set_project_pie_folders(saved.effective_pie_scan_folders())
+        self._sync_project_settings_to_tool_pages(deepcopy(saved))
+        self.refresh_project_datasource_page(saved)
+        self.statusbar.showMessage(
+            "PIE 能段登记已更新；项目内已复制文件未删除",
+            4000,
+        )
 
     def select_project_output_parent_folder(self) -> None:
         folder = QFileDialog.getExistingDirectory(
@@ -1802,13 +1754,10 @@ class WorkspacePagesMixin:
             self.project_output_dir_edit.setText(folder)
 
     def import_project_manual_peak_file(self) -> None:
-        ps = self._collect_project_settings_from_ui()
-        ps = self._normalize_project_output_dir(ps)
-        try:
-            ensure_project_structure(ps)
-        except Exception as exc:
-            QtWidgets.QMessageBox.critical(self, "初始化项目失败", str(exc))
+        if not self.project_settings_manager.has_project_path():
+            QtWidgets.QMessageBox.warning(self, "尚未保存项目", "请先保存项目。")
             return
+        ps = self.project_settings_manager.snapshot()
 
         path, _ = QFileDialog.getOpenFileName(
             self,
@@ -1832,33 +1781,36 @@ class WorkspacePagesMixin:
         ps.active_peak_set_id = peak_set.peak_set_id
         ps.manual_peak_file = str(verify_peak_set(project_root(ps), peak_set))
         ps.temp_peak_source = "manual"
-        self.project_settings_manager.set_project_path(Path(ps.output_dir))
-        self.project_settings_manager.set(ps)
-        self.project_settings_manager.save()
-        ps = self.project_settings_manager.reload()
+        ps = self.project_settings_manager.replace_and_save(ps)
         self._invalidate_untraceable_project_curves(ps)
 
         self._read_project_settings_to_ui(ps)
         self._apply_settings_to_tools(ps)
         self.update_project_title()
-        self.refresh_project_lifecycle(ps)
-        self.refresh_project_parameter_summary()
         self.refresh_project_datasource_page(ps)
         self.statusbar.showMessage(
-            f"✓ 已导入为不可变卡峰集并激活：{peak_set.label}",
+            f"✓ 已导入并设为当前项目卡峰范围：{peak_set.label}",
             5000,
         )
+        if hasattr(self, "open_project_peak_ranges"):
+            self.open_project_peak_ranges(
+                settings=ps,
+                prompt_before_replace=True,
+                show_feedback=False,
+            )
 
     def generate_project_peak_set_from_sum(self) -> None:
-        ps = self._collect_project_settings_from_ui()
-        ps = self._normalize_project_output_dir(ps)
+        if not self.project_settings_manager.has_project_path():
+            QtWidgets.QMessageBox.warning(self, "尚未保存项目", "请先保存项目。")
+            return
+        ps = self.project_settings_manager.snapshot()
         source_folder = Path(str(ps.sum_spectrum_folder or "")).expanduser()
         if not source_folder.is_absolute():
             source_folder = project_root(ps) / source_folder
         if not source_folder.is_dir():
             QtWidgets.QMessageBox.warning(
                 self,
-                "无法自动生成卡峰集",
+                "无法自动生成卡峰范围",
                 "项目累计谱目录不存在。请先在质谱工作台登记累计谱，"
                 "或导入现有卡峰文件。",
             )
@@ -1868,9 +1820,9 @@ class WorkspacePagesMixin:
             return
         reply = QtWidgets.QMessageBox.question(
             self,
-            "从累计谱自动生成卡峰集",
-            "将使用项目累计质谱、项目定标和项目寻峰参数创建一个新的"
-            "不可变卡峰版本。\n已有版本不会被覆盖。\n\n是否继续？",
+            "从累计谱生成卡峰范围",
+            "将使用项目累计质谱、项目定标和项目寻峰参数生成并保存"
+            "当前项目卡峰范围。\n历史快照由软件自动保留。\n\n是否继续？",
             QtWidgets.QMessageBox.StandardButton.Yes
             | QtWidgets.QMessageBox.StandardButton.No,
             QtWidgets.QMessageBox.StandardButton.No,
@@ -1879,7 +1831,7 @@ class WorkspacePagesMixin:
             return
 
         self.project_peak_set_generate_button.setEnabled(False)
-        self.project_peak_set_status.setText("正在自动寻峰…")
+        self.datasource_row_status_labels["manual_peak"].setText("正在自动寻峰…")
         worker = WorkerThread(
             lambda: generate_project_peak_set(
                 ps,
@@ -1889,7 +1841,9 @@ class WorkspacePagesMixin:
         )
         self._project_peak_generation_worker = worker
         worker.progress.connect(
-            lambda _value, message: self.project_peak_set_status.setText(message)
+            lambda _value, message: self.datasource_row_status_labels[
+                "manual_peak"
+            ].setText(message)
         )
 
         def on_success(record) -> None:
@@ -1898,33 +1852,36 @@ class WorkspacePagesMixin:
                 ps.active_peak_set_id = record.peak_set_id
                 ps.manual_peak_file = str(approved_path)
                 ps.temp_peak_source = "manual"
-                self.project_settings_manager.set(ps)
-                self.project_settings_manager.save()
-                saved = self.project_settings_manager.reload()
+                saved = self.project_settings_manager.replace_and_save(ps)
                 self._invalidate_untraceable_project_curves(saved)
                 self._read_project_settings_to_ui(saved)
                 self._apply_settings_to_tools(saved)
-                self.refresh_project_lifecycle(saved)
                 self.refresh_project_datasource_page(saved)
+                if hasattr(self, "open_project_peak_ranges"):
+                    self.open_project_peak_ranges(
+                        settings=saved,
+                        prompt_before_replace=False,
+                        show_feedback=False,
+                    )
                 self.statusbar.showMessage(
-                    f"✓ 已自动生成并激活项目卡峰集：{record.label}",
+                    f"✓ 已自动生成当前项目卡峰范围：{record.label}",
                     5000,
                 )
             except Exception as exc:
                 logger.exception("Failed to activate generated peak set")
                 QtWidgets.QMessageBox.critical(
                     self,
-                    "激活项目卡峰集失败",
+                    "保存项目卡峰范围失败",
                     str(exc),
                 )
 
         def on_failure(message: str) -> None:
             QtWidgets.QMessageBox.critical(
                 self,
-                "自动生成项目卡峰集失败",
+                "自动生成项目卡峰范围失败",
                 message,
             )
-            self.project_peak_set_status.setText("生成失败")
+            self.datasource_row_status_labels["manual_peak"].setText("生成失败")
 
         worker.finished_with_result.connect(on_success)
         worker.failed.connect(on_failure)
@@ -1935,37 +1892,6 @@ class WorkspacePagesMixin:
             lambda: setattr(self, "_project_peak_generation_worker", None)
         )
         worker.start()
-
-    def activate_selected_project_peak_set(self) -> None:
-        peak_set_id = str(self.project_peak_set_combo.currentData() or "")
-        if not peak_set_id:
-            QtWidgets.QMessageBox.warning(self, "无法激活", "请选择一个已批准卡峰集。")
-            return
-        ps = self._collect_project_settings_from_ui()
-        try:
-            record, path = activate_peak_set(project_root(ps), peak_set_id)
-        except Exception as exc:
-            QtWidgets.QMessageBox.critical(self, "卡峰集校验失败", str(exc))
-            return
-        if (
-            ps.active_peak_set_id == record.peak_set_id
-            and ps.manual_peak_file
-            and resolve_peak_set_path(project_root(ps), ps.manual_peak_file) == path
-        ):
-            self.project_peak_set_status.setText("当前使用")
-            return
-        ps.active_peak_set_id = record.peak_set_id
-        ps.manual_peak_file = str(path)
-        ps.temp_peak_source = "manual"
-        self.project_settings_manager.set(ps)
-        self.project_settings_manager.save()
-        ps = self.project_settings_manager.reload()
-        self._invalidate_untraceable_project_curves(ps)
-        self._read_project_settings_to_ui(ps)
-        self._apply_settings_to_tools(ps)
-        self.refresh_project_lifecycle(ps)
-        self.refresh_project_datasource_page(ps)
-        self.statusbar.showMessage(f"✓ 已激活卡峰集：{record.label}", 5000)
 
     def select_project_manual_peak(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -2035,185 +1961,8 @@ class WorkspacePagesMixin:
         self.project_output_dir_edit.setText(ps.output_dir)
         return ps
 
-    def _collect_and_save_project_settings(self) -> ProjectSettings:
-        ps = self._collect_project_settings_from_ui()
-        self._collect_all_project_parameters_from_ui(ps)
-        # Set project config path before saving
-        from pathlib import Path
-        if ps.output_dir and ps.output_dir.strip() != "output":
-            self.project_settings_manager.set_project_path(Path(ps.output_dir))
-        self.project_settings_manager.set(ps)
-        self.project_settings_manager.save()
-        self._apply_project_runtime_settings(ps)
-        return ps
-
-    def start_new_project_analysis(self) -> None:
-        self.apply_project_settings_to_tools()
-        self.switch_workspace_page("spectrum")
-        self.statusbar.showMessage("已切换到质谱工作台，可开始新分析", 4000)
-
-    def create_project_version_snapshot(self) -> None:
-        ps = self._collect_and_save_project_settings()
-
-        # Initialize worker manager if needed
-        if not hasattr(self, "_worker_manager"):
-            self._worker_manager = WorkerManager(self)
-
-        # Create worker
-        note = ps.project_name or ps.system or "snapshot"
-        worker = SnapshotWorker(ps, note)
-
-        # Connect signals
-        worker.progress.connect(self._on_snapshot_progress)
-        worker.finished.connect(self._on_snapshot_finished)
-        worker.error.connect(self._on_snapshot_error)
-        worker.cancelled.connect(self._on_snapshot_cancelled)
-
-        # Show progress dialog
-        self._snapshot_progress_dialog = ProgressDialog(self, "创建快照")
-        self._snapshot_progress_dialog.rejected.connect(lambda: self._worker_manager.cancel())
-        self._snapshot_progress_dialog.show()
-
-        # Disable button
-        if hasattr(self, "snapshot_button"):
-            self.snapshot_button.setEnabled(False)
-
-        # Start worker
-        self._worker_manager.run_worker(worker)
-
-    def _on_snapshot_progress(self, percent: int, message: str) -> None:
-        """Update snapshot progress dialog."""
-        if hasattr(self, "_snapshot_progress_dialog"):
-            self._snapshot_progress_dialog.update(percent, message)
-
-    def _on_snapshot_finished(self, result: dict) -> None:
-        """Handle snapshot completion."""
-        if hasattr(self, "_snapshot_progress_dialog"):
-            self._snapshot_progress_dialog.close()
-
-        if hasattr(self, "snapshot_button"):
-            self.snapshot_button.setEnabled(True)
-
-        if result.get("success"):
-            self.refresh_project_lifecycle()
-            self.statusbar.showMessage(f"项目快照已创建：{result['path']}", 5000)
-        else:
-            QtWidgets.QMessageBox.critical(self, "创建快照失败", result.get("error", "Unknown error"))
-
-    def _on_snapshot_error(self, message: str) -> None:
-        """Handle snapshot error."""
-        if hasattr(self, "_snapshot_progress_dialog"):
-            self._snapshot_progress_dialog.close()
-
-        if hasattr(self, "snapshot_button"):
-            self.snapshot_button.setEnabled(True)
-
-        QtWidgets.QMessageBox.critical(self, "创建快照失败", message)
-
-    def _on_snapshot_cancelled(self) -> None:
-        """Handle snapshot cancellation."""
-        if hasattr(self, "_snapshot_progress_dialog"):
-            self._snapshot_progress_dialog.close()
-
-        if hasattr(self, "snapshot_button"):
-            self.snapshot_button.setEnabled(True)
-
-        self.statusbar.showMessage("快照创建已取消", 3000)
-
-    def export_current_project(self) -> None:
-        ps = self._collect_and_save_project_settings()
-        default_name = f"{sanitize_project_slug(ps.project_name or ps.system or 'project')}_backup.zip"
-        path, _ = QFileDialog.getSaveFileName(
-            self,
-            "导出项目备份",
-            str(project_root(ps).parent / default_name),
-            "Zip Archive (*.zip)",
-        )
-        if not path:
-            return
-
-        # Initialize worker manager if needed
-        if not hasattr(self, "_worker_manager"):
-            self._worker_manager = WorkerManager(self)
-
-        # Create worker
-        worker = ExportWorker(ps, path)
-
-        # Connect signals
-        worker.progress.connect(self._on_export_progress)
-        worker.finished.connect(self._on_export_finished)
-        worker.error.connect(self._on_export_error)
-        worker.cancelled.connect(self._on_export_cancelled)
-
-        # Show progress dialog
-        self._export_progress_dialog = ProgressDialog(self, "导出项目")
-        self._export_progress_dialog.rejected.connect(lambda: self._worker_manager.cancel())
-        self._export_progress_dialog.show()
-
-        # Disable button
-        if hasattr(self, "export_button"):
-            self.export_button.setEnabled(False)
-
-        # Start worker
-        self._worker_manager.run_worker(worker)
-
-    def _on_export_progress(self, percent: int, message: str) -> None:
-        """Update export progress dialog."""
-        if hasattr(self, "_export_progress_dialog"):
-            self._export_progress_dialog.update(percent, message)
-
-    def _on_export_finished(self, result: dict) -> None:
-        """Handle export completion."""
-        if hasattr(self, "_export_progress_dialog"):
-            self._export_progress_dialog.close()
-
-        if hasattr(self, "export_button"):
-            self.export_button.setEnabled(True)
-
-        if result.get("success"):
-            self.refresh_project_lifecycle()
-            self.statusbar.showMessage(f"项目已导出：{result['path']}", 5000)
-        else:
-            QtWidgets.QMessageBox.critical(self, "导出失败", result.get("error", "Unknown error"))
-
-    def _on_export_error(self, message: str) -> None:
-        """Handle export error."""
-        if hasattr(self, "_export_progress_dialog"):
-            self._export_progress_dialog.close()
-
-        if hasattr(self, "export_button"):
-            self.export_button.setEnabled(True)
-
-        QtWidgets.QMessageBox.critical(self, "导出失败", message)
-
-    def _on_export_cancelled(self) -> None:
-        """Handle export cancellation."""
-        if hasattr(self, "_export_progress_dialog"):
-            self._export_progress_dialog.close()
-
-        if hasattr(self, "export_button"):
-            self.export_button.setEnabled(True)
-
-        self.statusbar.showMessage("项目导出已取消", 3000)
-
-    def refresh_project_lifecycle(self, ps: ProjectSettings | None = None) -> None:
-        """Compatibility hook for project artifact registration.
-
-        Project workflow progress is no longer displayed in the project page;
-        project management now focuses on data sources and shared parameters.
-        """
-        return
-
-    def _format_file_size(self, size_bytes: int) -> str:
-        size = float(size_bytes)
-        for unit in ("B", "KB", "MB", "GB"):
-            if size < 1024 or unit == "GB":
-                return f"{size:.1f} {unit}" if unit != "B" else f"{int(size)} B"
-            size /= 1024
-        return f"{size_bytes} B"
-
     def open_project_root_folder(self) -> None:
-        ps = self.project_settings_manager.get()
+        ps = self.project_settings_manager.snapshot()
         root = project_root(ps)
         root.mkdir(parents=True, exist_ok=True)
         QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(root)))
@@ -2236,73 +1985,18 @@ class WorkspacePagesMixin:
             window_title = f"{window_title} - {project_name}"
         self.setWindowTitle(window_title)
 
-    def refresh_project_parameter_summary(self) -> None:
-        # 参数摘要已被移除，改为卡片化设计（第5步实现）
-        # 此函数保留以保持向后兼容
-        if not hasattr(self, "project_param_summary"):
-            return
-        try:
-            ps = self.project_settings_manager.get()
-            calibration = ps.to_calibration()
-            light_map = {"io": "IO光电流", "beam_current": "Beam Current"}
-            pie_map = {"first": "光强校正", "none": "光强校正", "off": "不校正光强"}
-            peak_map = {
-                "adaptive": "自适应高召回（实验）",
-                "ensemble": "Ensemble融合检测",
-                "prominence": "Prominence",
-                "legacy": "传统局部极大",
-                "cwt": "CWT小波",
-            }
-            temp_map = {"sum": "Sum谱参考", "individual": "独立参考"}
-            merge_map = {
-                "low_energy_dominant": "低能段为主",
-                "first_segment_dominant": "第一组为主",
-                "mean": "简单拼接",
-            }
-            summary = (
-                "统一参数:\n"
-                f"定标 A={calibration.a:.6g}, B={calibration.b:.6g}, C={calibration.c:.6g}; "
-                f"光强来源={light_map.get(ps.light_source, ps.light_source)}; "
-                f"Kr m/z={ps.kr_mz}; "
-                f"Kr λ(T)={'已计算' if ps.expansion_factors else '未计算'}; "
-                f"主工作台寻峰={peak_map.get(ps.peak_algorithm, ps.peak_algorithm)}\n"
-                "功能默认:\n"
-                f"温度光强归一化={'开' if ps.temperature_photon_normalize else '关'}, "
-                f"温度Kr校正={'开' if ps.temperature_kr_correct else '关'}, "
-                f"PIE光强={pie_map.get(ps.pie_photon_mode, ps.pie_photon_mode)}; "
-                f"PIE 能量分组小数位={ps.pie_energy_decimals}, "
-                f"递归={'开' if ps.pie_recursive else '关'}, "
-                f"合并={merge_map.get(ps.pie_merge_method, ps.pie_merge_method)}; "
-                f"温度参考={temp_map.get(ps.temp_reference_mode, ps.temp_reference_mode)}, "
-                f"PICS NO m/z={ps.pics_no_mz}; "
-                f"母体 m/z={ps.mf_parent_mz}, 光子能量={ps.mf_photon_energy:.4g} eV\n"
-                "分析产物:\n"
-                f"温度扫描结果={'已登记' if ps.temperature_scan_result_file else '未登记'}; "
-                f"PIE曲线结果={'已登记' if ps.pie_curve_result_file else '未登记'}; "
-                f"PIE鉴定结果={'已登记' if ps.pie_identification_result_file else '未登记'}; "
-                f"同位素贡献校正结果={'已登记' if ps.isotope_correction_result_file else '未登记'}; "
-                f"摩尔分数结果={'已登记' if ps.mole_fraction_result_file else '未登记'}"
-            )
-        except Exception as exc:
-            summary = f"统一参数摘要读取失败: {exc}"
-        self.project_param_summary.setText(summary)
-
     def on_project_common_parameters_saved(self) -> None:
-        ps = self.project_settings_manager.get()
-        self._apply_project_runtime_settings(ps)
-        self._sync_project_settings_to_tool_pages(ps)
-        self.refresh_project_parameter_summary()
-        self.statusbar.showMessage("通用参数已保存并同步到各工具", 3000)
+        self._sync_project_page_edits_to_runtime(
+            save_project=False,
+            sync_tools=False,
+        )
+        self.statusbar.showMessage(
+            "参数已更新到项目草稿；点击“保存并应用项目参数”后生效",
+            3500,
+        )
 
     def switch_workspace_page(self, page_name: str):
-        """Switch top-level workspace page and refresh shared calibration state.
-
-        When leaving the project page, saved edits are synced to all tool pages via
-        _sync_project_page_edits_to_runtime (which calls _sync_project_settings_to_tool_pages).
-        When switching between non-project tool pages, only shared state (calibration,
-        normalization) is refreshed -- function-specific settings are not re-applied
-        to avoid overwriting unsaved edits on those pages.
-        """
+        """Switch pages after explicitly resolving an unsaved project draft."""
         page_map = {
             "project": self.project_page,
             "spectrum": self.spectrum_page,
@@ -2320,21 +2014,31 @@ class WorkspacePagesMixin:
             return
         current_page = self.workspace_stack.currentWidget() if hasattr(self, "workspace_stack") else None
         if current_page is getattr(self, "project_page", None):
-            # Leaving project page: save edits; sync_tools=True triggers
-            # _sync_project_settings_to_tool_pages, which calls set_project_settings
-            # on all tool pages with the freshly saved state.
-            ps = self._sync_project_page_edits_to_runtime(save_project=True, sync_tools=True)
+            if (
+                page is not current_page
+                and not self._confirm_project_draft_resolution()
+            ):
+                if "project" in self.page_buttons:
+                    self.page_buttons["project"].setChecked(True)
+                return
+            ps = self.project_settings_manager.snapshot()
         elif page_name == "project":
             self.load_project_settings()
-            ps = self.project_settings_manager.get()
+            ps = self.project_settings_manager.snapshot()
         else:
-            ps = self.project_settings_manager.get()
+            ps = self.project_settings_manager.snapshot()
         if self.project_settings_manager.has_project_path():
             self._apply_project_runtime_settings(ps)
         else:
             self.apply_config_defaults()
-            self.normalization_settings = load_normalization_settings()
-        calibration = self.current_calibration()
+            self.normalization_settings = (
+                load_factory_project_settings().to_normalization_settings()
+            )
+        calibration = (
+            ps.to_calibration()
+            if self.project_settings_manager.has_project_path()
+            else self.current_calibration()
+        )
         # Refresh shared calibration/normalization on all tool pages without
         # overwriting function-specific unsaved edits via set_project_settings.
         if hasattr(self, "temperature_page"):
@@ -2380,20 +2084,12 @@ class WorkspacePagesMixin:
         self.workspace_stack.setCurrentWidget(page)
         if page_name in self.page_buttons:
             self.page_buttons[page_name].setChecked(True)
-        if hasattr(self, "project_param_summary"):
-            self.refresh_project_parameter_summary()
-
     def open_common_parameters(self):
-        if hasattr(self, "project_common_parameters_widget"):
-            self.project_common_parameters_widget.settings = self.normalization_settings
-            self.project_common_parameters_widget.calibration = self.current_calibration()
-            # 设置ProjectSettings
-            from bl03u_masstool.core.project_settings import ProjectSettingsManager
-            ps = ProjectSettingsManager().get()
-            self.project_common_parameters_widget.set_project_settings(ps)
-        if hasattr(self, "project_peak_detection_widget"):
-            ps = ProjectSettingsManager().get()
-            self.project_peak_detection_widget.set_project_settings(ps)
+        if getattr(self, "spectrum_source_scope", "custom") == "custom":
+            self.open_temporary_spectrum_parameters()
+            return
         self.switch_workspace_page("project")
         if hasattr(self, "project_tabs"):
-            self.project_tabs.setCurrentWidget(self.project_common_parameters_widget)
+            self.project_tabs.setCurrentWidget(self.project_analysis_page)
+        if hasattr(self, "project_analysis_tabs"):
+            self.project_analysis_tabs.setCurrentIndex(0)

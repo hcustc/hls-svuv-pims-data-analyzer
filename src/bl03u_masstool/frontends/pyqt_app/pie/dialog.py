@@ -14,9 +14,9 @@ from typing import Tuple
 
 import numpy as np
 import pandas as pd
-from PyQt6 import QtCore, QtGui, QtWidgets
+from PyQt6 import QtCore, QtGui, QtWidgets, sip
 
-from bl03u_masstool.core.calibration import Calibration, tof_to_mz
+from bl03u_masstool.core.calibration import Calibration
 from bl03u_masstool.core.curve_database import (
     get_curve_dataset_state_read_only,
     list_pie_fit_states,
@@ -37,21 +37,8 @@ from bl03u_masstool.core.curve_repository import (
     validate_repository_round_trip,
 )
 from bl03u_masstool.core.config import (
-    PeakDetectionConfig,
-    load_calibration_config,
-    load_peak_detection_config,
-    save_calibration_config,
-    save_peak_detection_config,
     resolve_species_database_path,
     species_database_path,
-)
-from bl03u_masstool.core.isotope import (
-    calculate_isotope_distribution,
-    formula_monoisotopic_mass,
-    formula_nominal_mass,
-    generate_formula_candidates,
-    parse_element_count_ranges,
-    parse_formula,
 )
 from bl03u_masstool.core.nist_webbook import (
     NistWebBookClient,
@@ -59,43 +46,31 @@ from bl03u_masstool.core.nist_webbook import (
     select_species_ionization_energy,
 )
 from bl03u_masstool.core.output_paths import ensure_output_dir
-from bl03u_masstool.core.peak_sets import get_peak_set, resolve_active_peak_file
+from bl03u_masstool.core.peak_sets import (
+    get_peak_set,
+    resolve_active_peak_file,
+)
 from bl03u_masstool.core.pie_analysis import (
     PieSegmentSummary,
+    PIE_SPECTRUM_SUFFIXES,
     analyze_multiple_pie_folders,
     analyze_pie_folder,
     build_pie_curves,
+    build_pie_ratio_curve,
     discover_pie_segment_folders,
     identify_species_for_mz_with_curve,
     inspect_pie_source_segments,
     load_species_database,
-    merge_pie_segments,
 )
+from bl03u_masstool.core.spectrum_io import read_spectrum
 from bl03u_masstool.core.pie_state import PieStateManager, parse_pie_curve_key
-from bl03u_masstool.core.pics_calculator import calc_pics_single_energy
-from bl03u_masstool.core.elements import get_all_elements_from_database, filter_species_by_elements, COMMON_ELEMENTS, parse_formula as parse_formula_elements, get_elements_from_formula
-from bl03u_masstool.core.normalization import NormalizationSettings, load_normalization_settings, save_normalization_settings
+from bl03u_masstool.core.elements import filter_species_by_elements
+from bl03u_masstool.core.normalization import NormalizationSettings
 from bl03u_masstool.core.project_lifecycle import project_root
-from bl03u_masstool.core.project_settings import ProjectSettings, ProjectSettingsManager
-from bl03u_masstool.core.temperature_scan import (
-    TEMPERATURE_CURVE_CLASS_LABELS,
-    analyze_temperature_folder,
-    build_temperature_curves,
-    compute_kr_expansion_factors,
-)
-from bl03u_masstool.core.mole_fraction import (
-    MASS_DISCRIMINATION_PRESETS,
-    MoleFractionSettings,
-    calc_expansion_coefficients,
-    calc_isomeric_separation,
-    calc_mass_discrimination,
-    calc_parent_mole_fraction,
-    calc_product_mole_fraction,
-    compute_all_mole_fractions,
-    extract_signal_from_temperature_curves,
-    get_expansion_coefficient,
-    load_mole_fraction_settings,
-    save_mole_fraction_settings,
+from bl03u_masstool.core.project_settings import (
+    ProjectSettings,
+    ProjectSettingsManager,
+    load_factory_project_settings,
 )
 from bl03u_masstool.frontends.pyqt_app.workers import WorkerThread
 from bl03u_masstool.frontends.pyqt_app.project_peak_workflow import (
@@ -103,7 +78,9 @@ from bl03u_masstool.frontends.pyqt_app.project_peak_workflow import (
 )
 from bl03u_masstool.frontends.pyqt_app.project_artifacts import record_project_artifact
 from bl03u_masstool.frontends.pyqt_app.temporary_analysis_settings import (
-    TemporaryAnalysisSettingsDialog,
+    ANALYSIS_PARAMETER_FIELDS,
+    TEMPORARY_SHARED_PARAMETER_FIELDS,
+    AnalysisSettingsDialog,
     build_temporary_settings,
 )
 
@@ -112,18 +89,16 @@ from bl03u_masstool.frontends.pyqt_app.common.widgets import (
     AnalysisProgressState,
     DataFrameTableMixin,
     ElidedLabel,
-    FlowLayout,
 )
 from bl03u_masstool.frontends.pyqt_app.common.plot_spec import (
     CurveSeries,
     ScientificPlotSpec,
     SeriesRole,
+    VerticalReference,
 )
 from bl03u_masstool.frontends.pyqt_app.common.static_plot import StaticCurvePlot
-from bl03u_masstool.frontends.pyqt_app.normalization.widget import CommonParametersDialog
 from bl03u_masstool.frontends.pyqt_app.pie.fitting_control_widget import FittingControlWidget
 from bl03u_masstool.frontends.pyqt_app.pie.result_display_widget import ResultDisplayWidget
-from bl03u_masstool.frontends.pyqt_app.pie.batch_selector import CurveBatchSelectorDialog
 
 
 logger = logging.getLogger(__name__)
@@ -162,8 +137,9 @@ def _run_exhaustive_fit(
 
 
 class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
-    # Version 2 requires explicit peak-source provenance in every cache entry.
-    CACHE_VERSION = 2
+    PIE_DATASET_GROUP = "pie:project"
+    # Version 4 includes every supported spectrum format and the Poisson SNR policy.
+    CACHE_VERSION = 4
 
     @staticmethod
     def _curve_nominal_mz(curve: dict, curve_key: PieCurveKey | None = None) -> int:
@@ -266,8 +242,9 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self._global_normalization_settings = deepcopy(self.normalization_settings)
         self.project_settings: ProjectSettings | None = None
         self.temporary_settings: ProjectSettings | None = None
-        self.temporary_settings_source = "default"
+        self.temporary_settings_source = "factory"
         self.temporary_settings_modified = False
+        self._temporary_project_snapshot_available = False
         self.project_dir: str | None = None  # Phase 3: Project directory for state persistence
         self.pie_state_dirty = False  # Phase 3 Step 2: dirty flag for unsaved config changes
         self.pie_source_scope = "temporary"
@@ -278,7 +255,9 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self._segment_scan_worker: WorkerThread | None = None
         self._segment_scan_generation = 0
         self._segment_scan_pending = False
-        self.peak_detection = load_peak_detection_config()
+        self.peak_detection = (
+            load_factory_project_settings().to_peak_detection_config()
+        )
         self.database: list[dict] = []
         self.analysis_df = pd.DataFrame()
         self.curves: dict[PieCurveKey, dict] = {}
@@ -295,6 +274,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self._autoload_request_id = 0
         self._loaded_analysis_cache_key = ""
         self._analysis_provenance: dict = {}
+        self._last_analysis_source_info: dict = {}
         self.ie_lookup_worker: WorkerThread | None = None
         self._ie_lookup_cache: dict[str, dict] = {}
         self._ie_lookup_pending: dict[str, dict] = {}
@@ -353,14 +333,10 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.temporary_segments_button.clicked.connect(self._show_temporary_segment_selector)
         self.folder_edit.editingFinished.connect(self._scan_temporary_segments_from_editor)
 
-        self.analyze_button = QtWidgets.QPushButton("生成曲线")
+        self.analyze_button = QtWidgets.QPushButton("生成 PIE 曲线")
         self.analyze_button.setObjectName("PrimaryButton")
         self.analyze_button.setToolTip("生成PIE曲线")
         self.analyze_button.clicked.connect(self.run_analysis)
-        self.curve_batch_button = QtWidgets.QPushButton("分析批次…")
-        self.curve_batch_button.setObjectName("BrowseButton")
-        self.curve_batch_button.setToolTip("查看、加载或设定项目PIE分析批次")
-        self.curve_batch_button.clicked.connect(self.open_curve_batch_selector)
         self.export_button = QtWidgets.QToolButton()
         self.export_button.setText("导出")
         self.export_button.setObjectName("CommandMenuButton")
@@ -384,16 +360,20 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.export_plot_button.hide()
 
         self.common_params_button = QtWidgets.QToolButton()
-        self.common_params_button.setText("项目参数")
+        self.common_params_button.setText("编辑项目参数…")
         self.common_params_button.setObjectName("CommandMenuButton")
-        self.common_params_button.setPopupMode(QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.common_params_button.setPopupMode(
+            QtWidgets.QToolButton.ToolButtonPopupMode.MenuButtonPopup
+        )
         self.settings_menu = QtWidgets.QMenu(self.common_params_button)
-        self.common_params_action = self.settings_menu.addAction("分析默认值…")
+        self.common_params_action = self.settings_menu.addAction("编辑项目参数…")
         self.common_params_action.triggered.connect(self.open_common_parameters)
-        self.edit_project_action = self.settings_menu.addAction("项目与数据…")
-        self.edit_project_action.triggered.connect(self._open_project_settings)
+        self.edit_project_action = self.settings_menu.addAction("修改通用参数…")
+        self.edit_project_action.triggered.connect(self._open_shared_parameters)
         self.common_params_button.setMenu(self.settings_menu)
-        self.common_params_button.setToolTip("打开项目管理中的分析默认值或项目数据设置")
+        self.common_params_button.setDefaultAction(self.common_params_action)
+        self.common_params_button.setText("编辑项目参数…")
+        self.common_params_button.setToolTip("编辑当前项目 PIE 分析参数")
         self.summary_open_project_btn = QtWidgets.QPushButton("编辑项目")
         self.summary_open_project_btn.setObjectName("BrowseButton")
         self.summary_open_project_btn.setToolTip("修改项目名、体系、数据源等")
@@ -408,17 +388,22 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         # ---- 紧凑数据源控制带 ----
         source_panel = QtWidgets.QWidget()
         source_panel.setObjectName("ControlBar")
+        source_panel.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        self.source_panel = source_panel
         data_layout = QtWidgets.QVBoxLayout(source_panel)
-        data_layout.setContentsMargins(10, 9, 10, 9)
-        data_layout.setSpacing(7)
+        data_layout.setContentsMargins(10, 7, 10, 7)
+        data_layout.setSpacing(6)
 
         self.summary_bar = QtWidgets.QWidget()
         self.summary_bar.setObjectName("ContextHeader")
         summary_layout = QtWidgets.QHBoxLayout(self.summary_bar)
         summary_layout.setContentsMargins(0, 0, 0, 0)
-        summary_layout.setSpacing(10)
-        self.summary_project_label = QtWidgets.QLabel("项目：---")
-        self.summary_system_label = QtWidgets.QLabel("体系：---")
+        summary_layout.setSpacing(6)
+        self.summary_project_label = ElidedLabel("项目：---")
+        self.summary_system_label = ElidedLabel("体系：---")
         self.summary_data_label = QtWidgets.QLabel("数据源：---")
         self.summary_project_label.setObjectName("ContextValue")
         self.summary_system_label.setObjectName("ContextValue")
@@ -427,7 +412,11 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.summary_system_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
         self.summary_data_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
         for lbl in (self.summary_project_label, self.summary_system_label, self.summary_data_label):
-            lbl.setMinimumHeight(24)
+            lbl.setMinimumHeight(22)
+        self.summary_project_label.setMinimumWidth(135)
+        self.summary_project_label.setMaximumWidth(180)
+        self.summary_system_label.setMaximumWidth(130)
+        self.summary_system_label.hide()
         summary_layout.addWidget(self.summary_project_label)
         summary_layout.addWidget(self.summary_system_label)
         self.summary_data_label.setMaximumWidth(560)
@@ -437,7 +426,6 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         )
         self.summary_data_label.hide()
         summary_layout.addWidget(self.summary_data_label)
-        data_layout.addWidget(self.summary_bar)
 
         folder_row_panel = QtWidgets.QWidget()
         folder_row_panel.setObjectName("SourceInputRow")
@@ -460,7 +448,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         folder_row.addWidget(source_scope_panel)
         self.temporary_params_label = QtWidgets.QLabel("默认参数，可修改")
         self.temporary_params_label.setObjectName("ContextValue")
-        self.temporary_params_button = QtWidgets.QPushButton("编辑参数…")
+        self.temporary_params_button = QtWidgets.QPushButton("编辑临时参数…")
         self.temporary_params_button.setObjectName("BrowseButton")
         self.temporary_params_button.clicked.connect(self._edit_temporary_settings)
 
@@ -482,8 +470,6 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.temporary_params_hint = QtWidgets.QLabel("只影响本次临时分析，不会写回项目")
         self.temporary_params_hint.setObjectName("HintLabel")
         self.temporary_params_hint.hide()
-        summary_layout.addWidget(self.temporary_params_panel)
-        summary_layout.addWidget(self.common_params_button)
         self.parameter_summary_label = ElidedLabel()
         self.parameter_summary_label.setObjectName("ProjectParamSummary")
         self.parameter_summary_label.setMinimumWidth(0)
@@ -491,7 +477,6 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             QtWidgets.QSizePolicy.Policy.Ignored,
             QtWidgets.QSizePolicy.Policy.Fixed,
         )
-        summary_layout.addWidget(self.parameter_summary_label, stretch=1)
         self.curve_source_label = QtWidgets.QLabel(
             "当前曲线：临时内存 · 尚未生成"
         )
@@ -501,44 +486,68 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
         )
         self.curve_source_label.setMaximumWidth(330)
-        summary_layout.addWidget(self.curve_source_label)
         self.folder_edit.setMinimumWidth(180)
         folder_row.addWidget(self.folder_edit, stretch=1)
         folder_row.addWidget(self.select_folder_button)
         folder_row.addWidget(self.temporary_segments_button)
-        folder_row.addWidget(self.curve_batch_button)
         folder_row.addWidget(self.analyze_button)
         data_layout.addWidget(folder_row_panel)
 
-        analysis_options_panel = QtWidgets.QWidget()
-        analysis_options_panel.setObjectName("SettingsStrip")
-        analysis_options_row = QtWidgets.QHBoxLayout()
-        analysis_options_panel.setLayout(analysis_options_row)
-        analysis_options_row.setContentsMargins(8, 5, 8, 5)
-        analysis_options_row.setSpacing(8)
-        analysis_label = QtWidgets.QLabel("分析设置")
-        analysis_label.setObjectName("ReadoutLabel")
-        analysis_options_row.addWidget(analysis_label)
-        self.photon_correction_check = QtWidgets.QCheckBox("光强校正")
-        self.photon_correction_check.setToolTip("开启时按每个能量点的光强逐点校正；关闭时使用原始积分信号")
-        self.photon_correction_check.toggled.connect(self._refresh_parameter_summary)
-        analysis_options_row.addWidget(self.photon_correction_check)
+        parameter_panel = QtWidgets.QWidget()
+        parameter_panel.setObjectName("SettingsStrip")
+        parameter_layout = QtWidgets.QHBoxLayout(parameter_panel)
+        parameter_layout.setContentsMargins(8, 5, 8, 5)
+        parameter_layout.setSpacing(8)
+        parameter_title = QtWidgets.QLabel("当前参数")
+        parameter_title.setObjectName("ReadoutLabel")
+        parameter_layout.addWidget(self.summary_bar)
+        parameter_layout.addWidget(parameter_title)
+        parameter_layout.addWidget(self.temporary_params_panel)
+        parameter_layout.addWidget(self.common_params_button)
+        parameter_layout.addWidget(self.parameter_summary_label, 1)
+        self.photon_mode_combo = QtWidgets.QComboBox()
+        self.photon_mode_combo.addItem("关闭光强归一", "off")
+        self.photon_mode_combo.addItem("按IO归一", "none")
+        self.photon_mode_combo.addItem("按IO及参考值归一", "first")
+        self.photon_mode_combo.setToolTip(
+            "“按IO归一”保留 counts/(nA·s)；“按IO及参考值归一”"
+            "额外乘以首个能量点IO，用于兼容旧项目。"
+        )
+        self.photon_mode_combo.currentIndexChanged.connect(
+            self._on_photon_mode_changed
+        )
+        # Compatibility handle for older integrations/tests that toggled the
+        # former two-state checkbox directly.
+        self.photon_correction_check = QtWidgets.QCheckBox()
+        self.photon_correction_check.setVisible(False)
+        self.photon_correction_check.toggled.connect(
+            self._on_legacy_photon_checkbox_toggled
+        )
         self.integration_method_label = QtWidgets.QLabel("积分方式：范围累加")
         self.integration_method_label.setObjectName("ReadoutValue")
         self.integration_method_label.setToolTip("PIE 积分方式由项目管理 -> 功能默认参数 -> PIE 拟合设置")
-        analysis_options_row.addWidget(self.integration_method_label)
         self.replicate_enabled_check = QtWidgets.QCheckBox("合并重复采集")
         self.replicate_enabled_check.setToolTip("仅在确认为同一条件多次采集时开启；关闭时每个文件按自身能量点处理")
         self.replicate_enabled_check.toggled.connect(self._on_replicate_enabled_changed)
-        analysis_options_row.addWidget(self.replicate_enabled_check)
         self.replicate_mode_combo = QtWidgets.QComboBox()
         self.replicate_mode_combo.addItem("平均", "mean")
         self.replicate_mode_combo.addItem("累加", "sum")
         self.replicate_mode_combo.setToolTip("开启合并重复采集后，同组重复采集的聚合方式")
         self.replicate_mode_combo.setEnabled(False)
         self.replicate_mode_combo.currentIndexChanged.connect(self._refresh_parameter_summary)
-        analysis_options_row.addWidget(self.replicate_mode_combo)
-        analysis_options_row.addStretch()
+        self.update_project_params_button = QtWidgets.QPushButton("更新项目参数")
+        self.update_project_params_button.setObjectName("BrowseButton")
+        self.update_project_params_button.setToolTip(
+            "仅把 PIE 模块允许的当前会话参数写回活动项目"
+        )
+        self.update_project_params_button.clicked.connect(
+            self._edit_analysis_settings
+        )
+        self.photon_mode_combo.hide()
+        self.integration_method_label.hide()
+        self.replicate_enabled_check.hide()
+        self.replicate_mode_combo.hide()
+        self.update_project_params_button.hide()
 
         status_cluster = QtWidgets.QWidget()
         status_cluster.setObjectName("StatusActionStrip")
@@ -550,8 +559,8 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         status_layout.addWidget(status_title)
         status_layout.addWidget(self.status_label)
         status_layout.addWidget(self.export_button)
-        analysis_options_row.addWidget(status_cluster)
-        data_layout.addWidget(analysis_options_panel)
+        parameter_layout.addWidget(status_cluster)
+        data_layout.addWidget(parameter_panel)
 
         layout.addWidget(source_panel)
 
@@ -569,7 +578,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self._preview_timer = QtCore.QTimer(self)
         self._preview_timer.setSingleShot(True)
         self._preview_timer.setInterval(180)
-        self._preview_timer.timeout.connect(self._rebuild_manual_fit)
+        self._preview_timer.timeout.connect(self._rebuild_fit_preview)
 
         # 初始化UI状态
         self.set_pie_source_scope("temporary", restore_saved=False)
@@ -639,7 +648,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.fit_button = QtWidgets.QPushButton("拟合当前")
         self.fit_button.setObjectName("PrimaryToolbarButton")
         self.fit_button.setToolTip(
-            "拟合当前选中的 m/z 曲线（使用右侧面板配置）\n"
+            "拟合当前选中的 m/z 曲线；候选贡献由非负最小二乘（NNLS）自动计算。\n"
             "多选时将对每条曲线应用当前面板配置批量拟合"
         )
         self.fit_button.clicked.connect(self.fit_current_curve)
@@ -656,12 +665,23 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.more_actions_btn.setObjectName("BrowseButton")
         self.more_actions_btn.setToolTip("批量重拟合、穷举优选、清除拟合等高级操作")
         self.more_actions_menu = QtWidgets.QMenu(self)
+        self.more_actions_menu.setToolTipsVisible(True)
         self.refit_selected_action = self.more_actions_menu.addAction("批量重拟合（已保存配置）")
         self.refit_selected_action.triggered.connect(self.refit_selected_curves)
         self.exhaustive_action = self.more_actions_menu.addAction("穷举优选")
         self.exhaustive_action.triggered.connect(self._exhaustive_best_fit)
         self.clear_fits_action = self.more_actions_menu.addAction("清除拟合")
         self.clear_fits_action.triggered.connect(self.clear_all_fits)
+        self.more_actions_menu.addSeparator()
+        self.raw_spectrum_qc_action = self.more_actions_menu.addAction(
+            "核验原始积分谱…"
+        )
+        self.raw_spectrum_qc_action.setToolTip(
+            "在独立质控窗口中检查当前 m/z 各能量点的原始谱、积分窗口和峰顶"
+        )
+        self.raw_spectrum_qc_action.triggered.connect(
+            self._show_raw_spectrum_qc_dialog
+        )
         self.more_actions_menu.addSeparator()
         self.more_actions_menu.addAction("重新加载PICS截面数据库").triggered.connect(
             lambda: self.load_database(show_message=True)
@@ -682,6 +702,46 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         # Plot stack: empty state + actual plot
         self._plot_stack = QtWidgets.QStackedLayout()
 
+        plot_diagnostics_row = QtWidgets.QHBoxLayout()
+        plot_diagnostics_row.setSpacing(6)
+        plot_diagnostics_row.addWidget(QtWidgets.QLabel("显示方式"))
+        self.plot_mode_combo = QtWidgets.QComboBox(plot_container)
+        self.plot_mode_combo.addItem("当前曲线与拟合", "single")
+        self.plot_mode_combo.addItem("多通道·原始共用纵轴", "shared_y")
+        self.plot_mode_combo.addItem("多通道·各自归一形状", "shape")
+        self.plot_mode_combo.addItem("两通道比值诊断", "ratio")
+        self.plot_mode_combo.currentIndexChanged.connect(
+            self._on_plot_diagnostic_changed
+        )
+        plot_diagnostics_row.addWidget(self.plot_mode_combo)
+        self.energy_view_label = QtWidgets.QLabel("能量范围")
+        plot_diagnostics_row.addWidget(self.energy_view_label)
+        self.energy_view_combo = QtWidgets.QComboBox(plot_container)
+        self.energy_view_combo.addItem("全范围", "full")
+        self.energy_view_combo.addItem("上升区", "rise")
+        self.energy_view_combo.setToolTip(
+            "“上升区”仅缩放显示范围，不自动判定电离能。"
+        )
+        self.energy_view_combo.currentIndexChanged.connect(
+            self._on_plot_diagnostic_changed
+        )
+        plot_diagnostics_row.addWidget(self.energy_view_combo)
+        self.ratio_reference_spin = QtWidgets.QDoubleSpinBox(plot_container)
+        self.ratio_reference_spin.setRange(0.0, 100.0)
+        self.ratio_reference_spin.setDecimals(4)
+        self.ratio_reference_spin.setValue(0.32)
+        self.ratio_reference_spin.setPrefix("参考比值 ")
+        self.ratio_reference_spin.valueChanged.connect(
+            self._on_plot_diagnostic_changed
+        )
+        self.ratio_reference_spin.setVisible(False)
+        plot_diagnostics_row.addWidget(self.ratio_reference_spin)
+        self.plot_qc_label = QtWidgets.QLabel("核验：等待数据", plot_container)
+        self.plot_qc_label.setObjectName("InlineStatusLabel")
+        plot_diagnostics_row.addWidget(self.plot_qc_label, 1)
+        plot_diagnostics_row.addWidget(self.curve_source_label)
+        plot_container_layout.addLayout(plot_diagnostics_row)
+
         # Keep the initial workspace deliberately quiet: one explanation and one action.
         self._empty_state = AnalysisEmptyState(
             title="尚未生成 PIE 曲线",
@@ -695,6 +755,9 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self._plot_stack.addWidget(self._progress_state)
 
         self.plot_widget = StaticCurvePlot("Photon Energy (eV)", "Normalized Intensity", min_height=280)
+        self.plot_widget.setToolTip(
+            "移动鼠标可吸附到最近实验点；单击锁定读数，再次单击解除。"
+        )
         self._plot_stack.addWidget(self.plot_widget)
         self._plot_stack.setCurrentWidget(self._empty_state)
 
@@ -751,12 +814,14 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.fitting_control_widget.locked_candidate_added.connect(self._on_locked_species_changed)
         self.fitting_control_widget.locked_candidate_removed.connect(self._on_locked_species_changed)
         self.fitting_control_widget.species_config_changed.connect(self._on_fitting_config_changed)
-        self.fitting_control_widget.candidates_zeroed.connect(self._on_fitting_config_changed)
         self.fitting_control_widget.candidate_selection_changed.connect(self._on_candidate_selection_changed)
         self.fitting_control_widget.fit_readiness_changed.connect(self._on_fit_readiness_changed)
         self.fitting_control_widget.candidate_lock_toggled.connect(self._on_locked_species_changed)
         self.fitting_control_widget.confirmation_requested.connect(self._confirm_identification)
         self.fitting_control_widget.export_requested.connect(self.export_pie_results)
+        self.fitting_control_widget.result_details_requested.connect(
+            self._show_result_detail_popup
+        )
         self.fitting_control_widget.pics_import_requested.connect(self._goto_pics_import)
         self.fitting_control_widget.ie_query_requested.connect(self._request_current_ie_lookup)
 
@@ -798,6 +863,9 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
         # 拟合控制widget中的组件（为兼容性创建引用）
         self.species_table = self.fitting_control_widget.species_table
+        self.species_table.currentCellChanged.connect(
+            self._on_candidate_focus_changed
+        )
         # 向后兼容性别名
         self.candidate_table = self.species_table
 
@@ -811,15 +879,19 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         if hasattr(win, "project_pie_folders_list"):
             win.project_pie_folders_list.setFocus(QtCore.Qt.FocusReason.OtherFocusReason)
 
-    def _open_project_analysis_defaults(self) -> bool:
-        """Open the PIE section under the project's analysis defaults."""
+    def _open_shared_parameters(self) -> None:
+        """Open project management only for project-owned shared resources."""
         win = self.window()
-        if not hasattr(win, "switch_workspace_page"):
+        if hasattr(win, "switch_workspace_page"):
+            win.switch_workspace_page("project")
+        if hasattr(win, "project_tabs") and hasattr(win, "project_baseline_page"):
+            win.project_tabs.setCurrentWidget(win.project_baseline_page)
+
+    def _open_project_analysis_defaults(self) -> bool:
+        """Compatibility entry point; analysis parameters now open in-place."""
+        if not self._has_project_scope():
             return False
-        win.switch_workspace_page("project")
-        if hasattr(win, "project_tabs") and hasattr(win, "project_function_defaults_widget"):
-            win.project_tabs.setCurrentWidget(win.project_function_defaults_widget)
-            win.project_function_defaults_widget.set_current_page("pie")
+        self._edit_analysis_settings()
         return True
 
     def _goto_pics_import(self):
@@ -832,7 +904,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         """根据结果状态更新'结果详情 ›'按钮的可见性和文本，并保留用户展开状态"""
         if self._fit_preview_active and self.current_fit:
             self.show_result_detail_btn.setVisible(True)
-            self.show_result_detail_btn.setText("查看参数预览 ›")
+            self.show_result_detail_btn.setText("查看预览明细 ›")
             return
         if self.current_mz is None or self.current_mz not in self.all_fit_results:
             self.show_result_detail_btn.setVisible(False)
@@ -969,7 +1041,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
     def _on_locked_species_changed(self):
         """锁定候选物种改变时标记dirty并更新状态"""
         self.mark_pie_config_changed()
-        self._schedule_manual_fit_preview()
+        self._schedule_fit_preview()
 
     def _on_fitting_config_changed(self):
         """拟合配置改变时标记dirty、更新结果状态并重新拟合预览"""
@@ -984,56 +1056,27 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 self.fitting_control_widget.set_fit_result_status("OBSOLETE")
                 self.result_display_widget.set_result_status("OBSOLETE")
                 self._update_result_detail_button()
-        self._schedule_manual_fit_preview()
+        self._schedule_fit_preview()
         self._update_action_state()
+        self.refresh_current_plot()
 
-    def _schedule_manual_fit_preview(self) -> None:
-        """Debounce coefficient/selection changes before rebuilding the preview."""
+    def _schedule_fit_preview(self) -> None:
+        """Debounce candidate changes before rebuilding the NNLS preview."""
         if self._busy or self.current_mz is None:
             return
         self._preview_timer.start()
 
     def _on_candidate_selection_changed(self, _selected_ids: list[int]) -> None:
         self._update_action_state()
+        self.refresh_current_plot()
+
+    def _on_candidate_focus_changed(self, *_args) -> None:
+        self.refresh_current_plot()
 
     def _on_fit_readiness_changed(self, ready: bool, reason: str) -> None:
         if not ready and reason:
             self.fit_button.setToolTip(reason)
         self._update_action_state()
-
-    def _update_species_table_coefficients(self, fit_model: dict):
-        """将拟合结果中的系数更新到右侧候选物种表格"""
-        if not fit_model:
-            return
-
-        species_results = fit_model.get("species", [])
-        if not species_results:
-            return
-
-        # 构建物种名到系数的映射
-        coeff_map = {item.get("species", ""): float(item.get("coefficient", 0.0)) for item in species_results}
-
-        # 遍历表格并更新系数
-        self.fitting_control_widget._updating = True
-        try:
-            for row in range(self.species_table.rowCount()):
-                # 获取物种名（从 Col 1 的 widget 中）
-                species_widget = self.species_table.cellWidget(row, 1)
-                if species_widget:
-                    name_label = species_widget.findChild(QtWidgets.QLabel)
-                    if name_label:
-                        species_name = name_label.text()
-                        # 如果这个物种在拟合结果中，更新系数
-                        if species_name in coeff_map:
-                            coeff_widget = self.species_table.cellWidget(row, 3)
-                            if isinstance(coeff_widget, QtWidgets.QDoubleSpinBox):
-                                coeff_widget.setValue(coeff_map[species_name])
-                                # 也更新数据结构
-                                if row < len(self.fitting_control_widget._unified_species_data):
-                                    self.fitting_control_widget._unified_species_data[row]["coefficient"] = coeff_map[species_name]
-        finally:
-            self.fitting_control_widget._updating = False
-        self.fitting_control_widget._refresh_candidate_summary()
 
     def load_database(self, path: str | os.PathLike[str] | None = None, show_message: bool = True):
         path = str(path or "").strip()
@@ -1243,8 +1286,10 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
         config = self.per_mz_config[mz]
         selected_species = config.get("selected_species", [])
-        coefficients = config.get("coefficients", {})
         locked_ids = config.get("locked_ids", [])
+        # Manual input coefficients were removed from the UI. Discard legacy
+        # values so an old project cannot silently switch the solver mode.
+        config["coefficients"] = {}
 
         # 还原物种选择（直接更新数据结构，然后刷新表格）
         selected_species_ids = {int(s.get("id", -1)) for s in selected_species}
@@ -1253,7 +1298,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         for species in unified_data:
             species_id = int(species.get("id", -1))
             species["is_enabled"] = species_id in selected_species_ids
-            species["coefficient"] = coefficients.get(species_id, 0.0)
+            species["coefficient"] = 0.0
             species["is_locked"] = species_id in locked_ids_set
 
         # 同步锁定列表
@@ -1554,6 +1599,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                     status_code = "CONFIRMED"
                 self.fitting_control_widget.show_fit_result(self.current_fit, status_code)
                 self.result_display_widget.update_fit_table(self.current_fit)
+        self.refresh_current_plot()
 
     def _schedule_ie_for_fit_results(self, results: dict) -> None:
         for mz, fit_result in results.items():
@@ -1573,7 +1619,6 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         """从统一的物种表格中获取当前配置状态"""
         selected_species = []
         locked_ids = []
-        coefficients = {}
 
         # 从统一的数据结构中提取
         unified_data = self.fitting_control_widget._unified_species_data
@@ -1587,26 +1632,21 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
                 species_id = int(species.get("id", row + 1))
 
-                # Col 3: 系数（QDoubleSpinBox）
-                coeff_widget = self.species_table.cellWidget(row, 3)
-                if isinstance(coeff_widget, QtWidgets.QDoubleSpinBox):
-                    coefficients[species_id] = coeff_widget.value()
-
                 # 锁定状态：从数据结构中读取 is_locked 字段
                 if species.get("is_locked", False):
                     locked_ids.append(species_id)
 
         return {
             "selected_species": selected_species,
-            "coefficients": coefficients,
+            "coefficients": {},
             "locked_ids": locked_ids,
         }
 
-    def _rebuild_manual_fit(self):
-        """使用候选面板状态重建拟合曲线(NNLS客户端预览)"""
+    def _rebuild_fit_preview(self):
+        """使用当前启用候选重建 NNLS 拟合预览。"""
         if self.current_mz is None or self.current_mz not in self.curves:
             return
-        if self.fitting_control_widget._candidate_updating:
+        if self.fitting_control_widget.candidate_update_in_progress:
             return
 
         panel_state = self._get_candidate_panel_state()
@@ -1654,24 +1694,11 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
         design = np.column_stack(design_columns)
 
-        # 检查用户是否手动编辑了系数
-        user_coefficients = panel_state["coefficients"]
-        species_ids = [int(s.get("id", idx + 1)) for idx, s in enumerate(selected)]
-        has_manual_coefficients = any(user_coefficients.get(sid, 0.0) > 0.0 for sid in species_ids)
-
-        if has_manual_coefficients:
-            # 用户手动编辑了系数，直接使用用户的值
-            coeffs = np.array([
-                user_coefficients.get(species_id, 0.0)
-                for species_id in species_ids
-            ], dtype=float)
-        else:
-            # 没有手动编辑，使用 NNLS 自动优化
-            try:
-                from scipy.optimize import nnls
-                coeffs, _ = nnls(design, intensities)
-            except Exception:
-                return
+        try:
+            from scipy.optimize import nnls
+            coeffs, _ = nnls(design, intensities)
+        except Exception:
+            return
 
         fitted = design @ coeffs
         ss_res = np.sum((intensities - fitted) ** 2)
@@ -1728,8 +1755,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.fitting_control_widget.show_fit_result(manual_model, "PREVIEW")
         self._update_result_detail_button()
         self.status_label.setText(
-            f"m/z {self._mz_text_for_key(self.current_mz)} 参数预览 · "
-            f"R²={r_squared:.4f} · 点击拟合后方可确认"
+            "候选已调整，当前显示实时预览；点击“拟合当前”生成正式结果"
         )
 
     def get_filtered_database(self) -> list:
@@ -1760,10 +1786,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             ]
             self._fit_all_input_configs[mz] = {
                 "selected_species": candidates,
-                "coefficients": {
-                    int(species.get("id", idx + 1)): 0.0
-                    for idx, species in enumerate(candidates)
-                },
+                "coefficients": {},
                 "locked_ids": [
                     int(species.get("id", idx + 1))
                     for idx, species in enumerate(candidates)
@@ -1881,7 +1904,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                     input_config = getattr(self, "_fit_all_input_configs", {}).get(mz, {})
                     self.per_mz_config[mz] = {
                         "selected_species": list(input_config.get("selected_species", [])),
-                        "coefficients": dict(input_config.get("coefficients", {})),
+                        "coefficients": {},
                         "locked_ids": list(input_config.get("locked_ids", [])),
                     }
                     # 重新用刚保存的配置计算哈希，确保 _derive_result_status 判断为 COMPLETED
@@ -1946,7 +1969,6 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             if mz in self.per_mz_config:
                 config = self.per_mz_config[mz]
                 selected_species = config.get("selected_species", [])
-                coefficients = config.get("coefficients", {})
                 locked_ids = config.get("locked_ids", [])
             else:
                 # 如果没有保存的配置，使用全局自动识别
@@ -1956,32 +1978,18 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                     item for item in filtered_db
                     if int(item.get("mz", -1)) == nominal_mz
                 ]
-                coefficients = {}
                 locked_ids = []
 
             if not selected_species:
                 results[mz] = {'success': False, 'error': '无匹配物种'}
                 continue
 
-            # 检查是否有手动设置的系数
-            species_ids = [int(s.get("id", idx + 1)) for idx, s in enumerate(selected_species)]
-            has_manual_coefficients = any(coefficients.get(sid, 0.0) > 0.0 for sid in species_ids)
-
-            if has_manual_coefficients:
-                # 使用保存的系数
-                fit_model = fit_species_combination_with_curve(
-                    selected_species,
-                    energies,
-                    intensities,
-                    coefficient_mode="manual", coefficients=coefficients,
-                )
-            else:
-                # 使用 NNLS 自动优化
-                fit_model = fit_species_combination_with_curve(
-                    selected_species,
-                    energies,
-                    intensities,
-                )
+            fit_model = fit_species_combination_with_curve(
+                selected_species,
+                energies,
+                intensities,
+                locked_species_ids=locked_ids,
+            )
 
             fit_result_species = fit_model.get('species', [])
             # Phase 2: 保存版本快照
@@ -2024,8 +2032,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 fit_species = result['model'].get('species', [])
                 self.per_mz_config[mz] = {
                     "selected_species": fit_species,
-                    "coefficients": {int(s.get("id", idx + 1)): float(s.get("coefficient", 0.0))
-                                     for idx, s in enumerate(fit_species)},
+                    "coefficients": {},
                     "locked_ids": [],
                 }
                 new_hash = self._get_per_mz_config_hash(mz)
@@ -2086,6 +2093,9 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
     def export_pie_results(self):
         """导出PIE物种鉴定结果到Excel"""
         from bl03u_masstool.core.export_pie_results import export_pie_results_to_excel
+
+        if not self._ensure_isotope_qc_gate("导出已验证鉴定结果"):
+            return
 
         # 检查是否有拟合结果
         if not hasattr(self, 'all_fit_results') or not self.all_fit_results:
@@ -2161,11 +2171,18 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         if self._fit_preview_active or current_status != "COMPLETED":
             self.status_label.setText("参数已变化，请先重新拟合后再确认鉴定")
             return
+        if not self._ensure_isotope_qc_gate("确认物种"):
+            return
 
         # 标记为已确认
         self._fit_preview_active = False
         result["_confirmed"] = True
         result["_confirmed_timestamp"] = time.time()
+        override_reason = str(
+            self._last_analysis_source_info.get("qc_override_reason") or ""
+        )
+        if override_reason:
+            result["_qc_override_reason"] = override_reason
         self._store_current_species_assignments(result, assignment_status="confirmed")
 
         # 更新右侧面板确认状态
@@ -2177,14 +2194,51 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.populate_mz_list()
         self.pie_state_dirty = True
 
-        species_list = result.get("model", {}).get("species", [])
-        names = ", ".join(s.get("species", "?") for s in species_list[:3])
-        r2 = result.get("r_squared", 0.0)
-        self.status_label.setText(
-            f"m/z {self._mz_text_for_key(self.current_mz)} 已确认: "
-            f"{names}  R²={r2:.4f}"
-        )
+        self.status_label.setText("鉴定结果已确认")
         self._update_action_state()
+
+    def _ensure_isotope_qc_gate(self, action_label: str) -> bool:
+        status = str(
+            self._last_analysis_source_info.get(
+                "isotope_qc_status",
+                "not_evaluated",
+            )
+        )
+        if status != "fail":
+            return True
+        existing_reason = str(
+            self._last_analysis_source_info.get("qc_override_reason") or ""
+        ).strip()
+        if existing_reason:
+            return True
+        qc_rows = list(self._last_analysis_source_info.get("isotope_qc", []) or [])
+        failures = [
+            (
+                f"{row.get('light_mz', '?')}/{row.get('heavy_mz', '?')}: "
+                f"{row.get('reason') or '未恢复理论同位素比例'}"
+            )
+            for row in qc_rows
+            if isinstance(row, dict) and row.get("status") == "fail"
+        ]
+        reason, accepted = QtWidgets.QInputDialog.getMultiLineText(
+            self,
+            "同位素核验未通过",
+            f"{action_label}默认被禁止。\n"
+            + ("\n".join(failures) if failures else "同位素核验未通过")
+            + "\n\n如需覆盖，请填写可审计原因：",
+        )
+        reason = str(reason or "").strip()
+        if not accepted or not reason:
+            self.status_label.setText(
+                f"{action_label}已取消：同位素核验失败且未记录覆盖原因"
+            )
+            return False
+        self._last_analysis_source_info["qc_override_reason"] = reason
+        self._analysis_provenance["qc_override_reason"] = reason
+        if self._has_project_scope() and self.project_settings is not None:
+            self.project_settings.pie_qc_override_reason = reason
+        self.pie_state_dirty = True
+        return True
 
     def _store_current_species_assignments(
         self,
@@ -2294,17 +2348,6 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 exact_mz,
             )
 
-    # ── Force species management (delegated to FittingControlWidget) ───────
-
-    def add_force_species(self, species_name: str):
-        """向后兼容：锁定候选物种（推荐使用 lock_candidate）"""
-        self.fitting_control_widget.lock_candidate(species_name)
-        self._on_locked_species_changed()
-
-    def get_force_species(self) -> list:
-        """向后兼容：获取锁定候选物种列表（推荐使用 get_locked_species）"""
-        return self.fitting_control_widget.get_locked_species()
-
     # ── Fit stats helper ─────────────────────────────────────────────────
 
     def _update_fit_stats(self, fitted_count: int, total_count: int, avg_r_squared: float | None = None):
@@ -2345,20 +2388,35 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             or (self.project_settings.output_dir and self.project_settings.output_dir != "output")
         )
 
+    def _temporary_settings_context_key(self) -> str:
+        if (
+            not self._temporary_project_snapshot_available
+            or not self._has_project_context()
+            or self.project_settings is None
+        ):
+            return "__factory__"
+        return str(self.project_settings.output_dir or self.project_settings.project_name)
+
     def _ensure_temporary_settings(self) -> ProjectSettings:
-        if self.temporary_settings is None:
-            self.temporary_settings_source = "default"
-            self.temporary_settings = self._build_temporary_settings_snapshot("default")
+        context_key = self._temporary_settings_context_key()
+        if (
+            self.temporary_settings is None
+            or getattr(self, "_temporary_settings_context", None) != context_key
+        ):
+            source = (
+                "project"
+                if self._temporary_project_snapshot_available
+                and self._has_project_context()
+                else "factory"
+            )
+            self.temporary_settings_source = source
+            self.temporary_settings = self._build_temporary_settings_snapshot(source)
             self.temporary_settings_modified = False
+            self._temporary_settings_context = context_key
         return self.temporary_settings
 
     def _build_temporary_settings_snapshot(self, source: str) -> ProjectSettings:
-        return build_temporary_settings(
-            source,
-            self.project_settings,
-            runtime_calibration=self._global_calibration,
-            runtime_normalization=self._global_normalization_settings,
-        )
+        return build_temporary_settings(source, self.project_settings)
 
     def _effective_analysis_settings(self) -> ProjectSettings:
         if self._has_project_scope() and self.project_settings is not None:
@@ -2366,18 +2424,80 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         return self._ensure_temporary_settings()
 
     def _edit_temporary_settings(self) -> None:
-        dialog = TemporaryAnalysisSettingsDialog(
-            self._ensure_temporary_settings(),
-            self,
-            initial_tab="function",
-            visible_function_pages=("spectrum", "pie"),
-            initial_function_page="pie",
+        self._edit_analysis_settings()
+
+    def _edit_analysis_settings(self) -> None:
+        project_scope = self._has_project_scope()
+        current = (
+            self.project_settings
+            if project_scope and self.project_settings is not None
+            else self._ensure_temporary_settings()
         )
+        tracked_fields = ANALYSIS_PARAMETER_FIELDS["pie"] + (
+            () if project_scope else TEMPORARY_SHARED_PARAMETER_FIELDS
+        )
+        before = tuple(
+            deepcopy(getattr(current, field_name))
+            for field_name in tracked_fields
+        )
+        had_active_result = bool(self.curves) or not self.analysis_df.empty
+        folders, _merge_method = self._analysis_source_selection()
+        dialog = AnalysisSettingsDialog(
+            current,
+            self,
+            scope="project" if project_scope else "temporary",
+            page="pie",
+            pie_multi_segment=len(folders) > 1,
+        )
+        dialog.shared_parameters_requested.connect(self._open_shared_parameters)
         if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
             return
-        self.temporary_settings = dialog.settings()
-        self.temporary_settings_modified = True
-        self._apply_temporary_settings_to_runtime()
+        edited = dialog.settings()
+        if project_scope:
+            window = self.window()
+            if hasattr(window, "apply_analysis_settings_from_tool"):
+                saved = window.apply_analysis_settings_from_tool("pie", edited)
+            else:
+                manager = ProjectSettingsManager()
+                if not manager.has_project_path():
+                    QtWidgets.QMessageBox.warning(
+                        self,
+                        "尚未打开项目",
+                        "无法保存项目参数；请先打开项目。",
+                    )
+                    return
+                patch = {
+                    field_name: deepcopy(getattr(edited, field_name))
+                    for field_name in ANALYSIS_PARAMETER_FIELDS["pie"]
+                }
+                saved = manager.update_module_settings("pie", patch)
+            if saved is None:
+                return
+            self.project_settings = deepcopy(saved)
+        else:
+            self.temporary_settings = edited
+            self.temporary_settings_modified = True
+            self._apply_temporary_settings_to_runtime()
+
+        effective = self._effective_analysis_settings()
+        after = tuple(
+            deepcopy(getattr(effective, field_name))
+            for field_name in tracked_fields
+        )
+        if before != after:
+            self._clear_loaded_pie_curve_view()
+            if had_active_result:
+                self._show_empty_curve_source(
+                    warning="项目参数已变化，请重新生成曲线"
+                    if project_scope
+                    else "临时参数已变化，请重新生成曲线"
+                )
+            self.status_label.setText(
+                "项目参数已变化，请重新生成曲线"
+                if project_scope
+                else "临时参数已应用，请生成 PIE 曲线"
+            )
+        self._refresh_parameter_summary()
 
     def _apply_temporary_settings_to_runtime(self) -> None:
         if self._has_project_scope():
@@ -2392,7 +2512,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.integration_method_label.setText(
             f"积分方式：{self._integration_method_label(ps.pie_integration_method)}"
         )
-        self.photon_correction_check.setChecked(ps.pie_photon_mode != "off")
+        self._set_photon_mode_ui(ps.pie_photon_mode)
         mode = ps.pie_replicate_mode if ps.pie_replicate_mode in {"mean", "sum"} else "off"
         self.replicate_enabled_check.setChecked(mode != "off")
         index = self.replicate_mode_combo.findData(mode if mode != "off" else "mean")
@@ -2504,16 +2624,22 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.temporary_params_panel.setVisible(not use_project)
         self.common_params_button.setVisible(use_project)
         self.temporary_params_button.setEnabled(not busy)
-        source_text = "本次已修改" if self.temporary_settings_modified else "默认参数，可修改"
-        self.temporary_params_title_label.setText("临时数据参数")
+        source_text = (
+            "本次已修改"
+            if self.temporary_settings_modified
+            else (
+                "项目参数副本"
+                if self.temporary_settings_source == "project"
+                else "程序默认值"
+            )
+        )
+        self.temporary_params_title_label.setText("临时参数 · 不写入项目")
         self.temporary_params_label.setText(source_text)
-        self.temporary_params_button.setText("编辑参数…")
+        self.temporary_params_button.setText("编辑临时参数…")
         self.temporary_params_button.setToolTip(
             "编辑本次临时数据分析参数；不会写回项目"
         )
-        self.common_params_action.setText(
-            "分析默认值…" if use_project else "编辑参数…"
-        )
+        self.common_params_action.setText("编辑项目参数…")
         self.edit_project_action.setEnabled(self._has_project_context())
         self.temporary_segments_button.setVisible(not use_project)
         self.temporary_segments_button.setEnabled(
@@ -2523,16 +2649,6 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             and bool(self.folder_edit.text().strip())
         )
         self._update_temporary_segment_button()
-        self.curve_batch_button.setVisible(
-            use_project and self._curve_storage_mode() == "sqlite"
-        )
-        self.curve_batch_button.setEnabled(
-            use_project
-            and self._curve_storage_mode() == "sqlite"
-            and not busy
-            and self.project_settings is not None
-            and project_curve_database_path(self.project_settings).is_file()
-        )
         if use_project and not has_project_path:
             self.status_label.setText("项目未登记 PIE 数据源")
 
@@ -2855,91 +2971,6 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.folder_edit.setText(folder)
             self._start_temporary_segment_scan(folder, open_selector=True)
 
-    def open_curve_batch_selector(self) -> None:
-        if self.project_settings is None:
-            QtWidgets.QMessageBox.warning(self, "PIE分析批次", "当前没有项目上下文")
-            return
-        database_path = project_curve_database_path(self.project_settings)
-        dialog = CurveBatchSelectorDialog(database_path, parent=self)
-        if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
-            return
-        dataset_id = dialog.selected_dataset_id
-        if dataset_id is None:
-            return
-        if dialog.requested_action == "set_current":
-            try:
-                set_current_curve_dataset(database_path, dataset_id)
-            except Exception as exc:
-                QtWidgets.QMessageBox.critical(self, "设置当前批次失败", str(exc))
-                return
-            self.status_label.setText(
-                f"已将数据集 #{dataset_id} 设为项目当前；本页查看对象未改变"
-            )
-            if self.curve_database_dataset_id == dataset_id:
-                self._show_active_curve_source(origin="SQLite 已加载结果")
-            return
-        if dialog.requested_action in {"mark_stale", "archive"}:
-            status = (
-                "stale"
-                if dialog.requested_action == "mark_stale"
-                else "archived"
-            )
-            try:
-                set_curve_dataset_validity(
-                    database_path,
-                    dataset_id=dataset_id,
-                    validity_status=status,
-                    reason=(
-                        "用户在批次管理中标记过期"
-                        if status == "stale"
-                        else "用户在批次管理中归档"
-                    ),
-                )
-            except Exception as exc:
-                QtWidgets.QMessageBox.critical(self, "更新批次状态失败", str(exc))
-                return
-            self.status_label.setText(
-                f"数据集 #{dataset_id} 已{'标记过期' if status == 'stale' else '归档'}"
-            )
-            if self.curve_database_dataset_id == dataset_id:
-                self._clear_loaded_pie_curve_view()
-                self._show_empty_curve_source(
-                    warning=f"正在查看的数据集 #{dataset_id} 已"
-                    f"{'标记过期' if status == 'stale' else '归档'}"
-                )
-            return
-        datasets = list_curve_datasets_read_only(
-            database_path,
-            curve_type="pie",
-            include_stale=True,
-        )
-        dataset = next(
-            (item for item in datasets if item.dataset_id == dataset_id),
-            None,
-        )
-        if dataset is None:
-            QtWidgets.QMessageBox.critical(
-                self,
-                "加载批次失败",
-                f"数据集 #{dataset_id} 已不存在",
-            )
-            return
-        provenance = dataset.metadata.get("analysis_provenance")
-        if not isinstance(provenance, dict):
-            provenance = {}
-        try:
-            self._activate_sqlite_dataset(
-                dataset_id,
-                metadata=dataset.metadata,
-                cache_key=str(provenance.get("cache_key") or ""),
-            )
-        except Exception as exc:
-            QtWidgets.QMessageBox.critical(self, "加载批次失败", str(exc))
-            return
-        self.status_label.setText(
-            f"正在查看数据集 #{dataset_id}；未改变项目当前批次"
-        )
-
     def set_project_settings(
         self,
         ps: ProjectSettings,
@@ -2966,9 +2997,13 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         )
         if activate_project_scope is None:
             activate_project_scope = (self._has_project_scope() or bool(self.project_dir)) and has_project_context
+        self._temporary_project_snapshot_available = bool(
+            has_project_context
+            and (activate_project_scope or self._has_project_scope())
+        )
         previous_project_dir = self.project_dir
-        self.project_settings = ps
-        self.temporary_settings_source = "default"
+        self.project_settings = deepcopy(ps)
+        ps = self.project_settings
         database_path = resolve_species_database_path(ps.pics_database_path)
         normalized_database_path = str(database_path)
         if normalized_database_path != self._loaded_database_path:
@@ -2984,7 +3019,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
         # Keep PIE preprocessing, cache keys, and saved fit-state fingerprints
         # on the active project's TOF -> m/z calibration.  Otherwise this page
-        # can retain the global/default Calibration supplied by its constructor.
+        # can retain the standalone session Calibration supplied by its constructor.
         if self._has_project_scope():
             self.calibration = ps.to_calibration()
             self.normalization_settings = ps.to_normalization_settings()
@@ -3012,11 +3047,12 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             pie_path = self.folder_edit.text().strip() or "---"
         self.summary_project_label.setText(f"项目：{project_name}")
         self.summary_system_label.setText(f"体系：{system}")
+        self.summary_system_label.setVisible(bool(str(ps.system or "").strip()))
         self.summary_data_label.setText(
             f"{'项目管理' if self._has_project_scope() else '临时数据'}：{pie_path}"
         )
-        if hasattr(self, "photon_correction_check"):
-            self.photon_correction_check.setChecked(ps.pie_photon_mode != "off")
+        if hasattr(self, "photon_mode_combo"):
+            self._set_photon_mode_ui(ps.pie_photon_mode)
         if not self._has_project_scope():
             self._apply_temporary_settings_to_runtime()
         self._refresh_pie_source_controls()
@@ -3378,30 +3414,18 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.pie_state_dirty = True
             return (False, str(e))
 
-    def persist_per_mz_config_state(self) -> Tuple[bool, str | None]:
-        """Backward compatibility alias for persist_pie_project_state()."""
-        return self.persist_pie_project_state()
-
     def mark_pie_config_changed(self) -> None:
         """Mark PIE configuration as changed (dirty).
 
         Called when user modifies per-m/z configuration:
         - Candidate species selection
-        - Locked coefficients
-        - Forced species
+        - Locked candidates
         - Other per-m/z constraints
         """
         self.pie_state_dirty = True
 
     def open_common_parameters(self):
-        if not self._has_project_scope():
-            self._edit_temporary_settings()
-            return
-        if self._open_project_analysis_defaults():
-            return
-        dialog = CommonParametersDialog(self.normalization_settings, self.calibration, self)
-        dialog.exec()
-        self.calibration = load_calibration_config()
+        self._edit_analysis_settings()
 
     def _pie_cache_dir(self) -> Path:
         if self._has_project_scope() and self.project_settings is not None and self.project_settings.output_dir:
@@ -3443,7 +3467,10 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 unreadable = True
             for path in paths:
                 try:
-                    if not path.is_file() or path.suffix.lower() != ".txt":
+                    if (
+                        not path.is_file()
+                        or path.suffix.lower() not in PIE_SPECTRUM_SUFFIXES
+                    ):
                         continue
                     stat = path.stat()
                     files.append(
@@ -3471,7 +3498,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         peak_config = ps.to_peak_detection_config()
         calibration = ps.to_calibration()
         normalization = ps.to_normalization_settings()
-        photon_mode = "none" if self.photon_correction_check.isChecked() else "off"
+        photon_mode = str(ps.pie_photon_mode)
         manual_peak_path = None
         if self._has_project_scope():
             resolved_peak = resolve_active_peak_file(
@@ -3496,13 +3523,24 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             "recursive": bool(ps.pie_recursive),
             "integration_method": str(ps.pie_integration_method),
             "merge_method": merge_method,
-            "replicate_mode": self._current_replicate_mode(),
+            "replicate_mode": str(ps.pie_replicate_mode),
             "manual_peak": self._path_fingerprint(manual_peak_path),
             "active_peak_set_id": str(ps.active_peak_set_id or ""),
             "peak_set_origin": peak_set.origin if peak_set is not None else "",
             "photon_mode": photon_mode,
+            "normalize_by_time": bool(normalization.pie_time_normalize),
             "mass_discrimination": 1.0,
             "light_source": str(normalization.light_source),
+            "segment_discovery_policy": "immediate_children_v2",
+            "segment_scaling_policy": {
+                "version": 3,
+                "strategy": "shared_robust_log_median",
+                "min_overlap_energies": 3,
+                "min_channels": 3,
+                "min_snr": 10.0,
+                "snr_method": "poisson_peak_window",
+            },
+            "isotope_qc_pairs": list(ps.pie_isotope_qc_pairs),
         }
 
     def _pie_cache_parameters(
@@ -3691,7 +3729,8 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 (
                     dataset
                     for dataset in datasets
-                    if dataset.validity_status != "archived"
+                    if dataset.dataset_group == self.PIE_DATASET_GROUP
+                    and dataset.validity_status != "archived"
                     and (
                         dataset.analysis_key == cache_key
                         or str(
@@ -3753,7 +3792,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 self.status_label.setText(f"SQLite曲线读取失败：{exc}")
                 self._update_action_state()
                 return
-            self.status_label.setText("已从项目SQLite曲线库按需载入PIE批次")
+            self.status_label.setText("已从项目SQLite曲线库载入PIE结果")
             self._update_action_state()
             return
         if isinstance(result, dict) and "cached_result" in result:
@@ -3867,7 +3906,6 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         recursive = ps.pie_recursive
         integration_method = ps.pie_integration_method
         prefer_gaussian = integration_method == "gaussian"
-        ps.pie_prefer_gaussian = prefer_gaussian
         manual_peak_path = None
         if self._has_project_scope():
             try:
@@ -3884,17 +3922,13 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         threshold_end = peak_config.threshold_end
         min_intensity = peak_config.min_intensity
         settings = ps.to_normalization_settings()
-        photon_mode = "none" if self.photon_correction_check.isChecked() else "off"
-        ps.pie_photon_mode = photon_mode
+        photon_mode = str(ps.pie_photon_mode)
         settings.pie_photon_mode = photon_mode
-        self.normalization_settings.pie_photon_mode = photon_mode
         photon_normalize = photon_mode != "off"
         photon_reference_mode = "none" if photon_mode == "off" else photon_mode
         mass_discrimination = 1.0
         light_source = settings.light_source
         calibration = ps.to_calibration()
-        ps.pie_replicate_mode = self._current_replicate_mode()
-        self._save_project_analysis_switches()
         self.set_busy(True, message)
         self._begin_analysis_progress(message)
         self._analysis_request_id += 1
@@ -3932,15 +3966,20 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 manual_peak_path=manual_peak_path,
                 photon_normalize=photon_normalize,
                 photon_reference_mode=photon_reference_mode,
+                normalize_by_time=bool(settings.pie_time_normalize),
+                isotope_qc_pairs=list(ps.pie_isotope_qc_pairs),
                 mass_discrimination=mass_discrimination,
                 light_source=light_source,
-                replicate_mode=self._current_replicate_mode(),
+                replicate_mode=str(ps.pie_replicate_mode),
                 vote_threshold=peak_config.vote_threshold,
                 min_intensity_for_single_vote=peak_config.min_intensity_for_single_vote,
                 mz_tolerance=peak_config.mz_tolerance,
                 auto_discover_segments=(
-                    not self._has_project_scope()
-                    and not self._temporary_segment_selection_ready()
+                    len(folders) == 1
+                    and (
+                        self._has_project_scope()
+                        or not self._temporary_segment_selection_ready()
+                    )
                 ),
                 source_scope="project" if self._has_project_scope() else "temporary",
                 selection_explicit=(
@@ -4023,7 +4062,12 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         folder = self.folder_edit.text().strip()
         if self._temporary_segment_selection_ready():
             folders = list(self._temporary_selected_segment_folders)
-            return folders, "low_energy_dominant" if len(folders) > 1 else None
+            return (
+                folders,
+                self._effective_analysis_settings().pie_merge_method
+                if len(folders) > 1
+                else None,
+            )
         return ([folder] if folder else []), None
 
     def _temporary_segment_selection_ready(self) -> bool:
@@ -4032,13 +4076,34 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             and self._temporary_segment_root == self.folder_edit.text().strip()
         )
 
-    def _save_project_analysis_switches(self) -> None:
-        if not self._has_project_scope() or self.project_settings is None:
-            return
-        manager = ProjectSettingsManager()
-        if manager.has_project_path():
-            manager.set(self.project_settings)
-            manager.save()
+    def _current_photon_mode(self) -> str:
+        mode = str(self._effective_analysis_settings().pie_photon_mode or "none")
+        return mode if mode in {"off", "none", "first"} else "none"
+
+    def _set_photon_mode_ui(self, mode: str | None) -> None:
+        normalized = str(mode or "none").strip().lower()
+        if normalized not in {"off", "none", "first"}:
+            normalized = "none"
+        index = self.photon_mode_combo.findData(normalized)
+        if index >= 0:
+            blocker = QtCore.QSignalBlocker(self.photon_mode_combo)
+            self.photon_mode_combo.setCurrentIndex(index)
+            del blocker
+        checkbox_blocker = QtCore.QSignalBlocker(self.photon_correction_check)
+        self.photon_correction_check.setChecked(normalized != "off")
+        del checkbox_blocker
+        self._refresh_parameter_summary()
+
+    def _on_photon_mode_changed(self, _index: int) -> None:
+        blocker = QtCore.QSignalBlocker(self.photon_correction_check)
+        self.photon_correction_check.setChecked(
+            self._current_photon_mode() != "off"
+        )
+        del blocker
+        self._refresh_parameter_summary()
+
+    def _on_legacy_photon_checkbox_toggled(self, checked: bool) -> None:
+        self._set_photon_mode_ui("none" if checked else "off")
 
     def _on_replicate_enabled_changed(self, checked: bool) -> None:
         self.replicate_mode_combo.setEnabled(checked)
@@ -4047,16 +4112,26 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
     def _refresh_parameter_summary(self) -> None:
         if not hasattr(self, "parameter_summary_label"):
             return
-        photon_text = "开" if self.photon_correction_check.isChecked() else "关"
-        integration_text = self.integration_method_label.text().replace("积分方式：", "")
-        replicate_text = (
-            self.replicate_mode_combo.currentText()
-            if self.replicate_enabled_check.isChecked()
-            else "关"
+        ps = self._effective_analysis_settings()
+        photon_text = {
+            "off": "关闭",
+            "none": "按IO归一",
+            "first": "按IO及参考值归一",
+        }.get(str(ps.pie_photon_mode), "按IO归一")
+        time_text = "扫描时间归一" if ps.pie_time_normalize else "不按扫描时间归一"
+        integration_text = self._integration_method_label(ps.pie_integration_method)
+        replicate_text = {
+            "off": "关",
+            "mean": "平均",
+            "sum": "累加",
+        }.get(str(ps.pie_replicate_mode), "关")
+        scope_text = (
+            "项目参数"
+            if self._has_project_scope()
+            else "临时参数 · 不写入项目"
         )
-        scope_text = "项目参数" if self._has_project_scope() else "本次参数"
         text = (
-            f"{scope_text}：光强校正 {photon_text} · "
+            f"{scope_text}：{photon_text} · {time_text} · "
             f"积分 {integration_text} · 重复采集 {replicate_text}"
         )
         self.parameter_summary_label.setText(text)
@@ -4097,7 +4172,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                     "imported": "导入",
                     "workbench_auto": "工作台自动",
                     "workbench_manual": "工作台手动",
-                    "spectrum_workbench": "工作台批准",
+                    "spectrum_workbench": "工作台保存",
                 }.get(record.origin, record.origin) if record is not None else ""
                 details.append(
                     f"卡峰集：{origin + ' · ' if origin else ''}{peak_set}"
@@ -4180,11 +4255,10 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 details=[reason, *self._pie_source_details()],
             )
             return
-        role = "当前结果" if dataset_state.is_current else "历史结果"
+        role = "当前结果" if dataset_state.is_current else "已保存结果"
         details = [
             "正式读取来源：项目 SQLite 曲线库",
-            f"dataset_id：{dataset_state.dataset_id}",
-            f"数据集状态：有效 · {role}",
+            f"结果状态：有效 · {role}",
         ]
         if dataset_state.created_at:
             try:
@@ -4211,10 +4285,10 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             "imported": "导入",
             "workbench_auto": "工作台自动",
             "workbench_manual": "工作台手动",
-            "spectrum_workbench": "工作台批准",
+            "spectrum_workbench": "工作台保存",
         }.get(peak_record.origin, peak_record.origin) if peak_record is not None else ""
         self._set_curve_source_indicator(
-            f"当前曲线：SQLite #{dataset_state.dataset_id} · 有效"
+            "当前曲线：项目 SQLite · 有效"
             + (f" · 卡峰：{peak_origin}" if peak_origin else ""),
             state="valid",
             details=details,
@@ -4255,9 +4329,8 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         return False
 
     def _current_replicate_mode(self) -> str:
-        if not self.replicate_enabled_check.isChecked():
-            return "off"
-        return str(self.replicate_mode_combo.currentData() or "mean")
+        mode = str(self._effective_analysis_settings().pie_replicate_mode or "off")
+        return mode if mode in {"off", "mean", "sum"} else "off"
 
     def set_busy(self, busy: bool, message: str) -> None:
         self._busy = busy
@@ -4333,6 +4406,9 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         has_database = bool(self.database)
 
         self.analyze_button.setEnabled(self._has_analysis_source() and not busy)
+        self.analyze_button.setText(
+            "刷新 PIE 曲线" if has_curves else "生成 PIE 曲线"
+        )
         self.export_button.setEnabled(has_curves and not busy)
         self.export_plot_button.setEnabled(has_curves and not busy)
         self.export_curve_action.setEnabled(has_curves and not busy)
@@ -4344,6 +4420,25 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.more_actions_btn.setEnabled((has_curves or has_fit_records) and not busy)
         self.clear_fits_action.setEnabled(has_fit_records and not busy)
         self.refit_selected_action.setEnabled(has_curves and has_selection and not busy)
+        current_curve = (
+            self.curves[self.current_mz]
+            if self.current_mz is not None and self.current_mz in self.curves
+            else None
+        )
+        raw_spectrum_available = (
+            current_curve is not None
+            and self._curve_has_raw_spectrum_source(current_curve)
+        )
+        self.raw_spectrum_qc_action.setEnabled(
+            raw_spectrum_available and not busy
+        )
+        self.raw_spectrum_qc_action.setToolTip(
+            (
+                "在独立质控窗口中检查当前 m/z 各能量点的原始谱、积分窗口和峰顶"
+                if raw_spectrum_available
+                else "当前曲线没有可定位的原始谱；请从 TXT 原始数据重新生成 PIE 曲线"
+            )
+        )
         self.exhaustive_action.setEnabled(
             has_curves
             and len(selected_mzs) == 1
@@ -4407,6 +4502,8 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         manual_peak_path: str | None = None,
         photon_normalize: bool = True,
         photon_reference_mode: str = "none",
+        normalize_by_time: bool = True,
+        isotope_qc_pairs: list[dict] | None = None,
         mass_discrimination: float = 1.0,
         light_source: str = "io",
         replicate_mode: str = "off",
@@ -4464,6 +4561,8 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 manual_peak_path=manual_peak_path,
                 photon_normalize=photon_normalize,
                 photon_reference_mode=photon_reference_mode,
+                normalize_by_time=normalize_by_time,
+                isotope_qc_pairs=isotope_qc_pairs,
                 mass_discrimination=mass_discrimination,
                 light_source=light_source,
                 merge_method=merge_method,
@@ -4502,6 +4601,8 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 manual_peak_path=manual_peak_path,
                 photon_normalize=photon_normalize,
                 photon_reference_mode=photon_reference_mode,
+                normalize_by_time=normalize_by_time,
+                isotope_qc_pairs=isotope_qc_pairs,
                 mass_discrimination=mass_discrimination,
                 light_source=light_source,
                 replicate_mode=replicate_mode,
@@ -4518,6 +4619,17 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             "folders": list(folders),
             "source_scope": source_scope,
             "selection_explicit": selection_explicit,
+            "normalize_by_time": bool(normalize_by_time),
+            "segment_scaling_diagnostics": list(
+                analysis_df.attrs.get("segment_scaling_diagnostics", [])
+            ),
+            "segment_scaling_policy": dict(
+                analysis_df.attrs.get("segment_scaling_policy", {})
+            ),
+            "isotope_qc": list(analysis_df.attrs.get("isotope_qc", [])),
+            "isotope_qc_status": str(
+                analysis_df.attrs.get("isotope_qc_status", "not_evaluated")
+            ),
         }
         if progress_callback is not None:
             progress_callback(94, "正在构建各 m/z 的 PIE 曲线…")
@@ -4548,13 +4660,15 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 ),
             )
         )
+        analysis_provenance = dict(self._analysis_provenance)
+        analysis_provenance.setdefault("cache_key", analysis_key)
         dataset_id = store_curve_dataset_version(
             database_path,
             curve_type="pie",
             curves=self.curves,
-            dataset_group="pie:project",
+            dataset_group=self.PIE_DATASET_GROUP,
             analysis_key=analysis_key,
-            name="项目PIE曲线",
+            name="项目PIE结果",
             source_label="\n".join(folders),
             dataset_role="observed",
             metadata={
@@ -4564,7 +4678,36 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                     "merge_method",
                     self.project_settings.pie_merge_method,
                 ),
-                "analysis_provenance": self._analysis_provenance,
+                "analysis_provenance": analysis_provenance,
+                "segment_scaling_diagnostics": list(
+                    self._last_analysis_source_info.get(
+                        "segment_scaling_diagnostics",
+                        [],
+                    )
+                    or []
+                ),
+                "segment_scaling_policy": dict(
+                    self._last_analysis_source_info.get(
+                        "segment_scaling_policy",
+                        {},
+                    )
+                    or {}
+                ),
+                "isotope_qc": list(
+                    self._last_analysis_source_info.get("isotope_qc", []) or []
+                ),
+                "isotope_qc_status": str(
+                    self._last_analysis_source_info.get(
+                        "isotope_qc_status",
+                        "not_evaluated",
+                    )
+                ),
+                "normalize_by_time": bool(
+                    self._last_analysis_source_info.get(
+                        "normalize_by_time",
+                        True,
+                    )
+                ),
             },
             make_current=False,
         )
@@ -4586,7 +4729,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             database_path,
             project_settings=self.project_settings,
         )
-        return f"已写入并校验项目曲线库（数据集 #{dataset_id}）"
+        return f"已保存并校验项目PIE曲线（SQLite #{dataset_id}）"
 
     def _activate_sqlite_dataset(
         self,
@@ -4601,7 +4744,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         repository = SQLiteCurveRepository(database_path, dataset_id, cache_size=32)
         curves = RepositoryCurveMapping(repository)
         if not curves:
-            raise ValueError(f"PIE数据集 #{dataset_id} 没有曲线通道")
+            raise ValueError("项目PIE结果没有曲线通道")
         dataset_metadata = dict(metadata or {})
         provenance = dataset_metadata.get("analysis_provenance")
         if not isinstance(provenance, dict):
@@ -4615,6 +4758,19 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             "source_scope": "project",
             "folder_count": int(dataset_metadata.get("folder_count", 1) or 1),
             "merge_method": dataset_metadata.get("merge_method"),
+            "segment_scaling_diagnostics": list(
+                dataset_metadata.get("segment_scaling_diagnostics", []) or []
+            ),
+            "segment_scaling_policy": dict(
+                dataset_metadata.get("segment_scaling_policy", {}) or {}
+            ),
+            "isotope_qc": list(dataset_metadata.get("isotope_qc", []) or []),
+            "isotope_qc_status": str(
+                dataset_metadata.get("isotope_qc_status", "not_evaluated")
+            ),
+            "normalize_by_time": bool(
+                dataset_metadata.get("normalize_by_time", True)
+            ),
             "analysis_provenance": provenance,
         }
         self.curve_repository = repository
@@ -4738,6 +4894,40 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             summary_details.append(replicate_note)
         if integration_note:
             summary_details.append(integration_note)
+        scaling_diagnostics = list(
+            self._last_analysis_source_info.get(
+                "segment_scaling_diagnostics",
+                [],
+            )
+            or []
+        )
+        for diagnostic in scaling_diagnostics:
+            if str(diagnostic.get("qc_status")) != "pass":
+                continue
+            summary_details.append(
+                "能段共享缩放："
+                f"segment {diagnostic.get('segment')} × "
+                f"{float(diagnostic.get('factor', 1.0)):.6g}，"
+                f"log-MAD={float(diagnostic.get('log_mad', 0.0)):.3g}，"
+                f"{diagnostic.get('overlap_energy_count', 0)} 个重叠能量点 / "
+                f"{diagnostic.get('channel_count', 0)} 条曲线"
+            )
+        isotope_qc_status = str(
+            self._last_analysis_source_info.get(
+                "isotope_qc_status",
+                "not_evaluated",
+            )
+        )
+        summary_details.append(f"同位素核验：{isotope_qc_status}")
+        for qc in list(self._last_analysis_source_info.get("isotope_qc", []) or []):
+            if not isinstance(qc, dict):
+                continue
+            summary_details.append(
+                f"{qc.get('light_mz', '?')}/{qc.get('heavy_mz', '?')} "
+                f"{qc.get('status', '未评估')} · "
+                f"理论重/轻={float(qc.get('theoretical_heavy_to_light', np.nan)):.4g} · "
+                f"有效点={qc.get('valid_point_count', 0)}"
+            )
         self.summary_label.setToolTip("\n".join(summary_details))
         restored_r2 = [
             float(result.get("r_squared", 0.0) or 0.0)
@@ -4873,10 +5063,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 fg_color = QtGui.QColor("#374151")       # 深灰文字
                 bg_color = None                          # 无背景色
 
-            point_count = int(
-                curve.get("point_count", len(curve.get("energies", [])))
-            )
-            item_text = f"m/z {mz_text}{suffix}  [{status_str}]  ({point_count}点)"
+            item_text = f"m/z {mz_text}{suffix}  [{status_str}]"
             item = QtWidgets.QListWidgetItem(item_text)
             item.setData(QtCore.Qt.ItemDataRole.UserRole, mz)
             item.setForeground(QtGui.QBrush(fg_color))
@@ -4884,7 +5071,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 item.setBackground(QtGui.QBrush(bg_color))
             item.setToolTip(
                 f"精确 m/z {exact_mz:.12g} | 物种检索使用整数 m/z {nominal_mz}{suffix} | "
-                f"{status_str} | {point_count} 个能量点"
+                f"{status_str}"
             )
             self.mz_list.addItem(item)
             if current_mz == mz:
@@ -4908,6 +5095,10 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.mz_selection_label.setText(
             "未选择" if selected_count == 0 else f"已选 {selected_count} 条"
         )
+        if hasattr(self, "plot_mode_combo") and str(
+            self.plot_mode_combo.currentData() or "single"
+        ) != "single":
+            self.refresh_current_plot()
         self._update_action_state()
 
     def _pie_curve_matches_filter(self, mz: PieCurveKey, curve: dict) -> bool:
@@ -5031,12 +5222,106 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         integration_methods = rows.get("integration_method", pd.Series([""] * len(rows))).astype(str).map(
             {"sum_counts": "范围累加", "gaussian": "高斯", "baseline": "扣基线积分", "mixed": "混合"}
         ).fillna("").to_numpy()
+        acquisition_time_min = pd.to_numeric(
+            rows.get(
+                "acquisition_time_min_s",
+                rows.get(
+                    "acquisition_time_s",
+                    pd.Series(np.nan, index=rows.index),
+                ),
+            ),
+            errors="coerce",
+        ).to_numpy(dtype=float)
+        acquisition_time_max = pd.to_numeric(
+            rows.get(
+                "acquisition_time_max_s",
+                rows.get(
+                    "acquisition_time_s",
+                    pd.Series(np.nan, index=rows.index),
+                ),
+            ),
+            errors="coerce",
+        ).to_numpy(dtype=float)
+        acquisition_time_display = [
+            (
+                ""
+                if not (np.isfinite(low) and np.isfinite(high))
+                else f"{low:.4g}"
+                if np.isclose(low, high)
+                else f"{low:.4g}–{high:.4g}"
+            )
+            for low, high in zip(acquisition_time_min, acquisition_time_max)
+        ]
         curve_df = pd.DataFrame(
             [
                 ["积分方式", *integration_methods],
+                ["扫描时间 / s", *acquisition_time_display],
+                [
+                    "IO / nA",
+                    *np.round(
+                        pd.to_numeric(
+                            rows.get(
+                                "io",
+                                pd.Series(np.nan, index=rows.index),
+                            ),
+                            errors="coerce",
+                        ),
+                        4,
+                    ).to_numpy(),
+                ],
                 ["原始积分", *np.round(rows["raw_area"].astype(float), 4).to_numpy()],
-                ["IO归一化", *np.round(rows["photon_normalized_intensity"].astype(float), 4).to_numpy()],
-                ["最终强度", *np.round(rows["normalized_intensity"].astype(float), 4).to_numpy()],
+                [
+                    "计数率 / s⁻¹",
+                    *np.round(
+                        pd.to_numeric(
+                            rows.get(
+                                "count_rate",
+                                pd.Series(np.nan, index=rows.index),
+                            ),
+                            errors="coerce",
+                        ),
+                        4,
+                    ).to_numpy(),
+                ],
+                [
+                    "IO及时间归一 / (nA·s)",
+                    *np.round(
+                        pd.to_numeric(
+                            rows.get(
+                                "io_time_normalized_intensity",
+                                pd.Series(np.nan, index=rows.index),
+                            ),
+                            errors="coerce",
+                        ),
+                        6,
+                    ).to_numpy(),
+                ],
+                [
+                    "共享能段因子",
+                    *np.round(
+                        pd.to_numeric(
+                            rows.get(
+                                "shared_scale_factor",
+                                pd.Series(1.0, index=rows.index),
+                            ),
+                            errors="coerce",
+                        ),
+                        6,
+                    ).to_numpy(),
+                ],
+                [
+                    "合并强度",
+                    *np.round(
+                        pd.to_numeric(
+                            rows.get(
+                                "merged_intensity",
+                                rows["normalized_intensity"],
+                            ),
+                            errors="coerce",
+                        ),
+                        6,
+                    ).to_numpy(),
+                ],
             ],
             columns=["数据项", *point_columns],
         )
@@ -5072,9 +5357,503 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         if self.current_mz is not None and self.current_mz in self.curves:
             self.update_plot(self.curves[self.current_mz], self.current_fit)
 
+    @staticmethod
+    def _pie_rising_region_xlim(
+        x_values: np.ndarray,
+        y_values: np.ndarray,
+    ) -> tuple[float, float] | None:
+        """Return a view-only window around the first sustained PIE rise."""
+        count = min(x_values.size, y_values.size)
+        if count < 5:
+            return None
+        x_values = np.asarray(x_values[:count], dtype=float)
+        y_values = np.asarray(y_values[:count], dtype=float)
+        valid = np.isfinite(x_values) & np.isfinite(y_values)
+        x_values = x_values[valid]
+        y_values = y_values[valid]
+        if x_values.size < 5:
+            return None
+        order = np.argsort(x_values, kind="stable")
+        x_values = x_values[order]
+        y_values = y_values[order]
+        x_min = float(x_values[0])
+        x_max = float(x_values[-1])
+        full_width = x_max - x_min
+        if full_width <= 0:
+            return None
+
+        baseline_count = max(3, int(np.ceil(x_values.size * 0.2)))
+        baseline_values = y_values[:baseline_count]
+        baseline = float(np.median(baseline_values))
+        noise = float(
+            1.4826 * np.median(np.abs(baseline_values - baseline))
+        )
+        high_level = float(np.percentile(y_values, 95))
+        signal_span = high_level - baseline
+        scale = max(abs(high_level), abs(baseline), 1.0)
+        if signal_span <= max(5.0 * noise, np.finfo(float).eps * scale):
+            return None
+
+        threshold = baseline + max(5.0 * noise, 0.03 * signal_span)
+        crossing_indices = np.flatnonzero(y_values >= threshold)
+        if crossing_indices.size == 0:
+            return None
+        onset_index = int(crossing_indices[0])
+        if onset_index == 0:
+            return None
+
+        positive_steps = np.diff(x_values)
+        positive_steps = positive_steps[positive_steps > 0]
+        if positive_steps.size == 0:
+            return None
+        typical_step = float(np.median(positive_steps))
+        onset_x = float(x_values[onset_index])
+        left_margin = max(0.2, 5.0 * typical_step)
+        right_margin = max(0.35, 8.0 * typical_step)
+        edge_pad = max(typical_step, 0.02 * full_width)
+        window = (
+            max(x_min - edge_pad, onset_x - left_margin),
+            min(x_max + edge_pad, onset_x + right_margin),
+        )
+        if window[1] - window[0] >= 0.9 * full_width:
+            return None
+        return window
+
+    def _candidate_ie_references(
+        self,
+        visible_xlim: tuple[float, float],
+    ) -> tuple[VerticalReference, ...]:
+        lower, upper = sorted((float(visible_xlim[0]), float(visible_xlim[1])))
+        focused_row = self.species_table.currentRow()
+        references: list[VerticalReference] = []
+        for row, species in enumerate(
+            self.fitting_control_widget.get_candidate_data()
+        ):
+            if not bool(species.get("is_enabled", True)):
+                continue
+            ie_value = self._species_ie_value(species)
+            if ie_value is None or not lower <= ie_value <= upper:
+                continue
+            identity = str(
+                species.get("formula")
+                or species.get("species")
+                or species.get("name")
+                or "候选物种"
+            ).strip()
+            references.append(
+                VerticalReference(
+                    key=f"candidate-ie-{species.get('id', row)}",
+                    x=ie_value,
+                    label=f"IE · {identity} {ie_value:.4f} eV",
+                    emphasized=row == focused_row,
+                )
+            )
+        return tuple(references)
+
+    def _on_plot_diagnostic_changed(self, *_args) -> None:
+        mode = str(self.plot_mode_combo.currentData() or "single")
+        self.ratio_reference_spin.setVisible(mode == "ratio")
+        self.energy_view_label.setVisible(mode == "single")
+        self.energy_view_combo.setVisible(mode == "single")
+        self.refresh_current_plot()
+
+    def _selected_comparison_keys(self) -> list[PieCurveKey]:
+        selected = self._selected_mz_values()
+        if self.current_mz is not None and self.current_mz not in selected:
+            selected.insert(0, self.current_mz)
+        return [key for key in selected if key in self.curves]
+
+    def _render_comparison_plot(self, mode: str) -> bool:
+        keys = self._selected_comparison_keys()
+        if mode in {"shared_y", "shape"}:
+            if len(keys) < 2:
+                self.plot_widget.show_empty("请在左侧至少选择两条 m/z 曲线")
+                self.plot_qc_label.setText("核验：需要至少两条曲线")
+                return True
+            series: list[CurveSeries] = []
+            for key in keys:
+                curve = self.curves[key]
+                x_values = np.asarray(curve["energies"], dtype=float)
+                y_values = np.asarray(curve["intensities"], dtype=float)
+                valid = np.isfinite(x_values) & np.isfinite(y_values)
+                x_values = x_values[valid]
+                y_values = y_values[valid]
+                if mode == "shape" and y_values.size:
+                    maximum = float(np.max(np.abs(y_values)))
+                    if maximum > 0:
+                        y_values = y_values / maximum
+                series.append(
+                    CurveSeries(
+                        key=f"compare-{key}",
+                        role=SeriesRole.COMPARISON,
+                        x=x_values,
+                        y=y_values,
+                        label=f"m/z {self._mz_text_for_key(key)}",
+                    )
+                )
+            self.plot_widget.render_spec(
+                ScientificPlotSpec(
+                    title=(
+                        "PIE多通道形状比较"
+                        if mode == "shape"
+                        else "PIE多通道原始共轴比较"
+                    ),
+                    xlabel="光子能量 / eV",
+                    ylabel=(
+                        "各曲线最大值归一化"
+                        if mode == "shape"
+                        else "合并强度（共用纵轴）"
+                    ),
+                    series=tuple(series),
+                    show_legend=True,
+                    legend_loc="upper left",
+                )
+            )
+            self.plot_qc_label.setText(f"比较 {len(series)} 条曲线")
+            return True
+        if mode == "ratio":
+            if len(keys) != 2:
+                self.plot_widget.show_empty("比值诊断需要恰好选择两条 m/z 曲线")
+                self.plot_qc_label.setText("核验：请选择两条曲线")
+                return True
+            denominator_key, numerator_key = sorted(
+                keys,
+                key=lambda value: self._nominal_mz_for_key(value),
+            )
+            ratio_rows = build_pie_ratio_curve(
+                self.curves[numerator_key]["rows"],
+                self.curves[denominator_key]["rows"],
+                min_snr=10.0,
+            )
+            valid_rows = ratio_rows[ratio_rows["valid"]]
+            reference = float(self.ratio_reference_spin.value())
+            series = [
+                CurveSeries(
+                    key="ratio",
+                    role=SeriesRole.EXPERIMENTAL,
+                    x=valid_rows["energy"].to_numpy(dtype=float),
+                    y=valid_rows["ratio"].to_numpy(dtype=float),
+                    label=(
+                        f"I{self._nominal_mz_for_key(numerator_key)}/"
+                        f"I{self._nominal_mz_for_key(denominator_key)}"
+                    ),
+                )
+            ]
+            if not valid_rows.empty:
+                series.append(
+                    CurveSeries(
+                        key="ratio-reference",
+                        role=SeriesRole.COMPARISON,
+                        x=[
+                            float(valid_rows["energy"].min()),
+                            float(valid_rows["energy"].max()),
+                        ],
+                        y=[reference, reference],
+                        label=f"参考比值 {reference:.3g}",
+                    )
+                )
+            self.plot_widget.render_spec(
+                ScientificPlotSpec(
+                    title=(
+                        f"I{self._nominal_mz_for_key(numerator_key)}/"
+                        f"I{self._nominal_mz_for_key(denominator_key)} 比值诊断"
+                    ),
+                    xlabel="光子能量 / eV",
+                    ylabel="强度比",
+                    series=tuple(series),
+                    show_legend=True,
+                    legend_loc="upper left",
+                )
+            )
+            self.plot_qc_label.setText(
+                f"有效点 {len(valid_rows)}/{len(ratio_rows)} · SNR≥10"
+            )
+            return True
+        return False
+
+    @staticmethod
+    def _source_path_values(value) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError:
+                parsed = value
+            value = parsed
+        if isinstance(value, (list, tuple, set, np.ndarray, pd.Series)):
+            candidates = value
+        else:
+            candidates = [value]
+        return [
+            str(candidate).strip()
+            for candidate in candidates
+            if str(candidate).strip()
+            and str(candidate).strip().lower() not in {"nan", "none"}
+        ]
+
+    @classmethod
+    def _curve_has_raw_spectrum_source(cls, curve: dict) -> bool:
+        rows = curve.get("rows")
+        if not isinstance(rows, pd.DataFrame) or rows.empty:
+            return False
+        for _, row in rows.iterrows():
+            if cls._source_path_values(row.get("source_spectra")):
+                return True
+            if (
+                str(row.get("source_folder") or "").strip()
+                and cls._source_path_values(row.get("source_files"))
+            ):
+                return True
+        return False
+
+    def _show_raw_spectrum_qc_dialog(self, *_args) -> None:
+        curve_key = self.current_mz
+        if curve_key is None or curve_key not in self.curves:
+            QtWidgets.QMessageBox.information(
+                self,
+                "原始谱核验",
+                "请先选择一条 m/z 曲线。",
+            )
+            return
+        curve = self.curves[curve_key]
+        if not self._curve_has_raw_spectrum_source(curve):
+            QtWidgets.QMessageBox.information(
+                self,
+                "原始谱核验不可用",
+                "当前曲线没有可定位的原始谱。\n"
+                "请从 TXT 原始数据重新生成 PIE 曲线后再核验。",
+            )
+            return
+
+        existing = getattr(self, "_raw_spectrum_qc_dialog", None)
+        if existing is not None:
+            if sip.isdeleted(existing):
+                self._raw_spectrum_qc_dialog = None
+            else:
+                existing.close()
+
+        dialog = QtWidgets.QDialog(self)
+        dialog.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        dialog.setWindowTitle(
+            f"原始谱积分窗口核验 - m/z {self._mz_text_for_key(curve_key)}"
+        )
+        dialog.setWindowFlags(
+            QtCore.Qt.WindowType.Dialog
+            | QtCore.Qt.WindowType.WindowCloseButtonHint
+            | QtCore.Qt.WindowType.WindowMaximizeButtonHint
+        )
+        dialog.resize(960, 640)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+
+        controls = QtWidgets.QHBoxLayout()
+        controls.setSpacing(8)
+        controls.addWidget(QtWidgets.QLabel("采集能量"))
+        energy_combo = QtWidgets.QComboBox(dialog)
+        energy_combo.setToolTip("选择一个 PIE 采集能量，核验对应原始高分辨谱")
+        rows = curve.get("rows")
+        energy_values = sorted(
+            {
+                round(float(energy), 6)
+                for energy in pd.to_numeric(
+                    rows.get("energy", pd.Series(dtype=float)),
+                    errors="coerce",
+                )
+                if np.isfinite(float(energy))
+            }
+        )
+        for energy in energy_values:
+            energy_combo.addItem(f"{energy:g} eV", energy)
+        if energy_values:
+            target_index = int(
+                np.argmin(
+                    np.abs(np.asarray(energy_values, dtype=float) - 11.0)
+                )
+            )
+            energy_combo.setCurrentIndex(target_index)
+        controls.addWidget(energy_combo)
+        qc_label = QtWidgets.QLabel("原始谱：等待加载", dialog)
+        qc_label.setObjectName("InlineStatusLabel")
+        controls.addWidget(qc_label, 1)
+        layout.addLayout(controls)
+
+        plot_widget = StaticCurvePlot(
+            "TOF / bin",
+            "原始计数",
+            min_height=360,
+            parent=dialog,
+        )
+        layout.addWidget(plot_widget, 1)
+
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Close,
+            parent=dialog,
+        )
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        energy_combo.currentIndexChanged.connect(
+            lambda _index: self._render_fixed_energy_raw_spectrum(
+                curve_key=curve_key,
+                selected_energy=energy_combo.currentData(),
+                plot_widget=plot_widget,
+                qc_label=qc_label,
+            )
+        )
+        self._raw_spectrum_qc_dialog = dialog
+        self._raw_spectrum_energy_combo = energy_combo
+        self._raw_spectrum_plot_widget = plot_widget
+        self._raw_spectrum_qc_label = qc_label
+        self._render_fixed_energy_raw_spectrum(
+            curve_key=curve_key,
+            selected_energy=energy_combo.currentData(),
+            plot_widget=plot_widget,
+            qc_label=qc_label,
+        )
+        dialog.show()
+
+    def _render_fixed_energy_raw_spectrum(
+        self,
+        *,
+        curve_key: PieCurveKey,
+        selected_energy: float | None,
+        plot_widget: StaticCurvePlot,
+        qc_label: QtWidgets.QLabel,
+    ) -> None:
+        if curve_key not in self.curves:
+            plot_widget.show_empty("对应的 PIE 曲线已不可用")
+            qc_label.setText("原始谱：曲线不可用")
+            return
+        curve = self.curves[curve_key]
+        rows = curve.get("rows")
+        if not isinstance(rows, pd.DataFrame) or rows.empty:
+            plot_widget.show_empty("当前 SQLite 曲线未保存原始谱文件定位信息")
+            qc_label.setText("原始谱：需从 TXT 重新计算")
+            return
+        if selected_energy is None:
+            selected_energy = float(rows["energy"].iloc[-1])
+        row = rows.iloc[
+            int(
+                np.argmin(
+                    np.abs(
+                        pd.to_numeric(rows["energy"], errors="coerce").to_numpy(
+                            dtype=float
+                        )
+                        - float(selected_energy)
+                    )
+                )
+            )
+        ]
+        source_folder = str(row.get("source_folder") or "")
+        source_spectra = self._source_path_values(row.get("source_spectra"))
+        source_files = self._source_path_values(row.get("source_files"))
+        spectrum_candidates: list[Path] = []
+        for candidate in source_spectra:
+            candidate_path = Path(candidate)
+            if source_folder and not candidate_path.is_absolute():
+                spectrum_candidates.append(Path(source_folder) / candidate_path)
+            else:
+                spectrum_candidates.append(candidate_path)
+        if source_folder:
+            spectrum_candidates.extend(
+                Path(source_folder) / candidate for candidate in source_files
+            )
+        spectrum_path = next(
+            (candidate for candidate in spectrum_candidates if candidate.is_file()),
+            spectrum_candidates[0] if spectrum_candidates else None,
+        )
+        if spectrum_path is None:
+            plot_widget.show_empty("当前曲线缺少原始谱文件定位信息")
+            qc_label.setText("原始谱：来源信息不可用")
+            return
+        if not spectrum_path.is_file():
+            plot_widget.show_empty(f"原始谱文件不存在：{spectrum_path.name}")
+            qc_label.setText("原始谱：文件缺失")
+            return
+        spectrum = read_spectrum(
+            spectrum_path,
+            header_lines=10 if spectrum_path.suffix.lower() == ".txt" else None,
+            trim_start=0,
+        )
+        left = int(round(float(row.get("left_bound", 0))))
+        right = int(round(float(row.get("right_bound", left))))
+        x_values = np.asarray(spectrum.x, dtype=float)
+        y_values = np.asarray(spectrum.y, dtype=float)
+        view = (
+            np.isfinite(x_values)
+            & np.isfinite(y_values)
+            & (x_values >= left - 60)
+            & (x_values <= right + 60)
+        )
+        if not np.any(view):
+            plot_widget.show_empty("原始谱中找不到当前峰窗")
+            qc_label.setText("原始谱：当前峰窗无数据")
+            return
+        x_view = x_values[view]
+        y_view = y_values[view]
+        peak_x = float(x_view[int(np.argmax(y_view))])
+        maximum = float(np.max(y_view)) if y_view.size else 1.0
+        series: list[CurveSeries] = [
+            CurveSeries(
+                key="raw-spectrum",
+                role=SeriesRole.MEASUREMENT,
+                x=x_view,
+                y=y_view,
+                label=f"{spectrum_path.name} 原始计数",
+            ),
+            CurveSeries(
+                key="current-left",
+                role=SeriesRole.COMPARISON,
+                x=[left, left],
+                y=[0.0, maximum],
+                label="当前投影窗口",
+            ),
+            CurveSeries(
+                key="current-right",
+                role=SeriesRole.COMPARISON,
+                x=[right, right],
+                y=[0.0, maximum],
+                label="",
+            ),
+            CurveSeries(
+                key="actual-peak",
+                role=SeriesRole.COMPONENT,
+                x=[peak_x, peak_x],
+                y=[0.0, maximum],
+                label="实际峰顶",
+            ),
+        ]
+        plot_widget.render_spec(
+            ScientificPlotSpec(
+                title=(
+                    f"{float(row['energy']):.4g} eV 原始高分辨谱 · "
+                    f"m/z {self._mz_text_for_key(curve_key)}"
+                ),
+                xlabel="TOF / bin",
+                ylabel="原始计数",
+                series=tuple(series),
+                show_legend=True,
+                legend_loc="upper left",
+            )
+        )
+        qc_label.setText(
+            f"扫描 {float(row.get('acquisition_time_s', np.nan)):.4g} s · "
+            f"IO {float(row.get('io', np.nan)):.4g} · 峰顶 {peak_x:.0f}"
+        )
+
     def update_plot(self, curve: dict, fit_model: dict | None = None):
         if self.plot_widget is None:
             return
+        mode = str(self.plot_mode_combo.currentData() or "single")
+        if mode != "single":
+            self.plot_widget.clear_nearest_point_cursor()
+        if self._render_comparison_plot(mode):
+            return
+        self.plot_qc_label.setText(
+            f"核验：{self._last_analysis_source_info.get('isotope_qc_status', '未评估')}"
+        )
         x_values = np.asarray(curve["energies"], dtype=float)
         y_values = np.asarray(curve["intensities"], dtype=float)
         valid = np.isfinite(x_values) & np.isfinite(y_values)
@@ -5084,8 +5863,18 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         mz_text = self._curve_mz_text(curve, curve.get("curve_key"))
         title = f"m/z {mz_text} PIE物种识别拟合"
         if x_values.size == 0:
+            self.plot_widget.clear_nearest_point_cursor()
             self.plot_widget.show_empty("无有效数据", title=f"m/z {mz_text} PIE")
             return
+
+        xlim = None
+        if str(self.energy_view_combo.currentData() or "full") == "rise":
+            xlim = self._pie_rising_region_xlim(x_values, y_values)
+        reference_xlim = xlim or (
+            float(np.min(x_values)),
+            float(np.max(x_values)),
+        )
+        vertical_references = self._candidate_ie_references(reference_xlim)
 
         series: list[CurveSeries] = [
             CurveSeries(
@@ -5147,7 +5936,16 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 series=tuple(series),
                 show_legend=True,
                 legend_loc="upper left",
+                xlim=xlim,
+                vertical_references=vertical_references,
             )
+        )
+        self.plot_widget.set_nearest_point_cursor(
+            x_values,
+            y_values,
+            x_label="E",
+            y_label="I",
+            x_unit="eV",
         )
 
     def fit_current_curve(self):
@@ -5196,24 +5994,12 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             if not selected:
                 raise ValueError("请至少启用一个候选物种")
 
-            # 检查用户是否手动编辑了系数
-            user_coefficients = panel_state["coefficients"]
-            species_ids = [int(s.get("id", idx + 1)) for idx, s in enumerate(selected)]
-            has_manual_coefficients = any(user_coefficients.get(sid, 0.0) > 0.0 for sid in species_ids)
-
-            if has_manual_coefficients:
-                # 用户手动编辑了系数，使用用户的值
-                fit_model = fit_species_combination_with_curve(
-                    selected, curve["energies"], curve["intensities"],
-                    coefficient_mode="manual", coefficients=user_coefficients,
-                    locked_species_ids=panel_state["locked_ids"],
-                )
-            else:
-                # 没有手动编辑，使用 NNLS 自动优化
-                fit_model = fit_species_combination_with_curve(
-                    selected, curve["energies"], curve["intensities"],
-                    locked_species_ids=panel_state["locked_ids"],
-                )
+            fit_model = fit_species_combination_with_curve(
+                selected,
+                curve["energies"],
+                curve["intensities"],
+                locked_species_ids=panel_state["locked_ids"],
+            )
 
             results = fit_model.get("species", [])
             self.current_fit = fit_model if results else None
@@ -5262,11 +6048,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 self.result_display_widget.set_result_status("FAILED")
             self._update_result_detail_button()
 
-            self.status_label.setText(
-                f"m/z {self._mz_text_for_key(mz)}: "
-                f"PICS数据库候选 {fit_model.get('candidate_count', 0)} 个，"
-                f"命中 {len(results)} 个，R²={fit_model.get('r_squared', 0.0):.4f}"
-            )
+            self.status_label.setText("拟合完成，结果已更新")
             fitted_count = sum(1 for r in self.all_fit_results.values() if r.get("success"))
             total_count = len(self.curves)
             all_r_squared = [r.get("r_squared", 0.0) for r in self.all_fit_results.values() if r.get("success")]
@@ -5275,9 +6057,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.populate_mz_list()
             self._update_action_state()
             if not results:
-                self.status_label.setText(
-                    f"m/z {self._mz_text_for_key(mz)}: 当前候选无法形成有效拟合"
-                )
+                self.status_label.setText("当前候选无法形成有效拟合")
         except Exception as exc:
             self._fit_preview_active = False
             self.current_fit = None
@@ -5343,14 +6123,9 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                     item for item in filtered_database
                     if int(item.get("mz", -1)) == nominal_mz
                 ]
-                coefficients: dict[int, float] = {}
                 locked_ids: list[int] = []
             else:
                 selected = list(config.get("selected_species", []))
-                coefficients = {
-                    int(species_id): float(value)
-                    for species_id, value in config.get("coefficients", {}).items()
-                }
                 locked_ids = [int(value) for value in config.get("locked_ids", [])]
             jobs[mz] = {
                 "curve": curve,
@@ -5359,7 +6134,6 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                     self.curve_repository if channel_id is not None else None
                 ),
                 "selected_species": selected,
-                "coefficients": coefficients,
                 "locked_ids": locked_ids,
                 "per_mz_hash": self._get_per_mz_config_hash(mz),
             }
@@ -5386,24 +6160,12 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 continue
 
             try:
-                # 检查用户是否手动编辑了系数
-                user_coefficients = job["coefficients"]
-                species_ids = [int(s.get("id", idx + 1)) for idx, s in enumerate(selected)]
-                has_manual_coefficients = any(user_coefficients.get(sid, 0.0) > 0.0 for sid in species_ids)
-
-                if has_manual_coefficients:
-                    # 用户手动编辑了系数，使用用户的值
-                    fit_model = fit_species_combination_with_curve(
-                        selected, curve["energies"], curve["intensities"],
-                        coefficient_mode="manual", coefficients=user_coefficients,
-                        locked_species_ids=job["locked_ids"],
-                    )
-                else:
-                    # 没有手动编辑，使用 NNLS 自动优化
-                    fit_model = fit_species_combination_with_curve(
-                        selected, curve["energies"], curve["intensities"],
-                        locked_species_ids=job["locked_ids"],
-                    )
+                fit_model = fit_species_combination_with_curve(
+                    selected,
+                    curve["energies"],
+                    curve["intensities"],
+                    locked_species_ids=job["locked_ids"],
+                )
 
                 fit_result_species = fit_model.get("species", [])
                 results[mz] = {
@@ -5440,7 +6202,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 input_species = list(input_job.get("selected_species", []))
                 self.per_mz_config[mz] = {
                     "selected_species": input_species,
-                    "coefficients": dict(input_job.get("coefficients", {})),
+                    "coefficients": {},
                     "locked_ids": list(input_job.get("locked_ids", [])),
                 }
                 result["fit_config_hash"] = self._get_per_mz_config_hash(mz)
@@ -5465,9 +6227,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
     def _exhaustive_best_fit(self):
         """穷举候选物种所有组合，按R²排序，选出最优组合。"""
-        from itertools import combinations
 
-        from bl03u_masstool.core.pie_analysis import fit_species_combination_with_curve
 
         if self.current_mz is None or self.current_mz not in self.curves:
             QtWidgets.QMessageBox.warning(self, "提示", "请先选择一条m/z曲线")
@@ -5538,11 +6298,8 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         ])
         self.set_dataframe(self.fit_table, fit_df)
         self._exhaustive_ranked = ranked
-        names = ", ".join(best["species_names"])
         self.status_label.setText(
-            f"m/z {self._mz_text_for_key(self.current_mz)}: "
-            f"最优组合 [{names}] R²={best['r_squared']:.4f} "
-            f"(共 {len(ranked)} 种组合)"
+            f"组合优选完成，共比较 {len(ranked)} 种组合"
         )
         fitted_count = sum(1 for r in self.all_fit_results.values() if r.get("success"))
         all_r_squared = [r.get("r_squared", 0.0) for r in self.all_fit_results.values() if r.get("success")]

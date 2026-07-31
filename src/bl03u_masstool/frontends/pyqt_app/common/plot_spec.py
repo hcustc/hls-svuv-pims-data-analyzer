@@ -42,6 +42,17 @@ class CurveSeries:
 
 
 @dataclass(frozen=True)
+class VerticalReference:
+    """A labelled x-axis reference, such as a candidate ionization energy."""
+
+    key: str
+    x: float
+    label: str
+    color: str | None = None
+    emphasized: bool = False
+
+
+@dataclass(frozen=True)
 class ScientificPlotSpec:
     """Renderer-neutral description of a low-interaction scientific plot."""
 
@@ -55,4 +66,4 @@ class ScientificPlotSpec:
     ylim: tuple[float, float] | None = None
     show_zero_line: bool = False
     component_visibility_threshold: float = 1e-6
-
+    vertical_references: tuple[VerticalReference, ...] = ()

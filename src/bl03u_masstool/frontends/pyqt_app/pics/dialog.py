@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 
@@ -33,7 +34,11 @@ from bl03u_masstool.core.pics_calculator import (
 )
 from bl03u_masstool.core.elements import get_all_elements_from_database, filter_species_by_elements, COMMON_ELEMENTS, parse_formula as parse_formula_elements, get_elements_from_formula
 from bl03u_masstool.core.normalization import NormalizationSettings, load_normalization_settings, save_normalization_settings
-from bl03u_masstool.core.project_settings import ProjectSettings
+from bl03u_masstool.core.project_settings import (
+    ProjectSettings,
+    ProjectSettingsManager,
+    load_factory_project_settings,
+)
 from bl03u_masstool.core.temperature_scan import (
     TEMPERATURE_CURVE_CLASS_LABELS,
     analyze_temperature_folder,
@@ -69,7 +74,7 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
         super().__init__(parent)
         self.calibration = calibration
         self.normalization_settings = normalization_settings
-        self.settings = load_mole_fraction_settings()
+        self.settings = load_factory_project_settings().to_mole_fraction_settings()
 
         self.new_species_name = ""
         self.new_species_formula = ""
@@ -102,13 +107,14 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
         activate_project_scope: bool = True,
     ) -> None:
         """Apply ProjectSettings defaults to PICSCalculatorDialog controls."""
-        self.project_settings = ps if activate_project_scope else None
+        self.project_settings = deepcopy(ps) if activate_project_scope else None
+        ps = self.project_settings or deepcopy(ps)
         if activate_project_scope:
             self.calibration = ps.to_calibration()
             self.normalization_settings = ps.to_normalization_settings()
             self.settings = ps.to_mole_fraction_settings()
         else:
-            self.settings = load_mole_fraction_settings()
+            self.settings = load_factory_project_settings().to_mole_fraction_settings()
         self._load_database()
         if hasattr(self, "txt_folder_path"):
             self.txt_folder_path.setText(ps.pie_scan_folder if activate_project_scope else "")
@@ -122,7 +128,7 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.double_new_mf.setValue(ps.pics_new_species_mf)
         if hasattr(self, "spin_md_exponent"):
             exponent = (
-                ps.mf_mass_disc_exponent
+                ps.pics_mass_disc_exponent
                 if activate_project_scope
                 else self.settings.mass_disc_exponent
             )
@@ -314,12 +320,46 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.species_continue_button.setToolTip("检查当前输入并前往 PIE 信号加载")
         self.species_continue_button.clicked.connect(self._confirm_species_and_continue)
         action_row = QtWidgets.QHBoxLayout()
+        self.update_project_params_button = QtWidgets.QPushButton("更新项目参数")
+        self.update_project_params_button.setObjectName("BrowseButton")
+        self.update_project_params_button.clicked.connect(
+            self.update_project_parameters
+        )
+        action_row.addWidget(self.update_project_params_button)
         action_row.addStretch(1)
         action_row.addWidget(self.species_continue_button)
         layout.addLayout(action_row)
         layout.addStretch()
 
         return widget
+
+    def update_project_parameters(self) -> None:
+        """Commit only the PICS defaults represented by this page."""
+        if self.project_settings is None:
+            QtWidgets.QMessageBox.warning(self, "提示", "当前没有活动项目。")
+            return
+        changes = {
+            "pics_no_mz": int(self.spin_no_mz.value()),
+            "pics_no_formula": self.txt_no_formula.text().strip() or "NO",
+            "pics_no_mf": float(self.double_no_mf.value()),
+            "pics_new_species_mf": float(self.double_new_mf.value()),
+            "pics_mass_disc_exponent": float(
+                self.spin_md_exponent.value()
+            ),
+        }
+        try:
+            saved = ProjectSettingsManager().update_module_settings(
+                "pics",
+                changes,
+            )
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "更新项目参数失败", str(exc))
+            return
+        self.project_settings = deepcopy(saved)
+        window = self.window()
+        if hasattr(window, "_sync_project_settings_to_tool_pages"):
+            window._sync_project_settings_to_tool_pages(deepcopy(saved))
+        self._set_status("PICS 项目参数已更新", "success")
 
     def _create_reference_pics_tab(self):
         widget = QtWidgets.QWidget()

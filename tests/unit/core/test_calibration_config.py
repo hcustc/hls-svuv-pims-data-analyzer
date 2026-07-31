@@ -48,6 +48,22 @@ def test_calibration_fit_roundtrip():
     assert round(calibration.tof_to_mz(2), 6) == 5
 
 
+def test_calibration_fit_requires_three_distinct_tof_values():
+    with pytest.raises(ValueError, match="three distinct TOF"):
+        fit_quadratic_calibration([(100, 10), (100, 11), (100, 12)])
+
+
+def test_calibration_fit_rejects_non_increasing_mass_axis():
+    with pytest.raises(ValueError, match="must increase"):
+        fit_quadratic_calibration([(1, 3), (2, 2), (3, 1)])
+
+
+def test_inverse_calibration_uses_the_increasing_quadratic_branch():
+    calibration = Calibration(a=1.0, b=-10.0, c=25.0)
+
+    assert calibration.mz_to_tof(calibration.tof_to_mz(6.0)) == pytest.approx(6.0)
+
+
 def test_yaml_config_loads_project_defaults():
     calibration = load_calibration_config()
     assert calibration.a > 0

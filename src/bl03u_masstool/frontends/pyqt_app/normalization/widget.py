@@ -1,32 +1,15 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import re
-from datetime import datetime
-from pathlib import Path
 
-import numpy as np
-import pandas as pd
 from PyQt6 import QtCore, QtGui, QtWidgets
 
-from bl03u_masstool.core.calibration import Calibration, tof_to_mz
+from bl03u_masstool.core.calibration import Calibration
 from bl03u_masstool.core.config import (
     PeakDetectionConfig,
-    load_calibration_config,
-    load_peak_detection_config,
-    save_calibration_config,
-    save_peak_detection_config,
     resolve_species_database_path,
 )
-from bl03u_masstool.core.isotope import (
-    calculate_isotope_distribution,
-    formula_monoisotopic_mass,
-    formula_nominal_mass,
-    generate_formula_candidates,
-    parse_element_count_ranges,
-    parse_formula,
-)
-from bl03u_masstool.core.nist_webbook import default_nist_webbook_client
-from bl03u_masstool.core.output_paths import ensure_output_dir
 
 
 
@@ -96,32 +79,20 @@ class AutoSelectDoubleSpinBox(QtWidgets.QDoubleSpinBox):
             if match:
                 return float(match.group(0))
         return None
-from bl03u_masstool.core.pie_analysis import analyze_pie_folder, build_pie_curves, identify_species_for_mz_with_curve, load_species_database, analyze_multiple_pie_folders, merge_pie_segments
-from bl03u_masstool.core.pics_calculator import calc_pics_single_energy
-from bl03u_masstool.core.elements import get_all_elements_from_database, filter_species_by_elements, COMMON_ELEMENTS, parse_formula as parse_formula_elements, get_elements_from_formula
-from bl03u_masstool.core.normalization import NormalizationSettings, load_normalization_settings, save_normalization_settings
-from bl03u_masstool.core.project_settings import ProjectSettings, ProjectSettingsManager
+from bl03u_masstool.core.elements import COMMON_ELEMENTS
+from bl03u_masstool.core.normalization import (
+    NormalizationSettings,
+)
+from bl03u_masstool.core.project_settings import (
+    ProjectSettings,
+    load_factory_project_settings,
+)
 from bl03u_masstool.core.temperature_scan import (
-    TEMPERATURE_CURVE_CLASS_LABELS,
-    analyze_temperature_folder,
-    build_temperature_curves,
     compute_kr_expansion_factors,
 )
 from bl03u_masstool.core.mole_fraction import (
     MASS_DISCRIMINATION_PRESETS,
-    MoleFractionSettings,
-    calc_expansion_coefficients,
-    calc_isomeric_separation,
-    calc_mass_discrimination,
-    calc_parent_mole_fraction,
-    calc_product_mole_fraction,
-    compute_all_mole_fractions,
-    extract_signal_from_temperature_curves,
-    get_expansion_coefficient,
-    load_mole_fraction_settings,
-    save_mole_fraction_settings,
 )
-from bl03u_masstool.frontends.pyqt_app.theme import get_plot_theme
 from bl03u_masstool.frontends.pyqt_app.workers import WorkerThread
 
 try:
@@ -142,7 +113,12 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
         parent=None,
         *,
         show_actions: bool = True,
-        persist_changes: bool = True,
+        persist_changes: bool | None = None,
+        show_calibration: bool = True,
+        show_kr_expansion: bool = True,
+        show_mass_response: bool = False,
+        show_element_filter: bool = False,
+        embedded: bool = False,
     ):
         super().__init__(parent)
         self.settings = settings
@@ -150,16 +126,24 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
         self.project_settings: ProjectSettings | None = None
         self.worker: WorkerThread | None = None
         self.show_actions = show_actions
-        self.persist_changes = persist_changes
+        # Kept as an accepted keyword for callers from earlier releases. All
+        # persistence is now handled by explicit project/session transactions.
+        self.show_calibration = show_calibration
+        self.show_kr_expansion = show_kr_expansion
+        self.show_mass_response = show_mass_response
+        self.show_element_filter = show_element_filter
+        self.embedded = embedded
+        self._kr_dependency_snapshot: tuple[object, ...] | None = None
+        self._kr_factor_snapshot: dict = {}
 
         root = QtWidgets.QVBoxLayout(self)
-        root.setContentsMargins(8, 8, 8, 8 if show_actions else 0)
+        root.setContentsMargins(
+            0 if embedded else 8,
+            0 if embedded else 8,
+            0 if embedded else 8,
+            0 if embedded or not show_actions else 8,
+        )
         root.setSpacing(8)
-
-        # 单一可滚动内容区域
-        scroll = QtWidgets.QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setStyleSheet("QScrollArea { border: none; }")
 
         content_widget = QtWidgets.QWidget()
         content_layout = QtWidgets.QVBoxLayout(content_widget)
@@ -170,18 +154,37 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
         top_grid.setContentsMargins(0, 0, 0, 0)
         top_grid.setHorizontalSpacing(8)
         top_grid.setVerticalSpacing(8)
-        top_grid.addWidget(self._build_normalization_section(), 0, 0)
-        top_grid.addWidget(self._build_calibration_section(), 0, 1)
-        top_grid.addWidget(self._build_mass_discrimination_section(), 1, 0)
-        top_grid.addWidget(self._build_element_filter_section(), 1, 1)
+        normalization_section = self._build_normalization_section()
+        if show_calibration:
+            top_grid.addWidget(normalization_section, 0, 0)
+            top_grid.addWidget(self._build_calibration_section(), 0, 1)
+        else:
+            top_grid.addWidget(normalization_section, 0, 0, 1, 2)
+        if show_mass_response:
+            top_grid.addWidget(self._build_mass_discrimination_section(), 1, 0)
+        if show_element_filter:
+            top_grid.addWidget(self._build_element_filter_section(), 1, 1)
         top_grid.setColumnStretch(0, 2)
         top_grid.setColumnStretch(1, 3)
         content_layout.addLayout(top_grid)
-        content_layout.addWidget(self._build_kr_expansion_section())
-        content_layout.addStretch(1)
+        if show_kr_expansion:
+            content_layout.addWidget(self._build_kr_expansion_section())
+        if not embedded:
+            content_layout.addStretch(1)
 
-        scroll.setWidget(content_widget)
-        root.addWidget(scroll, 1)
+        if embedded:
+            # Embedded project cards are already hosted by a page-sized layout.
+            # Avoid a nested scroll area: it carries an expanding viewport and
+            # can vertically centre short content when adjacent pages are moved.
+            root.addWidget(content_widget)
+        else:
+            # Standalone dialogs retain their own scroll area for compact
+            # windows and the optional calibration/Kr sections.
+            scroll = QtWidgets.QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setStyleSheet("QScrollArea { border: none; }")
+            scroll.setWidget(content_widget)
+            root.addWidget(scroll, 1)
 
         # 底部工具栏 - 统一操作栏
         self.action_bar = QtWidgets.QWidget()
@@ -251,8 +254,7 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
             # 隐藏上下箭头，允许直接修改数值
             edit.setButtonSymbols(QtWidgets.QAbstractSpinBox.ButtonSymbols.NoButtons)
 
-        # 修改定标参数后自动同步到 ProjectSettingsManager，
-        # 防止切换页面时 _apply_project_runtime_settings 用旧值覆盖
+        # 失焦只更新此编辑组件持有的草稿，不触发 Manager 或文件写入。
         self.calibration_a_edit.editingFinished.connect(self._sync_calibration_to_project_settings)
         self.calibration_b_edit.editingFinished.connect(self._sync_calibration_to_project_settings)
         self.calibration_c_edit.editingFinished.connect(self._sync_calibration_to_project_settings)
@@ -427,267 +429,74 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
         layout.addLayout(elements_layout)
         return group
 
-    def select_kr_folder(self):
-        folder = QtWidgets.QFileDialog.getExistingDirectory(self, "选择Kr定标文件夹")
-        if folder:
-            self.kr_folder_edit.setText(folder)
-
-    def select_kr_peak_file(self):
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self,
-            "选择Kr手动卡峰文件",
-            "",
-            "Peak Files (*.yaml *.yml *.csv *.xlsx *.xls);;All Files (*)",
-        )
-        if path:
-            self.kr_peak_file_edit.setText(path)
-
-    def on_kr_peak_mode_changed(self):
-        """卡峰模式切换时，启用/禁用手动卡峰文件选择"""
-        use_manual = self.kr_peak_mode_manual_radio.isChecked()
-        self.kr_peak_file_edit.setEnabled(use_manual)
-        self.kr_peak_file_button.setEnabled(use_manual)
-        if not use_manual:
-            self.kr_peak_file_edit.clear()
-
-    def _set_all_elements(self, checked: bool):
-        for chk in self.element_checks.values():
-            chk.setChecked(checked)
-
-    def compute_kr_factors(self):
-        # 这是现有的方法，保持不变
-        pass
-
-    def on_energy_selected(self, index: int):
-        # 这是现有的方法，保持不变
-        pass
-
-    # ── Tab 1: 基础参数 ──────────────────────────────────────────
-    def _build_basic_tab(self) -> QtWidgets.QWidget:
-        widget = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(widget)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(10)
-
-        # 归一化参数
-        norm_group = QtWidgets.QGroupBox("归一化参数")
-        norm_layout = QtWidgets.QGridLayout(norm_group)
-        norm_layout.setHorizontalSpacing(10)
-        norm_layout.setVerticalSpacing(8)
-
-        self.light_source_combo = QtWidgets.QComboBox()
-        self.light_source_combo.addItem("IO 光电流", "io")
-        self.light_source_combo.addItem("Beam Current 储存环束流", "beam_current")
-        norm_layout.addWidget(QtWidgets.QLabel("光强来源:"), 0, 0)
-        norm_layout.addWidget(self.light_source_combo, 0, 1)
-        norm_layout.setColumnStretch(1, 1)
-        layout.addWidget(norm_group)
-
-        # 定标参数
-        cal_group = QtWidgets.QGroupBox("质量数定标  m/z = A·x² + B·x + C")
-        cal_layout = QtWidgets.QGridLayout(cal_group)
-        cal_layout.setHorizontalSpacing(10)
-        cal_layout.setVerticalSpacing(8)
-
-        self.calibration_a_edit = AutoSelectDoubleSpinBox()
-        self.calibration_b_edit = AutoSelectDoubleSpinBox()
-        self.calibration_c_edit = AutoSelectDoubleSpinBox()
-        for edit in (self.calibration_a_edit, self.calibration_b_edit, self.calibration_c_edit):
-            edit.setRange(-1_000_000, 1_000_000)
-            edit.setDecimals(18)
-            edit.setSingleStep(0.000000001)
-            # 隐藏上下箭头，允许直接修改数值
-            edit.setButtonSymbols(QtWidgets.QAbstractSpinBox.ButtonSymbols.NoButtons)
-
-        cal_layout.addWidget(QtWidgets.QLabel("A:"), 0, 0)
-        cal_layout.addWidget(self.calibration_a_edit, 0, 1)
-        cal_layout.addWidget(QtWidgets.QLabel("B:"), 0, 2)
-        cal_layout.addWidget(self.calibration_b_edit, 0, 3)
-        cal_layout.addWidget(QtWidgets.QLabel("C:"), 0, 4)
-        cal_layout.addWidget(self.calibration_c_edit, 0, 5)
-        for col in (1, 3, 5):
-            cal_layout.setColumnStretch(col, 1)
-        layout.addWidget(cal_group)
-
-        # 元素筛选
-        elements_group = QtWidgets.QGroupBox("元素筛选（影响PIE物种匹配范围）")
-        elements_layout = QtWidgets.QHBoxLayout(elements_group)
-        elements_layout.setSpacing(4)
-        self.element_checks = {}
-        for elem in COMMON_ELEMENTS:
-            chk = QtWidgets.QCheckBox(elem)
-            chk.setChecked(True)
-            self.element_checks[elem] = chk
-            elements_layout.addWidget(chk)
-        elements_layout.addStretch()
-        layout.addWidget(elements_group)
-
-        layout.addStretch()
-        return widget
-
-    # ── Tab 2: 摩尔分数 ──────────────────────────────────────────
-    def _build_mole_fraction_tab(self) -> QtWidgets.QWidget:
-        widget = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(widget)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(10)
-
-        # 摩尔分数质量响应校正
-        md_group = QtWidgets.QGroupBox("摩尔分数质量响应校正  D_i = (MW / 30)^n")
-        md_layout = QtWidgets.QVBoxLayout(md_group)
-        md_layout.setSpacing(8)
-
-        md_ctrl = QtWidgets.QHBoxLayout()
-        md_ctrl.setSpacing(8)
-        self.mf_md_preset_combo = QtWidgets.QComboBox()
-        self.mf_md_preset_combo.setToolTip("选择实验条件预设，自动填入对应指数 n")
-        for name in MASS_DISCRIMINATION_PRESETS:
-            self.mf_md_preset_combo.addItem(name)
-        self.mf_md_preset_combo.currentTextChanged.connect(self._on_mf_md_preset_changed)
-        self.mf_mass_disc_exponent_edit = QtWidgets.QDoubleSpinBox()
-        self.mf_mass_disc_exponent_edit.setToolTip("公式中的指数 n，决定质量响应校正强度")
-        self.mf_mass_disc_exponent_edit.setRange(0.0, 10.0)
-        self.mf_mass_disc_exponent_edit.setDecimals(5)
-        self.mf_mass_disc_exponent_edit.setSingleStep(0.001)
-        self.mf_mass_disc_exponent_edit.setValue(0.77897)
-        self.mf_md_preview_btn = QtWidgets.QPushButton("预览响应因子 D_i")
-        self.mf_md_preview_btn.setCheckable(True)
-        self.mf_md_preview_btn.clicked.connect(self._toggle_md_preview)
-
-        md_ctrl.addWidget(QtWidgets.QLabel("实验条件预设:"))
-        md_ctrl.addWidget(self.mf_md_preset_combo, 2)
-        md_ctrl.addWidget(QtWidgets.QLabel("指数 n:"))
-        md_ctrl.addWidget(self.mf_mass_disc_exponent_edit, 1)
-        md_ctrl.addWidget(self.mf_md_preview_btn)
-        md_layout.addLayout(md_ctrl)
-
-        self.mf_md_preview_table = QtWidgets.QTableWidget()
-        self.mf_md_preview_table.setColumnCount(3)
-        self.mf_md_preview_table.setHorizontalHeaderLabels(["物种", "分子量 (MW)", "响应因子 D_i"])
-        self.mf_md_preview_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
-        self.mf_md_preview_table.setAlternatingRowColors(True)
-        self.mf_md_preview_table.setVisible(False)
-        md_layout.addWidget(self.mf_md_preview_table, 1)
-        layout.addWidget(md_group, 1)
-
-        # Kr膨胀系数
-        kr_group = QtWidgets.QGroupBox("Kr膨胀系数 λ(T)")
-        kr_layout = QtWidgets.QVBoxLayout(kr_group)
-        kr_layout.setSpacing(8)
-
-        kr_form = QtWidgets.QGridLayout()
-        kr_form.setHorizontalSpacing(8)
-        kr_form.setVerticalSpacing(6)
-        self.kr_folder_edit = QtWidgets.QLineEdit()
-        self.kr_folder_edit.setPlaceholderText("选择Kr温度扫描文件夹")
-        self.kr_folder_button = QtWidgets.QPushButton("浏览…")
-        self.kr_folder_button.setFixedWidth(72)
-        self.kr_folder_button.clicked.connect(self.select_kr_folder)
-
-        # 卡峰模式选择
-        self.kr_peak_mode_auto_radio = QtWidgets.QRadioButton("自动卡峰")
-        self.kr_peak_mode_manual_radio = QtWidgets.QRadioButton("手动卡峰文件")
-        self.kr_peak_mode_auto_radio.setChecked(True)
-        self.kr_peak_mode_auto_radio.toggled.connect(self.on_kr_peak_mode_changed)
-
-        self.kr_peak_file_edit = QtWidgets.QLineEdit()
-        self.kr_peak_file_edit.setPlaceholderText("选择Kr手动卡峰文件 (*.csv, *.yaml, *.yml)")
-        self.kr_peak_file_edit.setEnabled(False)
-        self.kr_peak_file_button = QtWidgets.QPushButton("选择…")
-        self.kr_peak_file_button.setFixedWidth(72)
-        self.kr_peak_file_button.setEnabled(False)
-        self.kr_peak_file_button.clicked.connect(self.select_kr_peak_file)
-        self.compute_kr_button = QtWidgets.QPushButton("▶  计算 Kr 膨胀系数")
-        self.compute_kr_button.clicked.connect(self.compute_kr_factors)
-
-        # 能量选择（仅在多能量时显示）
-        self.energy_combo = QtWidgets.QComboBox()
-        self.energy_combo.setVisible(False)
-        self.energy_combo.currentIndexChanged.connect(self.on_energy_selected)
-
-        kr_form.addWidget(QtWidgets.QLabel("扫描文件夹:"), 0, 0)
-        kr_form.addWidget(self.kr_folder_edit, 0, 1)
-        kr_form.addWidget(self.kr_folder_button, 0, 2)
-
-        # 卡峰模式行
-        kr_form.addWidget(QtWidgets.QLabel("卡峰模式:"), 1, 0)
-        peak_mode_layout = QtWidgets.QHBoxLayout()
-        peak_mode_layout.addWidget(self.kr_peak_mode_auto_radio)
-        peak_mode_layout.addWidget(self.kr_peak_mode_manual_radio)
-        peak_mode_layout.addStretch()
-        kr_form.addLayout(peak_mode_layout, 1, 1, 1, 2)
-
-        kr_form.addWidget(QtWidgets.QLabel("卡峰文件:"), 2, 0)
-        kr_form.addWidget(self.kr_peak_file_edit, 2, 1)
-        kr_form.addWidget(self.kr_peak_file_button, 2, 2)
-
-        kr_form.addWidget(QtWidgets.QLabel("能量选择:"), 3, 0)
-        kr_form.addWidget(self.energy_combo, 3, 1)
-
-        kr_form.addWidget(self.compute_kr_button, 4, 1)
-        kr_form.setColumnStretch(1, 1)
-        kr_layout.addLayout(kr_form)
-
-        self.factor_table = QtWidgets.QTableWidget()
-        self.factor_table.setColumnCount(3)
-        self.factor_table.setHorizontalHeaderLabels(["温度 (°C)", "Kr 信号积分", "λ(T)"])
-        self.factor_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
-        self.factor_table.setAlternatingRowColors(True)
-        kr_layout.addWidget(self.factor_table, 1)
-        layout.addWidget(kr_group, 1)
-
-        return widget
-
     def load_from_settings(self) -> None:
         # 当有 ProjectSettings 时，优先从 ProjectSettings 加载项目特定参数
         # 这确保项目的参数设置在项目关闭/重新打开时被保留
         if self.project_settings:
             combo_set_data(self.light_source_combo, self.project_settings.light_source)
-            self.kr_folder_edit.setText(self.project_settings.kr_calibration_folder)
-            self.kr_peak_file_edit.setText(self.project_settings.kr_calibration_peak_file)
-            self.kr_mz_combo.setCurrentText(str(self.project_settings.kr_mz))
+            if self.show_kr_expansion:
+                self.kr_folder_edit.setText(self.project_settings.kr_calibration_folder)
+                self.kr_peak_file_edit.setText(self.project_settings.kr_calibration_peak_file)
+                self.kr_mz_combo.setCurrentText(str(self.project_settings.kr_mz))
             self.settings.expansion_factors = dict(self.project_settings.expansion_factors)
             self.settings.selected_elements = list(self.project_settings.selected_elements)
-            # 根据是否有卡峰文件来设置模式
-            use_manual_peak = bool(self.project_settings.kr_calibration_peak_file.strip())
-            self.kr_peak_mode_manual_radio.setChecked(use_manual_peak)
-            self.kr_peak_mode_auto_radio.setChecked(not use_manual_peak)
+            if self.show_kr_expansion:
+                use_manual_peak = bool(self.project_settings.kr_calibration_peak_file.strip())
+                self.kr_peak_mode_manual_radio.setChecked(use_manual_peak)
+                self.kr_peak_mode_auto_radio.setChecked(not use_manual_peak)
         else:
             # 无项目时，从本地 NormalizationSettings 加载
             combo_set_data(self.light_source_combo, self.settings.light_source)
-            self.kr_folder_edit.setText(self.settings.kr_calibration_folder)
-            self.kr_peak_file_edit.setText(self.settings.kr_calibration_peak_file)
-            self.kr_mz_combo.setCurrentText(str(self.settings.kr_mz))
-            # 根据是否有卡峰文件来设置模式
-            use_manual_peak = bool(self.settings.kr_calibration_peak_file.strip())
-            self.kr_peak_mode_manual_radio.setChecked(use_manual_peak)
-            self.kr_peak_mode_auto_radio.setChecked(not use_manual_peak)
+            if self.show_kr_expansion:
+                self.kr_folder_edit.setText(self.settings.kr_calibration_folder)
+                self.kr_peak_file_edit.setText(self.settings.kr_calibration_peak_file)
+                self.kr_mz_combo.setCurrentText(str(self.settings.kr_mz))
+                use_manual_peak = bool(self.settings.kr_calibration_peak_file.strip())
+                self.kr_peak_mode_manual_radio.setChecked(use_manual_peak)
+                self.kr_peak_mode_auto_radio.setChecked(not use_manual_peak)
 
-        # 更新卡峰文件控件的启用状态
-        self.on_kr_peak_mode_changed()
+        if self.show_kr_expansion:
+            self.on_kr_peak_mode_changed()
 
         # 加载校准参数；项目模式优先使用 project.yaml 中的定标值
-        if self.project_settings:
-            self.calibration_a_edit.setValue(self.project_settings.cal_a)
-            self.calibration_b_edit.setValue(self.project_settings.cal_b)
-            self.calibration_c_edit.setValue(self.project_settings.cal_c)
-        else:
-            calibration = load_calibration_config()
-            self.calibration_a_edit.setValue(calibration.a)
-            self.calibration_b_edit.setValue(calibration.b)
-            self.calibration_c_edit.setValue(calibration.c)
+        if self.show_calibration:
+            if self.project_settings:
+                self.calibration_a_edit.setValue(self.project_settings.cal_a)
+                self.calibration_b_edit.setValue(self.project_settings.cal_b)
+                self.calibration_c_edit.setValue(self.project_settings.cal_c)
+            else:
+                calibration = load_factory_project_settings().to_calibration()
+                self.calibration_a_edit.setValue(calibration.a)
+                self.calibration_b_edit.setValue(calibration.b)
+                self.calibration_c_edit.setValue(calibration.c)
 
-        # 加载摩尔分数参数
-        if self.project_settings:
+        # 模块专属参数仅供旧兼容入口显示；项目管理已移入对应模块页。
+        if self.show_mass_response and self.project_settings:
             # 恢复预设选择
             if self.project_settings.mf_md_preset:
+                if (
+                    self.mf_md_preset_combo.findData(
+                        self.project_settings.mf_md_preset
+                    )
+                    < 0
+                ):
+                    self.mf_md_preset_combo.addItem(
+                        self.project_settings.mf_md_preset,
+                        self.project_settings.mf_md_preset,
+                    )
                 combo_set_data(self.mf_md_preset_combo, self.project_settings.mf_md_preset)
             self.mf_mass_disc_exponent_edit.setValue(self.project_settings.mf_mass_disc_exponent)
-        self.refresh_factor_table()
-        # 加载元素筛选
-        selected = self.project_settings.selected_elements if self.project_settings else self.settings.selected_elements
-        for elem, chk in self.element_checks.items():
-            chk.setChecked(not selected or elem in selected)
+        if self.show_kr_expansion:
+            self._reset_kr_factor_display()
+        if self.show_element_filter:
+            selected = (
+                self.project_settings.selected_elements
+                if self.project_settings
+                else self.settings.selected_elements
+            )
+            for elem, chk in self.element_checks.items():
+                chk.setChecked(not selected or elem in selected)
+        self._remember_kr_factor_state()
 
     def set_project_settings(self, project_settings: ProjectSettings) -> None:
         """Set the project settings reference for parameter synchronization."""
@@ -695,75 +504,169 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
         if project_settings:
             self.load_from_settings()
 
-    def apply_to_settings(self, project_settings: ProjectSettings | None = None) -> None:
+    def _kr_dependency_signature(
+        self,
+        target: ProjectSettings | None = None,
+    ) -> tuple[object, ...]:
+        settings_source = target or self.project_settings
+        calibration_values: tuple[object, ...]
+        if self.show_calibration:
+            calibration_values = (
+                self.calibration_a_edit.value(),
+                self.calibration_b_edit.value(),
+                self.calibration_c_edit.value(),
+            )
+        elif settings_source is not None:
+            calibration_values = (
+                settings_source.cal_a,
+                settings_source.cal_b,
+                settings_source.cal_c,
+            )
+        else:
+            calibration_values = (
+                self.calibration.a,
+                self.calibration.b,
+                self.calibration.c,
+            )
+
+        kr_values: tuple[object, ...]
+        if self.show_kr_expansion:
+            manual_peak_file = (
+                self.kr_peak_file_edit.text().strip()
+                if self.kr_peak_mode_manual_radio.isChecked()
+                else ""
+            )
+            kr_values = (
+                self.kr_folder_edit.text().strip(),
+                manual_peak_file,
+                int(self.kr_mz_combo.currentText()),
+            )
+        elif settings_source is not None:
+            kr_values = (
+                settings_source.kr_calibration_folder,
+                settings_source.kr_calibration_peak_file,
+                settings_source.kr_mz,
+            )
+        else:
+            kr_values = (
+                self.settings.kr_calibration_folder,
+                self.settings.kr_calibration_peak_file,
+                self.settings.kr_mz,
+            )
+
+        return (
+            str(self.light_source_combo.currentData() or ""),
+            *calibration_values,
+            *kr_values,
+        )
+
+    def _remember_kr_factor_state(self) -> None:
+        self._kr_dependency_snapshot = self._kr_dependency_signature()
+        self._kr_factor_snapshot = deepcopy(self.settings.expansion_factors)
+
+    def _reset_kr_factor_display(self) -> None:
+        self._kr_display_factors = deepcopy(self.settings.expansion_factors)
+        self._kr_signal_data = {}
+        for attribute_name in ("_kr_result_df", "_energy_group_map"):
+            if hasattr(self, attribute_name):
+                delattr(self, attribute_name)
+        self.energy_combo.blockSignals(True)
+        self.energy_combo.clear()
+        self.energy_combo.blockSignals(False)
+        self.energy_combo.setVisible(False)
+        self.refresh_factor_table()
+
+    def _invalidate_stale_kr_factors(
+        self,
+        target: ProjectSettings | None = None,
+    ) -> bool:
+        inputs_changed = (
+            self._kr_dependency_snapshot is not None
+            and self._kr_dependency_signature(target)
+            != self._kr_dependency_snapshot
+        )
+        factors_recomputed = (
+            self.settings.expansion_factors != self._kr_factor_snapshot
+        )
+        if not inputs_changed or factors_recomputed:
+            return False
+
+        had_factors = bool(self.settings.expansion_factors)
+        self.settings.expansion_factors = {}
+        if self.show_kr_expansion:
+            self._reset_kr_factor_display()
+        if had_factors:
+            self.status_label.setText("Kr 输入已变化，请重新计算 λ(T)")
+        return had_factors
+
+    def apply_to_settings(
+        self,
+        project_settings: ProjectSettings | None = None,
+    ) -> bool:
         target = project_settings or self.project_settings
         if project_settings is not None:
             self.project_settings = project_settings
+        kr_factors_invalidated = self._invalidate_stale_kr_factors(target)
         self.settings.light_source = self.light_source_combo.currentData()
         self.settings.mass_discrimination = 1.0
-        self.settings.kr_calibration_folder = self.kr_folder_edit.text().strip()
-        self.settings.kr_mz = int(self.kr_mz_combo.currentText())
-        # 根据卡峰模式决定是否保存卡峰文件路径
-        if self.kr_peak_mode_manual_radio.isChecked():
-            self.settings.kr_calibration_peak_file = self.kr_peak_file_edit.text().strip()
-        else:
-            self.settings.kr_calibration_peak_file = ""
-        self.calibration = Calibration(
-            a=self.calibration_a_edit.value(),
-            b=self.calibration_b_edit.value(),
-            c=self.calibration_c_edit.value(),
-        )
-        # 同步所有项目特定参数到 ProjectSettings
-        if target:
-            target.light_source = self.settings.light_source
-            target.kr_calibration_folder = self.settings.kr_calibration_folder
-            target.kr_mz = int(self.kr_mz_combo.currentText())
-            # 根据卡峰模式决定是否保存卡峰文件路径
+        if self.show_kr_expansion:
+            self.settings.kr_calibration_folder = self.kr_folder_edit.text().strip()
+            self.settings.kr_mz = int(self.kr_mz_combo.currentText())
             if self.kr_peak_mode_manual_radio.isChecked():
-                target.kr_calibration_peak_file = self.kr_peak_file_edit.text().strip()
+                self.settings.kr_calibration_peak_file = self.kr_peak_file_edit.text().strip()
             else:
-                target.kr_calibration_peak_file = ""
-            target.expansion_factors = dict(self.settings.expansion_factors)
-            target.cal_a = self.calibration.a
-            target.cal_b = self.calibration.b
-            target.cal_c = self.calibration.c
-            target.mf_md_preset = self.mf_md_preset_combo.currentText()
-            target.mf_mass_disc_exponent = self.mf_mass_disc_exponent_edit.value()
-        self.settings.selected_elements = [
-            elem for elem, chk in self.element_checks.items() if chk.isChecked()
-        ]
-        if target:
-            target.selected_elements = list(self.settings.selected_elements)
-
-    def _sync_calibration_to_project_settings(self) -> None:
-        """将定标参数 spinbox 值同步到 ProjectSettingsManager。
-
-        与 workbench._sync_calibration_to_project_settings 功能相同，
-        防止在项目页面"通用参数"中修改定标后，切换页面时被覆盖。
-
-        editingFinished 在 spinbox 失去焦点时（用户点击导航按钮之前）触发，
-        因此能在 switch_workspace_page() 之前完成同步。
-        """
-        if not self.persist_changes:
-            return
-        try:
-            calibration = Calibration(
+                self.settings.kr_calibration_peak_file = ""
+        if self.show_calibration:
+            self.calibration = Calibration(
                 a=self.calibration_a_edit.value(),
                 b=self.calibration_b_edit.value(),
                 c=self.calibration_c_edit.value(),
             )
-            self.calibration = calibration
-            save_calibration_config(calibration)
+        # 同步所有项目特定参数到 ProjectSettings
+        if target:
+            target.light_source = self.settings.light_source
+            if self.show_kr_expansion:
+                target.kr_calibration_folder = self.settings.kr_calibration_folder
+                target.kr_mz = int(self.kr_mz_combo.currentText())
+                if self.kr_peak_mode_manual_radio.isChecked():
+                    target.kr_calibration_peak_file = self.kr_peak_file_edit.text().strip()
+                else:
+                    target.kr_calibration_peak_file = ""
+            target.expansion_factors = dict(self.settings.expansion_factors)
+            if self.show_calibration:
+                target.cal_a = self.calibration.a
+                target.cal_b = self.calibration.b
+                target.cal_c = self.calibration.c
+            if self.show_mass_response:
+                target.mf_md_preset = self.mf_md_preset_combo.currentText()
+                target.mf_mass_disc_exponent = (
+                    self.mf_mass_disc_exponent_edit.value()
+                )
+        if self.show_element_filter:
+            self.settings.selected_elements = [
+                elem for elem, chk in self.element_checks.items() if chk.isChecked()
+            ]
+            if target:
+                target.selected_elements = list(self.settings.selected_elements)
+        self._remember_kr_factor_state()
+        return kr_factors_invalidated
 
-            manager = ProjectSettingsManager()
-            if manager.has_project_path():
-                ps = manager.get()
-                ps.cal_a = calibration.a
-                ps.cal_b = calibration.b
-                ps.cal_c = calibration.c
-                manager.save()
-        except Exception:
-            pass
+    def _sync_calibration_to_project_settings(self) -> None:
+        """Update only the in-memory editor draft.
+
+        Persistence belongs to the project-page transaction.  Losing focus in
+        this widget must never write a machine-global or project configuration.
+        """
+        calibration = Calibration(
+            a=self.calibration_a_edit.value(),
+            b=self.calibration_b_edit.value(),
+            c=self.calibration_c_edit.value(),
+        )
+        self.calibration = calibration
+        if self.project_settings is not None:
+            self.project_settings.cal_a = calibration.a
+            self.project_settings.cal_b = calibration.b
+            self.project_settings.cal_c = calibration.c
 
     def _set_all_elements(self, checked: bool):
         for chk in self.element_checks.values():
@@ -794,20 +697,9 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
             self.kr_peak_file_edit.setText(path)
 
     def save_settings(self):
-        self.apply_to_settings()
-        normalization_path = save_normalization_settings(self.settings)
-        calibration_path = save_calibration_config(self.calibration)
-        # 保存ProjectSettings
-        project_path = None
-        if self.project_settings:
-            from bl03u_masstool.core.project_settings import ProjectSettingsManager
-            manager = ProjectSettingsManager()
-            manager.set(self.project_settings)
-            project_path = manager.save()
-        saved_parts = [str(normalization_path), str(calibration_path)]
-        if project_path:
-            saved_parts.append(str(project_path))
-        self.status_label.setText("已保存: " + "；".join(saved_parts))
+        kr_factors_invalidated = self.apply_to_settings()
+        if not kr_factors_invalidated:
+            self.status_label.setText("已更新当前草稿，尚未保存到项目")
         self.settings_saved.emit()
 
     def compute_kr_factors(self):
@@ -840,7 +732,7 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
         peak_config = (
             self.project_settings.to_peak_detection_config()
             if self.project_settings
-            else load_peak_detection_config()
+            else load_factory_project_settings().to_peak_detection_config()
         )
         self.set_busy(True, "正在计算Kr膨胀系数...")
         self.worker = WorkerThread(
@@ -947,15 +839,9 @@ class CommonParametersWidget(QtWidgets.QWidget, DataFrameTableMixin):
             msg = f"已计算 {len(self.settings.expansion_factors)} 个温度点的Kr膨胀系数"
 
         self.refresh_factor_table()
-        if self.persist_changes:
-            save_normalization_settings(self.settings)
         if self.project_settings:
             self.project_settings.expansion_factors = dict(self.settings.expansion_factors)
-            if self.persist_changes:
-                from bl03u_masstool.core.project_settings import ProjectSettingsManager
-                manager = ProjectSettingsManager()
-                manager.set(self.project_settings)
-                manager.save()
+        self._remember_kr_factor_state()
         self.status_label.setText(msg)
 
     def on_energy_selected(self, index: int) -> None:
@@ -1117,7 +1003,7 @@ class PeakDetectionWidget(QtWidgets.QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.peak_detection = load_peak_detection_config()
+        self.peak_detection = load_factory_project_settings().to_peak_detection_config()
         self.project_settings: ProjectSettings | None = None
 
         root = QtWidgets.QVBoxLayout(self)
@@ -1332,30 +1218,7 @@ class PeakDetectionWidget(QtWidgets.QWidget):
 
     def save_settings(self):
         self.apply_to_settings()
-        peak_detection_path = save_peak_detection_config(self.peak_detection)
-        # 也保存到ProjectSettings
-        if self.project_settings:
-            from bl03u_masstool.core.project_settings import ProjectSettingsManager
-            settings_manager = ProjectSettingsManager()
-            ps = settings_manager.get()
-            ps.peak_algorithm = self.project_settings.peak_algorithm
-            ps.detection_min_idx = self.project_settings.detection_min_idx
-            ps.threshold_end = self.project_settings.threshold_end
-            ps.min_intensity = self.project_settings.min_intensity
-            ps.nearby_peak_window = self.project_settings.nearby_peak_window
-            ps.duplicate_window = self.project_settings.duplicate_window
-            ps.weak_tail_ratio = self.project_settings.weak_tail_ratio
-            ps.gaussian_window_max = self.project_settings.gaussian_window_max
-            ps.gaussian_boundary_scale = self.project_settings.gaussian_boundary_scale
-            ps.boundary_padding = self.project_settings.boundary_padding
-            ps.prominence_ratio = self.project_settings.prominence_ratio
-            ps.smoothing_window = self.project_settings.smoothing_window
-            ps.baseline_window = self.project_settings.baseline_window
-            ps.baseline_percentile = self.project_settings.baseline_percentile
-            ps.min_peak_width = self.project_settings.min_peak_width
-            ps.max_peak_width = self.project_settings.max_peak_width
-            settings_manager.save()
-        self.status_label.setText(f"已保存: {peak_detection_path}")
+        self.status_label.setText("已更新当前草稿，尚未保存到项目")
         self.settings_saved.emit()
 
 
@@ -1368,11 +1231,6 @@ class CommonParametersDialog(QtWidgets.QDialog):
         layout.setContentsMargins(8, 8, 8, 8)
         self.settings_widget = CommonParametersWidget(settings, calibration, self)
         layout.addWidget(self.settings_widget)
-
-
-# Legacy alias for backward compatibility with core_tools/dialog.py
-NormalizationSettingsWidget = CommonParametersWidget
-
 
 class FunctionDefaultsWidget(QtWidgets.QWidget):
     """集成寻峰参数和功能默认参数的统一 Widget。
@@ -1400,7 +1258,7 @@ class FunctionDefaultsWidget(QtWidgets.QWidget):
         visible_pages: tuple[str, ...] | None = None,
     ):
         super().__init__(parent)
-        self.peak_detection = load_peak_detection_config()
+        self.peak_detection = load_factory_project_settings().to_peak_detection_config()
         self.project_settings: ProjectSettings | None = None
         visible_page_set = set(visible_pages) if visible_pages is not None else None
         self._visible_pages: list[str] = []
@@ -1417,6 +1275,7 @@ class FunctionDefaultsWidget(QtWidgets.QWidget):
         self.open_function_page_button.setObjectName("BrowseButton")
         self.open_function_page_button.setToolTip("打开当前默认值对应的功能页面")
         self.open_function_page_button.clicked.connect(self._request_current_function_page)
+        self.open_function_page_button.setVisible(show_actions)
         action_row.addWidget(self.open_function_page_button)
         if show_actions:
             root.addLayout(action_row)
@@ -1424,7 +1283,11 @@ class FunctionDefaultsWidget(QtWidgets.QWidget):
         # 使用标签页组织功能参数
         self.tabs = QtWidgets.QTabWidget()
         tab_specs = (
-            ("spectrum", "寻峰与积分", self._build_peak_detection_tab()),
+            (
+                "spectrum",
+                "寻峰与积分",
+                self._build_peak_detection_tab(),
+            ),
             ("temperature", "温度扫描", self._build_temperature_scan_tab()),
             ("pie", "PIE 分析", self._build_pie_fitting_tab()),
             ("pics", "PICS 计算", self._build_pics_tab()),
@@ -1446,7 +1309,7 @@ class FunctionDefaultsWidget(QtWidgets.QWidget):
         bl = QtWidgets.QHBoxLayout(bottom_bar)
         bl.setContentsMargins(8, 4, 8, 4)
         bl.setSpacing(8)
-        self.save_button = QtWidgets.QPushButton("保存为项目默认值")
+        self.save_button = QtWidgets.QPushButton("应用到当前草稿")
         self.save_button.setObjectName("PrimaryButton")
         self.save_button.setFixedHeight(30)
         self.save_button.clicked.connect(self.save_settings)
@@ -1567,6 +1430,7 @@ class FunctionDefaultsWidget(QtWidgets.QWidget):
         peak_layout.setColumnStretch(1, 1)
         peak_layout.setColumnStretch(3, 1)
         layout.addWidget(peak_group)
+
         layout.addStretch(1)
 
         return widget
@@ -1596,7 +1460,19 @@ class FunctionDefaultsWidget(QtWidgets.QWidget):
         self.temp_integration_method_combo.addItem("范围累加", "sum_counts")
         self.temp_integration_method_combo.addItem("扣基线积分", "baseline")
         self.temp_integration_method_combo.addItem("高斯", "gaussian")
-        self.temp_integration_method_combo.setToolTip("温度扫描原始积分信号的默认计算方式；高斯拟合不可用时回退范围累加，并在结果中记录实际方式")
+        self.temp_integration_method_combo.setToolTip(
+            "温度扫描原始积分信号的默认计算方式；"
+            "高斯拟合不可用时回退范围累加，并在结果中记录实际方式"
+        )
+
+        self.temperature_photon_check = QtWidgets.QCheckBox("光强归一化")
+        self.temperature_photon_check.setToolTip(
+            "使用项目共享参数中配置的光强来源归一化温度扫描信号"
+        )
+        self.temperature_kr_check = QtWidgets.QCheckBox("Kr 校正")
+        self.temperature_kr_check.setToolTip(
+            "使用项目共享参数中已有的 Kr 膨胀系数 λ(T) 校正温度扫描信号"
+        )
 
         self.temp_curve_class_change_threshold_edit = QtWidgets.QDoubleSpinBox()
         self.temp_curve_class_change_threshold_edit.setRange(0.0, 1.0)
@@ -1615,24 +1491,55 @@ class FunctionDefaultsWidget(QtWidgets.QWidget):
         self.temp_replicate_mode_combo.addItem("累加重复采集", "sum")
         self.temp_replicate_mode_combo.setToolTip("仅在确认同一条件多次采集时选择平均或累加")
 
-        form.addWidget(QtWidgets.QLabel("项目峰来源"), 0, 0)
-        project_peak_hint = QtWidgets.QLabel("当前项目卡峰集（PIE与温扫共用）")
-        project_peak_hint.setToolTip("在项目管理中导入、自动生成或切换卡峰版本")
-        form.addWidget(project_peak_hint, 0, 1, 1, 3)
-        form.addWidget(QtWidgets.QLabel("积分方式"), 0, 4)
-        form.addWidget(self.temp_integration_method_combo, 0, 5)
-        form.addWidget(QtWidgets.QLabel("分类变化阈值"), 1, 0)
-        form.addWidget(self.temp_curve_class_change_threshold_edit, 1, 1)
-        form.addWidget(QtWidgets.QLabel("端点峰值比例"), 1, 2)
-        form.addWidget(self.temp_curve_class_peak_fraction_edit, 1, 3)
-        form.addWidget(QtWidgets.QLabel("重复采集处理"), 2, 0)
-        form.addWidget(self.temp_replicate_mode_combo, 2, 1)
+        form.addWidget(self.temperature_photon_check, 0, 0)
+        form.addWidget(self.temperature_kr_check, 0, 1)
+        self.temp_peak_source_label = QtWidgets.QLabel("项目峰来源")
+        self.temp_peak_source_hint = QtWidgets.QLabel("当前项目卡峰集（PIE与温扫共用）")
+        self.temp_peak_source_hint.setToolTip("在项目管理中管理卡峰版本")
+        form.addWidget(self.temp_peak_source_label, 1, 0)
+        form.addWidget(self.temp_peak_source_hint, 1, 1, 1, 3)
+        form.addWidget(QtWidgets.QLabel("积分方式"), 1, 4)
+        form.addWidget(self.temp_integration_method_combo, 1, 5)
+        form.addWidget(QtWidgets.QLabel("分类变化阈值"), 2, 0)
+        form.addWidget(self.temp_curve_class_change_threshold_edit, 2, 1)
+        form.addWidget(QtWidgets.QLabel("端点峰值比例"), 2, 2)
+        form.addWidget(self.temp_curve_class_peak_fraction_edit, 2, 3)
+        form.addWidget(QtWidgets.QLabel("重复采集处理"), 3, 0)
+        form.addWidget(self.temp_replicate_mode_combo, 3, 1)
         for col in (1, 3, 5):
             form.setColumnStretch(col, 1)
 
         layout.addWidget(group)
         layout.addStretch(1)
         return widget
+
+    def _build_pie_element_filter_group(self) -> QtWidgets.QGroupBox:
+        group = QtWidgets.QGroupBox("物种匹配元素范围")
+        layout = QtWidgets.QVBoxLayout(group)
+        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setSpacing(8)
+
+        hint = QtWidgets.QLabel(
+            "仅影响 PIE 物种数据库匹配和同位素候选范围。"
+        )
+        hint.setObjectName("HintLabel")
+        layout.addWidget(hint)
+
+        elements_layout = QtWidgets.QGridLayout()
+        elements_layout.setHorizontalSpacing(6)
+        elements_layout.setVerticalSpacing(4)
+        self.element_checks: dict[str, QtWidgets.QCheckBox] = {}
+        for index, element in enumerate(COMMON_ELEMENTS):
+            checkbox = QtWidgets.QCheckBox(element)
+            checkbox.setMaximumWidth(60)
+            self.element_checks[element] = checkbox
+            elements_layout.addWidget(
+                checkbox,
+                index // 6,
+                index % 6,
+            )
+        layout.addLayout(elements_layout)
+        return group
 
     def _build_pie_fitting_tab(self) -> QtWidgets.QWidget:
         widget = QtWidgets.QWidget()
@@ -1649,6 +1556,21 @@ class FunctionDefaultsWidget(QtWidgets.QWidget):
         self.pie_energy_decimals_edit.setRange(0, 6)
         self.pie_energy_decimals_edit.setToolTip("光子能量分组时保留的小数位数")
 
+        self.pie_photon_mode_combo = QtWidgets.QComboBox()
+        self.pie_photon_mode_combo.addItem("关闭光强归一", "off")
+        self.pie_photon_mode_combo.addItem("按 IO 归一", "none")
+        self.pie_photon_mode_combo.addItem("按 IO 及参考值归一", "first")
+        self.pie_photon_mode_combo.setToolTip(
+            "选择 PIE 曲线生成时的光强归一化方式；光强来源由项目共享参数维护"
+        )
+
+        self.pie_time_normalize_check = QtWidgets.QCheckBox(
+            "按每个原始谱的扫描时间归一化"
+        )
+        self.pie_time_normalize_check.setToolTip(
+            "先换算为 counts/(nA·s) 再合并重复谱"
+        )
+
         self.pie_recursive_check = QtWidgets.QCheckBox("递归扩展拟合")
         self.pie_recursive_check.setToolTip("先拟合高能段，再逐步扩展到低能区")
 
@@ -1656,7 +1578,10 @@ class FunctionDefaultsWidget(QtWidgets.QWidget):
         self.pie_integration_method_combo.addItem("范围累加", "sum_counts")
         self.pie_integration_method_combo.addItem("扣基线积分", "baseline")
         self.pie_integration_method_combo.addItem("高斯", "gaussian")
-        self.pie_integration_method_combo.setToolTip("PIE 原始积分信号的默认计算方式；高斯拟合不可用时回退范围累加，并在结果中记录实际方式")
+        self.pie_integration_method_combo.setToolTip(
+            "PIE 原始积分信号的默认计算方式；"
+            "高斯拟合不可用时回退范围累加，并在结果中记录实际方式"
+        )
 
         self.pie_merge_method_combo = QtWidgets.QComboBox()
         self.pie_merge_method_combo.addItem("低能段为主", "low_energy_dominant")
@@ -1669,19 +1594,26 @@ class FunctionDefaultsWidget(QtWidgets.QWidget):
         self.pie_replicate_mode_combo.addItem("累加重复采集", "sum")
         self.pie_replicate_mode_combo.setToolTip("仅在确认同一条件多次采集时选择平均或累加")
 
-        form.addWidget(QtWidgets.QLabel("能量分组小数位"), 0, 0)
-        form.addWidget(self.pie_energy_decimals_edit, 0, 1)
-        form.addWidget(self.pie_recursive_check, 0, 2)
-        form.addWidget(QtWidgets.QLabel("积分方式"), 0, 3)
-        form.addWidget(self.pie_integration_method_combo, 0, 4)
-        form.addWidget(QtWidgets.QLabel("能段合并方式"), 1, 0)
-        form.addWidget(self.pie_merge_method_combo, 1, 1)
-        form.addWidget(QtWidgets.QLabel("重复采集处理"), 2, 0)
-        form.addWidget(self.pie_replicate_mode_combo, 2, 1)
+        form.addWidget(QtWidgets.QLabel("光强归一化"), 0, 0)
+        form.addWidget(self.pie_photon_mode_combo, 0, 1)
+        form.addWidget(self.pie_time_normalize_check, 0, 2, 1, 3)
+        form.addWidget(QtWidgets.QLabel("能量分组小数位"), 1, 0)
+        form.addWidget(self.pie_energy_decimals_edit, 1, 1)
+        form.addWidget(self.pie_recursive_check, 1, 2)
+        form.addWidget(QtWidgets.QLabel("积分方式"), 1, 3)
+        form.addWidget(self.pie_integration_method_combo, 1, 4)
+        form.addWidget(QtWidgets.QLabel("能段合并方式"), 2, 0)
+        form.addWidget(self.pie_merge_method_combo, 2, 1)
+        self.pie_merge_method_hint = QtWidgets.QLabel("仅在存在多个能段时生效")
+        self.pie_merge_method_hint.setObjectName("HintLabel")
+        form.addWidget(self.pie_merge_method_hint, 2, 2, 1, 3)
+        form.addWidget(QtWidgets.QLabel("重复采集处理"), 3, 0)
+        form.addWidget(self.pie_replicate_mode_combo, 3, 1)
         for col in (1, 3):
             form.setColumnStretch(col, 1)
 
         layout.addWidget(group)
+        layout.addWidget(self._build_pie_element_filter_group())
         layout.addStretch(1)
         return widget
 
@@ -1715,6 +1647,14 @@ class FunctionDefaultsWidget(QtWidgets.QWidget):
         self.pics_new_species_mf_edit.setSingleStep(0.001)
         self.pics_new_species_mf_edit.setToolTip("新物种默认摩尔分数")
 
+        self.pics_mass_disc_exponent_edit = QtWidgets.QDoubleSpinBox()
+        self.pics_mass_disc_exponent_edit.setRange(0.0, 2.0)
+        self.pics_mass_disc_exponent_edit.setDecimals(5)
+        self.pics_mass_disc_exponent_edit.setSingleStep(0.001)
+        self.pics_mass_disc_exponent_edit.setToolTip(
+            "PICS 计算独立使用的质量响应指数，不再读取摩尔分数参数"
+        )
+
         form.addWidget(QtWidgets.QLabel("NO m/z"), 0, 0)
         form.addWidget(self.pics_no_mz_edit, 0, 1)
         form.addWidget(QtWidgets.QLabel("NO 分子式"), 0, 2)
@@ -1723,6 +1663,8 @@ class FunctionDefaultsWidget(QtWidgets.QWidget):
         form.addWidget(self.pics_no_mf_edit, 1, 1)
         form.addWidget(QtWidgets.QLabel("新物种摩尔分数"), 1, 2)
         form.addWidget(self.pics_new_species_mf_edit, 1, 3)
+        form.addWidget(QtWidgets.QLabel("质量响应指数 n"), 2, 0)
+        form.addWidget(self.pics_mass_disc_exponent_edit, 2, 1)
         for col in (1, 3):
             form.setColumnStretch(col, 1)
 
@@ -1735,6 +1677,41 @@ class FunctionDefaultsWidget(QtWidgets.QWidget):
         layout = QtWidgets.QVBoxLayout(widget)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
+
+        mass_response_group = QtWidgets.QGroupBox("质量响应校正")
+        mass_response_layout = QtWidgets.QGridLayout(mass_response_group)
+        mass_response_layout.setHorizontalSpacing(8)
+        mass_response_layout.setVerticalSpacing(8)
+
+        self.mf_md_preset_combo = QtWidgets.QComboBox()
+        for name in MASS_DISCRIMINATION_PRESETS:
+            self.mf_md_preset_combo.addItem(name, name)
+        self.mf_md_preset_combo.currentTextChanged.connect(
+            self._on_mf_md_preset_changed
+        )
+
+        self.mf_mass_disc_exponent_edit = QtWidgets.QDoubleSpinBox()
+        self.mf_mass_disc_exponent_edit.setRange(0.0, 2.0)
+        self.mf_mass_disc_exponent_edit.setDecimals(5)
+        self.mf_mass_disc_exponent_edit.setToolTip(
+            "质量响应因子 Dᵢ = (MW / 30)ⁿ 中使用的指数"
+        )
+        mass_response_layout.addWidget(
+            QtWidgets.QLabel("实验条件预设"),
+            0,
+            0,
+        )
+        mass_response_layout.addWidget(self.mf_md_preset_combo, 0, 1)
+        mass_response_layout.addWidget(QtWidgets.QLabel("指数 n"), 1, 0)
+        mass_response_layout.addWidget(
+            self.mf_mass_disc_exponent_edit,
+            1,
+            1,
+        )
+        formula_label = QtWidgets.QLabel("响应因子公式：Dᵢ = (MW / 30)ⁿ")
+        formula_label.setObjectName("FormulaLabel")
+        mass_response_layout.addWidget(formula_label, 2, 0, 1, 2)
+        mass_response_layout.setColumnStretch(1, 1)
 
         group = QtWidgets.QGroupBox("摩尔分数默认参数")
         form = QtWidgets.QGridLayout(group)
@@ -1776,9 +1753,16 @@ class FunctionDefaultsWidget(QtWidgets.QWidget):
         for col in (1, 3):
             form.setColumnStretch(col, 1)
 
+        layout.addWidget(mass_response_group)
         layout.addWidget(group)
         layout.addStretch(1)
         return widget
+
+    def _on_mf_md_preset_changed(self, text: str) -> None:
+        if text in MASS_DISCRIMINATION_PRESETS:
+            self.mf_mass_disc_exponent_edit.setValue(
+                MASS_DISCRIMINATION_PRESETS[text]
+            )
 
     def set_project_settings(self, project_settings: ProjectSettings) -> None:
         """设置项目级配置引用"""
@@ -1804,24 +1788,64 @@ class FunctionDefaultsWidget(QtWidgets.QWidget):
         self.peak_gaussian_boundary_scale_edit.setValue(self.peak_detection.gaussian_boundary_scale)
         combo_set_data(self.temp_peak_source_combo, ps.temp_peak_source)
         combo_set_data(self.temp_reference_mode_combo, ps.temp_reference_mode)
-        combo_set_data(self.temp_integration_method_combo, ps.temp_integration_method)
+        self.temperature_photon_check.setChecked(
+            bool(ps.temperature_photon_normalize)
+        )
+        kr_available = bool(ps.expansion_factors)
+        self.temperature_kr_check.setEnabled(kr_available)
+        self.temperature_kr_check.setChecked(
+            bool(ps.temperature_kr_correct) and kr_available
+        )
+        self.temperature_kr_check.setText(
+            "Kr 校正" if kr_available else "Kr 校正（缺少系数）"
+        )
+        combo_set_data(
+            self.temp_integration_method_combo,
+            ps.temp_integration_method,
+        )
         self.temp_curve_class_change_threshold_edit.setValue(ps.temp_curve_class_change_threshold)
         self.temp_curve_class_peak_fraction_edit.setValue(ps.temp_curve_class_peak_fraction)
         combo_set_data(self.temp_replicate_mode_combo, ps.temp_replicate_mode)
+        combo_set_data(self.pie_photon_mode_combo, ps.pie_photon_mode)
+        self.pie_time_normalize_check.setChecked(bool(ps.pie_time_normalize))
         self.pie_energy_decimals_edit.setValue(ps.pie_energy_decimals)
         self.pie_recursive_check.setChecked(ps.pie_recursive)
-        combo_set_data(self.pie_integration_method_combo, ps.pie_integration_method)
+        combo_set_data(
+            self.pie_integration_method_combo,
+            ps.pie_integration_method,
+        )
         combo_set_data(self.pie_merge_method_combo, ps.pie_merge_method)
+        self.set_pie_multi_segment_state(
+            len(ps.effective_pie_scan_folders()) > 1
+        )
         combo_set_data(self.pie_replicate_mode_combo, ps.pie_replicate_mode)
+        selected_elements = set(ps.selected_elements)
+        for element, checkbox in self.element_checks.items():
+            checkbox.setChecked(
+                not selected_elements or element in selected_elements
+            )
         self.pics_no_mz_edit.setValue(ps.pics_no_mz)
         self.pics_no_formula_edit.setText(ps.pics_no_formula)
         self.pics_no_mf_edit.setValue(ps.pics_no_mf)
         self.pics_new_species_mf_edit.setValue(ps.pics_new_species_mf)
+        self.pics_mass_disc_exponent_edit.setValue(
+            ps.pics_mass_disc_exponent
+        )
         self.mf_parent_mz_edit.setValue(ps.mf_parent_mz)
         self.mf_parent_initial_mf_edit.setValue(ps.mf_parent_initial_mf)
         self.mf_photon_energy_edit.setValue(ps.mf_photon_energy)
         self.mf_reference_temperature_edit.setValue(
             0 if ps.mf_reference_temperature is None else int(ps.mf_reference_temperature)
+        )
+        if ps.mf_md_preset:
+            if self.mf_md_preset_combo.findData(ps.mf_md_preset) < 0:
+                self.mf_md_preset_combo.addItem(
+                    ps.mf_md_preset,
+                    ps.mf_md_preset,
+                )
+            combo_set_data(self.mf_md_preset_combo, ps.mf_md_preset)
+        self.mf_mass_disc_exponent_edit.setValue(
+            ps.mf_mass_disc_exponent
         )
 
     def apply_to_settings(self, project_settings: ProjectSettings | None = None) -> None:
@@ -1884,37 +1908,71 @@ class FunctionDefaultsWidget(QtWidgets.QWidget):
         target.vote_threshold = self.peak_detection.vote_threshold
         target.min_intensity_for_single_vote = self.peak_detection.min_intensity_for_single_vote
         target.mz_tolerance = self.peak_detection.mz_tolerance
-        target.temp_peak_source = "manual"
         target.temp_reference_mode = str(self.temp_reference_mode_combo.currentData())
-        target.temp_integration_method = str(self.temp_integration_method_combo.currentData())
-        target.temp_prefer_gaussian = target.temp_integration_method == "gaussian"
+        target.temperature_photon_normalize = self.temperature_photon_check.isChecked()
+        target.temperature_kr_correct = (
+            self.temperature_kr_check.isChecked()
+            and self.temperature_kr_check.isEnabled()
+        )
+        target.temp_integration_method = str(
+            self.temp_integration_method_combo.currentData()
+        )
+        target.temp_prefer_gaussian = (
+            target.temp_integration_method == "gaussian"
+        )
         target.temp_curve_class_change_threshold = self.temp_curve_class_change_threshold_edit.value()
         target.temp_curve_class_peak_fraction = self.temp_curve_class_peak_fraction_edit.value()
         target.temp_replicate_mode = str(self.temp_replicate_mode_combo.currentData())
+        target.pie_photon_mode = str(self.pie_photon_mode_combo.currentData())
+        target.pie_time_normalize = self.pie_time_normalize_check.isChecked()
         target.pie_energy_decimals = self.pie_energy_decimals_edit.value()
         target.pie_recursive = self.pie_recursive_check.isChecked()
-        target.pie_integration_method = str(self.pie_integration_method_combo.currentData())
-        target.pie_prefer_gaussian = target.pie_integration_method == "gaussian"
+        target.pie_integration_method = str(
+            self.pie_integration_method_combo.currentData()
+        )
+        target.pie_prefer_gaussian = (
+            target.pie_integration_method == "gaussian"
+        )
         target.pie_multi_folder_mode = len(target.effective_pie_scan_folders()) > 1
         target.pie_merge_method = str(self.pie_merge_method_combo.currentData())
         target.pie_replicate_mode = str(self.pie_replicate_mode_combo.currentData())
+        target.selected_elements = [
+            element
+            for element, checkbox in self.element_checks.items()
+            if checkbox.isChecked()
+        ]
         target.pics_no_mz = self.pics_no_mz_edit.value()
         target.pics_no_formula = self.pics_no_formula_edit.text().strip() or "NO"
         target.pics_no_mf = self.pics_no_mf_edit.value()
         target.pics_new_species_mf = self.pics_new_species_mf_edit.value()
+        target.pics_mass_disc_exponent = (
+            self.pics_mass_disc_exponent_edit.value()
+        )
         target.mf_parent_mz = self.mf_parent_mz_edit.value()
         target.mf_parent_initial_mf = self.mf_parent_initial_mf_edit.value()
         target.mf_photon_energy = self.mf_photon_energy_edit.value()
+        target.mf_md_preset = str(
+            self.mf_md_preset_combo.currentData()
+            or self.mf_md_preset_combo.currentText()
+        )
+        target.mf_mass_disc_exponent = (
+            self.mf_mass_disc_exponent_edit.value()
+        )
         reference_temperature = self.mf_reference_temperature_edit.value()
         target.mf_reference_temperature = None if reference_temperature == 0 else float(reference_temperature)
 
-    def save_settings(self) -> None:
-        """保存参数到配置文件"""
-        self.apply_to_settings()
+    def set_pie_multi_segment_state(self, enabled: bool) -> None:
+        """Enable PIE merge controls only when more than one segment is active."""
+        enabled = bool(enabled)
+        self.pie_merge_method_combo.setEnabled(enabled)
+        self.pie_merge_method_hint.setText(
+            "用于当前多能段数据"
+            if enabled
+            else "仅在存在多个能段时生效"
+        )
 
-        save_peak_detection_config(self.peak_detection)
-        if self.project_settings:
-            ProjectSettingsManager().set(self.project_settings)
-            ProjectSettingsManager().save()
-        self.status_label.setText("项目默认值已保存，并同步到功能页")
+    def save_settings(self) -> None:
+        """Apply controls to the in-memory draft and notify the owner."""
+        self.apply_to_settings()
+        self.status_label.setText("已更新当前草稿，尚未保存到项目")
         self.settings_saved.emit()

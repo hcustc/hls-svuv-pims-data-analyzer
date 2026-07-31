@@ -25,7 +25,7 @@ from bl03u_masstool.core.curve_database import (
     list_curve_datasets,
     project_curve_database_path,
     set_curve_dataset_validity,
-    store_curve_dataset_version,
+    store_curve_dataset,
 )
 from bl03u_masstool.core.curve_repository import RepositoryCurveMapping
 from bl03u_masstool.core.nist_webbook import (
@@ -56,6 +56,11 @@ def pie_dialog(qapp):
     dialog.show()
     yield dialog
     dialog.deleteLater()
+
+
+def test_top_controls_use_two_compact_rows(pie_dialog):
+    assert pie_dialog.source_panel.layout().count() == 2
+    assert pie_dialog.source_panel.sizeHint().height() <= 120
 
 
 def test_pie_sqlite_cache_hit_is_not_invalidated_before_activation(
@@ -94,6 +99,88 @@ def test_pie_sqlite_cache_hit_is_not_invalidated_before_activation(
     )
 
     assert activated == [42]
+
+
+def test_pie_cache_loader_ignores_legacy_batch_with_matching_cache_key(
+    pie_dialog,
+    tmp_path,
+    monkeypatch,
+):
+    settings = ProjectSettings(
+        output_dir=str(tmp_path),
+        curve_storage_mode="sqlite",
+    )
+    pie_dialog.set_project_settings(
+        settings,
+        activate_project_scope=True,
+        load_cached_results=False,
+    )
+    database_path = project_curve_database_path(settings)
+    store_curve_dataset(
+        database_path,
+        curve_type="pie",
+        curves={
+            28.01: {
+                "mz": 28.01,
+                "mz_rounded": 28,
+                "rows": pd.DataFrame(
+                    {
+                        "energy": [9.0, 10.0],
+                        "normalized_intensity": [0.0, 1.0],
+                    }
+                ),
+            }
+        },
+        dataset_key="pie:legacy-batch:42",
+        name="旧批次",
+        metadata={
+            "analysis_provenance": {
+                "cache_key": "matching-cache-key",
+            }
+        },
+    )
+    cached_result = object()
+    monkeypatch.setattr(
+        pie_dialog,
+        "_pie_cache_key",
+        lambda *_args, **_kwargs: "matching-cache-key",
+    )
+    monkeypatch.setattr(
+        pie_dialog,
+        "_load_pie_analysis_cache",
+        lambda _cache_key: cached_result,
+    )
+
+    result = pie_dialog._load_project_pie_cache(
+        [],
+        None,
+        {},
+    )
+
+    assert "sqlite_dataset_id" not in result
+    assert result["cached_result"] is cached_result
+
+
+def test_pie_cache_key_changes_with_time_normalization_policy(
+    pie_dialog,
+    tmp_path,
+):
+    source = tmp_path / "pie"
+    source.mkdir()
+    (source / "10eV.txt").write_text("source fingerprint", encoding="utf-8")
+    pie_dialog.temporary_settings = ProjectSettings(pie_time_normalize=True)
+
+    normalized_key = pie_dialog._pie_cache_key([str(source)], None)
+    pie_dialog.temporary_settings.pie_time_normalize = False
+    unnormalized_key = pie_dialog._pie_cache_key([str(source)], None)
+
+    assert normalized_key != unnormalized_key
+    static_parameters = pie_dialog._pie_cache_static_parameters(None)
+    assert static_parameters["normalize_by_time"] is False
+    assert (
+        static_parameters["segment_scaling_policy"]["strategy"]
+        == "shared_robust_log_median"
+    )
 
 
 def test_pie_workspace_columns_share_contiguous_splitter_boundaries(pie_dialog, qapp):
@@ -195,7 +282,7 @@ def test_project_open_restores_cached_pie_curves_without_reanalysis(qapp, tmp_pa
         assert restored.curve_database_dataset_id is not None
         assert restored._last_analysis_source_info["from_cache"] is True
         assert restored._loaded_analysis_cache_key == cache_key
-        assert "自动载入" in restored.status_label.text() or "参数预览" in restored.status_label.text()
+        assert "自动载入" in restored.status_label.text() or "实时预览" in restored.status_label.text()
         request_id = restored._autoload_request_id
         worker = restored._autoload_worker
         assert restored.ensure_project_cache_loaded() is True
@@ -632,26 +719,27 @@ def test_pie_parameters_follow_selected_data_source(pie_dialog, tmp_path):
 
     project_effective = pie_dialog._effective_analysis_settings()
     assert pie_dialog.pie_source_scope == "project"
-    assert project_effective is ps
+    assert project_effective is not ps
+    assert project_effective == ps
     assert project_effective.to_calibration() == ps.to_calibration()
     assert project_effective.pie_energy_decimals == 3
     assert project_effective.pie_integration_method == "baseline"
     assert project_effective.to_peak_detection_config().min_intensity == 17.0
 
     pie_dialog.set_pie_source_scope("temporary")
-    assert pie_dialog.temporary_settings_source == "default"
-    assert pie_dialog.temporary_params_title_label.text() == "临时数据参数"
-    assert pie_dialog.temporary_params_label.text() == "默认参数，可修改"
-    assert pie_dialog.temporary_params_button.text() == "编辑参数…"
-    assert pie_dialog._effective_analysis_settings().pie_energy_decimals == ProjectSettings().pie_energy_decimals
+    assert pie_dialog.temporary_settings_source == "project"
+    assert pie_dialog.temporary_params_title_label.text() == "临时参数 · 不写入项目"
+    assert pie_dialog.temporary_params_label.text() == "项目参数副本"
+    assert pie_dialog.temporary_params_button.text() == "编辑临时参数…"
+    assert pie_dialog._effective_analysis_settings().pie_energy_decimals == 3
 
     effective = pie_dialog._effective_analysis_settings()
-    assert pie_dialog.temporary_settings_source == "default"
-    assert pie_dialog.common_params_action.text() == "编辑参数…"
+    assert pie_dialog.temporary_settings_source == "project"
+    assert pie_dialog.common_params_action.text() == "编辑项目参数…"
     assert effective is not ps
-    assert effective.pie_energy_decimals == ProjectSettings().pie_energy_decimals
-    assert effective.pie_integration_method == ProjectSettings().pie_integration_method
-    assert effective.to_peak_detection_config().min_intensity == ProjectSettings().min_intensity
+    assert effective.pie_energy_decimals == 3
+    assert effective.pie_integration_method == "baseline"
+    assert effective.to_peak_detection_config().min_intensity == 17.0
     assert pie_dialog._pie_cache_dir() != tmp_path / "project" / "analysis" / "pie" / "cache"
 
     effective.cal_a = 8.0
@@ -662,17 +750,17 @@ def test_pie_parameters_follow_selected_data_source(pie_dialog, tmp_path):
 
 def test_temporary_parameter_panel_uses_default_editable_parameters_without_project(pie_dialog):
     assert pie_dialog.pie_source_scope == "temporary"
-    assert pie_dialog.temporary_params_title_label.text() == "临时数据参数"
-    assert pie_dialog.temporary_params_label.text() == "默认参数，可修改"
-    assert pie_dialog.temporary_params_button.text() == "编辑参数…"
+    assert pie_dialog.temporary_params_title_label.text() == "临时参数 · 不写入项目"
+    assert pie_dialog.temporary_params_label.text() == "程序默认值"
+    assert pie_dialog.temporary_params_button.text() == "编辑临时参数…"
     assert not hasattr(pie_dialog, "copy_project_params_action")
     assert not hasattr(pie_dialog, "temporary_params_reload_button")
-    assert pie_dialog.common_params_action.text() == "编辑参数…"
+    assert pie_dialog.common_params_action.text() == "编辑项目参数…"
     assert pie_dialog.common_params_button.isHidden()
 
     pie_dialog.temporary_settings_modified = True
     pie_dialog._refresh_pie_source_controls()
-    assert pie_dialog.temporary_settings_source == "default"
+    assert pie_dialog.temporary_settings_source == "factory"
     assert pie_dialog.temporary_params_label.text() == "本次已修改"
 
 
@@ -749,6 +837,37 @@ def test_selected_fit_jobs_keep_candidates_scoped_to_each_mz(pie_dialog):
     assert [item["species"] for item in jobs[44]["selected_species"]] == ["CO2"]
 
 
+def test_legacy_manual_coefficients_do_not_override_nnls_fit(pie_dialog):
+    pie_dialog.curves = {
+        30: {
+            "mz": 30,
+            "energies": np.array([9.0, 10.0, 11.0]),
+            "intensities": np.array([0.0, 1.0, 2.0]),
+        }
+    }
+    pie_dialog.per_mz_config = {
+        30: {
+            "selected_species": [
+                {
+                    "id": 1,
+                    "mz": 30,
+                    "species": "NO",
+                    "energies": np.array([9.0, 10.0, 11.0]),
+                    "cross_sections": np.array([0.0, 1.0, 2.0]),
+                }
+            ],
+            "coefficients": {1: 999.0},
+            "locked_ids": [],
+        }
+    }
+
+    result = pie_dialog.fit_selected_curves_sync([30])[30]
+
+    assert result["success"] is True
+    assert result["model"]["coefficient_mode"] == "fit"
+    assert result["model"]["species"][0]["coefficient"] == pytest.approx(1.0)
+
+
 def test_precise_peak_curves_share_nominal_candidates_without_key_collision(
     pie_dialog,
     qapp,
@@ -795,6 +914,8 @@ def test_precise_peak_curves_share_nominal_candidates_without_key_collision(
     assert pie_dialog.mz_list.count() == 2
     assert "227.587157" in pie_dialog.mz_list.item(0).text()
     assert "228.023117" in pie_dialog.mz_list.item(1).text()
+    assert "(2点)" not in pie_dialog.mz_list.item(0).text()
+    assert "个能量点" not in pie_dialog.mz_list.item(0).toolTip()
 
     for row, exact_mz in enumerate(exact_mz_values):
         pie_dialog.mz_list.setCurrentRow(row)
@@ -806,6 +927,263 @@ def test_precise_peak_curves_share_nominal_candidates_without_key_collision(
             pie_dialog.fitting_control_widget._unified_species_data[0]["species"]
             == "Nominal-228 candidate"
         )
+
+
+def test_single_pie_plot_can_focus_rise_and_show_candidate_ie_references(
+    pie_dialog,
+    qapp,
+):
+    energies = np.round(np.linspace(7.0, 11.0, 41), 4)
+    intensities = np.where(
+        energies < 10.7,
+        0.0,
+        np.square(energies - 10.7),
+    )
+    curve = {
+        "mz": 30.01,
+        "mz_rounded": 30,
+        "curve_key": 30.01,
+        "energies": energies,
+        "intensities": intensities,
+    }
+    pie_dialog.current_mz = 30.01
+    pie_dialog.current_fit = None
+    pie_dialog.curves = {30.01: curve}
+    pie_dialog.fitting_control_widget._current_mz = 30
+    pie_dialog.fitting_control_widget.set_candidate_data(
+        [
+            {
+                "id": 1,
+                "species": "Formaldehyde",
+                "formula": "CH2O",
+                "ie": 10.88,
+                "is_enabled": True,
+            },
+            {
+                "id": 2,
+                "species": "Disabled candidate",
+                "formula": "X",
+                "ie": 10.75,
+                "is_enabled": False,
+            },
+            {
+                "id": 3,
+                "species": "Outside scan",
+                "formula": "Y",
+                "ie": 11.52,
+                "is_enabled": True,
+            },
+        ]
+    )
+    pie_dialog.fitting_control_widget._candidates_loaded = True
+    pie_dialog.fitting_control_widget._update_ui_state()
+
+    pie_dialog.energy_view_combo.setCurrentIndex(
+        pie_dialog.energy_view_combo.findData("rise")
+    )
+    qapp.processEvents()
+
+    spec = pie_dialog.plot_widget._last_spec
+    assert spec is not None
+    assert spec.xlim is not None
+    assert spec.xlim[0] < 10.8 < spec.xlim[1]
+    assert spec.xlim[1] - spec.xlim[0] < energies[-1] - energies[0]
+    assert [
+        (reference.label, reference.x, reference.emphasized)
+        for reference in spec.vertical_references
+    ] == [("IE · CH2O 10.8800 eV", 10.88, True)]
+    np.testing.assert_array_equal(
+        pie_dialog.plot_widget._cursor_x_values,
+        energies,
+    )
+    np.testing.assert_array_equal(
+        pie_dialog.plot_widget._cursor_y_values,
+        intensities,
+    )
+
+
+def test_pie_diagnostic_plot_modes_render_shared_shape_and_snr_masked_ratio(
+    pie_dialog,
+    qapp,
+):
+    assert pie_dialog.plot_mode_combo.findData("raw_spectrum") == -1
+
+    def curve(mz, intensities, snr):
+        rows = pd.DataFrame(
+            {
+                "energy": [9.0, 10.0, 11.0],
+                "mz": [mz] * 3,
+                "mz_rounded": [int(round(mz))] * 3,
+                "merged_intensity": intensities,
+                "normalized_intensity": intensities,
+                "raw_area": [value * value for value in snr],
+                "signal_to_noise": snr,
+                "integration_method": ["sum_counts"] * 3,
+            }
+        )
+        return {
+            "mz": mz,
+            "mz_rounded": int(round(mz)),
+            "energies": rows["energy"].to_numpy(),
+            "intensities": np.asarray(intensities, dtype=float),
+            "rows": rows,
+        }
+
+    pie_dialog.curves = {
+        144.02: curve(144.02, [10.0, 20.0, 30.0], [12.0, 15.0, 20.0]),
+        146.02: curve(146.02, [3.2, 6.4, 9.6], [12.0, 5.0, 20.0]),
+    }
+    pie_dialog.populate_mz_list()
+    pie_dialog.mz_list.setCurrentRow(0)
+    pie_dialog.mz_list.item(1).setSelected(True)
+    qapp.processEvents()
+
+    for mode, expected_title, expected_ylabel in (
+        ("shared_y", "原始共轴", "共用纵轴"),
+        ("shape", "形状比较", "最大值归一化"),
+    ):
+        pie_dialog.plot_mode_combo.setCurrentIndex(
+            pie_dialog.plot_mode_combo.findData(mode)
+        )
+        qapp.processEvents()
+        spec = pie_dialog.plot_widget._last_spec
+        assert spec is not None
+        assert expected_title in spec.title
+        assert expected_ylabel in spec.ylabel
+        assert len(spec.series) == 2
+        if mode == "shape":
+            assert all(np.max(series.y) == pytest.approx(1.0) for series in spec.series)
+
+    pie_dialog.plot_mode_combo.setCurrentIndex(
+        pie_dialog.plot_mode_combo.findData("ratio")
+    )
+    qapp.processEvents()
+    spec = pie_dialog.plot_widget._last_spec
+    assert spec is not None
+    assert "I146/I144" in spec.title
+    assert len(spec.series) == 2
+    assert np.asarray(spec.series[0].y).tolist() == pytest.approx([0.32, 0.32])
+    assert np.asarray(spec.series[1].y).tolist() == pytest.approx([0.32, 0.32])
+    assert "有效点 2/3" in pie_dialog.plot_qc_label.text()
+    assert not pie_dialog.raw_spectrum_qc_action.isEnabled()
+    assert "没有可定位的原始谱" in pie_dialog.raw_spectrum_qc_action.toolTip()
+
+
+def test_raw_spectrum_qc_dialog_uses_source_window_without_replacing_pie_plot(
+    pie_dialog,
+    tmp_path,
+    qapp,
+):
+    spectrum_path = tmp_path / "11.0eV.txt"
+    header = [
+        "Acquisition Time: 60 s",
+        "IO: 2.0",
+        *[f"header {index}" for index in range(8)],
+    ]
+    data = [f"{tof} {1000.0 if tof == 105 else 10.0}" for tof in range(1, 201)]
+    spectrum_path.write_text("\n".join([*header, *data]), encoding="utf-8")
+    rows = pd.DataFrame(
+        {
+            "energy": [11.0],
+            "mz": [146.02],
+            "mz_rounded": [146],
+            "merged_intensity": [1.0],
+            "normalized_intensity": [1.0],
+            "raw_area": [1000.0],
+            "integration_method": ["sum_counts"],
+            "source_folder": [str(tmp_path)],
+            "source_files": [[spectrum_path.name]],
+            "left_bound": [100],
+            "right_bound": [110],
+            "acquisition_time_s": [60.0],
+            "io": [2.0],
+        }
+    )
+    pie_dialog.curves = {
+        146.02: {
+            "mz": 146.02,
+            "mz_rounded": 146,
+            "energies": np.array([11.0]),
+            "intensities": np.array([1.0]),
+            "rows": rows,
+        }
+    }
+    pie_dialog.populate_mz_list()
+    pie_dialog.mz_list.setCurrentRow(0)
+    qapp.processEvents()
+
+    main_plot_spec = pie_dialog.plot_widget._last_spec
+    assert main_plot_spec is not None
+    main_plot_title = main_plot_spec.title
+    assert pie_dialog.raw_spectrum_qc_action.isEnabled()
+
+    pie_dialog.raw_spectrum_qc_action.trigger()
+    qapp.processEvents()
+
+    assert pie_dialog._raw_spectrum_qc_dialog.isVisible()
+    assert "原始谱积分窗口核验" in pie_dialog._raw_spectrum_qc_dialog.windowTitle()
+    spec = pie_dialog._raw_spectrum_plot_widget._last_spec
+    assert spec is not None
+    assert "11 eV 原始高分辨谱" in spec.title
+    assert [series.key for series in spec.series[:4]] == [
+        "raw-spectrum",
+        "current-left",
+        "current-right",
+        "actual-peak",
+    ]
+    assert np.asarray(spec.series[3].x).tolist() == pytest.approx([105.0, 105.0])
+    assert "扫描 60 s" in pie_dialog._raw_spectrum_qc_label.text()
+    assert pie_dialog.plot_widget._last_spec is not None
+    assert pie_dialog.plot_widget._last_spec.title == main_plot_title
+    assert "原始高分辨谱" not in pie_dialog.plot_widget._last_spec.title
+    first_qc_dialog = pie_dialog._raw_spectrum_qc_dialog
+    first_qc_dialog.close()
+    qapp.sendPostedEvents(None, QtCore.QEvent.Type.DeferredDelete)
+    qapp.processEvents()
+
+    pie_dialog._show_raw_spectrum_qc_dialog()
+    qapp.processEvents()
+
+    assert pie_dialog._raw_spectrum_qc_dialog is not first_qc_dialog
+    assert pie_dialog._raw_spectrum_qc_dialog.isVisible()
+    pie_dialog._raw_spectrum_qc_dialog.close()
+
+
+def test_isotope_qc_failure_blocks_verified_action_until_reason_is_recorded(
+    pie_dialog,
+    monkeypatch,
+):
+    pie_dialog._last_analysis_source_info = {
+        "isotope_qc_status": "fail",
+        "isotope_qc": [
+            {
+                "light_mz": 127,
+                "heavy_mz": 129,
+                "status": "fail",
+                "reason": "偏离理论比例",
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        QtWidgets.QInputDialog,
+        "getMultiLineText",
+        lambda *args, **kwargs: ("", False),
+    )
+
+    assert pie_dialog._ensure_isotope_qc_gate("确认物种") is False
+    assert "核验失败" in pie_dialog.status_label.text()
+
+    monkeypatch.setattr(
+        QtWidgets.QInputDialog,
+        "getMultiLineText",
+        lambda *args, **kwargs: ("已检查原始谱，作为探索性覆盖", True),
+    )
+    assert pie_dialog._ensure_isotope_qc_gate("确认物种") is True
+    assert (
+        pie_dialog._analysis_provenance["qc_override_reason"]
+        == "已检查原始谱，作为探索性覆盖"
+    )
+    assert pie_dialog.pie_state_dirty is True
 
 
 class TestPerM_zConfiguration:
@@ -830,11 +1208,11 @@ class TestPerM_zConfiguration:
         }
 
         # Populate candidate table with mock species
-        pie_dialog.fitting_control_widget._candidate_data = [
+        pie_dialog.fitting_control_widget.set_candidate_data([
             {'id': 1, 'species': 'NO', 'mz': 46},
             {'id': 2, 'species': 'N2O', 'mz': 46},
             {'id': 3, 'species': 'CO2', 'mz': 46},
-        ]
+        ])
         pie_dialog.candidate_table.setRowCount(3)
 
         # Set current mz and populate candidate table checkboxes
@@ -861,10 +1239,10 @@ class TestPerM_zConfiguration:
     def test_restore_mz_config_restores_selection(self, pie_dialog):
         """Test that restored config restores candidate selection."""
         # Setup mock species
-        pie_dialog.fitting_control_widget._candidate_data = [
+        pie_dialog.fitting_control_widget.set_candidate_data([
             {'id': 1, 'species': 'NO', 'mz': 46},
             {'id': 2, 'species': 'N2O', 'mz': 46},
-        ]
+        ])
 
         # Create checkboxes in candidate table
         pie_dialog.candidate_table.setRowCount(2)
@@ -900,9 +1278,9 @@ class TestPerM_zConfiguration:
 
     def test_restore_mz_config_initializes_default_if_no_history(self, pie_dialog):
         """Test that restore initializes default config if no history."""
-        pie_dialog.fitting_control_widget._candidate_data = [
+        pie_dialog.fitting_control_widget.set_candidate_data([
             {'id': 1, 'species': 'NO', 'mz': 46},
-        ]
+        ])
 
         pie_dialog.candidate_table.setRowCount(1)
         check_widget = QtWidgets.QWidget()
@@ -1073,9 +1451,9 @@ class TestConfigurationOnMZSwitch:
             47: {'mz': 47, 'energies': [10.0], 'intensities': [1.0], 'rows': None},
         }
 
-        pie_dialog.fitting_control_widget._candidate_data = [
+        pie_dialog.fitting_control_widget.set_candidate_data([
             {'id': 1, 'species': 'NO', 'mz': 46},
-        ]
+        ])
 
         # Manually set current_mz and candidate table
         pie_dialog.current_mz = 46
@@ -1169,9 +1547,12 @@ def test_project_curve_storage_modes(
         assert isinstance(dialog.curves, RepositoryCurveMapping) is expects_lazy_mapping
         assert dialog.analysis_df.empty is expects_lazy_mapping
         if storage_mode == "sqlite":
-            assert "SQLite #" in dialog.curve_source_label.text()
+            assert dialog.curve_source_label.text().startswith(
+                "当前曲线：项目 SQLite · 有效"
+            )
             assert "有效" in dialog.curve_source_label.text()
             assert dialog.curve_source_label.property("sourceState") == "valid"
+            assert not hasattr(dialog, "curve_batch_button")
 
             dataset_id = dialog.curve_database_dataset_id
             assert dataset_id is not None
@@ -1234,7 +1615,7 @@ def test_temporary_curve_source_is_marked_as_unsaved_memory(qapp):
         dialog.deleteLater()
 
 
-def test_project_generation_creates_new_batch_for_same_key_new_payload(
+def test_project_generation_preserves_previous_result_for_new_payload(
     qapp,
     tmp_path,
     monkeypatch,
@@ -1276,19 +1657,12 @@ def test_project_generation_creates_new_batch_for_same_key_new_payload(
         }
 
     _old_rows, old_curves = curve_payload(2.0)
-    old_id = store_curve_dataset_version(
+    old_id = store_curve_dataset(
         database_path,
         curve_type="pie",
         curves=old_curves,
-        dataset_group="pie:project",
-        analysis_key="same-input-key",
+        dataset_key="pie:project",
         name="old",
-    )
-    set_curve_dataset_validity(
-        database_path,
-        dataset_id=old_id,
-        validity_status="stale",
-        reason="recompute",
     )
     new_rows, new_curves = curve_payload(3.0)
     critical_messages = []
@@ -1326,10 +1700,42 @@ def test_project_generation_creates_new_batch_for_same_key_new_payload(
             include_stale=True,
         )
         assert len(datasets) == 2
+        assert old_id in {dataset.dataset_id for dataset in datasets}
         assert dialog.curve_database_dataset_id != old_id
         assert [
             dataset.dataset_id for dataset in datasets if dataset.is_current
         ] == [dialog.curve_database_dataset_id]
         assert critical_messages == []
+    finally:
+        dialog.deleteLater()
+
+
+def test_pie_cache_fingerprint_includes_all_supported_spectrum_formats(
+    qapp,
+    tmp_path,
+):
+    for name in ("sample.txt", "sample.asc", "sample.888", "ignored.csv"):
+        (tmp_path / name).write_text(name, encoding="utf-8")
+
+    dialog = PIESpeciesFitDialog(Calibration())
+    try:
+        first = dialog._pie_folder_fingerprints(
+            [str(tmp_path)],
+            recursive=False,
+        )
+        assert {
+            item["relative_path"] for item in first[0]["files"]
+        } == {"sample.txt", "sample.asc", "sample.888"}
+
+        (tmp_path / "sample.asc").write_text(
+            "changed spectrum payload",
+            encoding="utf-8",
+        )
+        second = dialog._pie_folder_fingerprints(
+            [str(tmp_path)],
+            recursive=False,
+        )
+
+        assert first != second
     finally:
         dialog.deleteLater()

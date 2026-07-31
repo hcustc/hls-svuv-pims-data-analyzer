@@ -35,6 +35,7 @@ from bl03u_masstool.frontends.pyqt_app.common.plot_spec import (
     PlotProfile,
     ScientificPlotSpec,
     SeriesRole,
+    VerticalReference,
 )
 from bl03u_masstool.frontends.pyqt_app.theme import get_plot_theme
 
@@ -148,7 +149,7 @@ def configure_matplotlib_fonts(
 
 
 class StaticCurvePlot(QtWidgets.QWidget):
-    """Matplotlib canvas for publication-style trend curves in low-interaction pages."""
+    """Matplotlib canvas for publication-style trend curves."""
 
     def __init__(self, xlabel: str, ylabel: str, *, min_height: int | None = None, parent=None):
         super().__init__(parent)
@@ -157,6 +158,18 @@ class StaticCurvePlot(QtWidgets.QWidget):
         self._ylabel = ylabel
         self._last_spec: ScientificPlotSpec | None = None
         self._last_profile = PlotProfile.SCREEN
+        self._cursor_x_values = np.array([], dtype=float)
+        self._cursor_y_values = np.array([], dtype=float)
+        self._cursor_x_label = "x"
+        self._cursor_y_label = "y"
+        self._cursor_x_unit = ""
+        self._cursor_y_unit = ""
+        self._cursor_locked = False
+        self._cursor_index: int | None = None
+        self._cursor_vline = None
+        self._cursor_hline = None
+        self._cursor_marker = None
+        self._cursor_annotation = None
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
@@ -194,6 +207,9 @@ class StaticCurvePlot(QtWidgets.QWidget):
         with rc_context(screen_profile):
             self.axes = self.figure.add_subplot(111)
             self.clear_plot()
+        self.canvas.mpl_connect("motion_notify_event", self._on_cursor_motion)
+        self.canvas.mpl_connect("button_press_event", self._on_cursor_click)
+        self.canvas.mpl_connect("figure_leave_event", self._on_cursor_leave)
 
     def render_spec(
         self,
@@ -219,6 +235,7 @@ class StaticCurvePlot(QtWidgets.QWidget):
         component_index = 0
         comparison_index = 0
         with rc_context(load_plot_profile(resolved_profile)):
+            self._reset_cursor_artists()
             self.axes.clear()
             self._style_axes()
             self.axes.set_title(spec.title)
@@ -271,6 +288,9 @@ class StaticCurvePlot(QtWidgets.QWidget):
                     zorder=0,
                 )
 
+            for reference in spec.vertical_references:
+                self._draw_vertical_reference(reference, resolved_profile)
+
             if spec.show_legend:
                 handles, labels = self.axes.get_legend_handles_labels()
                 if labels:
@@ -281,6 +301,14 @@ class StaticCurvePlot(QtWidgets.QWidget):
                         ncol=2 if len(labels) > 8 else 1,
                     )
 
+            if (
+                resolved_profile is PlotProfile.SCREEN
+                and self._cursor_x_values.size
+            ):
+                self._install_cursor_artists()
+                if self._cursor_locked and self._cursor_index is not None:
+                    self._show_cursor_index(self._cursor_index)
+
             if draw:
                 self.canvas.draw_idle()
 
@@ -290,12 +318,52 @@ class StaticCurvePlot(QtWidgets.QWidget):
                 self._placeholder.setText(title or "未安装 matplotlib，无法显示高质量曲线图")
             return
         with rc_context(load_plot_profile(PlotProfile.SCREEN)):
+            self._reset_cursor_artists()
             self.axes.clear()
             self._xlabel = xlabel or self._xlabel
             self._ylabel = ylabel or self._ylabel
             self._style_axes()
             self.axes.set_title(title)
         self.canvas.draw_idle()
+
+    def set_nearest_point_cursor(
+        self,
+        x_values: Iterable[float],
+        y_values: Iterable[float],
+        *,
+        x_label: str = "x",
+        y_label: str = "y",
+        x_unit: str = "",
+        y_unit: str = "",
+    ) -> None:
+        """Enable a screen-only cursor that snaps to the nearest x data point."""
+        x_arr = np.asarray(list(x_values), dtype=float)
+        y_arr = np.asarray(list(y_values), dtype=float)
+        count = min(x_arr.size, y_arr.size)
+        valid = np.isfinite(x_arr[:count]) & np.isfinite(y_arr[:count])
+        self._cursor_x_values = x_arr[:count][valid]
+        self._cursor_y_values = y_arr[:count][valid]
+        self._cursor_x_label = x_label
+        self._cursor_y_label = y_label
+        self._cursor_x_unit = x_unit
+        self._cursor_y_unit = y_unit
+        self._cursor_locked = False
+        self._cursor_index = None
+        self._remove_cursor_artists()
+        if self._cursor_x_values.size and self.axes is not None:
+            self._install_cursor_artists()
+        if self.canvas is not None:
+            self.canvas.draw_idle()
+
+    def clear_nearest_point_cursor(self) -> None:
+        """Disable and remove the nearest-point cursor."""
+        self._cursor_x_values = np.array([], dtype=float)
+        self._cursor_y_values = np.array([], dtype=float)
+        self._cursor_locked = False
+        self._cursor_index = None
+        self._remove_cursor_artists()
+        if self.canvas is not None:
+            self.canvas.draw_idle()
 
     def show_empty(self, message: str, *, title: str = "") -> None:
         if self.axes is None or self.canvas is None:
@@ -458,6 +526,223 @@ class StaticCurvePlot(QtWidgets.QWidget):
         self.axes.grid(False, which="minor")
         self.axes.spines["top"].set_visible(bool(rcParams["xtick.top"]))
         self.axes.spines["right"].set_visible(bool(rcParams["ytick.right"]))
+
+    def _draw_vertical_reference(
+        self,
+        reference: VerticalReference,
+        profile: PlotProfile,
+    ) -> None:
+        try:
+            x_value = float(reference.x)
+        except (TypeError, ValueError):
+            return
+        if not np.isfinite(x_value):
+            return
+        monochrome = profile is PlotProfile.MONOCHROME
+        if monochrome:
+            color = "0.12" if reference.emphasized else "0.48"
+        else:
+            color = reference.color or (
+                "#d97706" if reference.emphasized else "#94a3b8"
+            )
+        self.axes.axvline(
+            x_value,
+            color=color,
+            linewidth=1.5 if reference.emphasized else 0.9,
+            linestyle=(0, (4, 3)),
+            alpha=0.9 if reference.emphasized else 0.7,
+            label=reference.label or None,
+            zorder=2,
+        )
+
+    def _reset_cursor_artists(self) -> None:
+        self._cursor_vline = None
+        self._cursor_hline = None
+        self._cursor_marker = None
+        self._cursor_annotation = None
+
+    def _remove_cursor_artists(self) -> None:
+        for artist in (
+            self._cursor_vline,
+            self._cursor_hline,
+            self._cursor_marker,
+            self._cursor_annotation,
+        ):
+            if artist is None:
+                continue
+            try:
+                artist.remove()
+            except (ValueError, NotImplementedError):
+                pass
+        self._reset_cursor_artists()
+
+    def _install_cursor_artists(self) -> None:
+        if self.axes is None or self._cursor_x_values.size == 0:
+            return
+        self._remove_cursor_artists()
+        cursor_color = "#0f766e"
+        self._cursor_vline = self.axes.axvline(
+            0.0,
+            color=cursor_color,
+            linewidth=0.8,
+            linestyle=(0, (3, 3)),
+            alpha=0.72,
+            visible=False,
+            label="_nolegend_",
+            zorder=8,
+        )
+        self._cursor_hline = self.axes.axhline(
+            0.0,
+            color=cursor_color,
+            linewidth=0.8,
+            linestyle=(0, (3, 3)),
+            alpha=0.55,
+            visible=False,
+            label="_nolegend_",
+            zorder=8,
+        )
+        (self._cursor_marker,) = self.axes.plot(
+            [],
+            [],
+            marker="o",
+            markersize=7,
+            markerfacecolor="#ffffff",
+            markeredgecolor=cursor_color,
+            markeredgewidth=1.5,
+            linestyle="None",
+            visible=False,
+            label="_nolegend_",
+            zorder=9,
+        )
+        self._cursor_annotation = self.axes.annotate(
+            "",
+            xy=(0.0, 0.0),
+            xytext=(10, 10),
+            textcoords="offset points",
+            fontsize=8.5,
+            color="#0f172a",
+            bbox={
+                "boxstyle": "round,pad=0.35",
+                "facecolor": "#ffffff",
+                "edgecolor": cursor_color,
+                "alpha": 0.96,
+            },
+            visible=False,
+            zorder=10,
+        )
+
+    @staticmethod
+    def _format_cursor_value(value: float) -> str:
+        absolute = abs(value)
+        if absolute != 0 and (absolute >= 1e4 or absolute < 1e-3):
+            return f"{value:.4g}"
+        return f"{value:.4f}"
+
+    def _show_cursor_index(self, index: int) -> None:
+        if (
+            self.axes is None
+            or self._cursor_vline is None
+            or self._cursor_x_values.size == 0
+        ):
+            return
+        index = int(np.clip(index, 0, self._cursor_x_values.size - 1))
+        x_value = float(self._cursor_x_values[index])
+        y_value = float(self._cursor_y_values[index])
+        self._cursor_index = index
+        self._cursor_vline.set_xdata([x_value, x_value])
+        self._cursor_hline.set_ydata([y_value, y_value])
+        self._cursor_marker.set_data([x_value], [y_value])
+        unit_x = f" {self._cursor_x_unit}" if self._cursor_x_unit else ""
+        unit_y = f" {self._cursor_y_unit}" if self._cursor_y_unit else ""
+        lock_hint = "（已锁定）" if self._cursor_locked else "（点击锁定）"
+        self._cursor_annotation.set_text(
+            f"{self._cursor_x_label} = {self._format_cursor_value(x_value)}{unit_x}\n"
+            f"{self._cursor_y_label} = {self._format_cursor_value(y_value)}{unit_y}\n"
+            f"{lock_hint}"
+        )
+        self._cursor_annotation.xy = (x_value, y_value)
+        x_min, x_max = self.axes.get_xlim()
+        y_min, y_max = self.axes.get_ylim()
+        x_right = x_value > (x_min + x_max) / 2
+        y_top = y_value > (y_min + y_max) / 2
+        self._cursor_annotation.set_position(
+            (-10 if x_right else 10, -10 if y_top else 10)
+        )
+        self._cursor_annotation.set_horizontalalignment(
+            "right" if x_right else "left"
+        )
+        self._cursor_annotation.set_verticalalignment(
+            "top" if y_top else "bottom"
+        )
+        for artist in (
+            self._cursor_vline,
+            self._cursor_hline,
+            self._cursor_marker,
+            self._cursor_annotation,
+        ):
+            artist.set_visible(True)
+
+    def _hide_cursor(self) -> None:
+        for artist in (
+            self._cursor_vline,
+            self._cursor_hline,
+            self._cursor_marker,
+            self._cursor_annotation,
+        ):
+            if artist is not None:
+                artist.set_visible(False)
+
+    def _nearest_cursor_index(self, x_value: float) -> int | None:
+        if self._cursor_x_values.size == 0 or not np.isfinite(x_value):
+            return None
+        return int(np.argmin(np.abs(self._cursor_x_values - float(x_value))))
+
+    def _on_cursor_motion(self, event) -> None:
+        if (
+            self._cursor_locked
+            or self.axes is None
+            or event.inaxes is not self.axes
+            or event.xdata is None
+        ):
+            return
+        index = self._nearest_cursor_index(float(event.xdata))
+        if index is None:
+            return
+        self._show_cursor_index(index)
+        if self.canvas is not None:
+            self.canvas.draw_idle()
+
+    def _on_cursor_click(self, event) -> None:
+        if (
+            self.axes is None
+            or event.inaxes is not self.axes
+            or event.xdata is None
+            or event.button != 1
+            or self._cursor_x_values.size == 0
+        ):
+            return
+        if self._cursor_locked:
+            self._cursor_locked = False
+            index = self._nearest_cursor_index(float(event.xdata))
+            if index is not None:
+                self._show_cursor_index(index)
+            if self.canvas is not None:
+                self.canvas.draw_idle()
+            return
+        index = self._nearest_cursor_index(float(event.xdata))
+        if index is None:
+            return
+        self._cursor_locked = True
+        self._show_cursor_index(index)
+        if self.canvas is not None:
+            self.canvas.draw_idle()
+
+    def _on_cursor_leave(self, _event) -> None:
+        if self._cursor_locked:
+            return
+        self._hide_cursor()
+        if self.canvas is not None:
+            self.canvas.draw_idle()
 
     @staticmethod
     def _finite_series_values(series: CurveSeries) -> tuple[np.ndarray, np.ndarray]:

@@ -71,6 +71,8 @@ export BL03U_MAX_PIE_JOBS=100
 
 ## 发布前检查
 
+完整且持续维护的检查规则见 [`pre_commit_checklist.md`](pre_commit_checklist.md)。发布前至少执行：
+
 ```bash
 git diff --check
 python -m compileall -q src tests main.py

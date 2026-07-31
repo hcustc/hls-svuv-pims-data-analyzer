@@ -45,6 +45,10 @@ def _pie_curves():
                     "energy": [7.0, 8.0],
                     "normalized_intensity": [0.0, 0.2],
                     "raw_area": [0.0, 2.0],
+                    "source_spectra": [
+                        ["/segment-low/7eV.txt"],
+                        ["/segment-low/8eV.txt", "/segment-high/8eV.txt"],
+                    ],
                     "left_bound": [24076, 24076],
                     "right_bound": [24086, 24086],
                 }
@@ -84,6 +88,14 @@ def test_curve_database_keeps_precise_peaks_separate(tmp_path):
     assert sorted(loaded["mz"].unique()) == pytest.approx([227.587157, 228.023117])
     assert loaded.groupby("mz").size().tolist() == [2, 2]
     assert loaded["mz_rounded"].unique().tolist() == [228]
+    merged_source_row = loaded[
+        np.isclose(loaded["mz"], 227.587157)
+        & np.isclose(loaded["energy"], 8.0)
+    ].iloc[0]
+    assert merged_source_row["source_spectra"] == [
+        "/segment-low/8eV.txt",
+        "/segment-high/8eV.txt",
+    ]
 
     with sqlite3.connect(path) as connection:
         indexes = {
@@ -358,8 +370,17 @@ def test_listing_migrates_legacy_database_before_querying_current_state(tmp_path
             """
         )
 
-    datasets = list_curve_datasets(path, curve_type="pie")
+    read_only_datasets = list_curve_datasets_read_only(path, curve_type="pie")
+    assert len(read_only_datasets) == 1
+    assert read_only_datasets[0].dataset_group == "pie:project"
+    with sqlite3.connect(path) as connection:
+        pre_migration_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(curve_datasets)")
+        }
+    assert "dataset_group" not in pre_migration_columns
 
+    datasets = list_curve_datasets(path, curve_type="pie")
     assert len(datasets) == 1
     assert datasets[0].name == "Legacy PIE"
     assert datasets[0].is_current is True

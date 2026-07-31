@@ -86,7 +86,7 @@ def test_pics_project_switch_replaces_runtime_parameters_and_source(qapp, tmp_pa
             cal_b=1.25,
             cal_c=-3.0,
             light_source="beam_current",
-            mf_mass_disc_exponent=0.63,
+            pics_mass_disc_exponent=0.63,
         )
         dialog.set_project_settings(first)
 

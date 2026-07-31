@@ -1,18 +1,23 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+import hashlib
 
 import yaml
 import pytest
 
+import bl03u_masstool.core.project_settings as project_settings_module
 from bl03u_masstool.core.project_settings import (
+    PROJECT_FIELD_OWNERS,
     ProjectSettings,
     ProjectSettingsManager,
     _flat_to_nested,
     _nested_to_flat,
+    load_factory_project_settings,
     load_project_settings,
     save_project_settings,
 )
+from bl03u_masstool.core.runtime_paths import default_resource_path
 
 
 def test_project_settings_default_parent_mz_is_unset():
@@ -29,6 +34,14 @@ def test_project_yaml_mapping_covers_every_non_deprecated_field():
     }
 
     assert set(asdict(settings)) - deprecated_runtime_fields <= serialized_fields
+
+
+def test_every_project_settings_field_has_one_owner():
+    owner_sets = list(PROJECT_FIELD_OWNERS.values())
+    owned = set().union(*owner_sets)
+
+    assert owned == set(asdict(ProjectSettings()))
+    assert sum(map(len, owner_sets)) == len(owned)
 
 
 def test_project_runtime_converters_preserve_common_kr_mass():
@@ -67,6 +80,7 @@ def test_project_settings_round_trip_preserves_nested_yaml_fields(tmp_path):
         temperature_photon_normalize=False,
         temperature_kr_correct=True,
         pie_photon_mode="each",
+        pie_time_normalize=False,
         kr_calibration_folder="data/kr",
         kr_calibration_peak_file="config/peak.yaml",
         kr_mz=83,
@@ -92,6 +106,7 @@ def test_project_settings_round_trip_preserves_nested_yaml_fields(tmp_path):
         pics_no_formula="15NO",
         pics_no_mf=0.02,
         pics_new_species_mf=0.003,
+        pics_mass_disc_exponent=0.66,
         mf_md_preset="30 Torr (Catalysis)",
         mf_mass_disc_exponent=0.7,
         mf_parent_mz=130,
@@ -136,6 +151,7 @@ def test_project_settings_round_trip_preserves_nested_yaml_fields(tmp_path):
     assert loaded.temperature_photon_normalize is False
     assert loaded.temperature_kr_correct is True
     assert loaded.pie_photon_mode == settings.pie_photon_mode
+    assert loaded.pie_time_normalize is False
     saved_yaml = yaml.safe_load(path.read_text(encoding="utf-8"))
     assert "mass_discrimination" not in saved_yaml["general_parameters"]["normalization"]
     assert loaded.kr_calibration_folder == settings.kr_calibration_folder
@@ -164,6 +180,10 @@ def test_project_settings_round_trip_preserves_nested_yaml_fields(tmp_path):
     assert loaded.pics_no_formula == settings.pics_no_formula
     assert loaded.pics_no_mf == settings.pics_no_mf
     assert loaded.pics_new_species_mf == settings.pics_new_species_mf
+    assert (
+        loaded.pics_mass_disc_exponent
+        == settings.pics_mass_disc_exponent
+    )
     assert loaded.mf_md_preset == settings.mf_md_preset
     assert loaded.mf_mass_disc_exponent == settings.mf_mass_disc_exponent
     assert loaded.mf_parent_mz == settings.mf_parent_mz
@@ -181,6 +201,26 @@ def test_project_settings_legacy_single_pie_folder_remains_effective():
     settings = ProjectSettings(pie_scan_folder="data/legacy-pie")
 
     assert settings.effective_pie_scan_folders() == ["data/legacy-pie"]
+
+
+def test_legacy_project_without_pie_time_policy_defaults_to_enabled(tmp_path):
+    path = tmp_path / "project.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "project": {"name": "legacy"},
+                "general_parameters": {
+                    "normalization": {"pie_photon_mode": "none"}
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = load_project_settings(path)
+
+    assert loaded.pie_time_normalize is True
 
 
 def test_legacy_temperature_kr_mz_populates_canonical_common_parameter(tmp_path):
@@ -311,6 +351,9 @@ def test_project_settings_manager_uses_portable_storage_but_absolute_runtime_pat
                 temperature_scan_folder=str(temperature_folder),
             )
         )
+        exposed = manager.get()
+        exposed.project_name = "Mutated copy"
+        assert manager.snapshot().project_name == "Manager"
 
         config_path = manager.save()
         saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
@@ -388,6 +431,30 @@ def test_normalization_settings_preserve_project_mass_discrimination():
     assert settings.to_normalization_settings().mass_discrimination == pytest.approx(0.42)
 
 
+def test_legacy_pics_mass_response_falls_back_to_mole_fraction_value(
+    tmp_path,
+):
+    path = tmp_path / "legacy-project.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "function_defaults": {
+                    "pics": {"no_mz": 30},
+                    "mole_fraction": {
+                        "mass_disc_exponent": 0.63,
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = load_project_settings(path)
+
+    assert loaded.mf_mass_disc_exponent == pytest.approx(0.63)
+    assert loaded.pics_mass_disc_exponent == pytest.approx(0.63)
+
+
 def test_load_project_settings_warns_when_file_missing(tmp_path, caplog):
     missing_path = tmp_path / "missing-project.yaml"
 
@@ -402,3 +469,98 @@ def test_invalid_curve_storage_mode_falls_back_to_sqlite():
     settings = ProjectSettings(curve_storage_mode="unexpected")
 
     assert settings.effective_curve_storage_mode() == "sqlite"
+
+
+def test_factory_project_settings_are_clean_and_resource_is_immutable():
+    resource = default_resource_path("config/project.yaml")
+    before = hashlib.sha256(resource.read_bytes()).hexdigest()
+
+    first = load_factory_project_settings()
+    first.cal_a = 99.0
+    second = load_factory_project_settings()
+
+    assert second.cal_a != 99.0
+    assert second.output_dir == "output"
+    assert second.temperature_scan_folder == ""
+    assert second.pie_scan_folder == ""
+    assert second.kr_calibration_folder == ""
+    assert second.expansion_factors == {}
+    assert second.temperature_scan_result_file == ""
+    assert hashlib.sha256(resource.read_bytes()).hexdigest() == before
+
+
+def test_manager_no_project_state_exposes_only_factory_snapshots():
+    manager = ProjectSettingsManager()
+    manager.clear_project_path()
+
+    one = manager.snapshot()
+    one.min_intensity = 123.0
+    two = manager.snapshot()
+
+    assert two.min_intensity != 123.0
+    with pytest.raises(RuntimeError, match="No active project"):
+        manager.get()
+    with pytest.raises(RuntimeError, match="without an active project"):
+        manager.set(one)
+    with pytest.raises(RuntimeError, match="without an active project"):
+        manager.save()
+
+
+def test_module_patch_reloads_committed_project_and_rejects_cross_module_fields(tmp_path):
+    project_dir = tmp_path / "project"
+    initial = ProjectSettings(
+        project_name="Scoped",
+        output_dir=str(project_dir),
+        temp_integration_method="sum_counts",
+        pie_energy_decimals=1,
+    )
+    save_project_settings(initial, project_dir / "config" / "project.yaml")
+    manager = ProjectSettingsManager()
+    manager.activate_project(project_dir)
+    stale = manager.snapshot()
+    stale.pie_energy_decimals = 4
+
+    manager.update_module_settings(
+        "temperature",
+        {"temp_integration_method": "baseline"},
+    )
+    saved = manager.update_module_settings("pie", stale)
+
+    assert saved.temp_integration_method == "baseline"
+    assert saved.pie_integration_method == "sum_counts"
+    assert saved.pie_energy_decimals == 4
+    saved = manager.update_module_settings(
+        "pie",
+        {"pie_integration_method": "gaussian"},
+    )
+    assert saved.temp_integration_method == "baseline"
+    assert saved.pie_integration_method == "gaussian"
+    with pytest.raises(ValueError, match="cannot update project fields"):
+        manager.update_module_settings(
+            "pie",
+            {"temp_integration_method": "gaussian"},
+        )
+    manager.clear_project_path()
+
+
+def test_project_defaults_do_not_assume_molecule_specific_isotope_pairs():
+    settings = ProjectSettings()
+
+    assert settings.pie_isotope_qc_pairs == []
+
+
+def test_atomic_save_failure_keeps_previous_project_yaml(tmp_path, monkeypatch):
+    path = tmp_path / "config" / "project.yaml"
+    save_project_settings(ProjectSettings(project_name="Committed"), path)
+    before = path.read_bytes()
+
+    def fail_dump(_data, handle, **_kwargs):
+        handle.write("partial")
+        raise OSError("disk full")
+
+    monkeypatch.setattr(project_settings_module.yaml, "safe_dump", fail_dump)
+    with pytest.raises(OSError, match="disk full"):
+        save_project_settings(ProjectSettings(project_name="Draft"), path)
+
+    assert path.read_bytes() == before
+    assert not list(path.parent.glob(".project.yaml.*.tmp"))

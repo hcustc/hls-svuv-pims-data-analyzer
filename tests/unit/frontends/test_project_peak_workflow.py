@@ -7,8 +7,15 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PyQt6")
+try:
+    from PyQt6 import QtWidgets
+except ImportError as exc:
+    pytest.skip(
+        f"PyQt6 display libraries not available: {exc}",
+        allow_module_level=True,
+    )
 
-from PyQt6 import QtWidgets
+pytestmark = pytest.mark.gui
 
 from bl03u_masstool.core.peak_sets import create_peak_set, verify_peak_set
 from bl03u_masstool.core.project_settings import ProjectSettings
@@ -36,7 +43,11 @@ def test_valid_project_peak_set_never_prompts(qapp, tmp_path, monkeypatch):
         output_dir=str(project),
         active_peak_set_id=record.peak_set_id,
         manual_peak_file=str(verify_peak_set(project, record)),
+        cal_a=0.0,
+        cal_b=0.5,
+        cal_c=2.0,
     )
+    original_content = verify_peak_set(project, record).read_bytes()
     owner = QtWidgets.QWidget()
     monkeypatch.setattr(
         QtWidgets.QMessageBox,
@@ -51,6 +62,7 @@ def test_valid_project_peak_set_never_prompts(qapp, tmp_path, monkeypatch):
             set_busy=lambda *_args: None,
             show_error=lambda message: pytest.fail(message),
         )
+        assert verify_peak_set(project, record).read_bytes() == original_content
     finally:
         owner.deleteLater()
 

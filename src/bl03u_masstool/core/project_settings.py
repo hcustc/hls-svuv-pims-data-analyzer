@@ -1,19 +1,23 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import asdict, dataclass, field, replace
 import logging
+import os
 from pathlib import Path, PurePosixPath, PureWindowsPath
+import tempfile
 from typing import Any
 
 import yaml
 
 from .calibration import Calibration
-from .config import PeakDetectionConfig, writable_config_path, readable_config_path, load_peak_detection_config
+from .config import PeakDetectionConfig
 from .elements import COMMON_ELEMENTS
 from .normalization import NormalizationSettings, load_normalization_settings
 from .mole_fraction import MoleFractionSettings, load_mole_fraction_settings
+from .runtime_paths import default_resource_path
 
-DEFAULT_PROJECT_CONFIG = Path("config/project.yaml")
+FACTORY_PROJECT_CONFIG = Path("config/project.yaml")
 logger = logging.getLogger(__name__)
 
 _PROJECT_PATH_FIELDS: tuple[str, ...] = (
@@ -32,6 +36,120 @@ _PROJECT_PATH_FIELDS: tuple[str, ...] = (
     "kr_calibration_folder",
     "kr_calibration_peak_file",
 )
+
+PROJECT_MODULE_FIELDS: dict[str, frozenset[str]] = {
+    "spectrum": frozenset(
+        {
+            "cal_a",
+            "cal_b",
+            "cal_c",
+            "calibration_points",
+            "peak_algorithm",
+            "detection_min_idx",
+            "threshold_end",
+            "min_intensity",
+            "nearby_peak_window",
+            "duplicate_window",
+            "weak_tail_early_window",
+            "weak_tail_late_window",
+            "weak_tail_ratio",
+            "gaussian_window_max",
+            "gaussian_boundary_scale",
+            "boundary_padding",
+            "prominence_ratio",
+            "smoothing_window",
+            "smoothing_poly_order",
+            "baseline_window",
+            "baseline_percentile",
+            "min_peak_width",
+            "max_peak_width",
+            "cwt_snr_threshold",
+            "cwt_wavelet_max_width",
+            "weak_tail_cutoff_idx",
+            "vote_threshold",
+            "min_intensity_for_single_vote",
+            "mz_tolerance",
+        }
+    ),
+    "temperature": frozenset(
+        {
+            "temperature_photon_normalize",
+            "temperature_kr_correct",
+            "temp_reference_mode",
+            "temp_integration_method",
+            "temp_replicate_mode",
+            "temp_curve_class_change_threshold",
+            "temp_curve_class_peak_fraction",
+            "temp_kr_mz",
+            "kr_calibration_folder",
+            "kr_calibration_peak_file",
+            "kr_mz",
+            "expansion_factors",
+        }
+    ),
+    "pie": frozenset(
+        {
+            "pie_photon_mode",
+            "pie_time_normalize",
+            "pie_energy_decimals",
+            "pie_recursive",
+            "pie_integration_method",
+            "pie_merge_method",
+            "pie_replicate_mode",
+            "pie_isotope_qc_pairs",
+            "pie_qc_override_reason",
+            "selected_elements",
+        }
+    ),
+    "pics": frozenset(
+        {
+            "pics_no_mz",
+            "pics_no_formula",
+            "pics_no_mf",
+            "pics_new_species_mf",
+            "pics_mass_disc_exponent",
+        }
+    ),
+    "mole_fraction": frozenset(
+        {
+            "mf_mass_disc_exponent",
+            "mf_md_preset",
+            "mf_parent_mz",
+            "mf_parent_initial_mf",
+            "mf_reference_temperature",
+            "mf_reference_species_mz",
+            "mf_reference_species_tm",
+            "mf_reference_species_mf_at_tm",
+            "mf_photon_energy",
+            "mf_kr_data",
+        }
+    ),
+}
+
+
+def derive_project_compatibility_fields(settings: ProjectSettings) -> ProjectSettings:
+    """Normalize compatibility fields from their authoritative project fields."""
+    normalized = deepcopy(settings)
+    normalized.temp_integration_method = str(
+        normalized.temp_integration_method or "sum_counts"
+    )
+    normalized.pie_integration_method = str(
+        normalized.pie_integration_method or "sum_counts"
+    )
+    folders = normalized.effective_pie_scan_folders()
+    normalized.pie_multi_folder_mode = len(folders) > 1
+    normalized.pie_prefer_gaussian = (
+        normalized.pie_integration_method == "gaussian"
+    )
+    normalized.temp_prefer_gaussian = (
+        normalized.temp_integration_method == "gaussian"
+    )
+    normalized.temp_peak_source = (
+        "manual"
+        if str(normalized.manual_peak_file or "").strip()
+        else "auto"
+    )
+    return normalized
 
 
 def _optional_float_dict(value):
@@ -90,6 +208,7 @@ class ProjectSettings:
     temperature_photon_normalize: bool = True
     temperature_kr_correct: bool = False
     pie_photon_mode: str = "none"
+    pie_time_normalize: bool = True
     mass_discrimination: float = 1.0
     kr_calibration_folder: str = ""
     kr_calibration_peak_file: str = ""
@@ -132,6 +251,8 @@ class ProjectSettings:
     pie_multi_folder_mode: bool = False
     pie_merge_method: str = "low_energy_dominant"
     pie_replicate_mode: str = "off"
+    pie_isotope_qc_pairs: list[dict[str, Any]] = field(default_factory=list)
+    pie_qc_override_reason: str = ""
 
     # === Temperature Scan Defaults ===
     temp_peak_source: str = "auto"  # "auto" or "manual"
@@ -148,10 +269,11 @@ class ProjectSettings:
     pics_no_formula: str = "NO"
     pics_no_mf: float = 0.01
     pics_new_species_mf: float = 0.002
+    pics_mass_disc_exponent: float = 0.77897
 
     # === Mole Fraction Defaults ===
     mf_mass_disc_exponent: float = 0.77897
-    mf_md_preset: str = "光电离"  # 实验条件预设名称
+    mf_md_preset: str = "760 Torr / 80μm"  # 实验条件预设名称
     mf_parent_mz: float = 0.0
     mf_parent_initial_mf: float = 0.002
     mf_reference_temperature: float | None = None
@@ -225,6 +347,7 @@ class ProjectSettings:
             temperature_photon_normalize=self.temperature_photon_normalize,
             temperature_kr_correct=self.temperature_kr_correct,
             pie_photon_mode=self.pie_photon_mode,
+            pie_time_normalize=self.pie_time_normalize,
             mass_discrimination=self.mass_discrimination,
             kr_calibration_folder=self.kr_calibration_folder,
             kr_calibration_peak_file=self.kr_calibration_peak_file,
@@ -247,6 +370,75 @@ class ProjectSettings:
             expansion_factors=dict(self.expansion_factors),
             kr_data=dict(self.mf_kr_data),
         )
+
+
+_PROJECT_IDENTITY_FIELDS = frozenset(
+    {"project_name", "system", "description", "output_dir"}
+)
+_PROJECT_DATA_SOURCE_FIELDS = frozenset(
+    {
+        "single_spectrum_file",
+        "sum_spectrum_folder",
+        "temperature_scan_folder",
+        "pie_scan_folder",
+        "pie_scan_folders",
+        "pics_database_path",
+        "kr_calibration_folder",
+        "kr_calibration_peak_file",
+    }
+)
+_PROJECT_BASELINE_FIELDS = frozenset(
+    {
+        "manual_peak_file",
+        "active_peak_set_id",
+        "cal_a",
+        "cal_b",
+        "cal_c",
+        "calibration_points",
+    }
+)
+_PROJECT_ARTIFACT_FIELDS = frozenset(
+    {
+        "curve_database_path",
+        "curve_storage_mode",
+        "temperature_scan_result_file",
+        "pie_curve_result_file",
+        "pie_identification_result_file",
+        "isotope_correction_result_file",
+        "mole_fraction_result_file",
+    }
+)
+_PROJECT_DERIVED_FIELDS = frozenset(
+    {
+        "temp_peak_source",
+        "pie_multi_folder_mode",
+        "temp_prefer_gaussian",
+        "pie_prefer_gaussian",
+    }
+)
+_PROJECT_LEGACY_FIELDS = frozenset({"mass_discrimination"})
+_PROJECT_ANALYSIS_FIELDS = frozenset(
+    (
+        set().union(*PROJECT_MODULE_FIELDS.values())
+        | {"light_source", "selected_elements"}
+    )
+    - _PROJECT_DATA_SOURCE_FIELDS
+    - _PROJECT_BASELINE_FIELDS
+    - _PROJECT_DERIVED_FIELDS
+)
+
+# One authoritative ownership category for every flattened ProjectSettings
+# field.  Module update whitelists remain a separate concern because a tool may
+# be allowed to update a baseline or data-source field explicitly.
+PROJECT_FIELD_OWNERS: dict[str, frozenset[str]] = {
+    "project_identity": _PROJECT_IDENTITY_FIELDS,
+    "data_sources": _PROJECT_DATA_SOURCE_FIELDS,
+    "project_baselines": _PROJECT_BASELINE_FIELDS,
+    "analysis_parameters": _PROJECT_ANALYSIS_FIELDS,
+    "analysis_artifacts": _PROJECT_ARTIFACT_FIELDS,
+    "internal_derived": _PROJECT_DERIVED_FIELDS,
+    "legacy_compatibility": _PROJECT_LEGACY_FIELDS,
+}
 
 
 def _nested_to_flat(data: dict) -> dict:
@@ -331,6 +523,7 @@ def _nested_to_flat(data: dict) -> dict:
                 "temperature_photon_normalize": "temperature_photon_normalize",
                 "temperature_kr_correct": "temperature_kr_correct",
                 "pie_photon_mode": "pie_photon_mode",
+                "pie_time_normalize": "pie_time_normalize",
                 "mass_discrimination": "mass_discrimination",
                 "kr_calibration_folder": "kr_calibration_folder",
                 "kr_calibration_peak_file": "kr_calibration_peak_file",
@@ -351,6 +544,7 @@ def _nested_to_flat(data: dict) -> dict:
                 "temperature_photon_normalize": "temperature_photon_normalize",
                 "temperature_kr_correct": "temperature_kr_correct",
                 "pie_photon_mode": "pie_photon_mode",
+                "pie_time_normalize": "pie_time_normalize",
                 "mass_discrimination": "mass_discrimination",
                 "kr_calibration_folder": "kr_calibration_folder",
                 "kr_calibration_peak_file": "kr_calibration_peak_file",
@@ -380,7 +574,9 @@ def _nested_to_flat(data: dict) -> dict:
                           ("pie_integration_method", "integration_method"),
                           ("pie_multi_folder_mode", "multi_folder_mode"),
                           ("pie_merge_method", "merge_method"),
-                          ("pie_replicate_mode", "replicate_mode")]:
+                          ("pie_replicate_mode", "replicate_mode"),
+                          ("pie_isotope_qc_pairs", "isotope_qc_pairs"),
+                          ("pie_qc_override_reason", "qc_override_reason")]:
                 if kk in pie:
                     flat[k] = pie[kk]
             if "integration_method" not in pie and pie.get("prefer_gaussian") is True:
@@ -404,7 +600,8 @@ def _nested_to_flat(data: dict) -> dict:
         pics = fd.get("pics", {})
         if isinstance(pics, dict):
             for k, kk in [("pics_no_mz", "no_mz"), ("pics_no_formula", "no_formula"),
-                          ("pics_no_mf", "no_mf"), ("pics_new_species_mf", "new_species_mf")]:
+                          ("pics_no_mf", "no_mf"), ("pics_new_species_mf", "new_species_mf"),
+                          ("pics_mass_disc_exponent", "mass_disc_exponent")]:
                 if kk in pics:
                     flat[k] = pics[kk]
 
@@ -422,6 +619,13 @@ def _nested_to_flat(data: dict) -> dict:
                           ("mf_kr_data", "kr_data")]:
                 if kk in mf:
                     flat[k] = mf[kk]
+        if (
+            "pics_mass_disc_exponent" not in flat
+            and "mf_mass_disc_exponent" in flat
+        ):
+            flat["pics_mass_disc_exponent"] = flat[
+                "mf_mass_disc_exponent"
+            ]
 
         # Load peak_detection from function_defaults scope
         peak_det = fd.get("peak_detection", {})
@@ -554,6 +758,7 @@ def _flat_to_nested(settings: ProjectSettings) -> dict:
                 "temperature_photon_normalize": d["temperature_photon_normalize"],
                 "temperature_kr_correct": d["temperature_kr_correct"],
                 "pie_photon_mode": d["pie_photon_mode"],
+                "pie_time_normalize": d["pie_time_normalize"],
                 "kr_calibration_folder": d["kr_calibration_folder"],
                 "kr_calibration_peak_file": d["kr_calibration_peak_file"],
                 "kr_mz": d["kr_mz"],
@@ -596,6 +801,8 @@ def _flat_to_nested(settings: ProjectSettings) -> dict:
                 "multi_folder_mode": d["pie_multi_folder_mode"],
                 "merge_method": d["pie_merge_method"],
                 "replicate_mode": d["pie_replicate_mode"],
+                "isotope_qc_pairs": d["pie_isotope_qc_pairs"],
+                "qc_override_reason": d["pie_qc_override_reason"],
             },
             "temperature_scan": {
                 "peak_source": d["temp_peak_source"],
@@ -611,6 +818,7 @@ def _flat_to_nested(settings: ProjectSettings) -> dict:
                 "no_formula": d["pics_no_formula"],
                 "no_mf": d["pics_no_mf"],
                 "new_species_mf": d["pics_new_species_mf"],
+                "mass_disc_exponent": d["pics_mass_disc_exponent"],
             },
             "mole_fraction": {
                 "md_preset": d["mf_md_preset"],
@@ -787,19 +995,50 @@ def portable_project_settings_dict(
 def _inferred_project_root(path: str | Path, config_path: Path) -> Path | None:
     """Infer ``<root>`` only for explicit ``<root>/config/project.yaml`` paths."""
     raw_path = Path(path)
-    if raw_path == DEFAULT_PROJECT_CONFIG:
-        return None
     if len(raw_path.parts) >= 3 and raw_path.parts[-2:] == ("config", "project.yaml"):
         return config_path.parent.parent
     return None
 
 
+def _settings_from_mapping(data: dict[str, Any]) -> ProjectSettings:
+    flat = _nested_to_flat(data)
+    return ProjectSettings(
+        **{
+            key: value
+            for key, value in flat.items()
+            if key in ProjectSettings.__dataclass_fields__
+        }
+    )
+
+
+def load_factory_project_settings() -> ProjectSettings:
+    """Load the immutable scientific defaults bundled with the application.
+
+    Factory defaults deliberately bypass ``runtime_read_path`` so a repository
+    or per-user ``config/project.yaml`` cannot silently become a machine-global
+    scientific configuration.
+    """
+
+    config_path = default_resource_path(FACTORY_PROJECT_CONFIG)
+    if not config_path.is_file():
+        logger.warning(
+            "Bundled project defaults not found; using dataclass fallbacks: %s",
+            config_path,
+        )
+        return ProjectSettings()
+    with config_path.open("r", encoding="utf-8") as handle:
+        data = yaml.safe_load(handle) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"factory project config root must be a mapping: {config_path}")
+    return _settings_from_mapping(data)
+
+
 def load_project_settings(
-    path: str | Path = DEFAULT_PROJECT_CONFIG,
+    path: str | Path,
     *,
     project_root: str | Path | None = None,
 ) -> ProjectSettings:
-    config_path = readable_config_path(path)
+    config_path = Path(path).expanduser()
     effective_root = (
         Path(project_root).expanduser().resolve()
         if project_root
@@ -807,7 +1046,7 @@ def load_project_settings(
     )
     if not config_path.exists():
         logger.warning("Project settings file not found; using defaults: %s", config_path)
-        defaults = ProjectSettings()
+        defaults = load_factory_project_settings()
         if effective_root is not None:
             defaults.output_dir = str(effective_root)
         return defaults
@@ -815,8 +1054,7 @@ def load_project_settings(
         data = yaml.safe_load(handle) or {}
     if not isinstance(data, dict):
         raise ValueError(f"project config root must be a mapping: {config_path}")
-    flat = _nested_to_flat(data)
-    settings = ProjectSettings(**{k: v for k, v in flat.items() if k in ProjectSettings.__dataclass_fields__})
+    settings = _settings_from_mapping(data)
     if effective_root is not None:
         settings = _resolve_project_scoped_paths(settings, effective_root)
     return settings
@@ -824,25 +1062,42 @@ def load_project_settings(
 
 def save_project_settings(
     settings: ProjectSettings,
-    path: str | Path = DEFAULT_PROJECT_CONFIG,
+    path: str | Path,
     *,
     project_root: str | Path | None = None,
 ) -> Path:
-    config_path = writable_config_path(path)
+    config_path = Path(path).expanduser()
     effective_root = (
         Path(project_root).expanduser().resolve()
         if project_root
         else _inferred_project_root(path, config_path)
     )
     config_path.parent.mkdir(parents=True, exist_ok=True)
+    settings = derive_project_compatibility_fields(settings)
     stored_settings = (
         _project_settings_for_storage(settings, effective_root)
         if effective_root is not None
         else settings
     )
     nested = _flat_to_nested(stored_settings)
-    with config_path.open("w", encoding="utf-8") as handle:
-        yaml.safe_dump(nested, handle, allow_unicode=True, sort_keys=False)
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=config_path.parent,
+            prefix=f".{config_path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temp_path = Path(handle.name)
+            yaml.safe_dump(nested, handle, allow_unicode=True, sort_keys=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, config_path)
+    finally:
+        if temp_path is not None and temp_path.exists():
+            temp_path.unlink()
     return config_path
 
 
@@ -865,6 +1120,7 @@ def migrate_from_legacy_configs() -> ProjectSettings:
         s.temperature_photon_normalize = ns.temperature_photon_normalize
         s.temperature_kr_correct = ns.temperature_kr_correct
         s.pie_photon_mode = ns.pie_photon_mode
+        s.pie_time_normalize = ns.pie_time_normalize
         s.kr_calibration_folder = ns.kr_calibration_folder
         s.kr_calibration_peak_file = ns.kr_calibration_peak_file
         s.kr_mz = ns.kr_mz
@@ -916,9 +1172,11 @@ def migrate_from_legacy_configs() -> ProjectSettings:
 
 
 class ProjectSettingsManager:
-    """Singleton holding the active ProjectSettings instance.
+    """Singleton holding the active project or a factory-backed session copy.
 
-    Supports both global config (config/project.yaml) and per-project configs (project_root/config/project.yaml).
+    Only an explicitly activated project can be persisted.  The no-project
+    state exists solely so standalone tools can receive an in-memory defaults
+    snapshot; it has no writable global configuration path.
     """
 
     _instance: ProjectSettingsManager | None = None
@@ -938,14 +1196,21 @@ class ProjectSettingsManager:
         """
         project_root = Path(project_root).expanduser().resolve()
         self._project_config_path = project_root / "config" / "project.yaml"
-        # 重新加载设置以使用新的项目路径
         self.reload()
 
+    def activate_project(self, project_root: Path | str) -> ProjectSettings:
+        """Activate a project and return an isolated, freshly loaded snapshot."""
+        self.set_project_path(project_root)
+        return self.snapshot()
+
     def get_project_config_path(self) -> Path:
-        """获取当前使用的项目配置路径。"""
-        if self._project_config_path:
-            return self._project_config_path
-        return DEFAULT_PROJECT_CONFIG
+        """Return the active project's config path.
+
+        Raises instead of falling back to a machine-global config.
+        """
+        if self._project_config_path is None:
+            raise RuntimeError("No active project")
+        return self._project_config_path
 
     def has_project_path(self) -> bool:
         """Return True when settings are scoped to an opened project folder."""
@@ -957,42 +1222,105 @@ class ProjectSettingsManager:
         return self._project_config_path.parent.parent
 
     def get(self) -> ProjectSettings:
+        """Compatibility accessor restricted to an active project.
+
+        New code should use :meth:`snapshot` and :meth:`replace_and_save`.
+        A copy is returned so legacy callers cannot mutate manager state.
+        """
+        if self._project_config_path is None:
+            raise RuntimeError("No active project; use load_factory_project_settings()")
         if self._settings is None:
-            config_path = self.get_project_config_path()
-            project_root = self._project_root()
-            self._settings = load_project_settings(config_path, project_root=project_root)
-            if self._is_fresh(config_path):
-                try:
-                    self._settings = migrate_from_legacy_configs()
-                    if project_root is not None:
-                        self._settings.output_dir = str(project_root.resolve())
-                    save_project_settings(self._settings, config_path, project_root=project_root)
-                except Exception:
-                    pass
-        return self._settings
+            self._settings = load_project_settings(
+                self._project_config_path,
+                project_root=self._project_root(),
+            )
+        return deepcopy(self._settings)
 
     def save(self) -> Path:
+        if self._project_config_path is None:
+            raise RuntimeError("Cannot persist scientific settings without an active project")
         config_path = self.get_project_config_path()
-        return save_project_settings(self.get(), config_path, project_root=self._project_root())
+        if self._settings is None:
+            self.reload()
+        return save_project_settings(
+            self._settings,
+            config_path,
+            project_root=self._project_root(),
+        )
 
     def reload(self) -> ProjectSettings:
+        if self._project_config_path is None:
+            self._settings = load_factory_project_settings()
+            return deepcopy(self._settings)
         config_path = self.get_project_config_path()
-        self._settings = load_project_settings(config_path, project_root=self._project_root())
-        return self._settings
+        self._settings = load_project_settings(
+            config_path,
+            project_root=self._project_root(),
+        )
+        return deepcopy(self._settings)
 
     def set(self, settings: ProjectSettings) -> None:
-        self._settings = settings
+        if self._project_config_path is None:
+            raise RuntimeError("Cannot set project settings without an active project")
+        self._settings = deepcopy(settings)
 
-    def _is_fresh(self, config_path: Path = None) -> bool:
-        """检查项目配置是否为新建（不存在）。"""
-        if config_path is None:
-            config_path = self.get_project_config_path()
+    def snapshot(self) -> ProjectSettings:
+        """Return an isolated copy of the active project/session settings."""
+        if self._project_config_path is None:
+            return load_factory_project_settings()
+        return self.get()
+
+    def replace_and_save(self, settings: ProjectSettings) -> ProjectSettings:
+        """Atomically replace and persist the active project's settings."""
+        if self._project_config_path is None:
+            raise RuntimeError("Cannot persist scientific settings without an active project")
+        previous = self._settings
+        self._settings = derive_project_compatibility_fields(settings)
         try:
-            return not readable_config_path(config_path).exists()
+            self.save()
+            return self.reload()
         except Exception:
-            return True
+            self._settings = previous
+            raise
+
+    def update_module_settings(
+        self,
+        module: str,
+        changes: ProjectSettings | dict[str, Any],
+    ) -> ProjectSettings:
+        """Merge one tool's explicit field patch into the active project.
+
+        The committed project is reloaded first, so a tool cannot overwrite
+        unrelated edits with an old whole-project snapshot.
+        """
+        if self._project_config_path is None:
+            raise RuntimeError("Cannot update project parameters without an active project")
+        try:
+            allowed = PROJECT_MODULE_FIELDS[module]
+        except KeyError as exc:
+            raise ValueError(f"Unknown project parameter module: {module}") from exc
+
+        if isinstance(changes, ProjectSettings):
+            patch = {name: deepcopy(getattr(changes, name)) for name in allowed}
+        else:
+            rejected = set(changes) - allowed
+            if rejected:
+                raise ValueError(
+                    f"{module} cannot update project fields: {sorted(rejected)}"
+                )
+            patch = {name: deepcopy(value) for name, value in changes.items()}
+
+        committed = load_project_settings(
+            self.get_project_config_path(),
+            project_root=self._project_root(),
+        )
+        for name, value in patch.items():
+            setattr(committed, name, value)
+        return self.replace_and_save(committed)
 
     def clear_project_path(self) -> None:
-        """清除项目路径，恢复为使用全局配置。"""
+        """Close the active project and restore an isolated factory snapshot."""
         self._project_config_path = None
-        self._settings = None
+        self._settings = load_factory_project_settings()
+
+    close_project = clear_project_path

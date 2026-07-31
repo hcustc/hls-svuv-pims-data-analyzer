@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 
@@ -33,7 +34,11 @@ from bl03u_masstool.core.pie_analysis import analyze_pie_folder, build_pie_curve
 from bl03u_masstool.core.pics_calculator import calc_pics_single_energy
 from bl03u_masstool.core.elements import get_all_elements_from_database, filter_species_by_elements, COMMON_ELEMENTS, parse_formula as parse_formula_elements, get_elements_from_formula
 from bl03u_masstool.core.normalization import NormalizationSettings, load_normalization_settings, save_normalization_settings
-from bl03u_masstool.core.project_settings import ProjectSettings
+from bl03u_masstool.core.project_settings import (
+    ProjectSettings,
+    ProjectSettingsManager,
+    load_factory_project_settings,
+)
 from bl03u_masstool.core.temperature_scan import (
     TEMPERATURE_CURVE_CLASS_LABELS,
     analyze_temperature_folder,
@@ -65,7 +70,7 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         super().__init__(parent)
         self.calibration = calibration
         self.normalization_settings = normalization_settings
-        self.settings = load_mole_fraction_settings()
+        self.settings = load_factory_project_settings().to_mole_fraction_settings()
         self.project_settings: ProjectSettings | None = None
         self.database: list[dict] = []
         self.mz_index: dict[int, list[int]] = {}
@@ -268,13 +273,14 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         activate_project_scope: bool = True,
     ) -> None:
         """Apply ProjectSettings defaults to MoleFractionDialog controls."""
-        self.project_settings = ps if activate_project_scope else None
+        self.project_settings = deepcopy(ps) if activate_project_scope else None
+        ps = self.project_settings or deepcopy(ps)
         if activate_project_scope:
             self.calibration = ps.to_calibration()
             self.normalization_settings = ps.to_normalization_settings()
             self.settings = ps.to_mole_fraction_settings()
         else:
-            self.settings = load_mole_fraction_settings()
+            self.settings = load_factory_project_settings().to_mole_fraction_settings()
         self._load_project_database_from_settings()
         # 卡峰范围由项目管理统一维护，在此自动加载
         self._load_peak_ranges_from_project()
@@ -856,6 +862,12 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.btn_calc_parent = QtWidgets.QPushButton("计算母体摩尔分数")
         self.btn_calc_parent.setObjectName("PrimaryButton")
         self.btn_calc_parent.clicked.connect(self._calc_parent_mole_fraction)
+        self.btn_update_project_params = QtWidgets.QPushButton("更新项目参数")
+        self.btn_update_project_params.setObjectName("BrowseButton")
+        self.btn_update_project_params.clicked.connect(
+            self.update_project_parameters
+        )
+        action_row.addWidget(self.btn_update_project_params)
         action_row.addWidget(self.btn_calc_parent)
         layout.addLayout(action_row)
 
@@ -868,6 +880,37 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self._update_parent_species_list()
         self._refresh_parent_selection_state()
         return widget
+
+    def update_project_parameters(self) -> None:
+        """Commit only the mole-fraction fields owned by this page."""
+        if self.project_settings is None:
+            QtWidgets.QMessageBox.warning(self, "提示", "当前没有活动项目。")
+            return
+        changes = {
+            "mf_parent_mz": float(self.spin_parent_mz.value()),
+            "mf_parent_initial_mf": float(self.spin_parent_mf0.value()),
+            "mf_reference_temperature": float(self.spin_parent_t0.value()),
+            "mf_photon_energy": float(self.spin_parent_energy.value()),
+        }
+        if hasattr(self, "combo_md_preset"):
+            changes["mf_md_preset"] = self.combo_md_preset.currentText()
+        if hasattr(self, "spin_md_exponent"):
+            changes["mf_mass_disc_exponent"] = float(
+                self.spin_md_exponent.value()
+            )
+        try:
+            saved = ProjectSettingsManager().update_module_settings(
+                "mole_fraction",
+                changes,
+            )
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "更新项目参数失败", str(exc))
+            return
+        self.project_settings = deepcopy(saved)
+        window = self.window()
+        if hasattr(window, "_sync_project_settings_to_tool_pages"):
+            window._sync_project_settings_to_tool_pages(deepcopy(saved))
+        self.status_label.setText("摩尔分数项目参数已更新")
 
     def _select_parent_mz_from_data(self) -> None:
         values = self._detected_parent_mz_values()

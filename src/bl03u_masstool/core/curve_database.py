@@ -461,9 +461,14 @@ def _signal_columns(rows: pd.DataFrame, curve_type: str) -> list[str]:
         )
         if curve_type == "temperature"
         else (
+            "merged_intensity",
             "normalized_intensity",
             "raw_area",
+            "count_rate",
+            "io_normalized_intensity",
+            "io_time_normalized_intensity",
             "photon_normalized_intensity",
+            "signal_to_noise",
         )
     )
     result = [column for column in preferred if column in rows]
@@ -661,7 +666,10 @@ def store_curve_dataset(
             )
             peak_track_value = curve.get(
                 "temperature_peak_track",
-                curve.get("temperature_peak_cluster", fallback_track),
+                curve.get(
+                    "temperature_peak_cluster",
+                    curve.get("peak_track", fallback_track),
+                ),
             )
             try:
                 peak_track = int(peak_track_value)
@@ -717,6 +725,29 @@ def store_curve_dataset(
                         "replicate_grouping",
                         "replicate_warning",
                         "reference_source",
+                        "source_folder",
+                        "source_folders",
+                        "source_files",
+                        "source_spectra",
+                        "source_segment",
+                        "acquisition_time_s",
+                        "total_acquisition_time_s",
+                        "acquisition_time_min_s",
+                        "acquisition_time_max_s",
+                        "acquisition_times_s",
+                        "io",
+                        "light_source",
+                        "time_normalized",
+                        "io_normalized",
+                        "shared_scale_factor",
+                        "shared_scale_log_mad",
+                        "shared_scale_overlap_energy_count",
+                        "shared_scale_channel_count",
+                        "shared_scale_observation_count",
+                        "shared_scale_rejected_count",
+                        "segment_scale_qc",
+                        "isotope_qc_status",
+                        "signal_to_noise_method",
                     )
                     if key in rows
                 }
@@ -960,7 +991,7 @@ def list_curve_datasets_read_only(
             "updated_at": "''",
             "is_current": "1",
             "stale_reason": "''",
-            "dataset_group": "curve_type",
+            "dataset_group": "dataset_key",
             "analysis_key": "dataset_key",
             "dataset_role": "'observed'",
             "parent_dataset_id": "NULL",
@@ -1378,6 +1409,11 @@ def load_curve_channel(path: str | Path, channel_id: int) -> CurveChannel:
             axis_column: float(point["axis_value"]),
             "mz": float(channel["exact_mz"]),
             "mz_rounded": int(channel["nominal_mz"]),
+            "peak_track": (
+                int(channel["peak_track"])
+                if channel["peak_track"] is not None
+                else None
+            ),
         }
         if point["photon_energy"] is not None:
             record["photon_energy"] = float(point["photon_energy"])

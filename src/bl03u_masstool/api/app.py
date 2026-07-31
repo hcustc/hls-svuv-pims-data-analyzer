@@ -517,6 +517,21 @@ def _pie_summary(
         "energy_count": energy_count,
         "row_count": len(analysis_df),
         "file_count": file_count,
+        "normalize_by_time": bool(
+            analysis_df["time_normalized"].all()
+            if not analysis_df.empty and "time_normalized" in analysis_df
+            else False
+        ),
+        "segment_scaling_diagnostics": list(
+            analysis_df.attrs.get("segment_scaling_diagnostics", [])
+        ),
+        "segment_scaling_policy": dict(
+            analysis_df.attrs.get("segment_scaling_policy", {})
+        ),
+        "isotope_qc": list(analysis_df.attrs.get("isotope_qc", [])),
+        "isotope_qc_status": str(
+            analysis_df.attrs.get("isotope_qc_status", "not_evaluated")
+        ),
         "mz_values": sorted(curves, key=float),
         "curves": [
             {
@@ -555,6 +570,7 @@ def _pie_artifacts(
                 "manual_peak_path": payload.manual_peak_path,
                 "target_mz": payload.target_mz,
                 "photon_mode": payload.photon_mode,
+                "normalize_by_time": payload.normalize_by_time,
                 "light_source": payload.light_source,
                 "mass_discrimination": payload.mass_discrimination,
                 "replicate_mode": payload.replicate_mode,
@@ -716,6 +732,11 @@ def _run_pie_job(job_id: str, payload: PieStartPayload) -> None:
         calibration = load_calibration_config()
         normalization = load_normalization_settings()
         photon_mode = payload.photon_mode or normalization.pie_photon_mode
+        normalize_by_time = (
+            bool(payload.normalize_by_time)
+            if payload.normalize_by_time is not None
+            else bool(getattr(normalization, "pie_time_normalize", True))
+        )
         light_source = payload.light_source or normalization.light_source
         mass_discrimination = (
             float(payload.mass_discrimination)
@@ -737,6 +758,7 @@ def _run_pie_job(job_id: str, payload: PieStartPayload) -> None:
             manual_peak_path=manual_peak_path,
             photon_normalize=photon_mode != "off",
             photon_reference_mode="none" if photon_mode == "off" else photon_mode,
+            normalize_by_time=normalize_by_time,
             mass_discrimination=mass_discrimination,
             light_source=light_source,
             target_mz_values=target_mz_values,
