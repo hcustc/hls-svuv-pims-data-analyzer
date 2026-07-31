@@ -3,6 +3,8 @@ from __future__ import annotations
 import pandas as pd
 from PyQt6 import QtCore, QtGui, QtWidgets
 
+from bl03u_masstool.core.runtime_paths import resource_path
+
 
 class ElidedLabel(QtWidgets.QLabel):
     """Single-line label that elides long text while preserving it in a tooltip."""
@@ -78,7 +80,11 @@ class StateGlyph(QtWidgets.QWidget):
 
 
 class AnalysisEmptyState(QtWidgets.QFrame):
-    """Compact empty state with one clear next action."""
+    """Branded empty state with one clear next action.
+
+    The watermark is painted into the frame background, so the existing title,
+    description and action button remain normal foreground children.
+    """
 
     browse_requested = QtCore.pyqtSignal()
 
@@ -88,10 +94,13 @@ class AnalysisEmptyState(QtWidgets.QFrame):
         title: str,
         description: str,
         action_text: str = "选择数据目录",
+        watermark_opacity: float = 0.10,
         parent=None,
     ):
         super().__init__(parent)
         self.setObjectName("AnalysisEmptyState")
+        self._watermark = QtGui.QPixmap(str(resource_path("icons/bjt.png")))
+        self._watermark_opacity = max(0.0, min(float(watermark_opacity), 1.0))
         self.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Expanding,
@@ -107,16 +116,16 @@ class AnalysisEmptyState(QtWidgets.QFrame):
         card_layout.setContentsMargins(28, 24, 28, 24)
         card_layout.setSpacing(12)
 
-        title_label = QtWidgets.QLabel(title)
-        title_label.setObjectName("EmptyStateTitle")
-        title_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        card_layout.addWidget(title_label)
+        self.title_label = QtWidgets.QLabel(title)
+        self.title_label.setObjectName("EmptyStateTitle")
+        self.title_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        card_layout.addWidget(self.title_label)
 
-        description_label = QtWidgets.QLabel(description)
-        description_label.setObjectName("EmptyStateSubtitle")
-        description_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        description_label.setWordWrap(True)
-        card_layout.addWidget(description_label)
+        self.description_label = QtWidgets.QLabel(description)
+        self.description_label.setObjectName("EmptyStateSubtitle")
+        self.description_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.description_label.setWordWrap(True)
+        card_layout.addWidget(self.description_label)
 
         self.primary_button = QtWidgets.QPushButton(action_text)
         self.primary_button.setObjectName("EmptyStateAction")
@@ -130,6 +139,52 @@ class AnalysisEmptyState(QtWidgets.QFrame):
         outer.addStretch()
         outer.addWidget(card, alignment=QtCore.Qt.AlignmentFlag.AlignCenter)
         outer.addStretch()
+
+    def set_content(self, *, title: str, description: str) -> None:
+        self.title_label.setText(title)
+        self.description_label.setText(description)
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:
+        super().paintEvent(event)
+        if self._watermark.isNull() or self._watermark_opacity <= 0:
+            return
+
+        bounds = self.contentsRect().adjusted(32, 32, -32, -32)
+        if bounds.width() <= 0 or bounds.height() <= 0:
+            return
+        target_width = min(
+            bounds.width(),
+            540,
+            max(260, int(bounds.width() * 0.34)),
+        )
+        scaled = self._watermark.scaledToWidth(
+            target_width,
+            QtCore.Qt.TransformationMode.SmoothTransformation,
+        )
+        if scaled.height() > int(bounds.height() * 0.34):
+            scaled = scaled.scaledToHeight(
+                max(1, int(bounds.height() * 0.34)),
+                QtCore.Qt.TransformationMode.SmoothTransformation,
+            )
+        watermark_center_y = max(
+            bounds.top() + scaled.height() // 2,
+            bounds.center().y() - scaled.height() - 18,
+        )
+        target = QtCore.QRect(
+            bounds.center().x() - scaled.width() // 2,
+            watermark_center_y - scaled.height() // 2,
+            scaled.width(),
+            scaled.height(),
+        )
+
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.SmoothPixmapTransform)
+        painter.setCompositionMode(
+            QtGui.QPainter.CompositionMode.CompositionMode_Multiply
+        )
+        painter.setOpacity(self._watermark_opacity)
+        painter.drawPixmap(target, scaled)
+        painter.end()
 
 
 class AnalysisProgressState(QtWidgets.QFrame):

@@ -27,7 +27,7 @@ Requires-Dist: scikit-learn
 Requires-Dist: scipy
 Requires-Dist: uvicorn
 Provides-Extra: dev
-Requires-Dist: httpx; extra == "dev"
+Requires-Dist: httpx2; extra == "dev"
 Requires-Dist: pyinstaller; extra == "dev"
 Requires-Dist: pytest; extra == "dev"
 

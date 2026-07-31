@@ -267,7 +267,7 @@ class ResultDisplayWidget(QtWidgets.QWidget):
 
         status_text = {
             "UNFITTED": "",
-            "PREVIEW": "[参数预览]",
+            "PREVIEW": "实时预览",
             "COMPLETED": "[已拟合]",
             "OBSOLETE": "[结果过期]",
             "FAILED": "[拟合失败]",

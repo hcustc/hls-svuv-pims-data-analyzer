@@ -7,6 +7,7 @@ import pytest
 from bl03u_masstool.core.isotope_correction import (
     IsotopeHypothesis,
     apply_isotope_correction,
+    evaluate_isotope_qc_pairs,
     infer_curve_columns,
     nominal_isotope_pattern,
     prepare_curve_matrix,
@@ -197,3 +198,115 @@ def test_correction_requires_formula_parent_channel_and_complete_values():
                 IsotopeHypothesis("C18H10", 226, fraction=0.5),
             ],
         )
+
+
+def test_prepare_curve_matrix_requires_explicit_peak_track_on_collision():
+    data = pd.DataFrame(
+        {
+            "energy": [10.0, 10.0, 10.0, 11.0, 11.0, 11.0],
+            "mz_rounded": [142, 142, 144, 142, 142, 144],
+            "peak_track": [0, 1, 0, 0, 1, 0],
+            "merged_intensity": [10.0, 100.0, 20.0, 12.0, 120.0, 24.0],
+        }
+    )
+
+    with pytest.raises(ValueError, match="不能自动平均"):
+        prepare_curve_matrix(
+            data,
+            axis_column="energy",
+            mass_column="mz_rounded",
+            intensity_column="merged_intensity",
+        )
+
+    matrix = prepare_curve_matrix(
+        data,
+        axis_column="energy",
+        mass_column="mz_rounded",
+        intensity_column="merged_intensity",
+        peak_track_selection={142: 1},
+    )
+    assert matrix.loc[10.0, 142] == pytest.approx(100.0)
+    assert matrix.loc[11.0, 142] == pytest.approx(120.0)
+
+
+def test_generic_multi_parent_isotope_chain_recovers_sources_and_diagnostics():
+    hypotheses = [
+        IsotopeHypothesis("C7H5ClO", 140),
+        IsotopeHypothesis("C6H3ClO2", 142),
+        IsotopeHypothesis("C6H5ClO2", 144),
+        IsotopeHypothesis("C8H2O3", 146),
+    ]
+    masses = [140, 142, 144, 146, 148]
+    amplitudes = {
+        "C7H5ClO": 100.0,
+        "C6H3ClO2": 30.0,
+        "C6H5ClO2": 50.0,
+        "C8H2O3": 20.0,
+    }
+    observed = {mass: 0.0 for mass in masses}
+    for hypothesis in hypotheses:
+        pattern = nominal_isotope_pattern(
+            hypothesis.formula,
+            max_shift=max(masses) - hypothesis.parent_mz,
+        )
+        for mass in masses:
+            shift = mass - hypothesis.parent_mz
+            if shift >= 0:
+                observed[mass] += (
+                    amplitudes[hypothesis.formula] * pattern.get(shift, 0.0)
+                )
+    matrix = pd.DataFrame(
+        {mass: [value] for mass, value in observed.items()},
+        index=pd.Index([11.0], name="energy"),
+    )
+
+    result = apply_isotope_correction(
+        matrix,
+        hypotheses,
+        mode="max_compatible",
+    )
+
+    recovered = result.source_table.set_index("formula")["source_amplitude"]
+    for formula, expected in amplitudes.items():
+        assert recovered[formula] == pytest.approx(expected, rel=1e-8)
+    residual = result.curve_table.set_index("mz")["residual"]
+    for hypothesis in hypotheses:
+        assert residual[hypothesis.parent_mz] == pytest.approx(
+            amplitudes[hypothesis.formula],
+            abs=1e-8,
+        )
+    assert result.pattern_rank == 4
+    assert np.isfinite(result.pattern_condition_number)
+    assert result.diagnostic_table.iloc[0]["relative_closure_error"] == pytest.approx(
+        0.0,
+        abs=1e-9,
+    )
+    assert not result.sensitivity_table.empty
+    assert "质量偏移" in result.scientific_note
+
+
+def test_formula_derived_isotope_qc_reports_pass_and_fail():
+    theoretical = nominal_isotope_pattern("C6H5ClO", max_shift=2)[2]
+    matrix = pd.DataFrame(
+        {
+            128: [100.0, 200.0, 300.0],
+            130: [
+                100.0 * theoretical,
+                200.0 * theoretical,
+                300.0 * theoretical,
+            ],
+        },
+        index=[8.0, 9.0, 10.0],
+    )
+    pair = [{"light_mz": 128, "heavy_mz": 130, "formula": "C6H5ClO"}]
+
+    passed = evaluate_isotope_qc_pairs(matrix, pair)
+    assert passed.iloc[0]["status"] == "pass"
+    assert passed.iloc[0]["theoretical_light_to_heavy"] == pytest.approx(
+        1.0 / theoretical
+    )
+
+    matrix[130] *= 2.0
+    failed = evaluate_isotope_qc_pairs(matrix, pair)
+    assert failed.iloc[0]["status"] == "fail"
+    assert failed.iloc[0]["relative_error"] == pytest.approx(1.0)

@@ -11,7 +11,11 @@ import pandas as pd
 
 from .calibration import Calibration
 from .integration import integrate_peak_with_method, resolve_integration_method
-from .normalization import extract_light_intensity
+from .isotope_correction import (
+    DEFAULT_ISOTOPE_QC_PAIRS,
+    evaluate_isotope_qc_pairs,
+)
+from .normalization import extract_acquisition_time_s, extract_light_intensity
 from .peak_ranges import load_peak_ranges, peak_ranges_to_peaks
 from .peak_detection import detect_peaks_by_algorithm
 from .spectrum_io import Spectrum, extract_first_number, find_filename_replicate_groups, filename_replicate_key, read_spectrum
@@ -20,6 +24,7 @@ from .spectrum_io import Spectrum, extract_first_number, find_filename_replicate
 logger = logging.getLogger(__name__)
 
 EV_RE = re.compile(r"([-+]?\d+(?:\.\d+)?)\s*eV", re.IGNORECASE)
+PIE_SPECTRUM_SUFFIXES = (".txt", ".asc", ".888")
 
 
 @dataclass(frozen=True)
@@ -206,7 +211,7 @@ def _looks_like_single_energy_directory(name: str) -> bool:
 def discover_pie_segment_folders(
     folder: str | Path,
     *,
-    suffixes: tuple[str, ...] = (".txt", ".asc", ".888"),
+    suffixes: tuple[str, ...] = PIE_SPECTRUM_SUFFIXES,
 ) -> list[Path]:
     """Resolve a temporary PIE source into one dataset or several segment folders.
 
@@ -273,7 +278,7 @@ def _read_spectrum_header_preview(path: Path, *, max_lines: int = 32) -> list[st
 def inspect_pie_source_segments(
     folder: str | Path,
     *,
-    suffixes: tuple[str, ...] = (".txt", ".asc", ".888"),
+    suffixes: tuple[str, ...] = PIE_SPECTRUM_SUFFIXES,
 ) -> list[PieSegmentSummary]:
     """Discover selectable PIE segments and summarize their energy coverage.
 
@@ -324,7 +329,7 @@ def _is_blank_spectrum_path(path: Path) -> bool:
     return any(part.lower() in blank_dir_names for part in path.parts[-3:-1])
 
 
-def _aligned_x_values(items: list[tuple[Path, Spectrum, float, float]], min_len: int) -> np.ndarray:
+def _aligned_x_values(items: list[tuple], min_len: int) -> np.ndarray:
     if not items:
         return np.arange(1, min_len + 1, dtype=float)
     reference_path, reference_spectrum, *_ = items[0]
@@ -341,6 +346,37 @@ def _aligned_x_values(items: list[tuple[Path, Spectrum, float, float]], min_len:
     return reference_x
 
 
+def _aggregate_spectrum_stack(
+    values: list[np.ndarray],
+    *,
+    replicate_mode: str,
+) -> np.ndarray:
+    if not values:
+        return np.array([], dtype=float)
+    stack = np.asarray(values, dtype=float)
+    if replicate_mode == "sum":
+        return np.sum(stack, axis=0)
+    return np.mean(stack, axis=0)
+
+
+def _subtract_optional_background(
+    sample_values: list[np.ndarray],
+    blank_values: list[np.ndarray],
+    *,
+    replicate_mode: str,
+) -> np.ndarray:
+    result = _aggregate_spectrum_stack(
+        sample_values,
+        replicate_mode=replicate_mode,
+    )
+    if blank_values:
+        result = result - _aggregate_spectrum_stack(
+            blank_values,
+            replicate_mode=replicate_mode,
+        )
+    return np.asarray(result, dtype=float)
+
+
 def _group_spectra_by_energy(
     folder: str | Path,
     *,
@@ -349,14 +385,16 @@ def _group_spectra_by_energy(
     energy_decimals: int,
     light_source: str,
     replicate_mode: str = "off",
+    normalize_by_time: bool = True,
+    normalize_by_light: bool = True,
 ) -> list[dict]:
     replicate_mode = "sum" if replicate_mode == "sum" else "mean" if replicate_mode == "mean" else "off"
-    grouped: dict[object, list[tuple[Path, Spectrum, float, float]]] = {}
-    blank_grouped: dict[float, list[tuple[Path, Spectrum, float, float]]] = {}
+    grouped: dict[object, list[tuple[Path, Spectrum, float, float, float | None]]] = {}
+    blank_grouped: dict[float, list[tuple[Path, Spectrum, float, float, float | None]]] = {}
     files = _iter_pie_files(folder, suffixes, recursive)
     filename_replicates = find_filename_replicate_groups(files) if replicate_mode != "off" else {}
     filename_replicate_energy_keys: dict[tuple[Path, str], set[float]] = {}
-    spectra: list[tuple[Path, Spectrum, float, float, float]] = []
+    spectra: list[tuple[Path, Spectrum, float, float, float, float | None]] = []
     for path in files:
         spectrum = read_spectrum(path, header_lines=10 if path.suffix.lower() == ".txt" else None, trim_start=0)
         if len(spectrum.y) == 0:
@@ -367,8 +405,37 @@ def _group_spectra_by_energy(
             logger.warning("Skipping PIE spectrum with no photon energy: %s", path)
             continue
         energy_key = round(energy, energy_decimals)
-        io_current = extract_light_intensity(spectrum.metadata_lines, light_source)
-        spectra.append((path, spectrum, energy, energy_key, io_current))
+        io_current = extract_light_intensity(
+            spectrum.metadata_lines,
+            light_source,
+            fallback=float("nan"),
+        )
+        if normalize_by_light and (
+            not np.isfinite(io_current) or float(io_current) <= 0
+        ):
+            raise ValueError(
+                f"PIE谱缺少有效{light_source}，不能执行光强归一化：{path}"
+            )
+        acquisition_time_s = extract_acquisition_time_s(spectrum.metadata_lines)
+        if normalize_by_time and (
+            acquisition_time_s is None
+            or not np.isfinite(acquisition_time_s)
+            or acquisition_time_s <= 0
+        ):
+            raise ValueError(
+                "PIE谱缺少有效扫描时间，已停止计算："
+                f"{path}。只有在项目设置中明确关闭按扫描时间归一化后才能继续。"
+            )
+        spectra.append(
+            (
+                path,
+                spectrum,
+                energy,
+                energy_key,
+                float(io_current),
+                acquisition_time_s,
+            )
+        )
         repeat_key = filename_replicate_key(path)
         if repeat_key is not None and repeat_key in filename_replicates:
             filename_replicate_energy_keys.setdefault(repeat_key, set()).add(energy_key)
@@ -379,18 +446,26 @@ def _group_spectra_by_energy(
         if len(energy_keys) <= 2
     }
 
-    for path, spectrum, energy, energy_key, io_current in spectra:
+    for path, spectrum, energy, energy_key, io_current, acquisition_time_s in spectra:
         if _is_blank_spectrum_path(path):
-            blank_grouped.setdefault(energy_key, []).append((path, spectrum, energy, io_current))
+            blank_grouped.setdefault(energy_key, []).append(
+                (path, spectrum, energy, io_current, acquisition_time_s)
+            )
             continue
         if replicate_mode == "off":
-            grouped.setdefault(("file", path), []).append((path, spectrum, energy, io_current))
+            grouped.setdefault(("file", path), []).append(
+                (path, spectrum, energy, io_current, acquisition_time_s)
+            )
             continue
         repeat_key = filename_replicate_key(path)
         if repeat_key is not None and repeat_key in valid_filename_replicates:
-            grouped.setdefault(("filename", repeat_key), []).append((path, spectrum, energy, io_current))
+            grouped.setdefault(("filename", repeat_key), []).append(
+                (path, spectrum, energy, io_current, acquisition_time_s)
+            )
         else:
-            grouped.setdefault(("energy", energy_key), []).append((path, spectrum, energy, io_current))
+            grouped.setdefault(("energy", energy_key), []).append(
+                (path, spectrum, energy, io_current, acquisition_time_s)
+            )
     groups = []
     for group_key, items in grouped.items():
         energy_key = round(float(np.mean([item[2] for item in items])), energy_decimals)
@@ -400,40 +475,325 @@ def _group_spectra_by_energy(
             + [len(item[1].y) for item in blank_items]
         )
         x_values = _aligned_x_values(items + blank_items, min_len)
-        y_stack = [item[1].y[:min_len] for item in items]
-        y_value = np.sum(y_stack, axis=0) if replicate_mode == "sum" else np.mean(y_stack, axis=0)
+        raw_stack = [np.asarray(item[1].y[:min_len], dtype=float) for item in items]
+        raw_blank_stack = [
+            np.asarray(item[1].y[:min_len], dtype=float) for item in blank_items
+        ]
+
+        def normalization_denominators(
+            source_items: list[tuple],
+            *,
+            by_time: bool,
+            by_light: bool,
+        ) -> list[float]:
+            denominators: list[float] = []
+            for item in source_items:
+                denominator = 1.0
+                acquisition_time = item[4]
+                if by_time:
+                    if (
+                        acquisition_time is None
+                        or not np.isfinite(acquisition_time)
+                        or acquisition_time <= 0
+                    ):
+                        return []
+                    denominator *= float(acquisition_time)
+                if by_light:
+                    current = float(item[3])
+                    if not np.isfinite(current) or current <= 0:
+                        return []
+                    denominator *= current
+                denominators.append(denominator)
+            return denominators
+
+        def normalized_stack(
+            source_items: list[tuple],
+            *,
+            by_time: bool,
+            by_light: bool,
+        ) -> list[np.ndarray]:
+            denominators = normalization_denominators(
+                source_items,
+                by_time=by_time,
+                by_light=by_light,
+            )
+            if source_items and not denominators:
+                return []
+            raw_values = [
+                np.asarray(item[1].y[:min_len], dtype=float)
+                for item in source_items
+            ]
+            result = [
+                values / denominator
+                for values, denominator in zip(
+                    raw_values,
+                    denominators,
+                    strict=True,
+                )
+            ]
+            if (
+                replicate_mode == "sum"
+                and result
+                and (by_time or by_light)
+            ):
+                total_exposure = float(np.sum(denominators))
+                if not np.isfinite(total_exposure) or total_exposure <= 0:
+                    return []
+                return [
+                    np.sum(np.asarray(raw_values, dtype=float), axis=0)
+                    / total_exposure
+                ]
+            return result
+
+        count_rate_stack = normalized_stack(
+            items,
+            by_time=True,
+            by_light=False,
+        )
+        count_rate_blank_stack = normalized_stack(
+            blank_items,
+            by_time=True,
+            by_light=False,
+        )
+        io_stack = normalized_stack(items, by_time=False, by_light=True)
+        io_blank_stack = normalized_stack(
+            blank_items,
+            by_time=False,
+            by_light=True,
+        )
+        io_time_stack = normalized_stack(items, by_time=True, by_light=True)
+        io_time_blank_stack = normalized_stack(
+            blank_items,
+            by_time=True,
+            by_light=True,
+        )
+        analysis_stack = normalized_stack(
+            items,
+            by_time=normalize_by_time,
+            by_light=normalize_by_light,
+        )
+        analysis_blank_stack = normalized_stack(
+            blank_items,
+            by_time=normalize_by_time,
+            by_light=normalize_by_light,
+        )
+        sample_analysis_denominators = normalization_denominators(
+            items,
+            by_time=normalize_by_time,
+            by_light=normalize_by_light,
+        )
+        blank_analysis_denominators = normalization_denominators(
+            blank_items,
+            by_time=normalize_by_time,
+            by_light=normalize_by_light,
+        )
+        y_value = _subtract_optional_background(
+            analysis_stack,
+            analysis_blank_stack,
+            replicate_mode=replicate_mode,
+        )
+        raw_sample_y_value = _aggregate_spectrum_stack(
+            raw_stack,
+            replicate_mode=replicate_mode,
+        )
+        raw_blank_y_value = (
+            _aggregate_spectrum_stack(
+                raw_blank_stack,
+                replicate_mode=replicate_mode,
+            )
+            if raw_blank_stack
+            else np.zeros(min_len, dtype=float)
+        )
+        raw_y_value = raw_sample_y_value - raw_blank_y_value
+        count_rate_y_value = (
+            _subtract_optional_background(
+                count_rate_stack,
+                count_rate_blank_stack,
+                replicate_mode=replicate_mode,
+            )
+            if count_rate_stack
+            else np.full(min_len, np.nan, dtype=float)
+        )
+        io_y_value = (
+            _subtract_optional_background(
+                io_stack,
+                io_blank_stack,
+                replicate_mode=replicate_mode,
+            )
+            if io_stack
+            else np.full(min_len, np.nan, dtype=float)
+        )
+        io_time_y_value = (
+            _subtract_optional_background(
+                io_time_stack,
+                io_time_blank_stack,
+                replicate_mode=replicate_mode,
+            )
+            if io_time_stack
+            else np.full(min_len, np.nan, dtype=float)
+        )
         blank_file_count = len(blank_items)
-        if blank_items:
-            blank_stack = [item[1].y[:min_len] for item in blank_items]
-            blank_value = np.sum(blank_stack, axis=0) if replicate_mode == "sum" else np.mean(blank_stack, axis=0)
-            y_value = y_value - blank_value
         uses_filename_grouping = bool(group_key[0] == "filename")
         warning = ""
         if replicate_mode != "off" and not uses_filename_grouping and len(items) > 1:
             warning = (
                 "未识别到文件名末尾采集序号，已退回按能量分组的旧逻辑处理重复文件。"
             )
+        acquisition_times = [
+            float(item[4])
+            for item in items
+            if item[4] is not None and np.isfinite(item[4]) and item[4] > 0
+        ]
         groups.append({
             "energy": float(np.mean([item[2] for item in items])),
             "energy_key": energy_key,
             "io": float(np.mean([item[3] for item in items])),
             "light_source": light_source,
             "file_count": len(items),
-            "files": [item[0].name for item in items],
+            "files": [
+                (
+                    item[0].relative_to(Path(folder)).as_posix()
+                    if item[0].is_relative_to(Path(folder))
+                    else item[0].name
+                )
+                for item in items
+            ],
             "replicate_mode": replicate_mode,
             "replicate_grouping": "filename" if uses_filename_grouping else "energy",
             "replicate_warning": warning,
             "blank_file_count": blank_file_count,
             "blank_files": [item[0].name for item in blank_items],
             "background_subtracted": bool(blank_items),
+            "acquisition_time_s": (
+                float(np.mean(acquisition_times)) if acquisition_times else np.nan
+            ),
+            "total_acquisition_time_s": (
+                float(np.sum(acquisition_times)) if acquisition_times else np.nan
+            ),
+            "acquisition_time_min_s": (
+                float(np.min(acquisition_times)) if acquisition_times else np.nan
+            ),
+            "acquisition_time_max_s": (
+                float(np.max(acquisition_times)) if acquisition_times else np.nan
+            ),
+            "acquisition_times_s": acquisition_times,
+            "normalize_by_time": bool(normalize_by_time),
+            "normalize_by_light": bool(normalize_by_light),
+            "_raw_sample_values": raw_stack,
+            "_raw_blank_values": raw_blank_stack,
+            "_sample_analysis_denominators": sample_analysis_denominators,
+            "_blank_analysis_denominators": blank_analysis_denominators,
             "spectrum": Spectrum(
                 x=np.asarray(x_values, dtype=float),
                 y=np.asarray(y_value, dtype=float),
                 metadata_lines=[],
                 path=str(folder),
             ),
+            "raw_spectrum": Spectrum(
+                x=np.asarray(x_values, dtype=float),
+                y=np.asarray(raw_y_value, dtype=float),
+                metadata_lines=[],
+                path=str(folder),
+            ),
+            "raw_sample_spectrum": Spectrum(
+                x=np.asarray(x_values, dtype=float),
+                y=np.asarray(raw_sample_y_value, dtype=float),
+                metadata_lines=[],
+                path=str(folder),
+            ),
+            "raw_blank_spectrum": Spectrum(
+                x=np.asarray(x_values, dtype=float),
+                y=np.asarray(raw_blank_y_value, dtype=float),
+                metadata_lines=[],
+                path=str(folder),
+            ),
+            "count_rate_spectrum": Spectrum(
+                x=np.asarray(x_values, dtype=float),
+                y=np.asarray(count_rate_y_value, dtype=float),
+                metadata_lines=[],
+                path=str(folder),
+            ),
+            "io_normalized_spectrum": Spectrum(
+                x=np.asarray(x_values, dtype=float),
+                y=np.asarray(io_y_value, dtype=float),
+                metadata_lines=[],
+                path=str(folder),
+            ),
+            "io_time_normalized_spectrum": Spectrum(
+                x=np.asarray(x_values, dtype=float),
+                y=np.asarray(io_time_y_value, dtype=float),
+                metadata_lines=[],
+                path=str(folder),
+            ),
         })
     return sorted(groups, key=lambda x: x["energy"])
+
+
+def _poisson_peak_window_snr(group: dict, peak) -> float:
+    """Estimate peak-window SNR from gross sample and blank counts.
+
+    The configured integration method may remove a baseline or fit a Gaussian,
+    neither of which is a Poisson count.  Noise is therefore estimated from
+    summed detector counts in the same fixed peak window.  For averaged
+    replicates, variance is propagated for the mean of independent counts.
+    """
+    replicate_mode = str(group.get("replicate_mode", "off"))
+    normalization_applied = bool(
+        group.get("normalize_by_time", False)
+        or group.get("normalize_by_light", False)
+    )
+
+    def component(
+        spectra: list[np.ndarray],
+        denominators: list[float],
+    ) -> tuple[float, float]:
+        if not spectra:
+            return 0.0, 0.0
+        counts = np.asarray(
+            [
+                max(
+                    float(
+                        integrate_peak_with_method(
+                            values,
+                            peak,
+                            prefer_gaussian=False,
+                            integration_method="sum_counts",
+                        )[0]
+                    ),
+                    0.0,
+                )
+                for values in spectra
+            ],
+            dtype=float,
+        )
+        exposure = np.asarray(denominators, dtype=float)
+        if exposure.size != counts.size or np.any(exposure <= 0):
+            return float("nan"), float("nan")
+        if replicate_mode == "sum":
+            if not normalization_applied:
+                return float(np.sum(counts)), float(np.sum(counts))
+            total_exposure = float(np.sum(exposure))
+            return (
+                float(np.sum(counts) / total_exposure),
+                float(np.sum(counts) / total_exposure**2),
+            )
+        count = len(counts)
+        signal = float(np.mean(counts / exposure))
+        variance = float(np.sum(counts / exposure**2) / count**2)
+        return signal, variance
+
+    sample_signal, sample_variance = component(
+        list(group.get("_raw_sample_values", [])),
+        list(group.get("_sample_analysis_denominators", [])),
+    )
+    blank_signal, blank_variance = component(
+        list(group.get("_raw_blank_values", [])),
+        list(group.get("_blank_analysis_denominators", [])),
+    )
+    variance = sample_variance + blank_variance
+    if not np.isfinite(variance) or variance <= 0:
+        return float("nan")
+    return float((sample_signal - blank_signal) / np.sqrt(variance))
 
 
 def _summarize_integration_methods(values) -> str:
@@ -443,6 +803,23 @@ def _summarize_integration_methods(values) -> str:
     if len(methods) == 1:
         return methods[0]
     return "mixed"
+
+
+def _merge_metadata_values(values) -> list:
+    merged: list = []
+    for value in values:
+        if isinstance(value, (list, tuple, set, np.ndarray)):
+            candidates = list(value)
+        elif value is None or (
+            isinstance(value, float) and not np.isfinite(value)
+        ):
+            candidates = []
+        else:
+            candidates = [value]
+        for candidate in candidates:
+            if candidate not in merged:
+                merged.append(candidate)
+    return merged
 
 
 def normalize_integration_method(value: str | None, *, prefer_gaussian: bool | None = None) -> str:
@@ -483,6 +860,7 @@ def _analyze_pie_sources(
     manual_peak_path: str | Path | None,
     photon_normalize: bool,
     photon_reference_mode: str,
+    normalize_by_time: bool,
     mass_discrimination: float,
     light_source: str,
     target_mz_values: list[int] | None,
@@ -494,6 +872,7 @@ def _analyze_pie_sources(
     cwt_wavelet_max_width: int,
     weak_tail_cutoff_idx: int,
     merge_method: str | None,
+    isotope_qc_pairs: list[dict] | None,
 ) -> pd.DataFrame:
     """Shared PIE analysis pipeline for one or many source folders."""
     grouped_sources: list[tuple[int, Path, list[dict]]] = []
@@ -507,6 +886,8 @@ def _analyze_pie_sources(
             energy_decimals=energy_decimals,
             light_source=light_source,
             replicate_mode=replicate_mode,
+            normalize_by_time=normalize_by_time,
+            normalize_by_light=photon_normalize,
         )
         grouped_sources.append((folder_idx, folder, groups))
         all_groups.extend(groups)
@@ -521,7 +902,10 @@ def _analyze_pie_sources(
         )
         reference_source = Path(manual_peak_path).name
     else:
-        reference_spectrum = reference_group["spectrum"]
+        # Detection thresholds are defined in detector counts.  Run peak
+        # finding on the unnormalized reference spectrum, then integrate all
+        # provenance layers through the same fixed windows.
+        reference_spectrum = reference_group["raw_spectrum"]
         reference_peaks = detect_peaks_by_algorithm(
             reference_spectrum.y,
             algorithm=algorithm,
@@ -578,22 +962,71 @@ def _analyze_pie_sources(
     for folder_idx, folder, groups in grouped_sources:
         for group in groups:
             for peak in reference_peaks:
-                raw_area, actual_method = integrate_peak_with_method(
+                analysis_area, actual_method = integrate_peak_with_method(
                     group["spectrum"].y,
                     peak,
                     prefer_gaussian=prefer_gaussian,
                     integration_method=configured_method,
                 )
-                photon_normalized = raw_area
-                if photon_normalize:
-                    photon_normalized = raw_area / group["io"] if group["io"] > 0 else 0.0
-                    if photon_reference_mode == "first":
-                        photon_normalized *= base_io
+                raw_area, _raw_method = integrate_peak_with_method(
+                    group["raw_spectrum"].y,
+                    peak,
+                    prefer_gaussian=prefer_gaussian,
+                    integration_method=configured_method,
+                )
+
+                def integrate_optional_spectrum(name: str) -> float:
+                    values = np.asarray(group[name].y, dtype=float)
+                    if not np.any(np.isfinite(values)):
+                        return float("nan")
+                    area, _method = integrate_peak_with_method(
+                        values,
+                        peak,
+                        prefer_gaussian=prefer_gaussian,
+                        integration_method=configured_method,
+                    )
+                    return float(area)
+
+                count_rate = integrate_optional_spectrum("count_rate_spectrum")
+                io_normalized = integrate_optional_spectrum(
+                    "io_normalized_spectrum"
+                )
+                io_time_normalized = integrate_optional_spectrum(
+                    "io_time_normalized_spectrum"
+                )
+                photon_normalized = float(analysis_area)
+                if photon_normalize and photon_reference_mode == "first":
+                    photon_normalized *= base_io
+                normalized_intensity = photon_normalized / denominator
+                signal_to_noise = _poisson_peak_window_snr(group, peak)
                 row = {
                     "energy": group["energy"],
                     "file_count": group["file_count"],
+                    "source_files": list(group.get("files", [])),
+                    "source_spectra": [
+                        str((Path(folder) / str(file_name)).resolve())
+                        for file_name in group.get("files", [])
+                    ],
                     "io": group["io"],
                     "light_source": group["light_source"],
+                    "acquisition_time_s": group.get("acquisition_time_s", np.nan),
+                    "total_acquisition_time_s": group.get(
+                        "total_acquisition_time_s",
+                        np.nan,
+                    ),
+                    "acquisition_time_min_s": group.get(
+                        "acquisition_time_min_s",
+                        np.nan,
+                    ),
+                    "acquisition_time_max_s": group.get(
+                        "acquisition_time_max_s",
+                        np.nan,
+                    ),
+                    "acquisition_times_s": list(
+                        group.get("acquisition_times_s", [])
+                    ),
+                    "time_normalized": bool(normalize_by_time),
+                    "io_normalized": bool(photon_normalize),
                     "replicate_mode": group.get("replicate_mode", replicate_mode),
                     "replicate_grouping": group.get("replicate_grouping", ""),
                     "replicate_warning": group.get("replicate_warning", ""),
@@ -605,8 +1038,14 @@ def _analyze_pie_sources(
                     "mz_rounded": int(round(peak.mz)),
                     "species": peak.species,
                     "photon_normalized_intensity": photon_normalized,
-                    "normalized_intensity": photon_normalized / denominator,
-                    "raw_area": raw_area,
+                    "normalized_intensity": normalized_intensity,
+                    "merged_intensity": normalized_intensity,
+                    "raw_area": float(raw_area),
+                    "count_rate": count_rate,
+                    "io_normalized_intensity": io_normalized,
+                    "io_time_normalized_intensity": io_time_normalized,
+                    "signal_to_noise": signal_to_noise,
+                    "signal_to_noise_method": "poisson_peak_window",
                     "integration_method": actual_method,
                     "left_bound": peak.left_bound,
                     "right_bound": peak.right_bound,
@@ -620,19 +1059,109 @@ def _analyze_pie_sources(
         return _empty_pie_dataframe()
     analysis_df = pd.DataFrame(rows)
     if merge_method is None:
-        return analysis_df
+        return _attach_isotope_qc(
+            analysis_df,
+            isotope_qc_pairs=isotope_qc_pairs,
+        )
     segment_frames = [
         analysis_df[analysis_df["source_folder_idx"] == folder_idx].copy().reset_index(drop=True)
         for folder_idx, _folder, _groups in grouped_sources
     ]
-    return merge_pie_segments(segment_frames, merge_method=merge_method)
+    merged = merge_pie_segments(segment_frames, merge_method=merge_method)
+    return _attach_isotope_qc(
+        merged,
+        isotope_qc_pairs=isotope_qc_pairs,
+    )
+
+
+def _attach_isotope_qc(
+    analysis_df: pd.DataFrame,
+    *,
+    isotope_qc_pairs: list[dict] | None,
+) -> pd.DataFrame:
+    result = analysis_df.copy()
+    pairs = list(
+        DEFAULT_ISOTOPE_QC_PAIRS
+        if isotope_qc_pairs is None
+        else isotope_qc_pairs
+    )
+    if result.empty or not pairs:
+        result["isotope_qc_status"] = "not_evaluated"
+        result.attrs.update(analysis_df.attrs)
+        result.attrs["isotope_qc"] = []
+        result.attrs["isotope_qc_status"] = "not_evaluated"
+        return result
+    signal_column = (
+        "merged_intensity"
+        if "merged_intensity" in result.columns
+        else "normalized_intensity"
+    )
+    identity_columns = [
+        column
+        for column in ("left_bound", "right_bound")
+        if column in result.columns
+    ]
+    collision_masses: list[int] = []
+    qc_masses = {
+        int(pair[key])
+        for pair in pairs
+        for key in ("light_mz", "heavy_mz")
+        if key in pair
+    }
+    if len(identity_columns) == 2:
+        for nominal_mz, group in result.groupby("mz_rounded", sort=True):
+            if (
+                int(nominal_mz) in qc_masses
+                and len(group[identity_columns].drop_duplicates()) > 1
+            ):
+                collision_masses.append(int(nominal_mz))
+    if collision_masses:
+        masses_text = "、".join(str(value) for value in collision_masses)
+        qc_records = [
+            {
+                "status": "fail",
+                "reason": (
+                    "同一名义质量存在多个精确峰轨道，必须先选择 peak_track："
+                    f"m/z {masses_text}"
+                ),
+            }
+        ]
+        overall = "fail"
+    else:
+        working = result.copy()
+        working["_energy_qc"] = pd.to_numeric(
+            working["energy"],
+            errors="coerce",
+        ).round(6)
+        matrix = working.pivot_table(
+            index="_energy_qc",
+            columns="mz_rounded",
+            values=signal_column,
+            aggfunc="mean",
+            sort=True,
+        )
+        qc_table = evaluate_isotope_qc_pairs(matrix, pairs)
+        qc_records = qc_table.to_dict("records")
+        evaluated = qc_table[qc_table["status"] != "missing"]
+        if evaluated.empty:
+            overall = "not_evaluated"
+        elif (evaluated["status"] == "fail").any():
+            overall = "fail"
+        else:
+            overall = "pass"
+    previous_attrs = dict(analysis_df.attrs)
+    result["isotope_qc_status"] = overall
+    result.attrs.update(previous_attrs)
+    result.attrs["isotope_qc"] = qc_records
+    result.attrs["isotope_qc_status"] = overall
+    return result
 
 
 def analyze_pie_folder(
     folder: str | Path,
     *,
     calibration: Calibration = Calibration(),
-    suffixes: tuple[str, ...] = (".txt", ".asc", ".888"),
+    suffixes: tuple[str, ...] = PIE_SPECTRUM_SUFFIXES,
     recursive: bool = True,
     energy_decimals: int = 1,
     algorithm: str = "legacy",
@@ -659,6 +1188,7 @@ def analyze_pie_folder(
     manual_peak_path: str | Path | None = None,
     photon_normalize: bool = True,
     photon_reference_mode: str = "first",
+    normalize_by_time: bool = True,
     mass_discrimination: float = 1.0,
     light_source: str = "io",
     target_mz_values: list[int] | None = None,
@@ -669,6 +1199,7 @@ def analyze_pie_folder(
     cwt_snr_threshold: float = 0.02,
     cwt_wavelet_max_width: int = 30,
     weak_tail_cutoff_idx: int = 15000,
+    isotope_qc_pairs: list[dict] | None = None,
 ) -> pd.DataFrame:
     """Generate experimental PIE curves from a folder of energy-resolved spectra."""
     return _analyze_pie_sources(
@@ -701,6 +1232,7 @@ def analyze_pie_folder(
         manual_peak_path=manual_peak_path,
         photon_normalize=photon_normalize,
         photon_reference_mode=photon_reference_mode,
+        normalize_by_time=normalize_by_time,
         mass_discrimination=mass_discrimination,
         light_source=light_source,
         target_mz_values=target_mz_values,
@@ -712,6 +1244,7 @@ def analyze_pie_folder(
         cwt_wavelet_max_width=cwt_wavelet_max_width,
         weak_tail_cutoff_idx=weak_tail_cutoff_idx,
         merge_method=None,
+        isotope_qc_pairs=isotope_qc_pairs,
     )
 
 
@@ -813,17 +1346,53 @@ def build_pie_curves(analysis_df: pd.DataFrame) -> dict[int | float, dict]:
                 ordered = group.copy()
             else:
                 group["energy_rounded"] = group["energy"].round(2)
-                ordered = group.groupby("energy_rounded", as_index=False).agg(
-                    energy=("energy", "mean"),
-                    normalized_intensity=("normalized_intensity", "mean"),
-                    raw_area=("raw_area", "mean"),
-                    photon_normalized_intensity=("photon_normalized_intensity", "mean"),
-                    integration_method=("integration_method", _summarize_integration_methods),
-                    species=("species", "first"),
-                    mz=("mz", "mean"),
-                    file_count=("file_count", "first"),
-                    io=("io", "first"),
-                ).sort_values("energy")
+                curve_agg: dict[str, tuple[str, object]] = {
+                    "energy": ("energy", "mean"),
+                    "normalized_intensity": ("normalized_intensity", "mean"),
+                    "raw_area": ("raw_area", "mean"),
+                    "photon_normalized_intensity": (
+                        "photon_normalized_intensity",
+                        "mean",
+                    ),
+                    "integration_method": (
+                        "integration_method",
+                        _summarize_integration_methods,
+                    ),
+                    "species": ("species", "first"),
+                    "mz": ("mz", "mean"),
+                    "file_count": ("file_count", "first"),
+                    "io": ("io", "first"),
+                }
+                for column in (
+                    "merged_intensity",
+                    "count_rate",
+                    "io_normalized_intensity",
+                    "io_time_normalized_intensity",
+                    "acquisition_time_s",
+                    "total_acquisition_time_s",
+                    "acquisition_time_min_s",
+                    "acquisition_time_max_s",
+                    "signal_to_noise",
+                    "shared_scale_factor",
+                    "shared_scale_log_mad",
+                ):
+                    if column in group.columns:
+                        curve_agg[column] = (column, "mean")
+                for column in (
+                    "source_folder",
+                    "source_segment",
+                    "time_normalized",
+                    "io_normalized",
+                    "signal_to_noise_method",
+                    "segment_scale_qc",
+                ):
+                    if column in group.columns:
+                        curve_agg[column] = (column, "first")
+                ordered = (
+                    group.groupby("energy_rounded", as_index=False)
+                    .agg(**curve_agg)
+                    .sort_values("energy")
+                )
             exact_mz = float(ordered["mz"].mean())
             curve_key = exact_mz
             if curve_key in curves:
@@ -837,13 +1406,113 @@ def build_pie_curves(analysis_df: pd.DataFrame) -> dict[int | float, dict]:
                 "mz_rounded": int(nominal_mz),
                 "mz_exact_mean": exact_mz,
                 "curve_key": curve_key,
+                "peak_track": int(_peak_identity),
                 "has_nominal_collision": has_nominal_collision,
                 "species": str(ordered["species"].iloc[0]) if "species" in ordered else "",
                 "energies": ordered["energy"].astype(float).tolist(),
-                "intensities": ordered["normalized_intensity"].astype(float).tolist(),
+                "intensities": ordered[
+                    "merged_intensity"
+                    if "merged_intensity" in ordered
+                    else "normalized_intensity"
+                ].astype(float).tolist(),
                 "rows": ordered,
             }
     return curves
+
+
+def build_pie_ratio_curve(
+    numerator_rows: pd.DataFrame,
+    denominator_rows: pd.DataFrame,
+    *,
+    intensity_column: str = "merged_intensity",
+    min_snr: float = 3.0,
+    energy_decimals: int = 4,
+) -> pd.DataFrame:
+    """Align two PIE channels and calculate a low-SNR-masked ratio curve."""
+    if intensity_column not in numerator_rows.columns:
+        intensity_column = "normalized_intensity"
+    if intensity_column not in denominator_rows.columns:
+        intensity_column = "normalized_intensity"
+    required = {"energy", intensity_column}
+    if not required.issubset(numerator_rows.columns) or not required.issubset(
+        denominator_rows.columns
+    ):
+        raise ValueError("PIE比值需要能量列和强度列")
+
+    def prepare(frame: pd.DataFrame, suffix: str) -> pd.DataFrame:
+        prepared = pd.DataFrame(
+            {
+                "energy_key": pd.to_numeric(
+                    frame["energy"],
+                    errors="coerce",
+                ).round(int(energy_decimals)),
+                f"energy_{suffix}": pd.to_numeric(
+                    frame["energy"],
+                    errors="coerce",
+                ),
+                f"intensity_{suffix}": pd.to_numeric(
+                    frame[intensity_column],
+                    errors="coerce",
+                ),
+                f"snr_{suffix}": _snr_values(frame),
+            }
+        )
+        return prepared.groupby("energy_key", as_index=False).mean(numeric_only=True)
+
+    merged = pd.merge(
+        prepare(numerator_rows, "numerator"),
+        prepare(denominator_rows, "denominator"),
+        on="energy_key",
+        how="inner",
+    )
+    if merged.empty:
+        return pd.DataFrame(
+            columns=[
+                "energy",
+                "numerator",
+                "denominator",
+                "ratio",
+                "valid",
+                "mask_reason",
+            ]
+        )
+    merged["energy"] = (
+        merged["energy_numerator"] + merged["energy_denominator"]
+    ) / 2.0
+    numerator = merged["intensity_numerator"].to_numpy(dtype=float)
+    denominator = merged["intensity_denominator"].to_numpy(dtype=float)
+    numerator_snr = merged["snr_numerator"].to_numpy(dtype=float)
+    denominator_snr = merged["snr_denominator"].to_numpy(dtype=float)
+    finite = (
+        np.isfinite(numerator)
+        & np.isfinite(denominator)
+        & np.isfinite(numerator_snr)
+        & np.isfinite(denominator_snr)
+    )
+    positive_denominator = denominator > 0
+    snr_valid = (
+        (numerator_snr >= float(min_snr))
+        & (denominator_snr >= float(min_snr))
+    )
+    valid = finite & positive_denominator & snr_valid
+    ratio = np.full(len(merged), np.nan, dtype=float)
+    ratio[valid] = numerator[valid] / denominator[valid]
+    reasons = np.full(len(merged), "", dtype=object)
+    reasons[~finite] = "非有限值"
+    reasons[finite & ~positive_denominator] = "分母不为正"
+    reasons[finite & positive_denominator & ~snr_valid] = "低SNR"
+    return pd.DataFrame(
+        {
+            "energy": merged["energy"].to_numpy(dtype=float),
+            "numerator": numerator,
+            "denominator": denominator,
+            "numerator_snr": numerator_snr,
+            "denominator_snr": denominator_snr,
+            "ratio": ratio,
+            "valid": valid,
+            "mask_reason": reasons,
+        }
+    ).sort_values("energy").reset_index(drop=True)
 
 
 def _solve_nonnegative_coefficients(design: np.ndarray, target: np.ndarray) -> np.ndarray:
@@ -1095,8 +1764,16 @@ def _empty_pie_dataframe() -> pd.DataFrame:
         "replicate_grouping", "replicate_warning", "reference_energy",
         "reference_source", "mz", "mz_rounded",
         "species", "photon_normalized_intensity", "normalized_intensity",
-        "raw_area", "integration_method", "left_bound", "right_bound", "blank_file_count",
-        "background_subtracted",
+        "merged_intensity", "raw_area", "count_rate",
+        "io_normalized_intensity", "io_time_normalized_intensity",
+        "acquisition_time_s", "total_acquisition_time_s",
+        "acquisition_time_min_s", "acquisition_time_max_s", "time_normalized",
+        "io_normalized", "signal_to_noise", "signal_to_noise_method",
+        "integration_method",
+        "left_bound", "right_bound", "blank_file_count",
+        "background_subtracted", "shared_scale_factor",
+        "shared_scale_log_mad", "segment_scale_qc",
+        "source_files", "source_folders", "source_spectra",
     ])
 
 
@@ -1107,12 +1784,18 @@ def _segment_energy_aggregation_spec(
 ) -> dict[str, tuple[str, object]]:
     if "integration_method" not in seg_df:
         seg_df["integration_method"] = ""
+    if "signal_to_noise_method" not in seg_df:
+        seg_df["signal_to_noise_method"] = ""
     agg_spec: dict[str, tuple[str, object]] = {
         "energy": ("energy", "mean"),
         "normalized_intensity": ("normalized_intensity", "mean"),
         "raw_area": ("raw_area", "mean"),
         "photon_normalized_intensity": ("photon_normalized_intensity", "mean"),
         "integration_method": ("integration_method", _summarize_integration_methods),
+        "signal_to_noise_method": (
+            "signal_to_noise_method",
+            _summarize_integration_methods,
+        ),
         "mz": ("mz", "mean"),
         "species": ("species", "first"),
         "file_count": ("file_count", "first"),
@@ -1121,6 +1804,27 @@ def _segment_energy_aggregation_spec(
         "left_bound": ("left_bound", "first"),
         "right_bound": ("right_bound", "first"),
     }
+    for numeric_column in (
+        "merged_intensity",
+        "count_rate",
+        "io_normalized_intensity",
+        "io_time_normalized_intensity",
+        "acquisition_time_s",
+        "total_acquisition_time_s",
+        "signal_to_noise",
+    ):
+        if numeric_column in seg_df.columns:
+            agg_spec[numeric_column] = (numeric_column, "mean")
+    if "acquisition_time_min_s" in seg_df.columns:
+        agg_spec["acquisition_time_min_s"] = (
+            "acquisition_time_min_s",
+            "min",
+        )
+    if "acquisition_time_max_s" in seg_df.columns:
+        agg_spec["acquisition_time_max_s"] = (
+            "acquisition_time_max_s",
+            "max",
+        )
     if include_mz_rounded:
         agg_spec = {
             "energy": agg_spec.pop("energy"),
@@ -1134,9 +1838,36 @@ def _segment_energy_aggregation_spec(
         "reference_source",
         "blank_file_count",
         "background_subtracted",
+        "time_normalized",
+        "io_normalized",
+        "source_segment",
+        "scale_factor",
+        "shared_scale_factor",
+        "shared_scale_log_mad",
+        "shared_scale_overlap_energy_count",
+        "shared_scale_channel_count",
+        "shared_scale_observation_count",
+        "shared_scale_rejected_count",
+        "segment_scale_qc",
     ):
         if optional in seg_df.columns:
             agg_spec[optional] = (optional, "first")
+    for sequence_column in (
+        "source_files",
+        "source_spectra",
+        "acquisition_times_s",
+        "source_folders",
+    ):
+        if sequence_column in seg_df.columns:
+            agg_spec[sequence_column] = (
+                sequence_column,
+                _merge_metadata_values,
+            )
+    if "source_folder" in seg_df.columns:
+        agg_spec["source_folders"] = (
+            "source_folder",
+            _merge_metadata_values,
+        )
     return agg_spec
 
 
@@ -1199,139 +1930,334 @@ def _aggregate_segments_by_mz_energy(df: pd.DataFrame) -> pd.DataFrame:
     return result[ordered_columns]
 
 
-def _scale_factor_from_overlap(ref_df: pd.DataFrame, seg_df: pd.DataFrame) -> float | None:
-    ref_energies = set(ref_df["energy_rounded"].values)
-    seg_energies = set(seg_df["energy_rounded"].values)
-    overlapping_energies = ref_energies & seg_energies
-    if not overlapping_energies:
-        return None
-    merged_overlap = pd.merge(
-        ref_df[ref_df["energy_rounded"].isin(overlapping_energies)][["energy_rounded", "normalized_intensity"]],
-        seg_df[seg_df["energy_rounded"].isin(overlapping_energies)][["energy_rounded", "normalized_intensity"]],
-        on="energy_rounded",
+def _snr_values(frame: pd.DataFrame) -> pd.Series:
+    if "signal_to_noise" in frame.columns:
+        return pd.to_numeric(frame["signal_to_noise"], errors="coerce")
+    raw = pd.to_numeric(
+        frame.get("raw_area", pd.Series(np.nan, index=frame.index)),
+        errors="coerce",
+    )
+    return np.sqrt(raw.clip(lower=0.0))
+
+
+def _shared_scale_from_overlap(
+    ref_df: pd.DataFrame,
+    seg_df: pd.DataFrame,
+    *,
+    min_overlap_energies: int,
+    min_channels: int,
+    min_snr: float,
+) -> dict[str, object]:
+    """Estimate one robust factor shared by every peak in a segment."""
+    join_keys = ["mz_rounded", "_pie_peak_key", "energy_rounded"]
+    ref = ref_df.copy()
+    seg = seg_df.copy()
+    ref["_scale_snr"] = _snr_values(ref)
+    seg["_scale_snr"] = _snr_values(seg)
+    overlap = pd.merge(
+        ref[
+            [
+                *join_keys,
+                "normalized_intensity",
+                "_scale_snr",
+            ]
+        ],
+        seg[
+            [
+                *join_keys,
+                "normalized_intensity",
+                "_scale_snr",
+            ]
+        ],
+        on=join_keys,
         suffixes=("_ref", "_seg"),
     )
-    if merged_overlap.empty:
-        return None
-    ref_intensities = merged_overlap["normalized_intensity_ref"].values
-    seg_intensities = merged_overlap["normalized_intensity_seg"].values
-    valid_mask = (seg_intensities > 0) & (ref_intensities > 0)
-    if np.sum(valid_mask) == 0:
-        return None
-    return float(np.median(ref_intensities[valid_mask] / seg_intensities[valid_mask]))
+    if overlap.empty:
+        return {
+            "valid": False,
+            "reason": "没有共同的能量-峰轨道观测",
+            "overlap_energy_count": 0,
+            "channel_count": 0,
+            "observation_count": 0,
+            "rejected_count": 0,
+        }
+    ref_intensity = pd.to_numeric(
+        overlap["normalized_intensity_ref"],
+        errors="coerce",
+    ).to_numpy(dtype=float)
+    seg_intensity = pd.to_numeric(
+        overlap["normalized_intensity_seg"],
+        errors="coerce",
+    ).to_numpy(dtype=float)
+    ref_snr = pd.to_numeric(overlap["_scale_snr_ref"], errors="coerce").to_numpy(
+        dtype=float
+    )
+    seg_snr = pd.to_numeric(overlap["_scale_snr_seg"], errors="coerce").to_numpy(
+        dtype=float
+    )
+    valid = (
+        np.isfinite(ref_intensity)
+        & np.isfinite(seg_intensity)
+        & np.isfinite(ref_snr)
+        & np.isfinite(seg_snr)
+        & (ref_intensity > 0)
+        & (seg_intensity > 0)
+        & (ref_snr >= float(min_snr))
+        & (seg_snr >= float(min_snr))
+    )
+    qualified = overlap.loc[valid].copy()
+    energy_count = int(qualified["energy_rounded"].nunique())
+    channel_count = int(qualified["_pie_peak_key"].nunique())
+    observation_count = int(len(qualified))
+    if energy_count < int(min_overlap_energies) or channel_count < int(min_channels):
+        return {
+            "valid": False,
+            "reason": (
+                f"有效重叠仅 {energy_count} 个能量点、{channel_count} 条曲线"
+                f"（要求至少 {min_overlap_energies} 个能量点、{min_channels} 条"
+                f"SNR≥{min_snr:g} 曲线）"
+            ),
+            "overlap_energy_count": energy_count,
+            "channel_count": channel_count,
+            "observation_count": observation_count,
+            "rejected_count": int(len(overlap) - observation_count),
+        }
+
+    log_ratios = np.log(ref_intensity[valid] / seg_intensity[valid])
+    initial_median = float(np.median(log_ratios))
+    absolute_deviation = np.abs(log_ratios - initial_median)
+    initial_mad = float(np.median(absolute_deviation))
+    if initial_mad > 0:
+        robust_sigma = 1.4826 * initial_mad
+        retained = absolute_deviation <= 3.5 * robust_sigma
+    else:
+        retained = np.ones(log_ratios.size, dtype=bool)
+    retained_rows = qualified.loc[retained]
+    retained_energy_count = int(retained_rows["energy_rounded"].nunique())
+    retained_channel_count = int(retained_rows["_pie_peak_key"].nunique())
+    if (
+        retained_energy_count < int(min_overlap_energies)
+        or retained_channel_count < int(min_channels)
+    ):
+        return {
+            "valid": False,
+            "reason": (
+                "稳健离群剔除后证据不足："
+                f"{retained_energy_count} 个能量点、{retained_channel_count} 条曲线"
+            ),
+            "overlap_energy_count": retained_energy_count,
+            "channel_count": retained_channel_count,
+            "observation_count": int(np.sum(retained)),
+            "rejected_count": int(len(overlap) - np.sum(retained)),
+        }
+    retained_log_ratios = log_ratios[retained]
+    log_median = float(np.median(retained_log_ratios))
+    log_mad = float(np.median(np.abs(retained_log_ratios - log_median)))
+    return {
+        "valid": True,
+        "factor": float(np.exp(log_median)),
+        "log_median": log_median,
+        "log_mad": log_mad,
+        "overlap_energy_count": retained_energy_count,
+        "channel_count": retained_channel_count,
+        "observation_count": int(retained_log_ratios.size),
+        "rejected_count": int(len(overlap) - retained_log_ratios.size),
+        "reason": "",
+    }
 
 
 def merge_pie_segments(
     analysis_dfs: list[pd.DataFrame],
     *,
     merge_method: str = "low_energy_dominant",
+    min_overlap_energies: int = 3,
+    min_scale_channels: int = 3,
+    min_scale_snr: float = 10.0,
 ) -> pd.DataFrame:
     """Merge PIE analysis DataFrames from multiple energy segments.
 
-    Segments are scaled in energy order. For 3+ segments, each unscaled segment
-    is matched against an already-scaled overlapping segment, so chained overlaps
-    (A overlaps B, B overlaps C) are handled even when C does not overlap A.
+    One factor is estimated per segment and shared by every peak track.  This
+    preserves isotope ratios.  Scaling is blocked when overlap/SNR evidence is
+    insufficient instead of silently substituting a factor of 1.
     """
     if not analysis_dfs:
         return _empty_pie_dataframe()
     if len(analysis_dfs) == 1:
-        return analysis_dfs[0].copy()
+        single = analysis_dfs[0].copy()
+        if "merged_intensity" not in single.columns:
+            single["merged_intensity"] = single["normalized_intensity"]
+        single["source_segment"] = 0
+        single["scale_factor"] = 1.0
+        single["shared_scale_factor"] = 1.0
+        single["shared_scale_log_mad"] = 0.0
+        single["segment_scale_qc"] = "single_segment"
+        single.attrs["segment_scaling_diagnostics"] = [
+            {
+                "segment": 0,
+                "factor": 1.0,
+                "qc_status": "single_segment",
+            }
+        ]
+        return single
 
-    prepared_segments: list[tuple[int, pd.DataFrame]] = []
-    all_peak_ids: set[tuple[int, str]] = set()
+    prepared_segments: list[dict[str, object]] = []
     for df_idx, df in enumerate(analysis_dfs):
         if df.empty or "mz_rounded" not in df.columns:
             continue
         prepared = _aggregate_segments_by_mz_energy(df)
-        prepared_segments.append((df_idx, prepared))
-        all_peak_ids.update(
-            (int(nominal_mz), str(peak_key))
-            for nominal_mz, peak_key in prepared[["mz_rounded", "_pie_peak_key"]]
-            .drop_duplicates()
-            .itertuples(index=False, name=None)
+        if "merged_intensity" not in prepared.columns:
+            prepared["merged_intensity"] = prepared["normalized_intensity"]
+        prepared_segments.append(
+            {
+                "df": prepared,
+                "segment_idx": df_idx,
+                "min_energy": float(prepared["energy"].min()),
+                "max_energy": float(prepared["energy"].max()),
+            }
         )
-    if not all_peak_ids:
+    if not prepared_segments:
         return _empty_pie_dataframe()
 
-    merged_frames: list[pd.DataFrame] = []
-    for target_mz, target_peak_key in sorted(all_peak_ids):
-        mz_segments = []
-        for df_idx, prepared in prepared_segments:
-            seg_df = prepared[
-                (prepared["mz_rounded"] == target_mz)
-                & (prepared["_pie_peak_key"] == target_peak_key)
-            ].copy()
-            if seg_df.empty:
-                continue
-            mz_segments.append({
-                "df": seg_df,
-                "min_energy": float(seg_df["energy"].min()),
-                "max_energy": float(seg_df["energy"].max()),
-                "segment_idx": df_idx,
-            })
+    prepared_segments.sort(key=lambda item: float(item["min_energy"]))
+    if merge_method == "first_segment_dominant":
+        first = next(
+            (
+                segment
+                for segment in prepared_segments
+                if int(segment["segment_idx"]) == 0
+            ),
+            prepared_segments[0],
+        )
+        ordered_segments = [
+            first,
+            *[
+                segment
+                for segment in prepared_segments
+                if segment is not first
+            ],
+        ]
+    else:
+        ordered_segments = list(prepared_segments)
 
-        if not mz_segments:
-            continue
-        if len(mz_segments) == 1:
-            merged_frames.append(mz_segments[0]["df"])
-            continue
-
-        mz_segments.sort(key=lambda x: x["min_energy"])
-
-        if merge_method == "mean":
-            merged_frames.extend(s["df"] for s in mz_segments)
-            continue
-
-        if merge_method == "first_segment_dominant":
-            first = next((s for s in mz_segments if s["segment_idx"] == 0), mz_segments[0])
-            remaining = [s for s in mz_segments if s is not first]
-            ordered_segments = [first] + sorted(remaining, key=lambda x: x["min_energy"])
-        else:
-            ordered_segments = mz_segments
-
-        scaled_segments: list[pd.DataFrame] = []
+    diagnostics: list[dict[str, object]] = []
+    scaled_segments: list[pd.DataFrame] = []
+    if merge_method == "mean":
         for segment in ordered_segments:
             seg_df = segment["df"].copy()
-            if not scaled_segments:
-                seg_df["source_segment"] = segment["segment_idx"]
-                seg_df["scale_factor"] = 1.0
-                scaled_segments.append(seg_df)
-                continue
-
-            best_scale: float | None = None
-            best_overlap_count = -1
-            for ref_df in scaled_segments:
-                overlap_count = len(set(ref_df["energy_rounded"].values) & set(seg_df["energy_rounded"].values))
-                if overlap_count <= 0:
-                    continue
-                candidate = _scale_factor_from_overlap(ref_df, seg_df)
-                if candidate is not None and overlap_count > best_overlap_count:
-                    best_scale = candidate
-                    best_overlap_count = overlap_count
-
-            scale_factor = 1.0 if best_scale is None else best_scale
-            if best_scale is None:
-                logger.debug(
-                    "No overlap found for precise PIE peak %s (nominal m/z %s) "
-                    "segment %s; leaving scale factor at 1",
-                    target_peak_key,
-                    target_mz,
-                    segment["segment_idx"],
-                )
-            for column in ("normalized_intensity", "photon_normalized_intensity", "raw_area"):
-                if column in seg_df.columns:
-                    seg_df[column] *= scale_factor
-            seg_df["source_segment"] = segment["segment_idx"]
-            seg_df["scale_factor"] = scale_factor
+            segment_idx = int(segment["segment_idx"])
+            seg_df["source_segment"] = segment_idx
+            seg_df["scale_factor"] = 1.0
+            seg_df["shared_scale_factor"] = 1.0
+            seg_df["shared_scale_log_mad"] = 0.0
+            seg_df["segment_scale_qc"] = "unscaled_mean"
             scaled_segments.append(seg_df)
+            diagnostics.append(
+                {
+                    "segment": segment_idx,
+                    "factor": 1.0,
+                    "qc_status": "unscaled_mean",
+                }
+            )
+    else:
+        for position, segment in enumerate(ordered_segments):
+            seg_df = segment["df"].copy()
+            segment_idx = int(segment["segment_idx"])
+            if position == 0:
+                diagnostic = {
+                    "valid": True,
+                    "factor": 1.0,
+                    "log_mad": 0.0,
+                    "overlap_energy_count": 0,
+                    "channel_count": 0,
+                    "observation_count": 0,
+                    "rejected_count": 0,
+                    "qc_status": "reference_segment",
+                    "segment": segment_idx,
+                    "reference_segment": None,
+                }
+            else:
+                candidates: list[tuple[dict[str, object], int]] = []
+                failed: list[dict[str, object]] = []
+                for reference_position, reference_df in enumerate(scaled_segments):
+                    candidate = _shared_scale_from_overlap(
+                        reference_df,
+                        seg_df,
+                        min_overlap_energies=min_overlap_energies,
+                        min_channels=min_scale_channels,
+                        min_snr=min_scale_snr,
+                    )
+                    reference_segment = int(
+                        ordered_segments[reference_position]["segment_idx"]
+                    )
+                    candidate["reference_segment"] = reference_segment
+                    if bool(candidate.get("valid")):
+                        candidates.append((candidate, reference_segment))
+                    else:
+                        failed.append(candidate)
+                if not candidates:
+                    best_failed = max(
+                        failed,
+                        key=lambda item: (
+                            int(item.get("overlap_energy_count", 0)),
+                            int(item.get("channel_count", 0)),
+                            int(item.get("observation_count", 0)),
+                        ),
+                        default={"reason": "没有可比较的已缩放能段"},
+                    )
+                    raise ValueError(
+                        f"PIE能段 {segment_idx} 共享缩放QC失败："
+                        f"{best_failed.get('reason')}。未使用静默1.0因子。"
+                    )
+                diagnostic, reference_segment = max(
+                    candidates,
+                    key=lambda item: (
+                        int(item[0].get("overlap_energy_count", 0)),
+                        int(item[0].get("channel_count", 0)),
+                        int(item[0].get("observation_count", 0)),
+                    ),
+                )
+                diagnostic = dict(diagnostic)
+                diagnostic.update(
+                    {
+                        "qc_status": "pass",
+                        "segment": segment_idx,
+                        "reference_segment": reference_segment,
+                    }
+                )
+            scale_factor = float(diagnostic["factor"])
+            seg_df["merged_intensity"] = (
+                pd.to_numeric(seg_df["normalized_intensity"], errors="coerce")
+                * scale_factor
+            )
+            # ``normalized_intensity`` remains the backward-compatible plotting
+            # field, while all explicitly raw/rate columns retain their original
+            # unscaled values.
+            seg_df["normalized_intensity"] = seg_df["merged_intensity"]
+            seg_df["source_segment"] = segment_idx
+            seg_df["scale_factor"] = scale_factor
+            seg_df["shared_scale_factor"] = scale_factor
+            seg_df["shared_scale_log_mad"] = float(
+                diagnostic.get("log_mad", 0.0)
+            )
+            seg_df["shared_scale_overlap_energy_count"] = int(
+                diagnostic.get("overlap_energy_count", 0)
+            )
+            seg_df["shared_scale_channel_count"] = int(
+                diagnostic.get("channel_count", 0)
+            )
+            seg_df["shared_scale_observation_count"] = int(
+                diagnostic.get("observation_count", 0)
+            )
+            seg_df["shared_scale_rejected_count"] = int(
+                diagnostic.get("rejected_count", 0)
+            )
+            seg_df["segment_scale_qc"] = str(diagnostic["qc_status"])
+            scaled_segments.append(seg_df)
+            diagnostics.append(dict(diagnostic))
 
-        merged_frames.extend(scaled_segments)
-
-    if not merged_frames:
-        return _empty_pie_dataframe()
-    combined = pd.concat(merged_frames, ignore_index=True)
+    combined = pd.concat(scaled_segments, ignore_index=True)
     final_combined = _aggregate_segments_by_mz_energy(combined)
-    return (
+    result = (
         final_combined.drop(
             columns=["energy_rounded", "_pie_peak_key"],
             errors="ignore",
@@ -1339,13 +2265,23 @@ def merge_pie_segments(
         .sort_values(["mz_rounded", "mz", "energy"])
         .reset_index(drop=True)
     )
+    result.attrs["segment_scaling_diagnostics"] = diagnostics
+    result.attrs["segment_scaling_policy"] = {
+        "version": 3,
+        "strategy": "shared_robust_log_median",
+        "min_overlap_energies": int(min_overlap_energies),
+        "min_channels": int(min_scale_channels),
+        "min_snr": float(min_scale_snr),
+        "snr_method": "poisson_peak_window",
+    }
+    return result
 
 
 def analyze_multiple_pie_folders(
     folders: list[str | Path],
     *,
     calibration: Calibration = Calibration(),
-    suffixes: tuple[str, ...] = (".txt", ".asc", ".888"),
+    suffixes: tuple[str, ...] = PIE_SPECTRUM_SUFFIXES,
     recursive: bool = True,
     energy_decimals: int = 1,
     algorithm: str = "legacy",
@@ -1372,6 +2308,7 @@ def analyze_multiple_pie_folders(
     manual_peak_path: str | Path | None = None,
     photon_normalize: bool = True,
     photon_reference_mode: str = "first",
+    normalize_by_time: bool = True,
     mass_discrimination: float = 1.0,
     light_source: str = "io",
     merge_method: str = "low_energy_dominant",
@@ -1382,6 +2319,7 @@ def analyze_multiple_pie_folders(
     cwt_snr_threshold: float = 0.02,
     cwt_wavelet_max_width: int = 30,
     weak_tail_cutoff_idx: int = 15000,
+    isotope_qc_pairs: list[dict] | None = None,
 ) -> pd.DataFrame:
     """Analyze multiple PIE folders and merge them with overlap scaling."""
     return _analyze_pie_sources(
@@ -1414,6 +2352,7 @@ def analyze_multiple_pie_folders(
         manual_peak_path=manual_peak_path,
         photon_normalize=photon_normalize,
         photon_reference_mode=photon_reference_mode,
+        normalize_by_time=normalize_by_time,
         mass_discrimination=mass_discrimination,
         light_source=light_source,
         target_mz_values=None,
@@ -1425,6 +2364,7 @@ def analyze_multiple_pie_folders(
         cwt_wavelet_max_width=cwt_wavelet_max_width,
         weak_tail_cutoff_idx=weak_tail_cutoff_idx,
         merge_method=merge_method,
+        isotope_qc_pairs=isotope_qc_pairs,
     )
 
 def identify_species_for_mz(database: list[dict], mz: int, energies, intensities) -> list[dict]:

@@ -21,6 +21,7 @@ from bl03u_masstool.core.curve_database import (
     mark_curve_datasets_stale,
     replace_species_assignments,
     store_curve_dataset,
+    store_curve_dataset_version,
 )
 from bl03u_masstool.core.project_settings import ProjectSettings
 from bl03u_masstool.frontends.pyqt_app.isotope_correction.dialog import IsotopeCorrectionDialog
@@ -299,14 +300,15 @@ def test_dialog_prefers_project_curve_database_over_export_file(qapp, tmp_path):
             ),
         }
     }
-    store_curve_dataset(
+    store_curve_dataset_version(
         database_path,
         curve_type="temperature",
         curves=curves,
-        dataset_key="temperature:project",
+        dataset_group="temperature:project",
+        analysis_key="temperature-analysis-v1",
         name="项目温度曲线",
     )
-    pie_dataset_id = store_curve_dataset(
+    pie_dataset_id = store_curve_dataset_version(
         database_path,
         curve_type="pie",
         curves={
@@ -321,7 +323,8 @@ def test_dialog_prefers_project_curve_database_over_export_file(qapp, tmp_path):
                 ),
             }
         },
-        dataset_key="pie:project",
+        dataset_group="pie:project",
+        analysis_key="pie-analysis-v1",
         name="项目PIE曲线",
     )
     replace_species_assignments(
@@ -364,9 +367,63 @@ def test_dialog_prefers_project_curve_database_over_export_file(qapp, tmp_path):
         widget.deleteLater()
 
 
+def test_dialog_ignores_legacy_batches_when_selecting_project_result(qapp, tmp_path):
+    database_path = tmp_path / "curve_data.sqlite"
+    store_curve_dataset(
+        database_path,
+        curve_type="temperature",
+        curves={
+            225.01: {
+                "mz": 225.01,
+                "mz_rounded": 225,
+                "rows": pd.DataFrame(
+                    {"temperature": [300.0], "area": [999.0]}
+                ),
+            }
+        },
+        dataset_key="temperature:legacy-batch:42",
+        name="旧批次",
+    )
+    current_result_id = store_curve_dataset(
+        database_path,
+        curve_type="temperature",
+        curves={
+            226.01: {
+                "mz": 226.01,
+                "mz_rounded": 226,
+                "rows": pd.DataFrame(
+                    {"temperature": [300.0], "area": [136.0]}
+                ),
+            }
+        },
+        dataset_key="temperature:project",
+        name="项目温度结果",
+    )
+    widget = IsotopeCorrectionDialog()
+    try:
+        widget.set_project_settings(
+            ProjectSettings(curve_database_path=str(database_path)),
+            activate_project_scope=True,
+        )
+
+        selected_path, datasets, current = widget._project_curve_selection()
+
+        assert selected_path == database_path
+        assert [dataset.dataset_id for dataset in datasets] == [current_result_id]
+        assert current is not None
+        assert current.dataset_id == current_result_id
+        assert widget.project_dataset_combo.count() == 1
+        assert not widget.project_dataset_combo.isVisible()
+    finally:
+        worker = widget._project_load_worker
+        if worker is not None and worker.isRunning():
+            worker.wait(2_000)
+        widget.deleteLater()
+
+
 def test_dialog_refreshes_and_auto_loads_new_valid_sqlite_dataset(qapp, tmp_path):
     database_path = tmp_path / "curve_data.sqlite"
-    stale_dataset_id = store_curve_dataset(
+    result_id = store_curve_dataset(
         database_path,
         curve_type="temperature",
         curves={
@@ -390,11 +447,9 @@ def test_dialog_refreshes_and_auto_loads_new_valid_sqlite_dataset(qapp, tmp_path
             ProjectSettings(curve_database_path=str(database_path)),
             activate_project_scope=True,
         )
-        assert widget.project_source_button.text() == (
-            f"加载 #{stale_dataset_id}（过期）"
-        )
+        assert widget.project_source_button.text() == "项目无对应结果"
 
-        valid_dataset_id = store_curve_dataset(
+        valid_result_id = store_curve_dataset(
             database_path,
             curve_type="temperature",
             curves={
@@ -406,19 +461,19 @@ def test_dialog_refreshes_and_auto_loads_new_valid_sqlite_dataset(qapp, tmp_path
                     ),
                 }
             },
-            dataset_key="temperature:project:new",
+            dataset_key="temperature:project",
             name="新温度曲线",
         )
-        assert valid_dataset_id != stale_dataset_id
+        assert valid_result_id == result_id
 
         assert widget.ensure_project_source_loaded()
         _wait_for_project_load(qapp, widget)
 
         assert widget.input_df["area"].tolist() == [136.0, 200.0]
         assert widget.loaded_database_path == str(database_path)
-        assert widget.project_source_button.text() == f"当前使用 #{valid_dataset_id}"
+        assert widget.project_source_button.text() == "当前使用项目结果"
         assert not widget.project_source_button.isEnabled()
-        assert "SQLite 数据集" in widget.source_path
+        assert "项目 SQLite" in widget.source_path
     finally:
         worker = widget._project_load_worker
         if worker is not None and worker.isRunning():
@@ -463,7 +518,7 @@ def test_dialog_does_not_replace_explicit_file_when_page_is_revisited(qapp, tmp_
         widget.deleteLater()
 
 
-def test_dialog_lists_stale_project_curve_dataset_for_explicit_review(qapp, tmp_path):
+def test_dialog_does_not_offer_stale_project_result_for_review(qapp, tmp_path):
     database_path = tmp_path / "curve_data.sqlite"
     store_curve_dataset(
         database_path,
@@ -492,16 +547,14 @@ def test_dialog_lists_stale_project_curve_dataset_for_explicit_review(qapp, tmp_
             activate_project_scope=True,
         )
 
-        assert widget.project_source_button.isEnabled()
-        assert widget.project_source_button.text() == (
-            f"加载 #{widget.project_dataset_combo.currentData()}（过期）"
-        )
-        assert "卡峰文件已变化" in widget.project_source_button.toolTip()
+        assert not widget.project_source_button.isEnabled()
+        assert widget.project_source_button.text() == "项目无对应结果"
+        assert not widget.project_dataset_combo.isVisible()
     finally:
         widget.deleteLater()
 
 
-def test_dialog_can_explicitly_load_stale_dataset_without_making_it_current(
+def test_dialog_cannot_load_stale_project_result(
     qapp,
     tmp_path,
     monkeypatch,
@@ -530,7 +583,7 @@ def test_dialog_can_explicitly_load_stale_dataset_without_making_it_current(
     monkeypatch.setattr(
         QtWidgets.QMessageBox,
         "warning",
-        lambda *args, **kwargs: QtWidgets.QMessageBox.StandardButton.Yes,
+        lambda *args, **kwargs: QtWidgets.QMessageBox.StandardButton.Ok,
     )
     widget = IsotopeCorrectionDialog()
     try:
@@ -540,10 +593,9 @@ def test_dialog_can_explicitly_load_stale_dataset_without_making_it_current(
         )
 
         widget.load_project_result()
-        _wait_for_project_load(qapp, widget)
 
-        assert widget.input_df["area"].tolist() == [136.0, 200.0]
-        assert "仅供核查" in widget.data_status_label.text()
+        assert widget._project_load_worker is None
+        assert widget.input_df.empty
         state = get_curve_dataset_state_read_only(database_path, dataset_id)
         assert state is not None
         assert state.validity_status == "stale"
@@ -580,9 +632,11 @@ def test_dialog_exports_curves_patterns_components_and_parameters(qapp, tmp_path
         assert set(workbook.sheet_names) == {
             "corrected_curves",
             "isotope_patterns",
-            "source_curves",
-            "components",
-            "parameters",
+                "source_curves",
+                "components",
+                "numerical_diagnostics",
+                "coefficient_sensitivity",
+                "parameters",
         }
     finally:
         widget.deleteLater()

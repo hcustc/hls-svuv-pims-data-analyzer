@@ -12,7 +12,7 @@ import yaml
 from pyqtgraph import mkPen, LinearRegionItem, GraphicsLayoutWidget
 from PyQt6 import QtCore, QtWidgets
 from PyQt6.QtCore import QTimer
-from PyQt6.QtGui import QIcon, QImage, QKeySequence, QPixmap, QShortcut
+from PyQt6.QtGui import QIcon, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QDialog,
     QFileDialog,
@@ -32,12 +32,8 @@ from scipy.optimize import curve_fit
 from bl03u_masstool.frontends.pyqt_app.ui_massspec import Ui_MainWindow
 from bl03u_masstool.frontends.pyqt_app.theme import get_plot_theme
 from bl03u_masstool.core.calibration import Calibration
-from bl03u_masstool.core.config import (
-    load_calibration_config,
-    load_calibration_points,
-    load_peak_detection_config,
-)
 from bl03u_masstool.core.output_paths import ensure_output_dir
+from bl03u_masstool.core.peak_ranges import load_peak_ranges
 from bl03u_masstool.core.peak_sets import (
     create_peak_set,
     resolve_active_peak_file,
@@ -46,11 +42,13 @@ from bl03u_masstool.core.peak_sets import (
 from bl03u_masstool.core.peak_detection import add_manual_peak as core_add_manual_peak
 from bl03u_masstool.core.peak_detection import detect_peaks_by_algorithm
 from bl03u_masstool.core.project_lifecycle import ensure_project_structure, project_root
+from bl03u_masstool.core.project_settings import load_factory_project_settings
 from bl03u_masstool.core.runtime_paths import resource_path
 from bl03u_masstool.core.spectrum_io import read_bl03u_txt, sum_spectra
 from bl03u_masstool.frontends.pyqt_app.spectrum.axis import SpectrumBottomAxis
 from bl03u_masstool.frontends.pyqt_app.spectrum.peak_dialog import PeakDialog
 from bl03u_masstool.frontends.pyqt_app.spectrum.workspace_pages import WorkspacePagesMixin
+from bl03u_masstool.frontends.pyqt_app.common.widgets import AnalysisEmptyState
 from bl03u_masstool.frontends.pyqt_app.worker_manager import WorkerManager
 from bl03u_masstool.frontends.pyqt_app.workers import WorkerThread
 
@@ -58,10 +56,26 @@ from bl03u_masstool.frontends.pyqt_app.workers import WorkerThread
 logger = logging.getLogger(__name__)
 
 
+class CalibrationLinearRegionItem(LinearRegionItem):
+    """Spectrum selection region that exposes a calibration double-click."""
+
+    calibrationDoubleClicked = QtCore.pyqtSignal()
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        if event.button() == QtCore.Qt.MouseButton.LeftButton:
+            self.calibrationDoubleClicked.emit()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+
 class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
     def __init__(self):
         super(MainWindow, self).__init__()
         self.setupUi(self)
+        self._spectrum_data_ready = False
+        self._spectrum_side_width = 400
+        self._install_spectrum_empty_state()
         self.x_axis_mode = "mz"
         self.current_plot_x = np.array([], dtype=float)
         self.current_plot_axis_x = np.array([], dtype=float)
@@ -81,9 +95,13 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         self._updating_peak_table = False
         self._peak_table_dirty = False
         self._peak_table_dirty_requires_confirm = False
-        self._peak_table_state_text = "候选峰未保存到项目"
+        self._peak_table_state_text = "当前卡峰范围尚未保存到项目"
         self._peak_candidate_origin = "workbench_manual"
         self._published_project_peak_file = ""
+        self._temporary_spectrum_settings = None
+        self._temporary_spectrum_context_key: str | None = None
+        self._calibration_candidate: dict | None = None
+        self._updating_calibration_table = False
         self.spectrum_source_scope = self._default_spectrum_source_scope()
         self._custom_single_spectrum_file = self.lineEdit.text().strip()
         self._custom_sum_spectrum_folder = self.folder_path.text().strip()
@@ -105,23 +123,10 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         self.addPeak.clicked.connect(self.add_peak)
         self.pushButton_4.clicked.connect(self.auto_find_peaks)  # 自动寻峰按钮
 
-        # 同步定标参数到 ProjectSettingsManager，防止切换页面后丢失修改
+        # 将直接编辑的定标参数同步到当前会话；项目持久化必须使用显式操作
         self.lineEdit_4.editingFinished.connect(self._sync_calibration_to_project_settings)
         self.lineEdit_5.editingFinished.connect(self._sync_calibration_to_project_settings)
         self.lineEdit_6.editingFinished.connect(self._sync_calibration_to_project_settings)
-
-        # 加载并显示图片
-        self.original_pixmap = QPixmap(str(resource_path("icons/bjt.png")))
-        if not self.original_pixmap.isNull():
-            self.update_label_picture()
-
-        # 连接 resize 事件以动态调整 label_picture 的大小
-        self.widget_2.resizeEvent = self.on_widget_2_resize
-
-        # # 设置 label 组件的图片
-        # image_path = 'icons/bjt.png'  # 替换为您的图像文件路径
-        # pixmap = QPixmap(image_path)
-        # self.label_picture.setPixmap(pixmap)
 
         # 初始化图表相关的成员变量
         self.p1 = None
@@ -141,6 +146,7 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
 
         # 连接选项卡切换事件
         self.peakResult.currentChanged.connect(self.on_tab_changed)
+        self.on_tab_changed()
 
         # 初始化复选框状态
         self.checkBox_show_gaussian.setChecked(False)  # 默认关闭高斯拟合图
@@ -168,24 +174,18 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         )
         self.clearPeaksButton.setFixedHeight(28)
         self.clearPeaksButton.clicked.connect(self.clear_peak_data)
-        self.openProjectPeaksButton = QPushButton("打开项目")
-        self.openProjectPeaksButton.setToolTip("打开项目管理中登记的手动卡峰范围，并恢复关联谱图")
-        self.openProjectPeaksButton.setMinimumWidth(0)
-        self.openProjectPeaksButton.setSizePolicy(
+        self.saveProjectPeaksButton = QPushButton("保存卡峰范围")
+        self.saveProjectPeaksButton.setObjectName("PrimaryButton")
+        self.saveProjectPeaksButton.setToolTip(
+            "将当前表格保存为项目正在使用的卡峰范围；历史快照由软件自动保留"
+        )
+        self.saveProjectPeaksButton.setMinimumWidth(132)
+        self.saveProjectPeaksButton.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Fixed,
         )
-        self.openProjectPeaksButton.setFixedHeight(28)
-        self.openProjectPeaksButton.clicked.connect(self.open_project_peak_ranges)
-        self.publishProjectPeaksButton = QPushButton("批准为新版本")
-        self.publishProjectPeaksButton.setToolTip("将当前候选表批准为新的不可变卡峰集并激活")
-        self.publishProjectPeaksButton.setMinimumWidth(0)
-        self.publishProjectPeaksButton.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Expanding,
-            QtWidgets.QSizePolicy.Policy.Fixed,
-        )
-        self.publishProjectPeaksButton.setFixedHeight(28)
-        self.publishProjectPeaksButton.clicked.connect(self.publish_peak_ranges_to_project)
+        self.saveProjectPeaksButton.setFixedHeight(28)
+        self.saveProjectPeaksButton.clicked.connect(self.save_peak_ranges_to_project)
         self.peakProjectStateLabel = QLabel("")
         self.peakProjectStateLabel.setObjectName("ProjectHint")
         self.peakProjectStateLabel.setWordWrap(True)
@@ -199,41 +199,66 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         try:
             previous_plot_calibration = self.current_plot_calibration
             calibration_points = None
-            try:
-                from bl03u_masstool.core.project_settings import ProjectSettingsManager
+            temporary_settings = getattr(self, "_temporary_spectrum_settings", None)
+            if (
+                getattr(self, "spectrum_source_scope", "custom") == "custom"
+                and temporary_settings is not None
+            ):
+                calibration = temporary_settings.to_calibration()
+                calibration_points = temporary_settings.calibration_points
+            else:
+                try:
+                    from bl03u_masstool.core.project_settings import ProjectSettingsManager
 
-                manager = ProjectSettingsManager()
-                if manager.has_project_path():
-                    project_settings = manager.get()
-                    calibration = project_settings.to_calibration()
-                    calibration_points = project_settings.calibration_points
-                else:
-                    calibration = load_calibration_config()
-            except Exception:
-                calibration = load_calibration_config()
+                    manager = ProjectSettingsManager()
+                    if manager.has_project_path():
+                        project_settings = manager.snapshot()
+                        calibration = project_settings.to_calibration()
+                        calibration_points = project_settings.calibration_points
+                    else:
+                        factory = load_factory_project_settings()
+                        calibration = factory.to_calibration()
+                        calibration_points = factory.calibration_points
+                except Exception:
+                    factory = load_factory_project_settings()
+                    calibration = factory.to_calibration()
+                    calibration_points = factory.calibration_points
             self.lineEdit_4.setText(format(calibration.a, ".17g"))
             self.lineEdit_5.setText(format(calibration.b, ".17g"))
             self.lineEdit_6.setText(format(calibration.c, ".17g"))
 
             if calibration_points is None:
-                points = load_calibration_points()
+                points = []
             else:
                 points = [
                     (float(item["tof"]), float(item["mz"]))
                     for item in calibration_points
                     if "tof" in item and "mz" in item
                 ]
-            if points:
-                self.region.setRowCount(len(points))
-                for row, (tof, mz) in enumerate(points):
-                    self.region.setItem(row, 0, QTableWidgetItem(f"{tof:g}"))
-                    self.region.setItem(row, 1, QTableWidgetItem(f"{mz:g}"))
+            self._set_calibration_points_table(points)
             if self.current_plot_x.size:
                 self.refresh_current_plot_calibration(previous_plot_calibration)
             elif hasattr(self, "p2"):
                 self.refresh_plot_axis_mode()
-        except Exception as exc:
+        except Exception:
             logger.warning("Failed to load YAML configuration; using UI defaults", exc_info=True)
+
+    def _set_calibration_points_table(self, points) -> None:
+        """Replace calibration points and keep one editable trailing blank row."""
+        normalized = [(float(tof), float(mz)) for tof, mz in points]
+        self._updating_calibration_table = True
+        self.region.setUpdatesEnabled(False)
+        try:
+            self.region.setRowCount(len(normalized) + 1)
+            for row, (tof, mz) in enumerate(normalized):
+                self.region.setItem(row, 0, QTableWidgetItem(f"{tof:g}"))
+                self.region.setItem(row, 1, QTableWidgetItem(f"{mz:g}"))
+            blank_row = len(normalized)
+            self.region.setItem(blank_row, 0, QTableWidgetItem(""))
+            self.region.setItem(blank_row, 1, QTableWidgetItem(""))
+        finally:
+            self.region.setUpdatesEnabled(True)
+            self._updating_calibration_table = False
 
     def closeEvent(self, event) -> None:
         """Persist window geometry and splitter state before closing."""
@@ -310,7 +335,6 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         self.verticalLayout_8.setContentsMargins(6, 6, 6, 6)
         self.graph_layout.setContentsMargins(0, 0, 0, 0)
         self.graph_layout.setSpacing(0)
-        self.label_picture.setText("")
         self.lineEdit.setClearButtonEnabled(True)
         self.folder_path.setClearButtonEnabled(True)
         self.tabWidget.setObjectName("SourceModeStateTabs")
@@ -345,6 +369,7 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
 
         self.peakData.setAccessibleName("卡峰范围表")
         self.region.setAccessibleName("质谱定标点表")
+        self._configure_calibration_controls()
 
     def add_core_tools_launcher(self):
         """Build top-level workspace pages instead of launching tool dialogs."""
@@ -362,6 +387,73 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         button.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextOnly)
         button.setFixedHeight(30)
         return button
+
+    def _configure_calibration_controls(self) -> None:
+        """Configure spreadsheet-like calibration editing and apply targets."""
+        self.region.setSelectionMode(
+            QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
+        )
+        self.region.setHorizontalHeaderLabels(["Peak / TOF", "M/Z"])
+        self.region.itemChanged.connect(self._on_calibration_table_changed)
+        self.region.setContextMenuPolicy(
+            QtCore.Qt.ContextMenuPolicy.CustomContextMenu
+        )
+        self.region.customContextMenuRequested.connect(
+            self.show_calibration_context_menu
+        )
+
+        self.calibrationTableHint = QLabel(
+            "双击末行新增 · 双击谱图选区添加 · Delete 删除 · 支持粘贴两列数据",
+            self.tab,
+        )
+        self.calibrationTableHint.setObjectName("ProjectHint")
+        self.calibrationTableHint.setWordWrap(True)
+        self.verticalLayout_4.addWidget(self.calibrationTableHint)
+
+        self._calibration_table_shortcuts = []
+        for key in (QKeySequence.StandardKey.Delete, QKeySequence.StandardKey.Backspace):
+            shortcut = QShortcut(QKeySequence(key), self.region)
+            shortcut.setContext(QtCore.Qt.ShortcutContext.WidgetShortcut)
+            shortcut.activated.connect(self.delete_selected_calibration_points)
+            self._calibration_table_shortcuts.append(shortcut)
+        paste_shortcut = QShortcut(QKeySequence.StandardKey.Paste, self.region)
+        paste_shortcut.setContext(QtCore.Qt.ShortcutContext.WidgetShortcut)
+        paste_shortcut.activated.connect(self.paste_calibration_points)
+        self._calibration_table_shortcuts.append(paste_shortcut)
+
+        self._calibration_region_shortcuts = []
+        for sequence in ("Ctrl+Return", "Ctrl+Enter", "Meta+Return", "Meta+Enter"):
+            shortcut = QShortcut(QKeySequence(sequence), self)
+            shortcut.setContext(QtCore.Qt.ShortcutContext.WindowShortcut)
+            shortcut.activated.connect(
+                self.add_calibration_point_from_region_if_active
+            )
+            self._calibration_region_shortcuts.append(shortcut)
+
+        self._take_all_items(self.horizontalLayout_7)
+        self.pushButton_3.setText("计算定标")
+        self.calibrationApplyMenuButton = self._command_menu_button(
+            "应用结果", self.widget_3
+        )
+        apply_menu = QMenu(self.calibrationApplyMenuButton)
+        self.applyCalibrationToTemporaryAction = apply_menu.addAction(
+            "应用到当前临时分析"
+        )
+        self.applyCalibrationToProjectAction = apply_menu.addAction(
+            "更新当前项目参数"
+        )
+        self.applyCalibrationToTemporaryAction.triggered.connect(
+            self.apply_calibration_candidate_to_temporary
+        )
+        self.applyCalibrationToProjectAction.triggered.connect(
+            self.apply_calibration_candidate_to_project
+        )
+        self.calibrationApplyMenuButton.setMenu(apply_menu)
+        self.horizontalLayout_7.addStretch(1)
+        self.horizontalLayout_7.addWidget(self.pushButton_3)
+        self.horizontalLayout_7.addWidget(self.calibrationApplyMenuButton)
+        self.horizontalLayout_7.addStretch(1)
+        self._refresh_calibration_candidate_actions()
 
     def _add_peak_data_menu_controls(self):
         """Keep infrequent file/data commands out of the primary search row."""
@@ -446,31 +538,18 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         self.update_peak_navigation_state()
 
     def _add_peak_project_controls(self):
-        if not hasattr(self, "openProjectPeaksButton") or not hasattr(self, "publishProjectPeaksButton"):
+        if not hasattr(self, "saveProjectPeaksButton"):
             return
         self.peakProjectActionPanel = QtWidgets.QWidget(self.widget_3)
         self.peakProjectActionPanel.setObjectName("PeakProjectActionPanel")
         project_action_layout = QHBoxLayout(self.peakProjectActionPanel)
         project_action_layout.setContentsMargins(0, 0, 0, 0)
         project_action_layout.setSpacing(4)
-        for button in (self.openProjectPeaksButton, self.publishProjectPeaksButton):
-            button.setParent(self.peakProjectActionPanel)
-            button.hide()
-
-        self.peakProjectMenuButton = self._command_menu_button(
-            "项目操作", self.peakProjectActionPanel
-        )
-        self.peakProjectMenuButton.setToolTip("打开已批准卡峰集，或将当前候选表批准为新版本")
-        project_menu = QMenu(self.peakProjectMenuButton)
-        self.openProjectPeaksAction = project_menu.addAction("打开项目卡峰范围…")
-        self.publishProjectPeaksAction = project_menu.addAction("批准当前候选表为新版本…")
-        self.openProjectPeaksAction.triggered.connect(self.openProjectPeaksButton.click)
-        self.publishProjectPeaksAction.triggered.connect(self.publishProjectPeaksButton.click)
-        self.peakProjectMenuButton.setMenu(project_menu)
+        self.saveProjectPeaksButton.setParent(self.peakProjectActionPanel)
 
         if hasattr(self, "peakProjectStateLabel"):
             project_action_layout.addWidget(self.peakProjectStateLabel, 1)
-        project_action_layout.addWidget(self.peakProjectMenuButton, 0)
+        project_action_layout.addWidget(self.saveProjectPeaksButton, 0)
         self.verticalLayout.insertWidget(2, self.peakProjectActionPanel)
 
     def _rebuild_top_controls(self):
@@ -726,6 +805,144 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
             button.setObjectName("ArrowButton")
             button.setFixedSize(32, 30)
         self.horizontalLayout_17.addWidget(toolbar_body, stretch=1)
+        self._refresh_spectrum_source_controls()
+
+    def _temporary_spectrum_settings_key(self) -> str:
+        try:
+            from bl03u_masstool.core.project_settings import ProjectSettingsManager
+
+            manager = ProjectSettingsManager()
+            if manager.has_project_path():
+                return str(manager.get_project_config_path())
+        except Exception:
+            pass
+        return "__factory__"
+
+    def _ensure_temporary_spectrum_settings(
+        self,
+        project_settings=None,
+        *,
+        reset_if_context_changed: bool = False,
+    ):
+        """Return the session-only settings snapshot used by temporary spectra."""
+        from bl03u_masstool.core.project_settings import ProjectSettingsManager
+        from bl03u_masstool.frontends.pyqt_app.temporary_analysis_settings import (
+            build_temporary_settings,
+        )
+
+        manager = ProjectSettingsManager()
+        context_key = self._temporary_spectrum_settings_key()
+        context_changed = self._temporary_spectrum_context_key != context_key
+        should_reset = self._temporary_spectrum_settings is None or (
+            reset_if_context_changed and context_changed
+        )
+        if should_reset:
+            if manager.has_project_path():
+                source_settings = project_settings or manager.snapshot()
+                settings = build_temporary_settings("project", source_settings)
+            else:
+                settings = build_temporary_settings("factory")
+                calibration = self.current_calibration()
+                settings.cal_a = calibration.a
+                settings.cal_b = calibration.b
+                settings.cal_c = calibration.c
+                try:
+                    settings.calibration_points = [
+                        {"tof": tof, "mz": mz}
+                        for tof, mz in self._calibration_points_from_table()
+                    ]
+                except ValueError:
+                    pass
+            self._temporary_spectrum_settings = settings
+            self._temporary_spectrum_context_key = context_key
+        return self._temporary_spectrum_settings, should_reset
+
+    @staticmethod
+    def _settings_calibration_points(settings) -> list[tuple[float, float]]:
+        return [
+            (float(item["tof"]), float(item["mz"]))
+            for item in settings.calibration_points
+            if "tof" in item and "mz" in item
+        ]
+
+    def _capture_temporary_spectrum_state(self) -> None:
+        if getattr(self, "spectrum_source_scope", "custom") != "custom":
+            return
+        settings, _ = self._ensure_temporary_spectrum_settings()
+        calibration = self.current_calibration()
+        settings.cal_a = calibration.a
+        settings.cal_b = calibration.b
+        settings.cal_c = calibration.c
+        try:
+            points = self._calibration_points_from_table()
+        except ValueError:
+            return
+        settings.calibration_points = [
+            {"tof": float(tof), "mz": float(mz)}
+            for tof, mz in points
+        ]
+
+    def _activate_spectrum_calibration(
+        self,
+        calibration: Calibration,
+        points,
+    ) -> None:
+        """Make one calibration state effective in the spectrum workbench."""
+        try:
+            previous_calibration = self.current_calibration()
+        except (TypeError, ValueError):
+            previous_calibration = self.current_plot_calibration
+        self.lineEdit_4.setText(format(calibration.a, ".17g"))
+        self.lineEdit_5.setText(format(calibration.b, ".17g"))
+        self.lineEdit_6.setText(format(calibration.c, ".17g"))
+        self._set_calibration_points_table(points)
+        if getattr(self, "current_plot_x", None) is not None and self.current_plot_x.size:
+            self.refresh_current_plot_calibration(previous_calibration)
+        elif hasattr(self, "p2"):
+            self.refresh_plot_axis_mode()
+
+    def _activate_temporary_spectrum_calibration(self) -> None:
+        settings, _ = self._ensure_temporary_spectrum_settings()
+        self._activate_spectrum_calibration(
+            settings.to_calibration(),
+            self._settings_calibration_points(settings),
+        )
+
+    def _activate_project_spectrum_calibration(self) -> bool:
+        try:
+            from bl03u_masstool.core.project_settings import ProjectSettingsManager
+
+            manager = ProjectSettingsManager()
+            if not manager.has_project_path():
+                return False
+            settings = manager.snapshot()
+            self._activate_spectrum_calibration(
+                settings.to_calibration(),
+                self._settings_calibration_points(settings),
+            )
+            return True
+        except Exception:
+            logger.exception("Failed to activate project calibration")
+            return False
+
+    def open_temporary_spectrum_parameters(self) -> None:
+        """Edit temporary spectrum parameters without persisting project state."""
+        from bl03u_masstool.frontends.pyqt_app.temporary_analysis_settings import (
+            TemporaryAnalysisSettingsDialog,
+        )
+
+        self._capture_temporary_spectrum_state()
+        settings, _ = self._ensure_temporary_spectrum_settings()
+        dialog = TemporaryAnalysisSettingsDialog(
+            settings,
+            self,
+            initial_tab="common",
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._temporary_spectrum_settings = dialog.settings()
+        self._activate_temporary_spectrum_calibration()
+        self.statusbar.showMessage("临时参数已应用；不会写回项目", 4000)
 
     def _default_spectrum_source_scope(self) -> str:
         # 单谱/累计谱是从项目温度/PIE扫描目录派生出来的工作台查看来源，
@@ -743,6 +960,9 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         previous_scope = getattr(self, "spectrum_source_scope", "custom")
         if previous_scope == "custom" and scope == "project":
             self._remember_custom_spectrum_paths()
+            self._capture_temporary_spectrum_state()
+            if not self._activate_project_spectrum_calibration():
+                scope = "custom"
         self.spectrum_source_scope = scope
 
         if hasattr(self, "projectSourceButton"):
@@ -754,7 +974,7 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
             try:
                 from bl03u_masstool.core.project_settings import ProjectSettingsManager
 
-                self.apply_project_spectrum_paths(ProjectSettingsManager().get())
+                self.apply_project_spectrum_paths(ProjectSettingsManager().snapshot())
             except Exception:
                 pass
         elif scope == "custom" and previous_scope == "project":
@@ -762,8 +982,12 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
                 self.lineEdit.setText(self._custom_single_spectrum_file)
             if self._custom_sum_spectrum_folder:
                 self.folder_path.setText(self._custom_sum_spectrum_folder)
+            self._activate_temporary_spectrum_calibration()
 
+        if scope != previous_scope:
+            self._set_calibration_candidate(None)
         self._refresh_spectrum_source_controls()
+        self._refresh_calibration_candidate_actions()
 
     def _refresh_spectrum_source_controls(self) -> None:
         use_project = getattr(self, "spectrum_source_scope", "custom") == "project"
@@ -771,6 +995,22 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
             self.projectSourceButton.setChecked(use_project)
         if hasattr(self, "customSourceButton"):
             self.customSourceButton.setChecked(not use_project)
+        if hasattr(self, "commonParamsButton"):
+            self.commonParamsButton.setText("项目参数" if use_project else "临时参数")
+            self.commonParamsButton.setToolTip(
+                "打开当前项目的通用参数"
+                if use_project
+                else "编辑本次临时数据参数；不会写回项目"
+            )
+        if hasattr(self, "projectSourceButton"):
+            try:
+                from bl03u_masstool.core.project_settings import ProjectSettingsManager
+
+                self.projectSourceButton.setEnabled(
+                    ProjectSettingsManager().has_project_path()
+                )
+            except Exception:
+                self.projectSourceButton.setEnabled(False)
         for edit, project_placeholder, custom_placeholder in (
             (self.lineEdit, "项目未登记单谱文件", "选择或输入单谱文件路径"),
             (self.folder_path, "项目未登记累计谱文件夹", "选择或输入累计谱文件夹路径"),
@@ -800,7 +1040,7 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         try:
             from bl03u_masstool.core.project_settings import ProjectSettingsManager
 
-            ps = ProjectSettingsManager().get()
+            ps = ProjectSettingsManager().snapshot()
             for value in (getattr(ps, "temperature_scan_folder", ""), getattr(ps, "pie_scan_folder", "")):
                 path = Path(str(value)).expanduser()
                 if path.exists():
@@ -837,18 +1077,10 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         self.choose_sum_folder()
 
     def _save_project_workbench_source(self, field_name: str, value: str) -> None:
-        try:
-            from bl03u_masstool.core.project_settings import ProjectSettingsManager
-
-            manager = ProjectSettingsManager()
-            if not manager.has_project_path():
-                return
-            ps = manager.get()
-            setattr(ps, field_name, value)
-            manager.set(ps)
-            manager.save()
-        except Exception:
-            logger.debug("Failed to save project workbench source %s", field_name, exc_info=True)
+        """Keep an ad-hoc workbench source in the current session only."""
+        temporary = getattr(self, "temporary_spectrum_settings", None)
+        if temporary is not None and hasattr(temporary, field_name):
+            setattr(temporary, field_name, value)
 
     def set_x_axis_mode(self):
         combo = getattr(self, "xAxisModeCombo", None)
@@ -972,6 +1204,9 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         splitter_state = self._qsettings.value("window/splitter_state")
         if splitter_state is not None:
             splitter.restoreState(splitter_state)
+        self._set_spectrum_content_ready(
+            bool(self.current_plot_x.size and self.current_plot_y.size)
+        )
 
     def _rebuild_side_panel(self):
         self.widget_3.setMinimumWidth(340)
@@ -1053,6 +1288,9 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         self.verticalLayout.addWidget(self.peakResult, stretch=1)
         self.verticalLayout.addWidget(self.label_4)
         self.verticalLayout.addLayout(self.horizontalLayout_7)
+        self._set_spectrum_content_ready(
+            bool(self.current_plot_x.size and self.current_plot_y.size)
+        )
 
     def _dialog_start_dir(self, current_path: str) -> str:
         current_path = current_path.strip().strip('"')
@@ -1213,78 +1451,122 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         if self.p1 is not None and self.checkBox_show_gaussian.isChecked():
             self.update_gaussian_fit()
 
-    def _sync_calibration_to_project_settings(self):
-        """将当前 UI 中的定标参数同步写到 ProjectSettingsManager。
-
-        防止用户直接在质谱工作台修改 lineEdit_4/5/6 或通过 calculate()
-        拟合新参数后，切换页面时被 _apply_project_runtime_settings 覆盖。
-        """
+    def _sync_calibration_to_project_settings(self, calibration_points=None) -> bool:
+        """Keep direct coefficient edits in the current session only."""
         try:
-            from bl03u_masstool.core.project_settings import ProjectSettingsManager
-            from bl03u_masstool.core.config import save_calibration_config
-
             calibration = self.current_calibration()
-            save_calibration_config(calibration)
-
-            manager = ProjectSettingsManager()
-            if manager.has_project_path():
-                ps = manager.get()
-                ps.cal_a = calibration.a
-                ps.cal_b = calibration.b
-                ps.cal_c = calibration.c
-                manager.save()
+            if calibration_points is None:
+                calibration_points = self._calibration_points_from_table()
+            settings, _ = self._ensure_temporary_spectrum_settings()
+            settings.cal_a = calibration.a
+            settings.cal_b = calibration.b
+            settings.cal_c = calibration.c
+            settings.calibration_points = [
+                {"tof": float(tof), "mz": float(mz)}
+                for tof, mz in calibration_points
+            ]
             self.refresh_current_plot_calibration()
+            return True
         except Exception as exc:
-            logger.warning("Calibration sync failed, configs may be inconsistent", exc_info=True)
+            logger.warning("Calibration session sync failed", exc_info=True)
             QMessageBox.warning(
                 self,
                 "定标同步失败",
-                "定标参数保存失败，全局配置与项目配置可能不一致。\n"
+                "定标参数或定标点无法应用到当前会话。\n"
                 f"错误信息: {exc}\n"
-                "建议手动检查 config/calibration.yaml 与项目配置后重新保存。",
+                "请检查当前会话定标参数后重试。",
+            )
+            return False
+
+    def _persist_project_calibration(
+        self,
+        calibration: Calibration,
+        points: list[tuple[float, float]],
+    ) -> None:
+        from bl03u_masstool.core.project_settings import ProjectSettingsManager
+
+        manager = ProjectSettingsManager()
+        if not manager.has_project_path():
+            raise RuntimeError("当前没有打开项目")
+        settings = manager.snapshot()
+        settings.cal_a = calibration.a
+        settings.cal_b = calibration.b
+        settings.cal_c = calibration.c
+        settings.calibration_points = [
+            {"tof": float(tof), "mz": float(mz)}
+            for tof, mz in points
+        ]
+        settings = manager.update_module_settings("spectrum", settings)
+        if hasattr(self, "project_common_parameters_widget"):
+            self.project_common_parameters_widget.set_project_settings(settings)
+        if hasattr(self, "_sync_project_settings_to_tool_pages"):
+            self._sync_project_settings_to_tool_pages(
+                settings,
+                calibration=calibration,
             )
 
-    def load_image(self, image_path):
-        pixmap = QPixmap(str(resource_path(image_path)))
+    def _install_spectrum_empty_state(self) -> None:
+        placeholder = getattr(self, "label_picture", None)
+        if placeholder is not None:
+            self.graph_layout.removeWidget(placeholder)
+            placeholder.setParent(None)
+            placeholder.deleteLater()
+        self.label_picture = None
 
-        if pixmap.isNull():
-            logger.warning("Failed to load image: %s", image_path)
-        else:
-            # 根据 label_picture 的大小调整图片大小并保持宽高比
-            scaled_pixmap = pixmap.scaled(
-                self.widget_2.size(),
-                aspectRatioMode=QtCore.Qt.AspectRatioMode.KeepAspectRatio,
-                transformMode=QtCore.Qt.TransformationMode.SmoothTransformation
-            )
-            self.label_picture.setPixmap(scaled_pixmap)
-
-    
-    def update_label_picture(self):
-        """更新 label_picture 的图片"""
-        if self.label_picture is None:
-            return
-        target_size = self.label_picture.size()
-        target_size.setWidth(max(1, min(520, int(target_size.width() * 0.42))))
-        target_size.setHeight(max(1, min(170, int(target_size.height() * 0.26))))
-        scaled_pixmap = self.original_pixmap.scaled(
-            target_size,
-            aspectRatioMode=QtCore.Qt.AspectRatioMode.KeepAspectRatio,
-                transformMode=QtCore.Qt.TransformationMode.SmoothTransformation
+        self._spectrum_empty_state = AnalysisEmptyState(
+            title="尚未加载质谱数据",
+            description="请选择单谱或累计谱数据。",
+            action_text="选择数据",
+            parent=self.widget_2,
         )
-        self.label_picture.setPixmap(scaled_pixmap)
+        self._spectrum_empty_state.browse_requested.connect(
+            self._choose_spectrum_data_from_empty_state
+        )
+        self.graph_layout.addWidget(self._spectrum_empty_state)
 
-    def on_widget_2_resize(self, event):
-        """当 widget_2 大小改变时调整 label_picture 的大小"""
-        # 使用 setScaledContents 来自动调整图片大小，而不是手动设置几何形状
-        self.update_label_picture()
+    def _choose_spectrum_data_from_empty_state(self) -> None:
+        if self.tabWidget.currentIndex() == 0:
+            self.choose_single_source()
+        else:
+            self.choose_sum_source()
+
+    def _set_spectrum_empty_message(
+        self,
+        *,
+        title: str = "尚未加载质谱数据",
+        description: str = "请选择单谱或累计谱数据。",
+    ) -> None:
+        empty_state = getattr(self, "_spectrum_empty_state", None)
+        if empty_state is not None:
+            empty_state.set_content(title=title, description=description)
+
+    def _set_spectrum_content_ready(self, ready: bool) -> None:
+        ready = bool(ready)
+        self._spectrum_data_ready = ready
+        empty_state = getattr(self, "_spectrum_empty_state", None)
+        if empty_state is not None:
+            empty_state.setVisible(not ready)
+
+        side_panel = getattr(self, "widget_3", None)
+        splitter = getattr(self, "main_splitter", None)
+        if side_panel is None:
+            return
+        if not ready:
+            if splitter is not None and side_panel.isVisible():
+                sizes = splitter.sizes()
+                if len(sizes) > 1 and sizes[1] > 0:
+                    self._spectrum_side_width = sizes[1]
+            side_panel.hide()
+            return
+
+        side_panel.show()
+        if splitter is not None:
+            total = max(sum(splitter.sizes()), splitter.width(), 1)
+            side_width = max(340, min(int(self._spectrum_side_width), 560))
+            splitter.setSizes([max(1, total - side_width), side_width])
 
     def clear_widgets(self):
         """清除旧的小部件"""
-        if self.label_picture is not None:
-            self.graph_layout.removeWidget(self.label_picture)
-            self.label_picture.setParent(None)
-            self.label_picture.deleteLater()
-            self.label_picture = None
         self.clear_plot_area()
         self.current_plot_x = np.array([], dtype=float)
         self.current_plot_axis_x = np.array([], dtype=float)
@@ -1293,6 +1575,7 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         self.current_plot_title = "质谱图"
         self.plot_x_min = None
         self.plot_x_max = None
+        self._set_spectrum_empty_message()
         self.update_peak_navigation_state()
 
     def clear_plot_area(self):
@@ -1300,18 +1583,22 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         if hasattr(self, "update_timer"):
             self.update_timer.stop()
             self.pending_update = False
+        empty_state = getattr(self, "_spectrum_empty_state", None)
         while self.graph_layout.count():
             item = self.graph_layout.takeAt(0)
             widget = item.widget()
-            if widget:
+            if widget is not None and widget is not empty_state:
                 widget.setParent(None)
                 widget.deleteLater()
+        if empty_state is not None:
+            self.graph_layout.addWidget(empty_state)
         self.p1 = None
         self.p2 = None
         self.p1_axis = None
         self.p2_axis = None
         self.selection_region = None
         self.spectrum_plot = None
+        self._set_spectrum_content_ready(False)
 
     def setup_plots(self, x_data, y_data, title="质谱图"):
         """设置并绘制图表"""
@@ -1342,6 +1629,7 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         plot_theme = get_plot_theme()
         win = GraphicsLayoutWidget()
         win.setBackground(plot_theme.background)
+        self._spectrum_empty_state.hide()
         self.graph_layout.addWidget(win)
         self.p1 = None
         self.p1_axis = None
@@ -1379,11 +1667,14 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         half_width = max(min_half_width, x_range * 0.001)
         region_left = max(self.plot_x_min, peak_center - half_width)
         region_right = min(self.plot_x_max, peak_center + half_width)
-        self.selection_region = LinearRegionItem(
+        self.selection_region = CalibrationLinearRegionItem(
             values=[region_left, region_right],
             bounds=(self.plot_x_min, self.plot_x_max),
             movable=True,  # 允许整体移动
             brush=pg.mkBrush(color=plot_theme.region_brush)
+        )
+        self.selection_region.calibrationDoubleClicked.connect(
+            self.add_calibration_point_from_region_if_active
         )
         self.selection_region.setZValue(20)
         self.p2.addItem(self.selection_region, ignoreBounds=True)
@@ -1400,6 +1691,8 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
             else:
                 self.selection_region.sigRegionChanged.connect(self.update_gaussian_fit)
             self.p1.sigRangeChanged.connect(lambda window, viewRange: self.update_region(viewRange))
+        self._set_spectrum_empty_message()
+        self._set_spectrum_content_ready(True)
         self.update_peak_navigation_state()
 
     def _apply_plot_limits(self, plot, y_min: float, y_max: float, x_range: float) -> None:
@@ -1652,19 +1945,19 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         self._peak_table_dirty = False
         self._peak_table_dirty_requires_confirm = False
         self._published_project_peak_file = path
-        self._peak_table_state_text = f"已批准并激活卡峰集: {Path(path).name}"
+        self._peak_table_state_text = "已保存为当前项目卡峰范围"
         self._refresh_peak_table_project_state()
 
     def _refresh_peak_table_project_state(self) -> None:
         label = getattr(self, "peakProjectStateLabel", None)
         if label is not None:
             label.setText(self._peak_table_state_text)
-        button = getattr(self, "publishProjectPeaksButton", None)
+        button = getattr(self, "saveProjectPeaksButton", None)
         if button is not None:
-            button.setEnabled(self._valid_peak_rows() != [])
-        action = getattr(self, "publishProjectPeaksAction", None)
-        if action is not None:
-            action.setEnabled(self._valid_peak_rows() != [])
+            button.setEnabled(
+                bool(self._valid_peak_rows())
+                and self.project_settings_manager.has_project_path()
+            )
 
     def update_peak_navigation_state(self):
         if not hasattr(self, "previousPeakButton"):
@@ -2091,89 +2384,436 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         df = pd.DataFrame(data)
         return df
 
+    def _on_calibration_table_changed(self, item=None) -> None:
+        if self._updating_calibration_table:
+            return
+        if item is not None and item.row() == self.region.rowCount() - 1:
+            tof_item = self.region.item(item.row(), 0)
+            mz_item = self.region.item(item.row(), 1)
+            tof_text = tof_item.text().strip() if tof_item is not None else ""
+            mz_text = mz_item.text().strip() if mz_item is not None else ""
+            if tof_text and mz_text:
+                self._append_calibration_blank_row()
+        self._set_calibration_candidate(None)
+
+    def _append_calibration_blank_row(self) -> int:
+        self._updating_calibration_table = True
+        try:
+            row = self.region.rowCount()
+            self.region.insertRow(row)
+            self.region.setItem(row, 0, QTableWidgetItem(""))
+            self.region.setItem(row, 1, QTableWidgetItem(""))
+            return row
+        finally:
+            self._updating_calibration_table = False
+
+    def _ensure_calibration_trailing_blank_row(self) -> int:
+        if self.region.rowCount() == 0:
+            return self._append_calibration_blank_row()
+        last_row = self.region.rowCount() - 1
+        texts = []
+        for column in range(2):
+            item = self.region.item(last_row, column)
+            texts.append(item.text().strip() if item is not None else "")
+        if any(texts):
+            return self._append_calibration_blank_row()
+        for column in range(2):
+            if self.region.item(last_row, column) is None:
+                self.region.setItem(last_row, column, QTableWidgetItem(""))
+        return last_row
+
+    def _set_calibration_candidate(self, candidate: dict | None) -> None:
+        self._calibration_candidate = candidate
+        self._refresh_calibration_candidate_actions()
+
+    def _refresh_calibration_candidate_actions(self) -> None:
+        candidate_ready = self._calibration_candidate is not None
+        custom_scope = (
+            getattr(self, "spectrum_source_scope", "custom") == "custom"
+        )
+        has_project = False
+        try:
+            from bl03u_masstool.core.project_settings import ProjectSettingsManager
+
+            has_project = ProjectSettingsManager().has_project_path()
+        except Exception:
+            pass
+        if hasattr(self, "calibrationApplyMenuButton"):
+            self.calibrationApplyMenuButton.setEnabled(candidate_ready)
+        if hasattr(self, "applyCalibrationToTemporaryAction"):
+            self.applyCalibrationToTemporaryAction.setEnabled(
+                candidate_ready and custom_scope
+            )
+        if hasattr(self, "applyCalibrationToProjectAction"):
+            self.applyCalibrationToProjectAction.setEnabled(
+                candidate_ready and has_project
+            )
+
+    def add_calibration_row(self) -> None:
+        """Insert an editable row before the trailing spreadsheet row."""
+        trailing_row = self._ensure_calibration_trailing_blank_row()
+        current_row = self.region.currentRow()
+        row = (
+            current_row + 1
+            if 0 <= current_row < trailing_row
+            else trailing_row
+        )
+        self._updating_calibration_table = True
+        try:
+            self.region.insertRow(row)
+            self.region.setItem(row, 0, QTableWidgetItem(""))
+            self.region.setItem(row, 1, QTableWidgetItem(""))
+        finally:
+            self._updating_calibration_table = False
+        self.region.setCurrentCell(row, 0)
+        self.region.scrollToItem(self.region.item(row, 0))
+        self._set_calibration_candidate(None)
+
+    def show_calibration_context_menu(self, position) -> None:
+        row = self.region.rowAt(position.y())
+        if row >= 0 and not self.region.selectionModel().isRowSelected(
+            row,
+            QtCore.QModelIndex(),
+        ):
+            self.region.selectRow(row)
+        menu = QMenu(self.region)
+        insert_action = menu.addAction("插入空白行")
+        from_region_action = menu.addAction("从当前框选添加")
+        paste_action = menu.addAction("粘贴定标点")
+        menu.addSeparator()
+        delete_action = menu.addAction("删除选中")
+        delete_action.setEnabled(bool(self.region.selectionModel().selectedRows()))
+        action = menu.exec(self.region.viewport().mapToGlobal(position))
+        if action == insert_action:
+            self.add_calibration_row()
+        elif action == from_region_action:
+            self.add_calibration_point_from_region()
+        elif action == paste_action:
+            self.paste_calibration_points()
+        elif action == delete_action:
+            self.delete_selected_calibration_points()
+
+    @staticmethod
+    def _parse_calibration_clipboard(text: str) -> list[tuple[float, float]]:
+        points: list[tuple[float, float]] = []
+        for line_number, raw_line in enumerate(text.splitlines(), start=1):
+            line = raw_line.strip()
+            if not line:
+                continue
+            if "\t" in line:
+                fields = [field.strip() for field in line.split("\t")]
+            elif "," in line:
+                fields = [field.strip() for field in line.split(",")]
+            else:
+                fields = line.split()
+            fields = [field for field in fields if field]
+            if len(fields) != 2:
+                raise ValueError(
+                    f"剪贴板第 {line_number} 行必须恰好包含 Peak/TOF 和 M/Z 两列。"
+                )
+            try:
+                tof, mz = (float(fields[0]), float(fields[1]))
+            except ValueError as exc:
+                raise ValueError(f"剪贴板第 {line_number} 行包含无效数字。") from exc
+            if not (np.isfinite(tof) and np.isfinite(mz) and tof > 0 and mz > 0):
+                raise ValueError(
+                    f"剪贴板第 {line_number} 行必须包含大于 0 的有限数值。"
+                )
+            points.append((tof, mz))
+        if not points:
+            raise ValueError("剪贴板中没有可用的两列定标数据。")
+        return points
+
+    def paste_calibration_points(self) -> None:
+        try:
+            points = self._parse_calibration_clipboard(
+                QtWidgets.QApplication.clipboard().text()
+            )
+        except ValueError as exc:
+            QMessageBox.warning(self, "粘贴定标点", str(exc))
+            return
+
+        trailing_row = self._ensure_calibration_trailing_blank_row()
+        start_row = self.region.currentRow()
+        if start_row < 0:
+            start_row = trailing_row
+        required_rows = start_row + len(points) + 1
+        self._updating_calibration_table = True
+        self.region.setUpdatesEnabled(False)
+        try:
+            while self.region.rowCount() < required_rows:
+                row = self.region.rowCount()
+                self.region.insertRow(row)
+                self.region.setItem(row, 0, QTableWidgetItem(""))
+                self.region.setItem(row, 1, QTableWidgetItem(""))
+            for offset, (tof, mz) in enumerate(points):
+                row = start_row + offset
+                self.region.setItem(row, 0, QTableWidgetItem(f"{tof:g}"))
+                self.region.setItem(row, 1, QTableWidgetItem(f"{mz:g}"))
+        finally:
+            self.region.setUpdatesEnabled(True)
+            self._updating_calibration_table = False
+        self._ensure_calibration_trailing_blank_row()
+        final_row = start_row + len(points) - 1
+        self.region.selectRow(final_row)
+        self.region.scrollToItem(self.region.item(final_row, 0))
+        self._set_calibration_candidate(None)
+        self.statusbar.showMessage(f"已粘贴 {len(points)} 个定标点", 3000)
+
+    def _insert_calibration_point(self, tof: float, mz: float) -> int:
+        entries = self._calibration_points_from_table()
+        entries.append((float(tof), float(mz)))
+        entries.sort(key=lambda item: (item[0], item[1]))
+        self._set_calibration_points_table(entries)
+        target_row = next(
+            (
+                row
+                for row, values in enumerate(entries)
+                if np.isclose(values[0], tof) and np.isclose(values[1], mz)
+            ),
+            len(entries) - 1,
+        )
+        self.region.selectRow(target_row)
+        self.region.scrollToItem(self.region.item(target_row, 0))
+        self._set_calibration_candidate(None)
+        return target_row
+
+    def add_calibration_point_from_region_if_active(self) -> None:
+        if self.peakResult.currentWidget() is self.tab:
+            self.add_calibration_point_from_region()
+
+    def add_calibration_point_from_region(self) -> None:
+        """Add the strongest TOF peak in the current selection as a reference."""
+        if (
+            self.selection_region is None
+            or self.current_plot_x.size == 0
+            or self.current_plot_y.size == 0
+        ):
+            QMessageBox.information(self, "添加定标点", "请先加载谱图并框选标准峰。")
+            return
+        try:
+            axis_left, axis_right = self._clamp_region_values(
+                *self.selection_region.getRegion()
+            )
+            left_tof, right_tof = self._axis_range_to_tof(axis_left, axis_right)
+            start = int(np.searchsorted(self.current_plot_x, left_tof, side="left"))
+            end = int(np.searchsorted(self.current_plot_x, right_tof, side="right"))
+            start = max(0, min(start, self.current_plot_y.size))
+            end = max(start, min(end, self.current_plot_y.size))
+            if end <= start:
+                raise ValueError("当前框选范围内没有有效数据")
+            segment = self.current_plot_y[start:end]
+            finite = np.isfinite(segment)
+            if not np.any(finite):
+                raise ValueError("当前框选范围内没有有效峰")
+            finite_indices = np.flatnonzero(finite)
+            local_index = int(finite_indices[np.argmax(segment[finite])])
+            peak_tof = float(self.current_plot_x[start + local_index])
+        except Exception as exc:
+            QMessageBox.warning(self, "添加定标点", str(exc))
+            return
+
+        mz_text, accepted = QtWidgets.QInputDialog.getText(
+            self,
+            "添加定标点",
+            f"检测到 Peak/TOF = {peak_tof:.8g}\n请输入该标准峰的已知 M/Z：",
+        )
+        if not accepted:
+            return
+        try:
+            mz = float(mz_text.strip())
+            if not np.isfinite(mz) or mz <= 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            QMessageBox.warning(self, "添加定标点", "M/Z 必须是大于 0 的有效数字。")
+            return
+        try:
+            self._insert_calibration_point(peak_tof, mz)
+        except ValueError as exc:
+            QMessageBox.warning(self, "添加定标点", str(exc))
+
+    def delete_selected_calibration_points(self) -> None:
+        selected_rows = {
+            index.row()
+            for index in self.region.selectionModel().selectedRows()
+            if 0 <= index.row() < self.region.rowCount()
+        }
+        current_row = self.region.currentRow()
+        if not selected_rows and 0 <= current_row < self.region.rowCount():
+            selected_rows.add(current_row)
+        rows = {
+            row
+            for row in selected_rows
+            if any(
+                (
+                    self.region.item(row, column).text().strip()
+                    if self.region.item(row, column) is not None
+                    else ""
+                )
+                for column in range(2)
+            )
+        }
+        if not rows:
+            return
+        count = len(rows)
+        reply = QMessageBox.question(
+            self,
+            "删除定标点",
+            f"确定删除选中的 {count} 个定标点吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self._updating_calibration_table = True
+        try:
+            for row in sorted(rows, reverse=True):
+                self.region.removeRow(row)
+        finally:
+            self._updating_calibration_table = False
+        self._ensure_calibration_trailing_blank_row()
+        self._set_calibration_candidate(None)
+        self.statusbar.showMessage(f"已删除 {count} 个定标点", 3000)
+
+    def _calibration_points_from_table(
+        self,
+        *,
+        require_minimum: bool = False,
+    ) -> list[tuple[float, float]]:
+        points: list[tuple[float, float]] = []
+        for row in range(self.region.rowCount()):
+            tof_item = self.region.item(row, 0)
+            mz_item = self.region.item(row, 1)
+            tof_text = tof_item.text().strip() if tof_item is not None else ""
+            mz_text = mz_item.text().strip() if mz_item is not None else ""
+            if not tof_text and not mz_text:
+                continue
+            if not tof_text or not mz_text:
+                raise ValueError(f"第 {row + 1} 行必须同时填写 Peak/TOF 和 M/Z。")
+            try:
+                tof = float(tof_text)
+                mz = float(mz_text)
+            except ValueError as exc:
+                raise ValueError(f"第 {row + 1} 行包含无效数字。") from exc
+            if not (np.isfinite(tof) and np.isfinite(mz) and tof > 0 and mz > 0):
+                raise ValueError(f"第 {row + 1} 行必须填写大于 0 的有限数值。")
+            points.append((tof, mz))
+
+        tof_values = [tof for tof, _ in points]
+        if len(tof_values) != len(set(tof_values)):
+            raise ValueError("Peak/TOF 不能重复，请检查定标点。")
+        if require_minimum and len(points) < 3:
+            raise ValueError("二次拟合至少需要 3 个有效定标点。")
+        return points
+
     # 读取表格2数据
     def read_table_data_1(self):
-        table = self.findChild(QTableWidget, "region")
-        column1_data = []
-        column2_data = []
-
-        for row in range(table.rowCount()):
-            item1 = table.item(row, 0)  # 第一列数据
-            item2 = table.item(row, 1)  # 第二列数据
-
-            if item1 is not None and item1.text():
-                column1_data.append(item1.text())
-
-            if item2 is not None and item2.text():
-                column2_data.append(item2.text())
-
-        df = pd.DataFrame({
-            'time': column1_data,
-            'mass': column2_data
-        })
-        return df
+        points = self._calibration_points_from_table()
+        return pd.DataFrame(points, columns=["time", "mass"])
 
         # print(df)
 
     def calculate(self):
-        """计算飞行时间质谱定标参数 A、B、C"""
+        """Fit a calibration candidate without changing any saved parameters."""
         try:
-            # 读取定标数据
-            df = self.read_table_data_1()
-            
-            # 确保有至少3个点
-            if len(df) < 3:
-                QMessageBox.warning(self, "警告", "至少需要3个定标点才能进行二次拟合！")
-                return
-            
-            # 准备数据点列表 [(tof, mz), ...]
-            points = []
-            for _, row in df.iterrows():
-                try:
-                    tof = float(row['time'])
-                    mz = float(row['mass'])
-                    points.append((tof, mz))
-                except (ValueError, TypeError):
-                    continue
-            
-            if len(points) < 3:
-                QMessageBox.warning(self, "警告", "有效的定标点不足3个，请检查数据！")
-                return
-            
-            # 使用核心库中的拟合函数
-            from bl03u_masstool.core.calibration import fit_quadratic_calibration, score_quadratic_calibration
+            points = self._calibration_points_from_table(require_minimum=True)
+            from bl03u_masstool.core.calibration import (
+                fit_quadratic_calibration,
+                score_quadratic_calibration,
+            )
+
             calibration = fit_quadratic_calibration(points)
             r2 = score_quadratic_calibration(points, calibration)
-            
-            # 更新界面显示
-            self.lineEdit_4.setText(format(calibration.a, ".17g"))
-            self.lineEdit_5.setText(format(calibration.b, ".17g"))
-            self.lineEdit_6.setText(format(calibration.c, ".17g"))
-            
-            # 显示结果
+
             result_text = (
                 f"m/z = {calibration.c:.8g} + {calibration.b:.8g}×TOF + {calibration.a:.8g}×TOF²\n"
-                f"R² = {r2:.6f}"
+                f"R² = {r2:.6f} · 尚未应用"
             )
             self.label_4.setText(result_text)
-            
-            # 保存到配置文件
-            try:
-                from bl03u_masstool.core.config import save_calibration_config, save_calibration_points
-                save_calibration_config(calibration)
-                save_calibration_points(points)
-            except Exception:
-                logger.exception("Failed to save calibration configuration")
-
-            # 同步到 ProjectSettingsManager，防止切换页面后参数被覆盖
-            self._sync_calibration_to_project_settings()
-            
-            # 显示成功消息
-            QMessageBox.information(self, "成功", f"定标完成！\nR² = {r2:.6f}")
-            
+            self._set_calibration_candidate(
+                {
+                    "calibration": calibration,
+                    "points": list(points),
+                    "r2": float(r2),
+                }
+            )
+            self.statusbar.showMessage(
+                f"定标拟合完成（R²={r2:.6f}），请选择“应用结果”",
+                6000,
+            )
+        except ValueError as exc:
+            self._set_calibration_candidate(None)
+            QMessageBox.warning(self, "定标点无效", str(exc))
         except Exception as e:
             logger.exception("Failed to calculate calibration parameters")
             QMessageBox.critical(self, "错误", f"计算定标参数时发生错误：{str(e)}")
+
+    def _calibration_candidate_values(
+        self,
+    ) -> tuple[Calibration, list[tuple[float, float]], float] | None:
+        candidate = self._calibration_candidate
+        if candidate is None:
+            QMessageBox.information(self, "应用定标结果", "请先计算定标。")
+            return None
+        return (
+            candidate["calibration"],
+            list(candidate["points"]),
+            float(candidate["r2"]),
+        )
+
+    def _mark_calibration_candidate_applied(self, target: str, r2: float) -> None:
+        calibration = self._calibration_candidate["calibration"]
+        self.label_4.setText(
+            f"m/z = {calibration.c:.8g} + {calibration.b:.8g}×TOF + "
+            f"{calibration.a:.8g}×TOF²\nR² = {r2:.6f} · {target}"
+        )
+        self.statusbar.showMessage(f"定标结果已{target}", 5000)
+
+    def apply_calibration_candidate_to_temporary(self) -> None:
+        values = self._calibration_candidate_values()
+        if values is None:
+            return
+        if getattr(self, "spectrum_source_scope", "custom") != "custom":
+            QMessageBox.information(
+                self,
+                "应用定标结果",
+                "请先切换到“临时数据”，再应用到当前临时分析。",
+            )
+            return
+        calibration, points, r2 = values
+        settings, _ = self._ensure_temporary_spectrum_settings()
+        settings.cal_a = calibration.a
+        settings.cal_b = calibration.b
+        settings.cal_c = calibration.c
+        settings.calibration_points = [
+            {"tof": float(tof), "mz": float(mz)}
+            for tof, mz in points
+        ]
+        self._activate_spectrum_calibration(calibration, points)
+        self._mark_calibration_candidate_applied("应用到临时分析", r2)
+
+    def apply_calibration_candidate_to_project(self) -> None:
+        values = self._calibration_candidate_values()
+        if values is None:
+            return
+        calibration, points, r2 = values
+        try:
+            self._persist_project_calibration(calibration, points)
+        except Exception as exc:
+            logger.exception("Failed to save calibration candidate to project")
+            QMessageBox.warning(self, "更新项目定标失败", str(exc))
+            return
+        if getattr(self, "spectrum_source_scope", "custom") == "custom":
+            settings, _ = self._ensure_temporary_spectrum_settings()
+            settings.cal_a = calibration.a
+            settings.cal_b = calibration.b
+            settings.cal_c = calibration.c
+            settings.calibration_points = [
+                {"tof": float(tof), "mz": float(mz)}
+                for tof, mz in points
+            ]
+        self._activate_spectrum_calibration(calibration, points)
+        self._mark_calibration_candidate_applied("更新到项目参数", r2)
 
     def transfer(self):
         time = self.findChild(QLineEdit, "lineEdit_2")
@@ -2344,10 +2984,10 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
     @staticmethod
     def _peak_range_change_summary(candidate: pd.DataFrame, current_path: str) -> str:
         if not current_path:
-            return f"首次批准：将创建包含 {len(candidate)} 个峰的新卡峰集。"
+            return f"首次保存：当前表格包含 {len(candidate)} 个峰。"
         path = Path(current_path).expanduser()
         if path.suffix.lower() != ".csv" or not path.is_file():
-            return "当前正式卡峰集不是可直接比较的 CSV；批准后仍会保留原版本。"
+            return "当前项目卡峰范围无法直接比较；软件仍会保留原有历史快照。"
         try:
             current = pd.read_csv(path)
             required = {"label", "mz", "left_bound", "right_bound"}
@@ -2377,14 +3017,14 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
                 for key in old.keys() & new.keys()
             )
             return (
-                f"相对当前正式版本：新增 {added}，删除 {removed}，"
+                f"相对当前项目卡峰范围：新增 {added}，删除 {removed}，"
                 f"边界修改 {changed}，未变 {unchanged}。"
             )
         except (OSError, TypeError, ValueError):
-            return "无法自动比较当前正式版本；批准后仍会保留原版本。"
+            return "无法自动比较当前项目卡峰范围；软件仍会保留原有历史快照。"
 
-    def publish_peak_ranges_to_project(self):
-        """Publish current curated ranges as the project-owned manual peak file."""
+    def save_peak_ranges_to_project(self):
+        """Save the current table as the project's active peak ranges."""
         try:
             df = self._peak_ranges_export_dataframe()
             if df.empty:
@@ -2397,7 +3037,7 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
                 return
 
             source = self._validated_current_spectrum_source_manifest()
-            ps = manager.get()
+            ps = manager.snapshot()
             change_summary = self._peak_range_change_summary(
                 df,
                 ps.manual_peak_file,
@@ -2405,12 +3045,12 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
 
             reply = QMessageBox.question(
                 self,
-                "批准为新卡峰集",
-                f"候选状态：{self._peak_table_state_text}\n"
+                "保存卡峰范围",
+                f"{self._peak_table_state_text}\n"
                 f"{change_summary}\n\n"
-                "当前候选表将保存为一个新的不可变卡峰集，并激活为项目正式版本。\n"
-                "已有卡峰集不会被覆盖；后续温度扫描、PIE 和摩尔分数分析将使用新版本。\n\n"
-                "是否批准并激活？",
+                "保存后，温度扫描、PIE 和摩尔分数分析将使用这份卡峰范围。\n"
+                "历史快照由软件自动保留。\n\n"
+                "是否保存？",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
             )
@@ -2423,7 +3063,7 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
                 project_root(ps),
                 content=csv_content,
                 extension=".csv",
-                label=f"工作台批准 · {len(df)} 个峰",
+                label=f"工作台保存 · {len(df)} 个峰",
                 origin=self._peak_candidate_origin,
                 manifest=self._peak_ranges_manifest_data(Path("pending.csv"), source),
                 metadata={
@@ -2437,95 +3077,162 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
             ps.active_peak_set_id = peak_set.peak_set_id
             ps.manual_peak_file = str(output_path)
             ps.temp_peak_source = "manual"
-            manager.set(ps)
-            manager.save()
-            saved = manager.reload()
+            saved = manager.replace_and_save(ps)
             if Path(saved.manual_peak_file).expanduser() != output_path:
                 raise RuntimeError(
                     "项目配置保存后没有指向刚写入的项目卡峰文件，"
                     f"当前为：{saved.manual_peak_file}"
                 )
-            manager.set(saved)
             self._sync_project_manual_peak_file_to_ui(saved)
             self._mark_peak_table_project_saved(str(output_path))
             self.statusbar.showMessage(
-                f"已批准并激活新卡峰集：{peak_set.label}",
+                f"已保存当前项目卡峰范围：{len(df)} 个峰",
                 5000,
             )
-            QMessageBox.information(
-                self,
-                "已批准",
-                f"已创建不可变卡峰集：\n{peak_set.peak_set_id}\n\n{output_path}",
-            )
         except (FileNotFoundError, ValueError) as e:
-            logger.info("Project peak ranges were not published: %s", e)
+            logger.info("Project peak ranges were not saved: %s", e)
             QMessageBox.warning(self, "无法保存项目卡峰范围", str(e))
         except Exception as e:
-            logger.exception("Failed to publish peak ranges to project")
+            logger.exception("Failed to save peak ranges to project")
             QMessageBox.critical(self, "错误", f"保存项目卡峰范围失败：{e}")
 
-    def open_project_peak_ranges(self):
-        """Load the project-owned manual peak file back into the workbench."""
+    def open_project_peak_ranges(
+        self,
+        *,
+        settings=None,
+        prompt_before_replace: bool = True,
+        show_feedback: bool = True,
+    ) -> bool:
+        """Load the project's current peak ranges into the workbench."""
         try:
-            ps = self.project_settings_manager.get()
+            ps = settings or self.project_settings_manager.snapshot()
             if not ps.manual_peak_file:
-                QMessageBox.warning(self, "提示", "项目管理中尚未登记手动卡峰文件。")
-                return
+                self._mark_project_without_peak_ranges()
+                if show_feedback:
+                    QMessageBox.warning(self, "提示", "当前项目尚未保存卡峰范围。")
+                return False
             peak_file = resolve_active_peak_file(
                 project_root(ps),
                 active_peak_set_id=ps.active_peak_set_id,
                 configured_peak_file=ps.manual_peak_file,
             )
             if peak_file is None:
-                QMessageBox.warning(self, "提示", "项目中尚无已批准卡峰集。")
-                return
-            try:
-                self._validate_peak_ranges_artifact(peak_file)
-            except Exception as exc:
-                QMessageBox.warning(
-                    self,
-                    "项目卡峰不完整",
-                    "项目管理中登记的手动卡峰文件不是完整的工作台项目卡峰结果。\n\n"
-                    f"{exc}\n\n"
-                    "请先打开对应原始谱图，在质谱工作台中确认卡峰范围后重新点击“保存到项目”。",
-                )
-                return
+                self._mark_project_without_peak_ranges()
+                if show_feedback:
+                    QMessageBox.warning(self, "提示", "当前项目尚未保存卡峰范围。")
+                return False
 
-            if self._peak_table_dirty and self._peak_table_dirty_requires_confirm and self._valid_peak_rows():
+            if (
+                prompt_before_replace
+                and self._peak_table_dirty
+                and self._peak_table_dirty_requires_confirm
+                and self._valid_peak_rows()
+            ):
                 reply = QMessageBox.question(
                     self,
-                    "打开项目卡峰",
-                    "当前工作台有未保存到项目的修改。\n打开项目卡峰会替换当前候选表。\n\n是否继续？",
+                    "加载项目卡峰范围",
+                    "当前工作台有尚未保存的卡峰修改。\n"
+                    "加载项目卡峰范围会替换当前表格。\n\n是否继续？",
                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                     QMessageBox.StandardButton.No,
                 )
                 if reply != QMessageBox.StandardButton.Yes:
-                    return
+                    return False
 
+            peak_ranges = load_peak_ranges(
+                peak_file,
+                calibration=ps.to_calibration(),
+            )
+            if not peak_ranges:
+                raise ValueError("项目卡峰文件中没有有效记录。")
             manifest = self._load_peak_ranges_manifest(peak_file)
-            source_loaded, source_message = self._restore_spectrum_from_peak_manifest(manifest)
-            ranges = pd.read_csv(peak_file).to_dict("records")
+            self.set_spectrum_source_scope("project", apply_project=False)
+            source_loaded = False
+            source_message = "当前卡峰范围未关联谱图。"
+            if isinstance(manifest.get("source"), dict):
+                source_loaded, source_message = self._restore_spectrum_from_peak_manifest(
+                    manifest
+                )
+            ranges = [
+                {
+                    "label": peak_range.label,
+                    "peak_index": peak_range.peak_index,
+                    "mz": peak_range.mz,
+                    "intensity": 0.0,
+                    "left_bound": peak_range.left_bound,
+                    "right_bound": peak_range.right_bound,
+                }
+                for peak_range in peak_ranges
+            ]
             self._load_peak_records_into_table(ranges)
             self.update_plot()
             self.update_peak_navigation_state()
             self._mark_peak_table_project_saved(str(peak_file))
             if self._valid_peak_rows():
                 self._select_peak_row(self._valid_peak_rows()[0])
+            if not source_loaded and self.current_plot_x.size == 0:
+                self._set_spectrum_empty_message(
+                    title="项目卡峰范围已加载",
+                    description="请加载谱图后查看和编辑卡峰范围。",
+                )
+                self._set_spectrum_content_ready(False)
 
-            if source_loaded:
+            if show_feedback and source_loaded:
                 if source_message:
                     self.statusbar.showMessage(source_message, 6000)
                 else:
-                    self.statusbar.showMessage("已打开项目卡峰范围并恢复关联谱图", 4000)
-            else:
+                    self.statusbar.showMessage("已加载项目卡峰范围并恢复关联谱图", 4000)
+            elif show_feedback:
                 QMessageBox.warning(
                     self,
                     "谱图未恢复",
-                    f"项目卡峰范围已载入，但未能恢复关联谱图。\n{source_message}",
+                    f"项目卡峰范围已加载，但没有恢复关联谱图。\n{source_message}",
                 )
+            return True
         except Exception as e:
             logger.exception("Failed to open project peak ranges")
-            QMessageBox.critical(self, "错误", f"打开项目卡峰范围失败：{e}")
+            if show_feedback:
+                QMessageBox.critical(self, "错误", f"加载项目卡峰范围失败：{e}")
+            elif hasattr(self, "statusbar"):
+                self.statusbar.showMessage(f"项目卡峰范围自动加载失败：{e}", 8000)
+            return False
+
+    def _mark_project_without_peak_ranges(self) -> None:
+        if not self._peak_table_dirty and self._published_project_peak_file:
+            self._load_peak_records_into_table([])
+            self.update_plot()
+            self.update_peak_navigation_state()
+        self._published_project_peak_file = ""
+        if self._peak_table_dirty:
+            self._peak_table_state_text = (
+                "当前项目尚无卡峰范围；工作台修改尚未保存"
+            )
+        else:
+            self._peak_table_state_text = "当前项目尚无已保存卡峰范围"
+        if self.current_plot_x.size == 0:
+            self._set_spectrum_empty_message()
+            self._set_spectrum_content_ready(False)
+        self._refresh_peak_table_project_state()
+
+    def detach_project_peak_ranges(self) -> None:
+        """Detach saved project ranges when leaving a project."""
+        if self._peak_table_dirty:
+            self._published_project_peak_file = ""
+            self._peak_table_state_text = "当前卡峰范围为临时修改，尚未保存到项目"
+            self._refresh_peak_table_project_state()
+            return
+        if self._published_project_peak_file:
+            self._load_peak_records_into_table([])
+            self.update_plot()
+            self.update_peak_navigation_state()
+        self._published_project_peak_file = ""
+        self._peak_table_dirty = False
+        self._peak_table_dirty_requires_confirm = False
+        self._peak_table_state_text = "当前卡峰范围尚未保存到项目"
+        if self.current_plot_x.size == 0:
+            self._set_spectrum_empty_message()
+            self._set_spectrum_content_ready(False)
+        self._refresh_peak_table_project_state()
 
     def _load_peak_ranges_manifest(self, peak_file: Path) -> dict:
         manifest_path = self._manifest_path_for_peak_file(peak_file)
@@ -2617,8 +3324,6 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
             self._invalidate_untraceable_project_curves(ps)
         if hasattr(self, "mole_fraction_page"):
             self.mole_fraction_page.set_project_settings(ps)
-        if hasattr(self, "refresh_project_lifecycle"):
-            self.refresh_project_lifecycle(ps)
         if hasattr(self, "refresh_project_datasource_page"):
             self.refresh_project_datasource_page(ps)
 
@@ -2667,8 +3372,8 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
             if self._peak_table_dirty and self._peak_table_dirty_requires_confirm and self._valid_peak_rows():
                 reply = QMessageBox.question(
                     self,
-                    "替换当前候选峰",
-                    "自动寻峰会替换当前工作台候选表，但不会覆盖项目卡峰范围。\n"
+                    "替换当前卡峰范围",
+                    "自动寻峰会替换当前工作台表格，但不会覆盖项目卡峰范围。\n"
                     "未保存到项目的手动修改会从当前表格中消失。\n\n是否继续？",
                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                     QMessageBox.StandardButton.No,
@@ -2689,12 +3394,12 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
             # 表格是峰标注的单一数据源，避免重复叠加旧标注。
             self.update_plot()
             self._mark_peak_table_dirty(
-                "自动寻峰候选峰，尚未批准",
+                "自动寻峰结果尚未保存到项目",
                 require_confirm=False,
                 candidate_origin="workbench_auto",
             )
             mode = self._peak_detection_preset_label()
-            self.statusbar.showMessage(f"{mode} 自动寻峰完成：{len(peaks)} 个候选峰", 4000)
+            self.statusbar.showMessage(f"{mode} 自动寻峰完成：{len(peaks)} 个峰", 4000)
 
         except Exception as e:
             QMessageBox.warning(self, 'Error', f'自动寻峰失败: {str(e)}')
@@ -2705,10 +3410,10 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
 
             manager = ProjectSettingsManager()
             if manager.has_project_path():
-                return manager.get().to_peak_detection_config()
+                return manager.snapshot().to_peak_detection_config()
         except Exception:
             pass
-        return load_peak_detection_config()
+        return load_factory_project_settings().to_peak_detection_config()
 
     def _peak_detection_preset_key(self) -> str:
         combo = getattr(self, "peakDetectionPreset", None)
@@ -2821,12 +3526,17 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
     def on_tab_changed(self):
         """选项卡切换事件处理"""
         # 检查当前选项卡是否为"质谱定标"
-        if self.peakResult.tabText(self.peakResult.currentIndex()) == "质谱定标":
+        calibration_tab_active = (
+            self.peakResult.tabText(self.peakResult.currentIndex()) == "质谱定标"
+        )
+        if calibration_tab_active:
             self.label_4.setVisible(True)  # 显示文本框
             self.pushButton_3.setVisible(True)
         else:
             self.label_4.setVisible(False)  # 隐藏文本框
             self.pushButton_3.setVisible(False)
+        if hasattr(self, "calibrationApplyMenuButton"):
+            self.calibrationApplyMenuButton.setVisible(calibration_tab_active)
 
     def show_peak_context_menu(self, position):
         """显示峰值表格的上下文菜单"""
@@ -3030,7 +3740,7 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
             if peak_left: peak_left.setText("")
             if peak_right: peak_right.setText("")
             self.update_peak_navigation_state()
-            self._mark_peak_table_dirty("当前候选峰表已清空，尚未保存到项目")
+            self._mark_peak_table_dirty("当前卡峰范围已清空，尚未保存到项目")
             
             QMessageBox.information(self, "成功", "峰值数据已清除")
             

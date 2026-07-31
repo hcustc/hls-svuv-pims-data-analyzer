@@ -37,7 +37,7 @@ classifiers = [
 
 [project.optional-dependencies]
 dev = [
-    "httpx",
+    "httpx2",
     "pyinstaller",
     "pytest",
 ]

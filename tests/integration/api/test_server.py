@@ -331,7 +331,12 @@ def test_pie_start_job_passes_peak_detection_config(tmp_path, monkeypatch):
     monkeypatch.setattr(
         server,
         "load_normalization_settings",
-        lambda: SimpleNamespace(pie_photon_mode="first", light_source="io", mass_discrimination=1.0),
+        lambda: SimpleNamespace(
+            pie_photon_mode="first",
+            pie_time_normalize=True,
+            light_source="io",
+            mass_discrimination=1.0,
+        ),
     )
     monkeypatch.setattr(server, "analyze_pie_folder", fake_analyze_pie_folder)
     monkeypatch.setattr(server, "build_pie_curves", lambda df: {})
@@ -339,7 +344,10 @@ def test_pie_start_job_passes_peak_detection_config(tmp_path, monkeypatch):
     monkeypatch.setattr(server, "_pie_artifacts", lambda **kwargs: ({}, {}))
 
     job_id = "peak-config-test"
-    payload = server.PieStartPayload(folder=str(tmp_path))
+    payload = server.PieStartPayload(
+        folder=str(tmp_path),
+        normalize_by_time=False,
+    )
     try:
         with server.JOBS_LOCK:
             server.JOBS[job_id] = server.PieJob(id=job_id)
@@ -360,3 +368,36 @@ def test_pie_start_job_passes_peak_detection_config(tmp_path, monkeypatch):
     assert captured["vote_threshold"] == 0.75
     assert captured["min_intensity_for_single_vote"] == 8.0
     assert captured["mz_tolerance"] == 0.33
+    assert captured["normalize_by_time"] is False
+
+
+def test_pie_summary_returns_time_scaling_and_isotope_qc_diagnostics():
+    analysis = pd.DataFrame(
+        {
+            "energy": [9.0, 10.0],
+            "file_count": [1, 1],
+            "time_normalized": [True, True],
+        }
+    )
+    analysis.attrs["segment_scaling_diagnostics"] = [
+        {"segment": 1, "factor": 0.32, "qc_status": "pass"}
+    ]
+    analysis.attrs["segment_scaling_policy"] = {
+        "strategy": "shared_robust_log_median"
+    }
+    analysis.attrs["isotope_qc"] = [
+        {"light_mz": 127, "heavy_mz": 129, "status": "fail"}
+    ]
+    analysis.attrs["isotope_qc_status"] = "fail"
+
+    summary = server._pie_summary(analysis, {})
+
+    assert summary["normalize_by_time"] is True
+    assert summary["segment_scaling_diagnostics"][0]["factor"] == pytest.approx(
+        0.32
+    )
+    assert (
+        summary["segment_scaling_policy"]["strategy"]
+        == "shared_robust_log_median"
+    )
+    assert summary["isotope_qc_status"] == "fail"

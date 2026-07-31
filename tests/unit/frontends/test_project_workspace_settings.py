@@ -18,9 +18,9 @@ except ImportError as e:
 
 pytestmark = pytest.mark.gui
 
-from bl03u_masstool.core.config import PeakDetectionConfig
 from bl03u_masstool.core.project_settings import ProjectSettings
 from bl03u_masstool.core.project_settings import ProjectSettingsManager
+from bl03u_masstool.core.project_settings import load_factory_project_settings
 from bl03u_masstool.core.project_settings import load_project_settings
 from bl03u_masstool.core.project_settings import save_project_settings
 from bl03u_masstool.core.project_lifecycle import project_root
@@ -30,10 +30,14 @@ from bl03u_masstool.core.peak_sets import (
     list_peak_sets,
     verify_peak_set,
 )
+from bl03u_masstool.frontends.pyqt_app.common.widgets import AnalysisEmptyState
 from bl03u_masstool.frontends.pyqt_app.normalization.widget import FunctionDefaultsWidget
 from bl03u_masstool.frontends.pyqt_app.spectrum.workbench import MainWindow
 from bl03u_masstool.frontends.pyqt_app.temporary_analysis_settings import (
+    ANALYSIS_PARAMETER_FIELDS,
+    AnalysisSettingsDialog,
     TemporaryAnalysisSettingsDialog,
+    TemporarySharedParametersDialog,
 )
 
 
@@ -57,8 +61,6 @@ def _wait_for_project_materialization(qapp, window: MainWindow, timeout_ms: int 
 @pytest.fixture(autouse=True)
 def isolated_project_settings(tmp_path, monkeypatch):
     import bl03u_masstool.core.config as core_config
-    import bl03u_masstool.frontends.pyqt_app.normalization.widget as normalization_widget
-    import bl03u_masstool.frontends.pyqt_app.spectrum.workspace_pages as workspace_pages
 
     config_dir = tmp_path / "runtime_config"
     config_dir.mkdir()
@@ -71,9 +73,6 @@ def isolated_project_settings(tmp_path, monkeypatch):
 
     monkeypatch.setattr(core_config, "save_calibration_config", fake_save_calibration_config)
     monkeypatch.setattr(core_config, "save_peak_detection_config", fake_save_peak_detection_config)
-    monkeypatch.setattr(normalization_widget, "save_calibration_config", fake_save_calibration_config)
-    monkeypatch.setattr(normalization_widget, "save_peak_detection_config", fake_save_peak_detection_config)
-    monkeypatch.setattr(workspace_pages, "save_peak_detection_config", fake_save_peak_detection_config)
 
     manager = ProjectSettingsManager()
     manager.set_project_path(tmp_path / "active_project")
@@ -234,11 +233,8 @@ def test_kr_energy_selection_updates_displayed_lambda_values(qapp, monkeypatch):
     from bl03u_masstool.core.calibration import Calibration
     from bl03u_masstool.core.normalization import NormalizationSettings
     from bl03u_masstool.frontends.pyqt_app.normalization.widget import CommonParametersWidget
-    import bl03u_masstool.frontends.pyqt_app.normalization.widget as normalization_widget
-
     widget = CommonParametersWidget(NormalizationSettings(), Calibration(), None)
     try:
-        monkeypatch.setattr(normalization_widget, "save_normalization_settings", lambda settings: Path("/tmp/normalization.yaml"))
         df = pd.DataFrame(
             [
                 {"photon_energy": 14.6, "temperature": 400.0, "kr_signal": 10.0, "expansion_lambda": 1.0},
@@ -263,6 +259,184 @@ def test_kr_energy_selection_updates_displayed_lambda_values(qapp, monkeypatch):
         widget.deleteLater()
 
 
+@pytest.mark.parametrize(
+    "dependency",
+    (
+        "light_source",
+        "cal_a",
+        "cal_b",
+        "cal_c",
+        "kr_folder",
+        "kr_peak_file",
+        "kr_mz",
+    ),
+)
+def test_common_parameters_invalidates_kr_factors_when_inputs_change(
+    qapp,
+    dependency,
+):
+    from bl03u_masstool.core.calibration import Calibration
+    from bl03u_masstool.core.normalization import NormalizationSettings
+    from bl03u_masstool.frontends.pyqt_app.normalization.widget import (
+        CommonParametersWidget,
+    )
+
+    settings = ProjectSettings(
+        cal_a=1.0,
+        cal_b=2.0,
+        cal_c=3.0,
+        light_source="io",
+        kr_calibration_folder="/tmp/kr-original",
+        kr_calibration_peak_file="/tmp/kr-original.csv",
+        kr_mz=84,
+        expansion_factors={400.0: 1.0, 800.0: 1.2},
+    )
+    widget = CommonParametersWidget(NormalizationSettings(), Calibration(), None)
+    try:
+        widget.set_project_settings(settings)
+        assert widget.factor_table.rowCount() == 2
+
+        if dependency == "light_source":
+            widget.light_source_combo.setCurrentIndex(
+                widget.light_source_combo.findData("beam_current")
+            )
+        elif dependency == "cal_a":
+            widget.calibration_a_edit.setValue(1.5)
+        elif dependency == "cal_b":
+            widget.calibration_b_edit.setValue(2.5)
+        elif dependency == "cal_c":
+            widget.calibration_c_edit.setValue(3.5)
+        elif dependency == "kr_folder":
+            widget.kr_folder_edit.setText("/tmp/kr-updated")
+        elif dependency == "kr_peak_file":
+            widget.kr_peak_file_edit.setText("/tmp/kr-updated.csv")
+        elif dependency == "kr_mz":
+            widget.kr_mz_combo.setCurrentText("86")
+
+        widget.apply_to_settings(settings)
+
+        assert settings.expansion_factors == {}
+        assert widget.settings.expansion_factors == {}
+        assert widget.factor_table.rowCount() == 0
+        assert "重新计算 λ(T)" in widget.status_label.text()
+    finally:
+        widget.deleteLater()
+
+
+def test_common_parameters_preserves_kr_factors_when_inputs_are_unchanged(qapp):
+    from bl03u_masstool.core.calibration import Calibration
+    from bl03u_masstool.core.normalization import NormalizationSettings
+    from bl03u_masstool.frontends.pyqt_app.normalization.widget import (
+        CommonParametersWidget,
+    )
+
+    factors = {400.0: 1.0, 800.0: 1.2}
+    settings = ProjectSettings(
+        cal_a=1.0,
+        cal_b=2.0,
+        cal_c=3.0,
+        light_source="io",
+        kr_calibration_folder="/tmp/kr",
+        kr_mz=84,
+        expansion_factors=factors,
+    )
+    widget = CommonParametersWidget(NormalizationSettings(), Calibration(), None)
+    try:
+        widget.set_project_settings(settings)
+        widget.apply_to_settings(settings)
+
+        assert settings.expansion_factors == factors
+        assert widget.factor_table.rowCount() == 2
+    finally:
+        widget.deleteLater()
+
+
+def test_embedded_project_calibration_change_invalidates_kr_factors(qapp):
+    from bl03u_masstool.core.calibration import Calibration
+    from bl03u_masstool.core.normalization import NormalizationSettings
+    from bl03u_masstool.frontends.pyqt_app.normalization.widget import (
+        CommonParametersWidget,
+    )
+
+    original = ProjectSettings(
+        cal_a=1.0,
+        cal_b=2.0,
+        cal_c=3.0,
+        light_source="io",
+        kr_calibration_folder="/tmp/kr",
+        kr_mz=84,
+        expansion_factors={400.0: 1.0},
+    )
+    edited = ProjectSettings(
+        cal_a=1.5,
+        cal_b=2.0,
+        cal_c=3.0,
+        light_source="io",
+        kr_calibration_folder="/tmp/kr",
+        kr_mz=84,
+        expansion_factors={400.0: 1.0},
+    )
+    widget = CommonParametersWidget(
+        NormalizationSettings(),
+        Calibration(),
+        None,
+        show_calibration=False,
+        show_kr_expansion=False,
+    )
+    try:
+        widget.set_project_settings(original)
+        widget.apply_to_settings(edited)
+
+        assert edited.expansion_factors == {}
+    finally:
+        widget.deleteLater()
+
+
+def test_recomputed_kr_factors_are_bound_to_current_inputs(qapp):
+    from bl03u_masstool.core.calibration import Calibration
+    from bl03u_masstool.core.normalization import NormalizationSettings
+    from bl03u_masstool.frontends.pyqt_app.normalization.widget import (
+        CommonParametersWidget,
+    )
+
+    settings = ProjectSettings(
+        kr_calibration_folder="/tmp/kr-original",
+        kr_mz=84,
+        expansion_factors={400.0: 1.0},
+    )
+    widget = CommonParametersWidget(NormalizationSettings(), Calibration(), None)
+    try:
+        widget.set_project_settings(settings)
+        widget.kr_mz_combo.setCurrentText("86")
+        widget.apply_to_settings(settings)
+        assert settings.expansion_factors == {}
+
+        widget.on_kr_factors_ready(
+            pd.DataFrame(
+                [
+                    {
+                        "temperature": 400.0,
+                        "kr_signal": 10.0,
+                        "expansion_lambda": 1.0,
+                    },
+                    {
+                        "temperature": 800.0,
+                        "kr_signal": 20.0,
+                        "expansion_lambda": 2.0,
+                    },
+                ]
+            )
+        )
+        widget.apply_to_settings(settings)
+        assert settings.expansion_factors == {400.0: 1.0, 800.0: 2.0}
+
+        widget.kr_folder_edit.setText("/tmp/kr-updated")
+        widget.apply_to_settings(settings)
+        assert settings.expansion_factors == {}
+    finally:
+        widget.deleteLater()
+
+
 def test_function_defaults_apply_to_project_settings(qapp):
     widget = FunctionDefaultsWidget()
     try:
@@ -270,6 +444,7 @@ def test_function_defaults_apply_to_project_settings(qapp):
             peak_algorithm="legacy",
             detection_min_idx=111,
             pie_scan_folders=["pie-low", "pie-high"],
+            expansion_factors={500.0: 1.0},
         )
         widget.set_project_settings(ps)
 
@@ -286,6 +461,8 @@ def test_function_defaults_apply_to_project_settings(qapp):
         assert merge_index >= 0
         widget.temp_peak_source_combo.setCurrentIndex(peak_source_index)
         widget.temp_reference_mode_combo.setCurrentIndex(reference_index)
+        widget.temperature_photon_check.setChecked(False)
+        widget.temperature_kr_check.setChecked(True)
         temp_integration_index = widget.temp_integration_method_combo.findData("baseline")
         assert temp_integration_index >= 0
         widget.temp_integration_method_combo.setCurrentIndex(temp_integration_index)
@@ -293,6 +470,10 @@ def test_function_defaults_apply_to_project_settings(qapp):
         widget.temp_curve_class_peak_fraction_edit.setValue(0.72)
         widget.pie_energy_decimals_edit.setValue(3)
         widget.pie_recursive_check.setChecked(False)
+        widget.pie_photon_mode_combo.setCurrentIndex(
+            widget.pie_photon_mode_combo.findData("first")
+        )
+        widget.pie_time_normalize_check.setChecked(False)
         integration_index = widget.pie_integration_method_combo.findData("baseline")
         assert integration_index >= 0
         widget.pie_integration_method_combo.setCurrentIndex(integration_index)
@@ -301,6 +482,16 @@ def test_function_defaults_apply_to_project_settings(qapp):
         widget.pics_no_formula_edit.setText("15NO")
         widget.pics_no_mf_edit.setValue(0.02)
         widget.pics_new_species_mf_edit.setValue(0.004)
+        widget.pics_mass_disc_exponent_edit.setValue(0.67)
+        widget.element_checks["C"].setChecked(True)
+        widget.element_checks["H"].setChecked(True)
+        widget.element_checks["O"].setChecked(False)
+        preset_idx = widget.mf_md_preset_combo.findData(
+            "30 Torr (Catalysis)"
+        )
+        assert preset_idx >= 0
+        widget.mf_md_preset_combo.setCurrentIndex(preset_idx)
+        widget.mf_mass_disc_exponent_edit.setValue(0.75148)
         widget.mf_parent_mz_edit.setValue(130)
         widget.mf_parent_initial_mf_edit.setValue(0.006)
         widget.mf_photon_energy_edit.setValue(11.2)
@@ -311,14 +502,20 @@ def test_function_defaults_apply_to_project_settings(qapp):
         assert ps.peak_algorithm == "cwt"
         assert ps.detection_min_idx == 4321
         assert ps.min_intensity == pytest.approx(12.5)
-        assert ps.temp_peak_source == "manual"
+        # Peak source is derived by the project save service from the current
+        # project baseline; the hidden compatibility control cannot overwrite it.
+        assert ps.temp_peak_source == "auto"
         assert ps.temp_reference_mode == "individual"
+        assert ps.temperature_photon_normalize is False
+        assert ps.temperature_kr_correct is True
         assert ps.temp_prefer_gaussian is False
         assert ps.temp_integration_method == "baseline"
         assert ps.temp_curve_class_change_threshold == pytest.approx(0.35)
         assert ps.temp_curve_class_peak_fraction == pytest.approx(0.72)
         assert ps.pie_energy_decimals == 3
         assert ps.pie_recursive is False
+        assert ps.pie_photon_mode == "first"
+        assert ps.pie_time_normalize is False
         assert ps.pie_prefer_gaussian is False
         assert ps.pie_integration_method == "baseline"
         assert ps.pie_multi_folder_mode is True
@@ -327,6 +524,12 @@ def test_function_defaults_apply_to_project_settings(qapp):
         assert ps.pics_no_formula == "15NO"
         assert ps.pics_no_mf == pytest.approx(0.02)
         assert ps.pics_new_species_mf == pytest.approx(0.004)
+        assert ps.pics_mass_disc_exponent == pytest.approx(0.67)
+        assert "C" in ps.selected_elements
+        assert "H" in ps.selected_elements
+        assert "O" not in ps.selected_elements
+        assert ps.mf_md_preset == "30 Torr (Catalysis)"
+        assert ps.mf_mass_disc_exponent == pytest.approx(0.75148)
         assert ps.mf_parent_mz == 130
         assert ps.mf_parent_initial_mf == pytest.approx(0.006)
         assert ps.mf_photon_energy == pytest.approx(11.2)
@@ -350,6 +553,34 @@ def test_function_defaults_routes_users_to_corresponding_function_page(qapp):
         widget.deleteLater()
 
 
+def test_project_function_defaults_keep_integration_methods_independent(qapp):
+    widget = FunctionDefaultsWidget()
+    try:
+        settings = ProjectSettings(
+            temp_integration_method="sum_counts",
+            pie_integration_method="baseline",
+        )
+        widget.set_project_settings(settings)
+
+        assert widget.tabs.tabText(0) == "寻峰与积分"
+        assert widget.temp_integration_method_combo.currentData() == "sum_counts"
+        assert widget.pie_integration_method_combo.currentData() == "baseline"
+        assert (
+            widget.temp_integration_method_combo
+            is not widget.pie_integration_method_combo
+        )
+
+        widget.temp_integration_method_combo.setCurrentIndex(
+            widget.temp_integration_method_combo.findData("gaussian")
+        )
+        widget.apply_to_settings(settings)
+
+        assert settings.temp_integration_method == "gaussian"
+        assert settings.pie_integration_method == "baseline"
+    finally:
+        widget.deleteLater()
+
+
 def test_temporary_settings_dialog_scopes_function_pages_for_pie(qapp):
     dialog = TemporaryAnalysisSettingsDialog(
         ProjectSettings(),
@@ -358,17 +589,331 @@ def test_temporary_settings_dialog_scopes_function_pages_for_pie(qapp):
         initial_function_page="pie",
     )
     try:
-        assert dialog.tabs.currentWidget() is dialog.function_widget
         assert [
             dialog.function_widget.tabs.tabText(index)
             for index in range(dialog.function_widget.tabs.count())
-        ] == ["寻峰与积分", "PIE 分析"]
-        assert dialog.function_widget.tabs.currentIndex() == 1
-
-        dialog.function_widget.tabs.setCurrentIndex(1)
+        ] == ["PIE 分析"]
+        assert dialog.function_widget.tabs.currentIndex() == 0
+        assert not hasattr(dialog, "common_widget")
+        assert dialog.scope == "temporary"
+        assert dialog.page == "pie"
         assert dialog.function_widget.open_function_page_button.text() == "打开PIE 拟合页"
+        assert dialog.function_widget.open_function_page_button.isHidden()
     finally:
         dialog.deleteLater()
+
+
+def test_analysis_settings_dialog_applies_only_page_whitelist(qapp):
+    original = ProjectSettings(
+        project_name="Keep me",
+        light_source="beam_current",
+        temperature_photon_normalize=True,
+        temp_integration_method="sum_counts",
+        pie_energy_decimals=2,
+    )
+    dialog = AnalysisSettingsDialog(
+        original,
+        scope="project",
+        page="temperature",
+    )
+    try:
+        dialog.function_widget.temperature_photon_check.setChecked(False)
+        integration_index = (
+            dialog.function_widget.temp_integration_method_combo.findData("baseline")
+        )
+        dialog.function_widget.temp_integration_method_combo.setCurrentIndex(
+            integration_index
+        )
+        dialog._settings.project_name = "Must not leak"
+        dialog._settings.light_source = "io"
+        dialog._settings.pie_energy_decimals = 6
+
+        dialog.accept()
+        edited = dialog.settings()
+
+        assert edited.temperature_photon_normalize is False
+        assert edited.temp_integration_method == "baseline"
+        assert edited.temp_prefer_gaussian is False
+        assert edited.project_name == "Keep me"
+        assert edited.light_source == "beam_current"
+        assert edited.pie_energy_decimals == 2
+        assert set(ANALYSIS_PARAMETER_FIELDS["temperature"]) >= {
+            "temperature_photon_normalize",
+            "temp_integration_method",
+        }
+    finally:
+        dialog.deleteLater()
+
+
+def test_analysis_settings_dialog_cancel_keeps_snapshot_unchanged(qapp):
+    original = ProjectSettings(pie_energy_decimals=2, pie_recursive=True)
+    dialog = AnalysisSettingsDialog(
+        original,
+        scope="temporary",
+        page="pie",
+    )
+    try:
+        dialog.function_widget.pie_energy_decimals_edit.setValue(5)
+        dialog.function_widget.pie_recursive_check.setChecked(False)
+        dialog.reject()
+
+        assert dialog.settings().pie_energy_decimals == 2
+        assert dialog.settings().pie_recursive is True
+        assert original.pie_energy_decimals == 2
+        assert original.pie_recursive is True
+    finally:
+        dialog.deleteLater()
+
+
+def test_temporary_shared_parameters_edit_without_project_navigation(
+    qapp,
+    monkeypatch,
+):
+    original = ProjectSettings(
+        cal_a=1.0,
+        cal_b=2.0,
+        cal_c=3.0,
+        light_source="io",
+        expansion_factors={},
+        temp_integration_method="sum_counts",
+    )
+    project_navigation_requests: list[bool] = []
+
+    def accept_shared_edits(shared_dialog):
+        common = shared_dialog.common_widget
+        common.calibration_a_edit.setValue(4.0)
+        common.calibration_b_edit.setValue(5.0)
+        common.calibration_c_edit.setValue(6.0)
+        common.light_source_combo.setCurrentIndex(
+            common.light_source_combo.findData("beam_current")
+        )
+        common.settings.expansion_factors = {650.0: 1.25}
+        shared_dialog.accept()
+        return QtWidgets.QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(
+        TemporarySharedParametersDialog,
+        "exec",
+        accept_shared_edits,
+    )
+    dialog = AnalysisSettingsDialog(
+        original,
+        scope="temporary",
+        page="temperature",
+    )
+    dialog.shared_parameters_requested.connect(
+        lambda: project_navigation_requests.append(True)
+    )
+    try:
+        integration_index = (
+            dialog.function_widget.temp_integration_method_combo.findData("baseline")
+        )
+        dialog.function_widget.temp_integration_method_combo.setCurrentIndex(
+            integration_index
+        )
+
+        assert dialog.shared_parameters_group.title() == "通用参数"
+        assert dialog.open_shared_parameters_button.text() == "编辑通用参数…"
+        assert "卡峰集" not in dialog.shared_parameters_label.text()
+
+        dialog.open_shared_parameters_button.click()
+
+        assert project_navigation_requests == []
+        assert "Beam Current" in dialog.shared_parameters_label.text()
+        assert "Kr：可用" in dialog.shared_parameters_label.text()
+
+        dialog.accept()
+        edited = dialog.settings()
+
+        assert edited.cal_a == pytest.approx(4.0)
+        assert edited.cal_b == pytest.approx(5.0)
+        assert edited.cal_c == pytest.approx(6.0)
+        assert edited.light_source == "beam_current"
+        assert edited.expansion_factors == {650.0: 1.25}
+        assert edited.temp_integration_method == "baseline"
+        assert original.cal_a == pytest.approx(1.0)
+        assert original.light_source == "io"
+        assert original.expansion_factors == {}
+    finally:
+        dialog.deleteLater()
+
+
+def test_project_shared_parameters_still_request_project_management(qapp):
+    requests: list[bool] = []
+    dialog = AnalysisSettingsDialog(
+        ProjectSettings(),
+        scope="project",
+        page="temperature",
+    )
+    dialog.shared_parameters_requested.connect(lambda: requests.append(True))
+    try:
+        assert dialog.shared_parameters_group.title() == "通用参数（项目）"
+        assert (
+            dialog.open_shared_parameters_button.text()
+            == "前往项目管理修改"
+        )
+
+        dialog.open_shared_parameters_button.click()
+
+        assert requests == [True]
+    finally:
+        dialog.deleteLater()
+
+
+def test_temporary_shared_parameter_change_disables_stale_kr_correction(
+    qapp,
+    monkeypatch,
+):
+    original = ProjectSettings(
+        kr_mz=84,
+        expansion_factors={500.0: 1.2},
+        temperature_kr_correct=True,
+    )
+
+    def accept_changed_kr_input(shared_dialog):
+        shared_dialog.common_widget.kr_mz_combo.setCurrentText("86")
+        shared_dialog.accept()
+        return QtWidgets.QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(
+        TemporarySharedParametersDialog,
+        "exec",
+        accept_changed_kr_input,
+    )
+    dialog = AnalysisSettingsDialog(
+        original,
+        scope="temporary",
+        page="temperature",
+    )
+    try:
+        assert dialog.function_widget.temperature_kr_check.isChecked()
+
+        dialog.open_shared_parameters_button.click()
+
+        assert "Kr：不可用" in dialog.shared_parameters_label.text()
+        assert not dialog.function_widget.temperature_kr_check.isEnabled()
+        assert not dialog.function_widget.temperature_kr_check.isChecked()
+
+        dialog.accept()
+        edited = dialog.settings()
+
+        assert edited.kr_mz == 86
+        assert edited.expansion_factors == {}
+        assert edited.temperature_kr_correct is False
+        assert original.kr_mz == 84
+        assert original.expansion_factors == {500.0: 1.2}
+        assert original.temperature_kr_correct is True
+    finally:
+        dialog.deleteLater()
+
+
+def test_temporary_temperature_settings_dialog_imports_peak_file_for_session(
+    qapp,
+    tmp_path,
+    monkeypatch,
+):
+    peak_file = tmp_path / "temporary_peak_ranges.csv"
+    peak_file.write_text(
+        "label,peak_index,mz,left_bound,right_bound\n"
+        "CH4,100,16.03,96,104\n",
+        encoding="utf-8",
+    )
+    original = ProjectSettings(
+        manual_peak_file="",
+        active_peak_set_id="",
+        temp_peak_source="auto",
+    )
+    monkeypatch.setattr(
+        QtWidgets.QFileDialog,
+        "getOpenFileName",
+        lambda *args, **kwargs: (str(peak_file), "卡峰文件 (*.csv)"),
+    )
+
+    dialog = AnalysisSettingsDialog(
+        original,
+        scope="temporary",
+        page="temperature",
+    )
+    try:
+        assert dialog.import_temporary_peak_button.text() == "导入卡峰文件…"
+        assert "自动寻峰" in dialog.temporary_peak_status_label.text()
+
+        dialog.import_temporary_peak_button.click()
+
+        assert dialog.temporary_peak_file_edit.text() == str(peak_file.resolve())
+        assert "1 个卡峰" in dialog.temporary_peak_status_label.text()
+
+        dialog.accept()
+        edited = dialog.settings()
+
+        assert edited.manual_peak_file == str(peak_file.resolve())
+        assert edited.active_peak_set_id == ""
+        assert edited.temp_peak_source == "manual"
+        assert original.manual_peak_file == ""
+        assert original.temp_peak_source == "auto"
+    finally:
+        dialog.deleteLater()
+
+
+def test_temporary_temperature_settings_can_return_to_automatic_peaks(
+    qapp,
+    tmp_path,
+):
+    peak_file = tmp_path / "temporary_peak_ranges.csv"
+    peak_file.write_text(
+        "label,peak_index,mz,left_bound,right_bound\n"
+        "CH4,100,16.03,96,104\n",
+        encoding="utf-8",
+    )
+    original = ProjectSettings(
+        manual_peak_file=str(peak_file),
+        active_peak_set_id="project-peak-set",
+        temp_peak_source="manual",
+    )
+    dialog = AnalysisSettingsDialog(
+        original,
+        scope="temporary",
+        page="temperature",
+    )
+    try:
+        dialog.clear_temporary_peak_button.click()
+        dialog.accept()
+        edited = dialog.settings()
+
+        assert edited.manual_peak_file == ""
+        assert edited.active_peak_set_id == ""
+        assert edited.temp_peak_source == "auto"
+        assert original.manual_peak_file == str(peak_file)
+        assert original.active_peak_set_id == "project-peak-set"
+    finally:
+        dialog.deleteLater()
+
+
+def test_analysis_settings_dialog_controls_kr_and_pie_merge_availability(qapp):
+    temperature_dialog = AnalysisSettingsDialog(
+        ProjectSettings(
+            temperature_kr_correct=True,
+            expansion_factors={},
+        ),
+        scope="project",
+        page="temperature",
+    )
+    pie_dialog = AnalysisSettingsDialog(
+        ProjectSettings(pie_scan_folders=["one"]),
+        scope="project",
+        page="pie",
+        pie_multi_segment=False,
+    )
+    try:
+        assert not temperature_dialog.function_widget.temperature_kr_check.isEnabled()
+        assert not temperature_dialog.function_widget.temperature_kr_check.isChecked()
+        assert not pie_dialog.function_widget.pie_merge_method_combo.isEnabled()
+
+        pie_dialog.function_widget.set_pie_multi_segment_state(True)
+        assert pie_dialog.function_widget.pie_merge_method_combo.isEnabled()
+    finally:
+        temperature_dialog.deleteLater()
+        pie_dialog.deleteLater()
 
 
 def test_project_parameter_pages_do_not_show_internal_ownership_banners(qapp):
@@ -413,11 +958,137 @@ def test_project_page_omits_workflow_progress_card(qapp):
         assert [
             window.project_tabs.tabText(index)
             for index in range(window.project_tabs.count())
-        ] == ["项目与数据", "共享参数", "分析默认值"]
+        ] == ["项目与数据", "定标与卡峰", "项目分析参数"]
+        assert [
+            window.project_analysis_tabs.tabText(index)
+            for index in range(window.project_analysis_tabs.count())
+        ] == [
+            "寻峰与积分",
+            "温度扫描",
+            "PIE 分析",
+            "PICS 计算",
+            "摩尔分数",
+        ]
+        assert (
+            window.project_analysis_save_button.text()
+            == "保存并应用项目参数"
+        )
+        assert "提示保存、放弃或取消" in (
+            window.project_analysis_unsaved_hint.text()
+        )
+        assert not hasattr(
+            window.project_common_parameters_widget,
+            "mf_md_preset_combo",
+        )
+        assert hasattr(
+            window.project_function_defaults_widget,
+            "mf_md_preset_combo",
+        )
+        assert hasattr(
+            window.project_function_defaults_widget,
+            "element_checks",
+        )
         labels = " ".join(label.text() for label in window.project_identity_page.findChildren(QtWidgets.QLabel))
         assert "项目工作流" not in labels
         assert "建议下一步" not in labels
     finally:
+        window.deleteLater()
+
+
+def test_project_pages_keep_short_content_top_aligned(qapp):
+    window = MainWindow()
+    try:
+        window.resize(1600, 960)
+        window.show()
+        window.switch_workspace_page("project")
+        window.project_tabs.setCurrentWidget(window.project_analysis_page)
+        window.project_analysis_tabs.setCurrentIndex(0)
+        qapp.processEvents()
+
+        common_page = window.project_common_analysis_page
+        groups = {
+            group.title(): group
+            for group in common_page.findChildren(QtWidgets.QGroupBox)
+        }
+        group_positions = {
+            title: group.mapTo(common_page, QtCore.QPoint(0, 0)).y()
+            for title, group in groups.items()
+        }
+
+        assert window.project_function_defaults_widget.isVisibleTo(window)
+        assert window.project_common_parameters_widget.embedded is True
+        assert not window.project_common_parameters_widget.findChildren(
+            QtWidgets.QScrollArea
+        )
+        assert groups["归一化参数"].isVisibleTo(window)
+        assert groups["自动寻峰参数"].isVisibleTo(window)
+        assert (
+            group_positions["归一化参数"]
+            < group_positions["自动寻峰参数"]
+        )
+        assert group_positions["归一化参数"] < 40
+
+        window.project_tabs.setCurrentWidget(window.project_identity_page)
+        qapp.processEvents()
+        assert (
+            window.datasource_card.sizePolicy().verticalPolicy()
+            == QtWidgets.QSizePolicy.Policy.Fixed
+        )
+        assert (
+            window.datasource_card.geometry().bottom()
+            < window.project_identity_page.height()
+        )
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_leaving_project_page_can_discard_draft_without_auto_save(
+    qapp,
+    tmp_path,
+    monkeypatch,
+):
+    project_dir = tmp_path / "Explicit_Save_Project"
+    window = MainWindow()
+    try:
+        window.new_project()
+        window.project_name_edit.setText("Explicit Save")
+        window.project_output_dir_edit.setText(str(project_dir))
+        assert window.save_project() is True
+        window.workspace_stack.setCurrentWidget(window.project_page)
+
+        light_index = (
+            window.project_common_parameters_widget.light_source_combo.findData(
+                "beam_current"
+            )
+        )
+        window.project_common_parameters_widget.light_source_combo.setCurrentIndex(
+            light_index
+        )
+        prompts: list[bool] = []
+        monkeypatch.setattr(
+            QtWidgets.QMessageBox,
+            "exec",
+            lambda _box: (
+                prompts.append(True)
+                or QtWidgets.QMessageBox.StandardButton.Discard
+            ),
+        )
+
+        window.switch_workspace_page("spectrum")
+
+        saved = load_project_settings(
+            project_dir / "config" / "project.yaml"
+        )
+        assert prompts == [True]
+        assert saved.light_source == "io"
+        assert (
+            window.project_common_parameters_widget.light_source_combo.currentData()
+            == "io"
+        )
+        assert window.workspace_stack.currentWidget() is window.spectrum_page
+    finally:
+        window.project_settings_manager.clear_project_path()
         window.deleteLater()
 
 
@@ -465,8 +1136,17 @@ def test_hidden_curve_pages_defer_cache_loading_until_opened(qapp, monkeypatch):
         window.deleteLater()
 
 
-def test_pie_project_parameter_menu_opens_pie_analysis_defaults(qapp):
+def test_pie_project_parameter_menu_opens_pie_analysis_dialog(qapp, monkeypatch):
     window = MainWindow()
+    opened: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        AnalysisSettingsDialog,
+        "exec",
+        lambda dialog: (
+            opened.append((dialog.scope, dialog.page))
+            or QtWidgets.QDialog.DialogCode.Rejected
+        ),
+    )
     try:
         window.pie_page.set_project_settings(
             ProjectSettings(project_name="UI test", output_dir="output"),
@@ -474,23 +1154,29 @@ def test_pie_project_parameter_menu_opens_pie_analysis_defaults(qapp):
         )
         window.switch_workspace_page("pie")
 
-        assert window.pie_page.common_params_button.text() == "项目参数"
-        assert window.pie_page.common_params_action.text() == "分析默认值…"
-        assert window.pie_page.edit_project_action.text() == "项目与数据…"
+        assert window.pie_page.common_params_button.text() == "编辑项目参数…"
+        assert window.pie_page.common_params_action.text() == "编辑项目参数…"
+        assert window.pie_page.edit_project_action.text() == "修改通用参数…"
 
         window.pie_page.common_params_action.trigger()
 
-        assert window.workspace_stack.currentWidget() is window.project_page
-        assert window.project_tabs.currentWidget() is window.project_function_defaults_widget
-        assert window.project_function_defaults_widget.tabs.tabText(
-            window.project_function_defaults_widget.tabs.currentIndex()
-        ) == "PIE 分析"
+        assert opened == [("project", "pie")]
+        assert window.workspace_stack.currentWidget() is window.pie_page
     finally:
         window.deleteLater()
 
 
-def test_temperature_project_parameter_menu_opens_temperature_defaults(qapp):
+def test_temperature_project_parameter_menu_opens_temperature_dialog(qapp, monkeypatch):
     window = MainWindow()
+    opened: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        AnalysisSettingsDialog,
+        "exec",
+        lambda dialog: (
+            opened.append((dialog.scope, dialog.page))
+            or QtWidgets.QDialog.DialogCode.Rejected
+        ),
+    )
     try:
         window.temperature_page.set_project_settings(
             ProjectSettings(project_name="UI test", output_dir="output"),
@@ -498,45 +1184,79 @@ def test_temperature_project_parameter_menu_opens_temperature_defaults(qapp):
         )
         window.switch_workspace_page("temperature")
 
-        assert window.temperature_page.common_params_button.text() == "项目参数"
-        assert window.temperature_page.common_params_action.text() == "分析默认值…"
-        assert window.temperature_page.edit_project_action.text() == "项目与数据…"
+        assert window.temperature_page.common_params_button.text() == "编辑项目参数…"
+        assert window.temperature_page.common_params_action.text() == "编辑项目参数…"
+        assert window.temperature_page.edit_project_action.text() == "修改通用参数…"
 
         window.temperature_page.common_params_action.trigger()
 
-        assert window.workspace_stack.currentWidget() is window.project_page
-        assert window.project_tabs.currentWidget() is window.project_function_defaults_widget
-        assert window.project_function_defaults_widget.tabs.tabText(
-            window.project_function_defaults_widget.tabs.currentIndex()
-        ) == "温度扫描"
+        assert opened == [("project", "temperature")]
+        assert window.workspace_stack.currentWidget() is window.temperature_page
     finally:
         window.deleteLater()
 
 
-def test_temperature_project_parameters_fall_back_outside_workspace(qapp, monkeypatch):
+def test_temperature_project_dialog_saves_whitelist_and_syncs_pages(
+    qapp, tmp_path, monkeypatch
+):
+    project_dir = tmp_path / "dialog_project"
+    window = MainWindow()
+
+    def accept_with_edits(dialog):
+        dialog.function_widget.temperature_photon_check.setChecked(False)
+        dialog.function_widget.temp_integration_method_combo.setCurrentIndex(
+            dialog.function_widget.temp_integration_method_combo.findData("baseline")
+        )
+        dialog._settings.light_source = "io"
+        dialog._settings.project_name = "Must not overwrite"
+        dialog.accept()
+        return QtWidgets.QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(AnalysisSettingsDialog, "exec", accept_with_edits)
+    try:
+        window.new_project()
+        window.project_name_edit.setText("Dialog project")
+        window.project_system_edit.setText("C2H4")
+        window.project_output_dir_edit.setText(str(project_dir))
+        assert window.save_project() is True
+        committed = window.project_settings_manager.snapshot()
+        committed.light_source = "beam_current"
+        committed = window.project_settings_manager.replace_and_save(committed)
+        window._set_project_draft(committed, committed=True)
+        window._apply_settings_to_tools(committed)
+        window.pie_page.set_pie_source_scope("temporary")
+
+        window.switch_workspace_page("temperature")
+        window.temperature_page.common_params_action.trigger()
+
+        saved = load_project_settings(project_dir / "config" / "project.yaml")
+        assert saved.temperature_photon_normalize is False
+        assert saved.temp_integration_method == "baseline"
+        assert saved.project_name == "Dialog project"
+        assert saved.light_source == "beam_current"
+        assert window.temperature_page.project_settings.temp_integration_method == "baseline"
+        assert (
+            window.project_function_defaults_widget.temp_integration_method_combo.currentData()
+            == "baseline"
+        )
+        assert window.pie_page.pie_source_scope == "temporary"
+    finally:
+        window.project_settings_manager.clear_project_path()
+        window.deleteLater()
+
+
+def test_temperature_project_parameters_open_card_outside_workspace(qapp, monkeypatch):
     from bl03u_masstool.core.calibration import Calibration
-    from bl03u_masstool.frontends.pyqt_app.temperature import dialog as temperature_dialog_module
     from bl03u_masstool.frontends.pyqt_app.temperature.dialog import TemperatureScanDialog
 
     opened = []
-
-    class FakeCommonParametersDialog:
-        def __init__(self, settings, calibration, parent):
-            opened.append((settings, calibration, parent))
-
-        def exec(self):
-            return 0
-
-    reloaded_calibration = Calibration(a=1.0, b=2.0, c=3.0)
     monkeypatch.setattr(
-        temperature_dialog_module,
-        "CommonParametersDialog",
-        FakeCommonParametersDialog,
-    )
-    monkeypatch.setattr(
-        temperature_dialog_module,
-        "load_calibration_config",
-        lambda: reloaded_calibration,
+        AnalysisSettingsDialog,
+        "exec",
+        lambda dialog: (
+            opened.append((dialog.scope, dialog.page, dialog.parent()))
+            or QtWidgets.QDialog.DialogCode.Rejected
+        ),
     )
 
     widget = TemperatureScanDialog(Calibration())
@@ -547,29 +1267,80 @@ def test_temperature_project_parameters_fall_back_outside_workspace(qapp, monkey
         )
         widget.open_common_parameters()
 
-        assert len(opened) == 1
-        assert opened[0][2] is widget
-        assert widget.calibration == reloaded_calibration
+        assert opened == [("project", "temperature", widget)]
     finally:
         widget.deleteLater()
 
 
-def test_refresh_project_lifecycle_is_compatible_without_workflow_ui(qapp, tmp_path):
-    window = MainWindow()
-    result_file = tmp_path / "temperature_result.csv"
-    result_file.write_text("mz,temperature,signal\n29,650,1\n", encoding="utf-8")
-    try:
-        ps = ProjectSettings(
-            project_name="Legacy Workflow",
-            system="Test",
-            output_dir=str(tmp_path / "Legacy_Workflow"),
-            temperature_scan_result_file=str(result_file),
-        )
-        window.project_settings_manager.set(ps)
-        window.refresh_project_lifecycle(ps)
+def test_temperature_temporary_parameter_change_invalidates_active_view(
+    qapp, monkeypatch
+):
+    from bl03u_masstool.core.calibration import Calibration
+    from bl03u_masstool.frontends.pyqt_app.temperature.dialog import TemperatureScanDialog
 
+    def accept_with_edits(dialog):
+        dialog.function_widget.temp_integration_method_combo.setCurrentIndex(
+            dialog.function_widget.temp_integration_method_combo.findData("baseline")
+        )
+        dialog.accept()
+        return QtWidgets.QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(AnalysisSettingsDialog, "exec", accept_with_edits)
+    widget = TemperatureScanDialog(Calibration())
+    try:
+        widget.result_df = pd.DataFrame({"mz": [28.0], "temperature": [700.0]})
+        widget.curves = {28.0: {"temperatures": [700.0], "areas": [1.0]}}
+        widget.current_mz = 28.0
+
+        widget.open_common_parameters()
+
+        assert widget.temporary_settings.temp_integration_method == "baseline"
+        assert widget.result_df.empty
+        assert widget.curves == {}
+        assert widget.current_mz is None
+        assert "临时参数已应用" in widget.inline_status_text.text()
+    finally:
+        widget.deleteLater()
+
+
+def test_temperature_temporary_shared_parameter_change_invalidates_active_view(
+    qapp,
+    monkeypatch,
+):
+    from bl03u_masstool.core.calibration import Calibration
+    from bl03u_masstool.frontends.pyqt_app.temperature.dialog import (
+        TemperatureScanDialog,
+    )
+
+    def accept_with_shared_edit(dialog):
+        dialog._settings.cal_a = 7.5
+        dialog.accept()
+        return QtWidgets.QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(AnalysisSettingsDialog, "exec", accept_with_shared_edit)
+    widget = TemperatureScanDialog(Calibration())
+    try:
+        widget.result_df = pd.DataFrame({"mz": [28.0], "temperature": [700.0]})
+        widget.curves = {28.0: {"temperatures": [700.0], "areas": [1.0]}}
+        widget.current_mz = 28.0
+
+        widget.open_common_parameters()
+
+        assert widget.temporary_settings.cal_a == pytest.approx(7.5)
+        assert widget.result_df.empty
+        assert widget.curves == {}
+        assert widget.current_mz is None
+        assert "临时参数已应用" in widget.inline_status_text.text()
+    finally:
+        widget.deleteLater()
+
+
+def test_project_page_has_no_legacy_lifecycle_ui_or_hook(qapp):
+    window = MainWindow()
+    try:
         assert not hasattr(window, "project_stage_buttons")
         assert not hasattr(window, "project_continue_button")
+        assert not hasattr(window, "refresh_project_lifecycle")
     finally:
         window.project_settings_manager.clear_project_path()
         window.deleteLater()
@@ -586,10 +1357,12 @@ def test_common_parameters_apply_to_project_settings(qapp):
         widget.set_project_settings(ps)
 
         light_idx = widget.light_source_combo.findData("beam_current")
-        preset_idx = widget.mf_md_preset_combo.findData("30 Torr (Catalysis)")
         assert light_idx >= 0
-        assert preset_idx >= 0
+        assert not hasattr(widget, "mf_md_preset_combo")
+        assert not hasattr(widget, "mf_mass_disc_exponent_edit")
+        assert not hasattr(widget, "element_checks")
         assert not hasattr(widget, "pie_photon_mode_combo")
+        assert not hasattr(widget, "pie_time_normalize_check")
         assert not hasattr(widget, "temperature_photon_check")
         assert not hasattr(widget, "temperature_kr_check")
 
@@ -598,15 +1371,9 @@ def test_common_parameters_apply_to_project_settings(qapp):
         widget.calibration_a_edit.setValue(1.23e-7)
         widget.calibration_b_edit.setValue(2.34e-4)
         widget.calibration_c_edit.setValue(0.56)
-        widget.mf_md_preset_combo.setCurrentIndex(preset_idx)
-        widget.mf_mass_disc_exponent_edit.setValue(0.75148)
         widget.kr_folder_edit.setText("/tmp/kr")
         widget.kr_peak_mode_manual_radio.setChecked(True)
         widget.kr_peak_file_edit.setText("/tmp/kr_peak.csv")
-        widget.element_checks["C"].setChecked(True)
-        widget.element_checks["H"].setChecked(True)
-        widget.element_checks["O"].setChecked(False)
-
         widget.apply_to_settings(ps)
 
         assert ps.light_source == "beam_current"
@@ -617,13 +1384,8 @@ def test_common_parameters_apply_to_project_settings(qapp):
         assert ps.cal_a == pytest.approx(1.23e-7)
         assert ps.cal_b == pytest.approx(2.34e-4)
         assert ps.cal_c == pytest.approx(0.56)
-        assert ps.mf_md_preset == "30 Torr (Catalysis)"
-        assert ps.mf_mass_disc_exponent == pytest.approx(0.75148)
         assert ps.kr_calibration_folder == "/tmp/kr"
         assert ps.kr_calibration_peak_file == "/tmp/kr_peak.csv"
-        assert "C" in ps.selected_elements
-        assert "H" in ps.selected_elements
-        assert "O" not in ps.selected_elements
     finally:
         widget.deleteLater()
 
@@ -645,7 +1407,10 @@ def test_temperature_page_owns_analysis_switches(qapp, tmp_path):
         origin="imported",
     )
     settings = NormalizationSettings(light_source="beam_current", expansion_factors={})
-    widget = TemperatureScanDialog(Calibration(), settings)
+    widget = TemperatureScanDialog(
+        Calibration(a=0.0, b=1.0, c=0.0),
+        settings,
+    )
     try:
         assert widget._sidebar.isHidden()
         assert widget.curve_stats.isHidden()
@@ -661,6 +1426,9 @@ def test_temperature_page_owns_analysis_switches(qapp, tmp_path):
             temperature_kr_correct=True,
             temp_replicate_mode="sum",
             light_source="beam_current",
+            cal_a=0.0,
+            cal_b=1.0,
+            cal_c=0.0,
         )
         widget.set_project_settings(ps, activate_project_scope=True)
         assert widget.temperature_photon_check.isChecked() is False
@@ -672,9 +1440,11 @@ def test_temperature_page_owns_analysis_switches(qapp, tmp_path):
         widget.run_analysis()
 
         assert ps.temperature_photon_normalize is False
-        assert ps.temperature_kr_correct is False
-        assert ps.temp_replicate_mode == "sum"
-        assert "退回" in widget.inline_status_text.text()
+        assert ps.temperature_kr_correct is True
+        assert widget.project_settings is not ps
+        assert widget.project_settings.temperature_kr_correct is True
+        assert widget.project_settings.temp_replicate_mode == "sum"
+        assert "无法生成曲线" in widget.inline_status_text.text()
     finally:
         if widget.worker is not None and widget.worker.isRunning():
             widget.worker.wait(1000)
@@ -774,19 +1544,19 @@ def test_temperature_parameters_follow_selected_data_source(qapp, tmp_path):
         assert project_params["min_intensity"] == 12.0
 
         widget.set_temperature_source_scope("temporary")
-        assert widget.temporary_settings_source == "default"
-        assert widget.temporary_params_title_label.text() == "临时数据参数"
-        assert widget.temporary_params_label.text() == "默认参数，可修改"
-        assert widget.temporary_params_button.text() == "编辑参数…"
+        assert widget.temporary_settings_source == "project"
+        assert widget.temporary_params_title_label.text() == "临时参数 · 不写入项目"
+        assert widget.temporary_params_label.text() == "项目参数副本"
+        assert widget.temporary_params_button.text() == "编辑临时参数…"
         assert not hasattr(widget, "temporary_params_reload_button")
         assert not hasattr(widget, "copy_project_params_action")
-        assert widget._analysis_parameters()["integration_method"] == ProjectSettings().temp_integration_method
+        assert widget._analysis_parameters()["integration_method"] == "baseline"
 
         params = widget._analysis_parameters()
         assert widget.temporary_params_hint.text() == "只影响本次临时分析，不会写回项目"
-        assert params["calibration"] != project_calibration
-        assert params["integration_method"] == ProjectSettings().temp_integration_method
-        assert params["min_intensity"] == ProjectSettings().min_intensity
+        assert params["calibration"] == project_calibration
+        assert params["integration_method"] == "baseline"
+        assert params["min_intensity"] == 12.0
         assert params["cache_dir"] != tmp_path / "project" / "analysis" / "temperature_scan" / "cache"
 
         widget.temporary_settings.cal_a = 9.0
@@ -796,8 +1566,106 @@ def test_temperature_parameters_follow_selected_data_source(qapp, tmp_path):
 
         widget.temporary_settings_modified = True
         widget._refresh_temperature_source_controls()
-        assert widget.temporary_settings_source == "default"
+        assert widget.temporary_settings_source == "project"
         assert widget.temporary_params_label.text() == "本次已修改"
+    finally:
+        widget.deleteLater()
+
+
+def test_temperature_temporary_scope_forwards_imported_peak_file(
+    qapp,
+    tmp_path,
+    monkeypatch,
+):
+    import bl03u_masstool.frontends.pyqt_app.temperature.dialog as temperature_module
+    from bl03u_masstool.core.calibration import Calibration
+    from bl03u_masstool.frontends.pyqt_app.temperature.dialog import (
+        TemperatureScanDialog,
+    )
+
+    peak_file = tmp_path / "temporary_peak_ranges.csv"
+    peak_file.write_text(
+        "label,peak_index,mz,left_bound,right_bound\n"
+        "CH4,100,16.03,96,104\n",
+        encoding="utf-8",
+    )
+    captured: dict[str, object] = {}
+
+    def fake_analyze(folder, **kwargs):
+        captured["folder"] = folder
+        captured.update(kwargs)
+        return pd.DataFrame()
+
+    monkeypatch.setattr(
+        temperature_module,
+        "analyze_temperature_folder",
+        fake_analyze,
+    )
+
+    widget = TemperatureScanDialog(Calibration())
+    try:
+        widget.set_temperature_source_scope("temporary")
+        settings = widget._ensure_temporary_settings()
+        settings.manual_peak_file = str(peak_file)
+        settings.active_peak_set_id = ""
+        settings.temp_peak_source = "manual"
+
+        params = widget._analysis_parameters()
+
+        assert params["effective_peak_source"] == "manual"
+        assert params["manual_peak_path"] == str(peak_file.resolve())
+        assert widget._validate_analysis_parameters(params) is True
+
+        widget._analyze_temperature_folder_with_params("temporary-scan", params)
+
+        assert captured["folder"] == "temporary-scan"
+        assert captured["manual_peak_path"] == str(peak_file.resolve())
+    finally:
+        widget.deleteLater()
+
+
+def test_temperature_temporary_project_snapshot_uses_registered_peak_set(
+    qapp,
+    tmp_path,
+):
+    from bl03u_masstool.core.calibration import Calibration
+    from bl03u_masstool.frontends.pyqt_app.temperature.dialog import (
+        TemperatureScanDialog,
+    )
+
+    project_dir = tmp_path / "project"
+    scan_dir = tmp_path / "temperature_scan"
+    scan_dir.mkdir()
+    peak_set = create_peak_set(
+        project_dir,
+        content=(
+            b"label,peak_index,mz,left_bound,right_bound\n"
+            b"CH4,100,16.03,96,104\n"
+        ),
+        extension=".csv",
+        label="project peaks",
+        origin="imported",
+    )
+    peak_path = verify_peak_set(project_dir, peak_set)
+    settings = ProjectSettings(
+        project_name="Temporary project snapshot",
+        output_dir=str(project_dir),
+        temperature_scan_folder=str(scan_dir),
+        manual_peak_file=str(peak_path),
+        active_peak_set_id=peak_set.peak_set_id,
+        temp_peak_source="manual",
+    )
+
+    widget = TemperatureScanDialog(Calibration())
+    try:
+        widget.set_project_settings(settings, activate_project_scope=True)
+        widget.set_temperature_source_scope("temporary")
+
+        params = widget._analysis_parameters()
+
+        assert params["effective_peak_source"] == "manual"
+        assert params["manual_peak_path"] == str(peak_path)
+        assert params["peak_set_origin"] == "imported"
     finally:
         widget.deleteLater()
 
@@ -829,13 +1697,13 @@ def test_temperature_page_lists_energy_subfolders_for_project_source(qapp, tmp_p
         assert widget.temperature_source_scope == "project"
         assert widget.scan_folder_combo.count() == 4
         assert [widget.scan_folder_combo.itemText(i) for i in range(widget.scan_folder_combo.count())] == [
-            "全部能量 (3)",
+            "全部光子能量 (3)",
             "8eV",
             "9.5eV",
             "14.6-14.8eV",
         ]
         assert widget._current_temperature_folder() == str(root)
-        assert widget._selected_analysis_folders() == [
+        assert widget._selected_view_folders() == [
             (8.0, str(low)),
             (9.5, str(high)),
             (14.6, str(range_energy)),
@@ -852,9 +1720,11 @@ def test_temperature_page_lists_energy_subfolders_for_project_source(qapp, tmp_p
 
         widget.scan_folder_combo.setCurrentIndex(2)
         assert widget._current_temperature_folder() == str(high)
+        assert widget._selected_view_folders() == [(9.5, str(high))]
         assert widget._generation_analysis_folders() == [(9.5, str(high))]
         assert "9.5eV" in widget.summary_data_label.text()
-        assert "选择单个能量时仅生成该能量曲线" in widget.scan_folder_combo.toolTip()
+        assert "请选择本次要处理的光子能量" in widget.scan_folder_combo.toolTip()
+        assert "选择“全部光子能量”" in widget.scan_folder_combo.toolTip()
     finally:
         widget.deleteLater()
 
@@ -1458,7 +2328,9 @@ def test_temperature_project_curve_storage_modes(
         assert isinstance(dialog.curves, RepositoryCurveMapping) is expects_lazy_mapping
         assert dialog.result_df.empty is expects_lazy_mapping
         if storage_mode == "sqlite":
-            assert "SQLite #" in dialog.curve_source_label.text()
+            assert dialog.curve_source_label.text().startswith(
+                "当前曲线：项目 SQLite · 有效"
+            )
             assert "有效" in dialog.curve_source_label.text()
             assert dialog.curve_source_label.property("sourceState") == "valid"
         else:
@@ -1741,7 +2613,9 @@ def test_temperature_sqlite_cache_hit_is_not_invalidated_before_activation(
         widget.deleteLater()
 
 
-def test_pie_page_owns_photon_mode_switch(qapp, tmp_path, monkeypatch):
+def test_pie_run_uses_project_photon_mode_not_hidden_compatibility_control(
+    qapp, tmp_path, monkeypatch
+):
     from bl03u_masstool.core.calibration import Calibration
     from bl03u_masstool.core.normalization import NormalizationSettings
     from bl03u_masstool.frontends.pyqt_app.pie.dialog import PIESpeciesFitDialog
@@ -1758,22 +2632,33 @@ def test_pie_page_owns_photon_mode_switch(qapp, tmp_path, monkeypatch):
         origin="imported",
     )
 
-    widget = PIESpeciesFitDialog(Calibration(), NormalizationSettings(light_source="beam_current"))
+    widget = PIESpeciesFitDialog(
+        Calibration(a=0.0, b=1.0, c=0.0),
+        NormalizationSettings(light_source="beam_current"),
+    )
     try:
         ps = ProjectSettings(
             project_name="PIE Switch",
             output_dir=str(project_dir),
             pie_scan_folder=str(pie_dir),
-            pie_photon_mode="first",
+            pie_photon_mode="none",
             active_peak_set_id=peak_set.peak_set_id,
             manual_peak_file=str(verify_peak_set(project_dir, peak_set)),
+            cal_a=0.0,
+            cal_b=1.0,
+            cal_c=0.0,
         )
         manager = ProjectSettingsManager()
         manager.set_project_path(project_dir)
-        manager.set(ps)
+        manager.replace_and_save(ps)
         widget.set_project_settings(ps, activate_project_scope=True)
+        widget.photon_mode_combo.setCurrentIndex(
+            widget.photon_mode_combo.findData("first")
+        )
 
         assert widget.photon_correction_check.isChecked() is True
+        assert widget._current_photon_mode() == "none"
+        assert widget._pie_cache_static_parameters(None)["photon_mode"] == "none"
 
         monkeypatch.setattr(widget, "set_busy", lambda *args, **kwargs: None)
 
@@ -1801,33 +2686,25 @@ def test_pie_page_owns_photon_mode_switch(qapp, tmp_path, monkeypatch):
         assert ps.pie_photon_mode == "none"
         assert widget.normalization_settings.pie_photon_mode == "none"
         assert saved.pie_photon_mode == "none"
-
-        widget.photon_correction_check.setChecked(False)
-        widget.run_analysis()
-
-        saved = load_project_settings(tmp_path / "project" / "config" / "project.yaml")
-        assert ps.pie_photon_mode == "off"
-        assert widget.normalization_settings.pie_photon_mode == "off"
-        assert saved.pie_photon_mode == "off"
     finally:
         ProjectSettingsManager().clear_project_path()
         widget.deleteLater()
 
 
-def test_save_and_apply_uses_selected_parent_directory_for_new_project(qapp, tmp_path, monkeypatch):
+def test_save_project_uses_selected_parent_directory_for_new_project(qapp, tmp_path, monkeypatch):
     downloads_dir = tmp_path / "Downloads"
     downloads_dir.mkdir()
 
     window = MainWindow()
     monkeypatch.setattr(QtWidgets.QMessageBox, "critical", lambda *args, **kwargs: None)
     try:
+        window.new_project()
         window.project_name_edit.setText("test")
         window.project_system_edit.setText("test")
         window.project_description_edit.setText("test")
         window.project_output_dir_edit.setText(str(downloads_dir))
 
-        window.save_and_apply_project_settings()
-        _wait_for_project_materialization(qapp, window)
+        assert window.save_project() is True
 
         project_dir = downloads_dir / "test"
         assert project_dir.exists()
@@ -1871,6 +2748,71 @@ def test_empty_state_placeholders_do_not_use_specific_system_examples(qapp):
         window.deleteLater()
 
 
+def test_branded_empty_state_preserves_foreground_controls(qapp):
+    state = AnalysisEmptyState(
+        title="空状态标题",
+        description="空状态说明",
+        action_text="选择数据",
+    )
+    clicked: list[bool] = []
+    state.browse_requested.connect(lambda: clicked.append(True))
+    try:
+        assert not state._watermark.isNull()
+        assert state.title_label.text() == "空状态标题"
+        assert state.description_label.text() == "空状态说明"
+        assert state.primary_button.text() == "选择数据"
+
+        state.primary_button.click()
+
+        assert clicked == [True]
+    finally:
+        state.deleteLater()
+
+
+def test_spectrum_empty_state_hides_side_panel_until_spectrum_is_ready(qapp):
+    window = MainWindow()
+    try:
+        assert window._spectrum_empty_state.title_label.text() == "尚未加载质谱数据"
+        assert not window._spectrum_empty_state.isHidden()
+        assert window.widget_3.isHidden()
+
+        window.setup_plots(
+            np.array([100.0, 101.0, 102.0]),
+            np.array([1.0, 10.0, 2.0]),
+        )
+        qapp.processEvents()
+
+        assert window._spectrum_empty_state.isHidden()
+        assert not window.widget_3.isHidden()
+
+        window.clear_widgets()
+        qapp.processEvents()
+
+        assert not window._spectrum_empty_state.isHidden()
+        assert window.widget_3.isHidden()
+        assert window.graph_layout.indexOf(window._spectrum_empty_state) >= 0
+    finally:
+        window.project_settings_manager.clear_project_path()
+        window.deleteLater()
+
+
+def test_temperature_and_pie_reuse_branded_empty_state_without_replacing_controls(qapp):
+    window = MainWindow()
+    try:
+        temperature_state = window.temperature_page._empty_state
+        pie_state = window.pie_page._empty_state
+
+        assert temperature_state.title_label.text() == "尚未生成温度曲线"
+        assert temperature_state.primary_button.text() == "选择数据"
+        assert not temperature_state._watermark.isNull()
+        assert pie_state.title_label.text() == "尚未生成 PIE 曲线"
+        assert pie_state.primary_button.text() == "选择数据"
+        assert not pie_state._watermark.isNull()
+    finally:
+        window.project_settings_manager.clear_project_path()
+        window.deleteLater()
+
+
 def test_ie_lookup_hides_unavailable_prediction_model_ui(qapp):
     window = MainWindow()
     try:
@@ -1900,8 +2842,7 @@ def test_new_project_uses_parent_directory_even_if_parent_contains_old_project_f
         window.project_description_edit.setText("hhh")
         window.project_output_dir_edit.setText(str(downloads_dir))
 
-        window.save_and_apply_project_settings()
-        _wait_for_project_materialization(qapp, window)
+        assert window.save_project() is True
 
         project_dir = downloads_dir / "hhh"
         assert project_dir.exists()
@@ -1935,8 +2876,7 @@ def test_save_new_project_ignores_stale_opened_parent_project_root(qapp, tmp_pat
         window.project_description_edit.setText("aaa")
         window.project_output_dir_edit.setText(str(downloads_dir))
 
-        window.save_and_apply_project_settings()
-        _wait_for_project_materialization(qapp, window)
+        assert window.save_project() is True
 
         project_dir = downloads_dir / "aaa"
         assert (project_dir / "config" / "project.yaml").exists()
@@ -1963,13 +2903,13 @@ def test_save_project_name_into_active_stale_parent_creates_child_project(qapp, 
     monkeypatch.setattr(QtWidgets.QMessageBox, "critical", lambda *args, **kwargs: pytest.fail(str(args)))
     try:
         window.project_settings_manager.set_project_path(downloads_dir)
+        window.new_project()
         window.project_name_edit.setText("aaa")
         window.project_system_edit.setText("aaa")
         window.project_description_edit.setText("aaa")
         window.project_output_dir_edit.setText(str(downloads_dir))
 
-        window.save_and_apply_project_settings()
-        _wait_for_project_materialization(qapp, window)
+        assert window.save_project() is True
 
         project_dir = downloads_dir / "aaa"
         assert (project_dir / "analysis").exists()
@@ -1980,7 +2920,7 @@ def test_save_project_name_into_active_stale_parent_creates_child_project(qapp, 
         window.deleteLater()
 
 
-def test_save_and_apply_materializes_project_data_sources(qapp, tmp_path, monkeypatch):
+def test_save_project_does_not_materialize_project_data_sources(qapp, tmp_path, monkeypatch):
     downloads_dir = tmp_path / "Downloads"
     downloads_dir.mkdir()
     temp_source = tmp_path / "external" / "温度扫描"
@@ -1998,38 +2938,27 @@ def test_save_and_apply_materializes_project_data_sources(qapp, tmp_path, monkey
     window = MainWindow()
     monkeypatch.setattr(QtWidgets.QMessageBox, "critical", lambda *args, **kwargs: pytest.fail(str(args)))
     try:
+        window.new_project()
         window.project_name_edit.setText("managed")
         window.project_system_edit.setText("C6H6")
         window.project_output_dir_edit.setText(str(downloads_dir))
         window.project_temperature_folder_edit.setText(str(temp_source))
         window.project_pie_folder_edit.setText(str(pie_source))
-        window.project_common_parameters_widget.kr_folder_edit.setText(str(kr_source))
-        window.project_common_parameters_widget.kr_peak_mode_manual_radio.setChecked(True)
-        window.project_common_parameters_widget.kr_peak_file_edit.setText(str(kr_peak_source))
-
-        window.save_and_apply_project_settings()
-        _wait_for_project_materialization(qapp, window)
+        assert window.save_project() is True
 
         project_dir = downloads_dir / "managed"
-        managed_temp = project_dir / "raw_data" / "temperature_scan" / "温度扫描"
-        managed_pie = project_dir / "raw_data" / "pie_scan" / "PIE"
-        managed_kr = project_dir / "raw_data" / "kr_calibration" / "Kr定标"
-        managed_kr_peak = project_dir / "analysis" / "spectrum" / "kr_manual_peaks" / "kr_peaks.csv"
         saved = load_project_settings(project_dir / "config" / "project.yaml")
 
-        assert Path(saved.temperature_scan_folder) == managed_temp
-        assert Path(saved.pie_scan_folder) == managed_pie
-        assert Path(saved.kr_calibration_folder) == managed_kr
-        assert Path(saved.kr_calibration_peak_file) == managed_kr_peak
-        assert window.project_temperature_folder_edit.text() == str(managed_temp)
-        assert window.project_pie_folder_edit.text() == str(managed_pie)
-        assert window.project_common_parameters_widget.kr_folder_edit.text() == str(managed_kr)
-        assert window.project_common_parameters_widget.kr_peak_file_edit.text() == str(managed_kr_peak)
-        assert not managed_temp.is_symlink()
-        assert (managed_temp / "8.0eV" / "650K.txt").read_text(encoding="utf-8") == "temp"
-        assert (managed_pie / "8.0eV.txt").read_text(encoding="utf-8") == "pie"
-        assert (managed_kr / "Kr_650K.txt").read_text(encoding="utf-8") == "kr"
-        assert managed_kr_peak.read_text(encoding="utf-8").startswith("mz,start,end")
+        assert saved.temperature_scan_folder == ""
+        assert saved.pie_scan_folder == ""
+        assert saved.kr_calibration_folder == ""
+        assert saved.kr_calibration_peak_file == ""
+        for destination in (
+            project_dir / "raw_data" / "temperature_scan",
+            project_dir / "raw_data" / "pie_scan",
+            project_dir / "raw_data" / "kr_calibration",
+        ):
+            assert not destination.exists() or not any(destination.iterdir())
     finally:
         window.project_settings_manager.clear_project_path()
         window.deleteLater()
@@ -2119,8 +3048,14 @@ def test_open_project_restores_data_sources_and_applies_to_tools(qapp, tmp_path,
         assert window.normalization_settings.pie_photon_mode == "off"
         assert window.normalization_settings.mass_discrimination == pytest.approx(1.0)
         assert not hasattr(window.project_common_parameters_widget, "mass_discrimination_edit")
-        assert window.project_common_parameters_widget.mf_md_preset_combo.currentText() == "30 Torr (Catalysis)"
-        assert window.project_common_parameters_widget.mf_mass_disc_exponent_edit.value() == pytest.approx(0.75148)
+        assert (
+            window.project_function_defaults_widget.mf_md_preset_combo.currentText()
+            == "30 Torr (Catalysis)"
+        )
+        assert (
+            window.project_function_defaults_widget.mf_mass_disc_exponent_edit.value()
+            == pytest.approx(0.75148)
+        )
         assert window.temperature_page.project_settings.temperature_scan_folder == str(temperature_folder)
         assert window.temperature_page.temperature_source_scope == "project"
         assert window.temperature_page.project_source_button.text() == "项目数据"
@@ -2202,8 +3137,9 @@ def test_close_project_returns_related_tools_to_temporary_data_scope(qapp, tmp_p
         assert window.pie_page.project_settings is None
         assert window.mole_fraction_page.project_settings is None
         assert window.pics_page.project_settings is None
-        assert window.mole_fraction_page._mass_disc_exponent == pytest.approx(0.42)
-        assert window.pics_page.spin_md_exponent.value() == pytest.approx(0.42)
+        factory_exponent = load_factory_project_settings().mf_mass_disc_exponent
+        assert window.mole_fraction_page._mass_disc_exponent == pytest.approx(factory_exponent)
+        assert window.pics_page.spin_md_exponent.value() == pytest.approx(factory_exponent)
     finally:
         window.project_settings_manager.clear_project_path()
         window.deleteLater()
@@ -2289,7 +3225,7 @@ def test_spectrum_workbench_custom_source_does_not_overwrite_legacy_project_sour
         window.deleteLater()
 
 
-def test_spectrum_workbench_project_source_can_select_from_project_scan_folder(qapp, tmp_path, monkeypatch):
+def test_spectrum_workbench_ad_hoc_source_is_session_only(qapp, tmp_path, monkeypatch):
     project_dir = tmp_path / "Project_Source_Select"
     temp_dir = project_dir / "raw_data" / "temperature_scan" / "temp"
     source_file = temp_dir / "650K.txt"
@@ -2321,7 +3257,7 @@ def test_spectrum_workbench_project_source_can_select_from_project_scan_folder(q
 
         saved = load_project_settings(project_dir / "config" / "project.yaml")
         assert window.lineEdit.text() == str(source_file)
-        assert saved.single_spectrum_file == str(source_file)
+        assert saved.single_spectrum_file == ""
         assert window.lineEdit.isReadOnly()
     finally:
         window.project_settings_manager.clear_project_path()
@@ -2333,12 +3269,18 @@ def test_save_and_apply_persists_common_parameters_to_project_file(qapp, tmp_pat
     window = MainWindow()
     monkeypatch.setattr(QtWidgets.QMessageBox, "critical", lambda *args, **kwargs: None)
     try:
+        window.new_project()
         window.project_name_edit.setText("Project Params")
         window.project_system_edit.setText("C6H6")
         window.project_output_dir_edit.setText(str(project_dir))
+        assert window.save_project() is True
 
         light_idx = window.project_common_parameters_widget.light_source_combo.findData("beam_current")
-        preset_idx = window.project_common_parameters_widget.mf_md_preset_combo.findData("150 Torr (Combustion)")
+        preset_idx = (
+            window.project_function_defaults_widget.mf_md_preset_combo.findData(
+                "150 Torr (Combustion)"
+            )
+        )
         assert light_idx >= 0
         assert preset_idx >= 0
         assert not hasattr(window.project_common_parameters_widget, "pie_photon_mode_combo")
@@ -2346,15 +3288,17 @@ def test_save_and_apply_persists_common_parameters_to_project_file(qapp, tmp_pat
         assert not hasattr(window.project_common_parameters_widget, "temperature_kr_check")
 
         window.project_common_parameters_widget.light_source_combo.setCurrentIndex(light_idx)
-        window.project_common_parameters_widget.calibration_a_edit.setValue(4.56e-7)
-        window.project_common_parameters_widget.calibration_b_edit.setValue(7.89e-4)
-        window.project_common_parameters_widget.calibration_c_edit.setValue(0.12)
-        window.project_common_parameters_widget.mf_md_preset_combo.setCurrentIndex(preset_idx)
-        window.project_common_parameters_widget.mf_mass_disc_exponent_edit.setValue(0.76155)
+        window.project_calibration_edits[0].setValue(4.56e-7)
+        window.project_calibration_edits[1].setValue(7.89e-4)
+        window.project_calibration_edits[2].setValue(0.12)
+        window.project_function_defaults_widget.mf_md_preset_combo.setCurrentIndex(
+            preset_idx
+        )
+        window.project_function_defaults_widget.mf_mass_disc_exponent_edit.setValue(
+            0.76155
+        )
 
         window.save_and_apply_project_settings()
-        _wait_for_project_materialization(qapp, window)
-
         saved = load_project_settings(project_dir / "config" / "project.yaml")
         saved_yaml = yaml.safe_load((project_dir / "config" / "project.yaml").read_text(encoding="utf-8"))
         assert saved.light_source == "beam_current"
@@ -2394,7 +3338,8 @@ def test_calibration_sync_persists_through_multiple_round_trips(qapp, tmp_path):
         # 模拟打开项目
         window.project_settings_manager.set_project_path(project_dir)
         window.project_settings_manager.set(ps)
-        window._read_project_settings_to_ui(ps)
+        window._set_project_draft(ps, committed=True)
+        window.set_spectrum_source_scope("project", apply_project=False)
 
         # Round 0: 初始状态 — 验证加载的定标参数
         window._apply_project_runtime_settings(ps)
@@ -2404,17 +3349,19 @@ def test_calibration_sync_persists_through_multiple_round_trips(qapp, tmp_path):
         assert cal0.c == pytest.approx(3.3)
 
         # Round 1: 模拟用户在项目管理页面修改定标参数
-        widget = window.project_common_parameters_widget
-        widget.calibration_a_edit.setValue(9.9e-7)
-        widget.calibration_b_edit.setValue(8.8e-4)
-        widget.calibration_c_edit.setValue(7.7)
+        edits = window.project_calibration_edits
+        edits[0].setValue(9.9e-7)
+        edits[1].setValue(8.8e-4)
+        edits[2].setValue(7.7)
 
         # 触发 editingFinished (模拟 spinbox 失去焦点)
-        widget.calibration_a_edit.editingFinished.emit()
-        widget.calibration_b_edit.editingFinished.emit()
-        widget.calibration_c_edit.editingFinished.emit()
+        for edit in edits:
+            edit.editingFinished.emit()
 
-        # 模拟切到质谱页面
+        # 失焦与切换页签都不保存；显式统一事务后才更新运行时。
+        unchanged = load_project_settings(project_dir / "config" / "project.yaml")
+        assert unchanged.cal_a == pytest.approx(1.1e-7)
+        assert window.save_and_apply_project_settings() is True
         window.switch_workspace_page("spectrum")
         cal1 = window.current_calibration()
         assert cal1.a == pytest.approx(9.9e-7), f"Round 1: expected a=9.9e-7, got {cal1.a}"
@@ -2435,16 +3382,15 @@ def test_calibration_sync_persists_through_multiple_round_trips(qapp, tmp_path):
         assert cal2.c == pytest.approx(7.7), f"Round 2: expected c=7.7, got {cal2.c}"
 
         # 再次修改定标参数
-        widget.calibration_a_edit.setValue(5.5e-7)
-        widget.calibration_b_edit.setValue(4.4e-4)
-        widget.calibration_c_edit.setValue(3.3)
+        edits[0].setValue(5.5e-7)
+        edits[1].setValue(4.4e-4)
+        edits[2].setValue(3.3)
 
         # 触发 editingFinished
-        widget.calibration_a_edit.editingFinished.emit()
-        widget.calibration_b_edit.editingFinished.emit()
-        widget.calibration_c_edit.editingFinished.emit()
+        for edit in edits:
+            edit.editingFinished.emit()
 
-        # 切到质谱页面
+        assert window.save_and_apply_project_settings() is True
         window.switch_workspace_page("spectrum")
         cal3 = window.current_calibration()
         assert cal3.a == pytest.approx(5.5e-7), f"Round 3: expected a=5.5e-7, got {cal3.a}"
@@ -2459,18 +3405,307 @@ def test_calibration_sync_persists_through_multiple_round_trips(qapp, tmp_path):
 
         # 切回项目管理页面验证 UI 不被覆盖
         window.switch_workspace_page("project")
-        assert widget.calibration_a_edit.value() == pytest.approx(5.5e-7)
-        assert widget.calibration_b_edit.value() == pytest.approx(4.4e-4)
-        assert widget.calibration_c_edit.value() == pytest.approx(3.3)
+        assert edits[0].value() == pytest.approx(5.5e-7)
+        assert edits[1].value() == pytest.approx(4.4e-4)
+        assert edits[2].value() == pytest.approx(3.3)
     finally:
         window.project_settings_manager.clear_project_path()
         window.deleteLater()
 
 
-def test_loaded_spectrum_is_reprojected_after_second_project_calibration_edit(qapp, tmp_path, monkeypatch):
-    """Regression: loaded spectrum coordinates must follow the second project calibration edit."""
-    import bl03u_masstool.frontends.pyqt_app.spectrum.workbench as workbench_module
+def test_project_calibration_points_load_and_save_with_coefficients(qapp, tmp_path):
+    project_dir = tmp_path / "Calibration_Points_Project"
+    initial_points = [
+        {"tof": 10.0, "mz": 2.0},
+        {"tof": 20.0, "mz": 5.0},
+        {"tof": 30.0, "mz": 10.0},
+    ]
+    ps = ProjectSettings(
+        project_name="Calibration points",
+        output_dir=str(project_dir),
+        cal_a=0.01,
+        cal_b=0.0,
+        cal_c=1.0,
+        calibration_points=initial_points,
+    )
+    save_project_settings(ps, project_dir / "config" / "project.yaml")
 
+    window = MainWindow()
+    try:
+        window.project_settings_manager.set_project_path(project_dir)
+        loaded = window.project_settings_manager.get()
+        window.set_spectrum_source_scope("project", apply_project=False)
+        window._apply_project_runtime_settings(loaded)
+
+        assert window.region.rowCount() == 4
+        assert window.region.item(0, 0).text() == "10"
+        assert window.region.item(2, 1).text() == "10"
+        assert window.region.item(3, 0).text() == ""
+
+        updated_points = [(11.0, 3.0), (21.0, 6.0), (31.0, 11.0)]
+        window.lineEdit_4.setText("0.02")
+        window.lineEdit_5.setText("0.1")
+        window.lineEdit_6.setText("0.5")
+        window._sync_calibration_to_project_settings(updated_points)
+
+        saved = load_project_settings(project_dir / "config" / "project.yaml")
+        assert saved.cal_a == pytest.approx(0.01)
+
+        window._persist_project_calibration(
+            window.current_calibration(),
+            updated_points,
+        )
+        saved = load_project_settings(project_dir / "config" / "project.yaml")
+        assert saved.cal_a == pytest.approx(0.02)
+        assert saved.cal_b == pytest.approx(0.1)
+        assert saved.cal_c == pytest.approx(0.5)
+        assert saved.calibration_points == [
+            {"tof": 11.0, "mz": 3.0},
+            {"tof": 21.0, "mz": 6.0},
+            {"tof": 31.0, "mz": 11.0},
+        ]
+    finally:
+        window.project_settings_manager.clear_project_path()
+        window.deleteLater()
+
+
+def test_temporary_spectrum_calibration_is_independent_from_project(qapp, tmp_path):
+    project_dir = tmp_path / "Temporary_Calibration_Project"
+    points = [
+        {"tof": 10.0, "mz": 2.0},
+        {"tof": 20.0, "mz": 5.0},
+        {"tof": 30.0, "mz": 10.0},
+    ]
+    ps = ProjectSettings(
+        project_name="Temporary calibration",
+        output_dir=str(project_dir),
+        cal_a=0.01,
+        cal_b=0.0,
+        cal_c=1.0,
+        calibration_points=points,
+    )
+    save_project_settings(ps, project_dir / "config" / "project.yaml")
+
+    window = MainWindow()
+    try:
+        window.project_settings_manager.set_project_path(project_dir)
+        loaded = window.project_settings_manager.get()
+        window._apply_project_runtime_settings(loaded)
+        assert window.spectrum_source_scope == "custom"
+        assert window.commonParamsButton.text() == "临时参数"
+
+        window.lineEdit_4.setText("0.02")
+        window.lineEdit_5.setText("0.1")
+        window.lineEdit_6.setText("0.5")
+        assert window._sync_calibration_to_project_settings()
+
+        unchanged = load_project_settings(project_dir / "config" / "project.yaml")
+        assert unchanged.cal_a == pytest.approx(0.01)
+        assert unchanged.cal_b == pytest.approx(0.0)
+        assert unchanged.cal_c == pytest.approx(1.0)
+
+        window.set_spectrum_source_scope("project", apply_project=False)
+        assert window.commonParamsButton.text() == "项目参数"
+        assert window.current_calibration().a == pytest.approx(0.01)
+        assert window.current_calibration().b == pytest.approx(0.0)
+        assert window.current_calibration().c == pytest.approx(1.0)
+
+        window.set_spectrum_source_scope("custom", apply_project=False)
+        assert window.commonParamsButton.text() == "临时参数"
+        assert window.current_calibration().a == pytest.approx(0.02)
+        assert window.current_calibration().b == pytest.approx(0.1)
+        assert window.current_calibration().c == pytest.approx(0.5)
+    finally:
+        window.project_settings_manager.clear_project_path()
+        window.deleteLater()
+
+
+def test_calibration_point_table_grows_from_trailing_row_and_deletes(qapp, monkeypatch):
+    window = MainWindow()
+    try:
+        assert not hasattr(window, "addCalibrationRowButton")
+        assert "双击末行新增" in window.calibrationTableHint.text()
+        window._set_calibration_points_table(
+            [(float(index), float(index + 10)) for index in range(1, 8)]
+        )
+        assert window.region.rowCount() == 8
+
+        window.region.item(7, 0).setText("8")
+        window.region.item(7, 1).setText("18")
+        assert window.region.rowCount() == 9
+        assert window.region.item(8, 0).text() == ""
+
+        monkeypatch.setattr(
+            QtWidgets.QMessageBox,
+            "question",
+            lambda *args, **kwargs: QtWidgets.QMessageBox.StandardButton.Yes,
+        )
+        window.region.selectRow(7)
+        window.delete_selected_calibration_points()
+
+        assert window.region.rowCount() == 8
+        assert window._calibration_points_from_table()[-1] == (7.0, 17.0)
+    finally:
+        window.project_settings_manager.clear_project_path()
+        window.deleteLater()
+
+
+def test_calibration_table_pastes_two_columns_and_expands(qapp):
+    window = MainWindow()
+    try:
+        window._set_calibration_points_table([(10.0, 2.0)])
+        window.region.setCurrentCell(1, 0)
+        QtWidgets.QApplication.clipboard().setText(
+            "20\t5\n30\t10\n40\t17"
+        )
+
+        window.paste_calibration_points()
+
+        assert window._calibration_points_from_table() == [
+            (10.0, 2.0),
+            (20.0, 5.0),
+            (30.0, 10.0),
+            (40.0, 17.0),
+        ]
+        assert window.region.rowCount() == 5
+        assert window.region.item(4, 0).text() == ""
+    finally:
+        window.project_settings_manager.clear_project_path()
+        window.deleteLater()
+
+
+def test_double_clicking_region_adds_calibration_point_on_calibration_tab(
+    qapp,
+    monkeypatch,
+):
+    window = MainWindow()
+    monkeypatch.setattr(
+        QtWidgets.QInputDialog,
+        "getText",
+        lambda *args, **kwargs: ("50.0", True),
+    )
+    try:
+        tof = np.arange(100.0, 121.0)
+        intensity = np.zeros(tof.size)
+        intensity[8] = 100.0
+        window.setup_plots(tof, intensity)
+        window.peakResult.setCurrentWidget(window.tab)
+
+        window.selection_region.calibrationDoubleClicked.emit()
+
+        assert (108.0, 50.0) in window._calibration_points_from_table()
+    finally:
+        window.project_settings_manager.clear_project_path()
+        window.deleteLater()
+
+
+def test_calibration_calculate_previews_before_project_update(qapp, tmp_path):
+    project_dir = tmp_path / "Calibration_Preview_Project"
+    original = ProjectSettings(
+        project_name="Calibration preview",
+        output_dir=str(project_dir),
+        cal_a=0.0,
+        cal_b=1.0,
+        cal_c=0.0,
+        calibration_points=[
+            {"tof": 1.0, "mz": 1.0},
+            {"tof": 2.0, "mz": 2.0},
+            {"tof": 3.0, "mz": 3.0},
+        ],
+    )
+    save_project_settings(original, project_dir / "config" / "project.yaml")
+
+    window = MainWindow()
+    try:
+        window.project_settings_manager.set_project_path(project_dir)
+        window.set_spectrum_source_scope("project", apply_project=False)
+        window._apply_project_runtime_settings(window.project_settings_manager.get())
+        fit_points = [
+            (10.0, 3.0),
+            (20.0, 7.0),
+            (30.0, 13.0),
+            (40.0, 21.0),
+        ]
+        window._set_calibration_points_table(fit_points)
+
+        window.calculate()
+
+        unchanged = load_project_settings(project_dir / "config" / "project.yaml")
+        assert unchanged.cal_a == pytest.approx(0.0)
+        assert unchanged.cal_b == pytest.approx(1.0)
+        assert window._calibration_candidate is not None
+        assert "尚未应用" in window.label_4.text()
+
+        window.apply_calibration_candidate_to_project()
+
+        saved = load_project_settings(project_dir / "config" / "project.yaml")
+        assert saved.cal_a == pytest.approx(0.01)
+        assert saved.cal_b == pytest.approx(0.1)
+        assert saved.cal_c == pytest.approx(1.0)
+        assert saved.calibration_points == [
+            {"tof": tof, "mz": mz}
+            for tof, mz in fit_points
+        ]
+    finally:
+        window.project_settings_manager.clear_project_path()
+        window.deleteLater()
+
+
+def test_project_calibration_apply_refreshes_loaded_custom_spectrum(qapp, tmp_path):
+    from bl03u_masstool.core.calibration import Calibration
+
+    project_dir = tmp_path / "Calibration_Custom_Refresh"
+    original = ProjectSettings(
+        project_name="Custom calibration refresh",
+        output_dir=str(project_dir),
+        cal_a=0.0,
+        cal_b=1.0,
+        cal_c=0.0,
+        calibration_points=[
+            {"tof": 1.0, "mz": 1.0},
+            {"tof": 2.0, "mz": 2.0},
+            {"tof": 3.0, "mz": 3.0},
+        ],
+    )
+    save_project_settings(original, project_dir / "config" / "project.yaml")
+
+    window = MainWindow()
+    try:
+        window.project_settings_manager.set_project_path(project_dir)
+        window.set_spectrum_source_scope("custom", apply_project=False)
+        window._activate_spectrum_calibration(
+            Calibration(a=0.0, b=1.0, c=0.0),
+            [(1.0, 1.0), (2.0, 2.0), (3.0, 3.0)],
+        )
+        tof = np.arange(1.0, 8.0)
+        window.setup_plots(tof, np.arange(tof.size, dtype=float))
+        candidate = Calibration(a=0.0, b=2.0, c=5.0)
+        window._set_calibration_candidate(
+            {
+                "calibration": candidate,
+                "points": [(1.0, 7.0), (2.0, 9.0), (3.0, 11.0)],
+                "r2": 1.0,
+            }
+        )
+
+        window.apply_calibration_candidate_to_project()
+
+        saved = load_project_settings(project_dir / "config" / "project.yaml")
+        assert saved.cal_b == pytest.approx(2.0)
+        assert saved.cal_c == pytest.approx(5.0)
+        assert window.current_plot_axis_x.tolist() == pytest.approx(
+            (2.0 * tof + 5.0).tolist()
+        )
+        temporary_settings, _ = window._ensure_temporary_spectrum_settings()
+        assert temporary_settings.cal_b == pytest.approx(2.0)
+        assert temporary_settings.cal_c == pytest.approx(5.0)
+    finally:
+        window.project_settings_manager.clear_project_path()
+        window.deleteLater()
+
+
+def test_loaded_spectrum_axis_updates_after_second_project_calibration_edit(qapp, tmp_path, monkeypatch):
+    """Regression: the displayed m/z axis follows each project calibration edit."""
     project_dir = tmp_path / "Calibration_Reproject_Test"
     project_dir.mkdir(parents=True)
 
@@ -2490,18 +3725,6 @@ def test_loaded_spectrum_is_reprojected_after_second_project_calibration_edit(qa
     )
     save_project_settings(ps, project_dir / "config" / "project.yaml")
 
-    peak_config = PeakDetectionConfig(
-        algorithm="legacy",
-        detection_min_idx=0,
-        threshold_end=0.5,
-        min_intensity=1.0,
-        nearby_peak_window=3,
-        duplicate_window=3,
-        gaussian_window_max=8,
-        boundary_padding=0,
-    )
-    monkeypatch.setattr(workbench_module, "load_peak_detection_config", lambda: peak_config)
-
     def fail_warning(*args, **kwargs):
         pytest.fail(f"Unexpected warning dialog: {args[2] if len(args) > 2 else args}")
 
@@ -2513,6 +3736,7 @@ def test_loaded_spectrum_is_reprojected_after_second_project_calibration_edit(qa
         window.project_settings_manager.set(ps)
         window._read_project_settings_to_ui(ps)
         window._load_project_settings_to_parameter_widgets(ps)
+        window.set_spectrum_source_scope("project", apply_project=False)
         window._apply_project_runtime_settings(ps)
 
         tof = np.arange(100.0, 220.0)
@@ -2529,13 +3753,13 @@ def test_loaded_spectrum_is_reprojected_after_second_project_calibration_edit(qa
         assert window.current_plot_axis_x[peak_index] == pytest.approx(peak_time)
 
         window.switch_workspace_page("project")
-        widget = window.project_common_parameters_widget
-        widget.calibration_a_edit.setValue(0.0)
-        widget.calibration_b_edit.setValue(2.0)
-        widget.calibration_c_edit.setValue(5.0)
-        widget.calibration_a_edit.editingFinished.emit()
-        widget.calibration_b_edit.editingFinished.emit()
-        widget.calibration_c_edit.editingFinished.emit()
+        edits = window.project_calibration_edits
+        edits[0].setValue(0.0)
+        edits[1].setValue(2.0)
+        edits[2].setValue(5.0)
+        for edit in edits:
+            edit.editingFinished.emit()
+        assert window.save_and_apply_project_settings() is True
 
         window.switch_workspace_page("spectrum")
         expected_mz = peak_time * 2.0 + 5.0
@@ -2550,7 +3774,7 @@ def test_loaded_spectrum_is_reprojected_after_second_project_calibration_edit(qa
         window.deleteLater()
 
 
-def test_project_page_edits_sync_when_switching_to_tools(qapp, tmp_path, monkeypatch):
+def test_project_page_edits_apply_only_after_unified_save(qapp, tmp_path, monkeypatch):
     import bl03u_masstool.frontends.pyqt_app.spectrum.workbench as workbench_module
 
     project_dir = tmp_path / "Project_Live_Sync"
@@ -2581,8 +3805,7 @@ def test_project_page_edits_sync_when_switching_to_tools(qapp, tmp_path, monkeyp
     try:
         window.project_settings_manager.set_project_path(project_dir)
         window.project_settings_manager.set(ps)
-        window._read_project_settings_to_ui(ps)
-        window._load_project_settings_to_parameter_widgets(ps)
+        window._set_project_draft(ps, committed=True)
         window._apply_project_runtime_settings(ps)
         window.workspace_stack.setCurrentWidget(window.project_page)
 
@@ -2596,9 +3819,15 @@ def test_project_page_edits_sync_when_switching_to_tools(qapp, tmp_path, monkeyp
         assert light_index >= 0
         window.project_common_parameters_widget.light_source_combo.setCurrentIndex(light_index)
 
+        window._on_project_tab_changed(2)
+        unchanged = load_project_settings(project_dir / "config" / "project.yaml")
+        assert unchanged.peak_algorithm == "legacy"
+        assert window.project_settings_manager.snapshot().peak_algorithm == "legacy"
+
+        assert window.save_and_apply_project_settings() is True
         window.switch_workspace_page("spectrum")
 
-        active = window.project_settings_manager.get()
+        active = window.project_settings_manager.snapshot()
         assert active.peak_algorithm == "cwt"
         assert active.detection_min_idx == 2222
         assert active.min_intensity == pytest.approx(12.5)
@@ -2686,8 +3915,8 @@ def test_workbench_peak_commands_use_compact_action_menus(qapp):
         assert window.clearPeaksButton.isHidden()
         assert window.deleteSelectedPeakButton.isHidden()
         assert window.updatePeakRangeButton.isHidden()
-        assert window.openProjectPeaksButton.isHidden()
-        assert window.publishProjectPeaksButton.isHidden()
+        assert not hasattr(window, "openProjectPeaksButton")
+        assert not hasattr(window, "publishProjectPeaksButton")
 
         assert window.peakDataMenuButton.menu() is not None
         assert [action.text() for action in window.peakDataMenuButton.menu().actions()] == [
@@ -2705,12 +3934,14 @@ def test_workbench_peak_commands_use_compact_action_menus(qapp):
         ]
         assert window.peakProjectActionPanel.layout().count() == 2
         assert window.peakProjectActionPanel.layout().itemAt(0).widget() is window.peakProjectStateLabel
-        assert window.peakProjectActionPanel.layout().itemAt(1).widget() is window.peakProjectMenuButton
+        assert window.peakProjectActionPanel.layout().itemAt(1).widget() is window.saveProjectPeaksButton
+        assert window.saveProjectPeaksButton.text() == "保存卡峰范围"
+        assert not hasattr(window, "peakProjectMenuButton")
         assert [
             window.peakData.horizontalHeaderItem(column).text()
             for column in range(window.peakData.columnCount())
         ] == ["物种", "TOF", "m/z", "强度", "左边界", "右边界"]
-        assert not window.publishProjectPeaksAction.isEnabled()
+        assert not window.saveProjectPeaksButton.isEnabled()
         assert not window.updatePeakRangeAction.isEnabled()
         assert not window.deleteSelectedPeakAction.isEnabled()
     finally:
@@ -2757,7 +3988,7 @@ def test_workbench_delete_selected_peaks_removes_multiple_rows(qapp, monkeypatch
         window.deleteLater()
 
 
-def test_workbench_publish_peak_ranges_registers_project_manual_file(qapp, tmp_path, monkeypatch):
+def test_workbench_save_peak_ranges_registers_project_manual_file(qapp, tmp_path, monkeypatch):
     project_dir = tmp_path / "Project_Publish_Peaks"
     project_dir.mkdir(parents=True)
     ps = ProjectSettings(
@@ -2797,7 +4028,7 @@ def test_workbench_publish_peak_ranges_registers_project_manual_file(qapp, tmp_p
             for column, value in enumerate(values):
                 window.peakData.setItem(row, column, QtWidgets.QTableWidgetItem(value))
 
-        window.publish_peak_ranges_to_project()
+        window.save_peak_ranges_to_project()
 
         saved = load_project_settings(project_dir / "config" / "project.yaml")
         saved_path = Path(saved.manual_peak_file)
@@ -2826,7 +4057,7 @@ def test_workbench_publish_peak_ranges_registers_project_manual_file(qapp, tmp_p
 
         first_content = saved_path.read_bytes()
         window.peakData.item(0, 4).setText("95.0")
-        window.publish_peak_ranges_to_project()
+        window.save_peak_ranges_to_project()
         updated = load_project_settings(project_dir / "config" / "project.yaml")
         records = list_peak_sets(project_dir)
         assert len(records) == 2
@@ -2838,7 +4069,7 @@ def test_workbench_publish_peak_ranges_registers_project_manual_file(qapp, tmp_p
         window.deleteLater()
 
 
-def test_peak_approval_change_summary_reports_candidate_diff(tmp_path):
+def test_peak_save_change_summary_reports_table_diff(tmp_path):
     current = tmp_path / "approved.csv"
     pd.DataFrame(
         [
@@ -2912,7 +4143,7 @@ def test_workbench_auto_find_does_not_overwrite_project_peak_file(qapp, tmp_path
         window.deleteLater()
 
 
-def test_workbench_publish_peak_ranges_requires_reopenable_spectrum_source(qapp, tmp_path, monkeypatch):
+def test_workbench_save_peak_ranges_requires_reopenable_spectrum_source(qapp, tmp_path, monkeypatch):
     project_dir = tmp_path / "Project_Publish_Requires_Source"
     project_dir.mkdir(parents=True)
     ps = ProjectSettings(
@@ -2942,7 +4173,7 @@ def test_workbench_publish_peak_ranges_requires_reopenable_spectrum_source(qapp,
         for column, value in enumerate(["Peak", "101.0", "28.0", "42.0", "99.0", "103.0"]):
             window.peakData.setItem(0, column, QtWidgets.QTableWidgetItem(value))
 
-        window.publish_peak_ranges_to_project()
+        window.save_peak_ranges_to_project()
 
         saved = load_project_settings(project_dir / "config" / "project.yaml")
         assert saved.manual_peak_file == ""
@@ -2954,7 +4185,11 @@ def test_workbench_publish_peak_ranges_requires_reopenable_spectrum_source(qapp,
         window.deleteLater()
 
 
-def test_workbench_open_project_peak_ranges_rejects_incomplete_project_artifact(qapp, tmp_path, monkeypatch):
+def test_workbench_open_project_peak_ranges_accepts_import_without_spectrum_manifest(
+    qapp,
+    tmp_path,
+    monkeypatch,
+):
     project_dir = tmp_path / "Project_Incomplete_Peaks"
     project_dir.mkdir(parents=True)
     peak_file = project_dir / "peak_ranges.csv"
@@ -2986,12 +4221,56 @@ def test_workbench_open_project_peak_ranges_rejects_incomplete_project_artifact(
         window.project_settings_manager.set_project_path(project_dir)
         window.project_settings_manager.set(ps)
 
-        window.open_project_peak_ranges()
+        assert window.open_project_peak_ranges()
 
-        assert window._valid_peak_rows() == []
+        assert window._valid_peak_rows() == [0]
+        assert window.peakData.item(0, 0).text() == "Unknown"
+        assert window.widget_3.isHidden()
+        assert (
+            window._spectrum_empty_state.title_label.text()
+            == "项目卡峰范围已加载"
+        )
         assert warnings
-        assert warnings[0][0] == "项目卡峰不完整"
-        assert "CSV 缺少列" in warnings[0][1]
+        assert warnings[0][0] == "谱图未恢复"
+        assert "未关联谱图" in warnings[0][1]
+    finally:
+        window.project_settings_manager.clear_project_path()
+        window.deleteLater()
+
+
+def test_open_project_automatically_loads_current_peak_ranges(qapp, tmp_path, monkeypatch):
+    project_dir = tmp_path / "Project_Auto_Load_Peaks"
+    peak_set = create_peak_set(
+        project_dir,
+        content=b"label,peak_index,mz,left_bound,right_bound\nCH4,100,16,98,102\n",
+        extension=".csv",
+        label="current",
+        origin="spectrum_workbench",
+    )
+    ps = ProjectSettings(
+        project_name="Auto load peaks",
+        output_dir=str(project_dir),
+        manual_peak_file=peak_set.peak_file,
+        active_peak_set_id=peak_set.peak_set_id,
+        temp_peak_source="manual",
+    )
+    save_project_settings(ps, project_dir / "config" / "project.yaml")
+    monkeypatch.setattr(
+        QtWidgets.QFileDialog,
+        "getExistingDirectory",
+        lambda *args, **kwargs: str(project_dir),
+    )
+
+    window = MainWindow()
+    try:
+        window.open_project()
+
+        assert window._valid_peak_rows() == [0]
+        assert window.peakData.item(0, 0).text() == "CH4"
+        assert window.peakData.item(0, 4).text() == "98.00"
+        assert window._peak_table_dirty is False
+        assert window.spectrum_source_scope == "project"
+        assert window.peakProjectStateLabel.text() == "已保存为当前项目卡峰范围"
     finally:
         window.project_settings_manager.clear_project_path()
         window.deleteLater()
@@ -3036,7 +4315,7 @@ def test_workbench_open_project_peak_ranges_restores_manifest_source(qapp, tmp_p
         for column, value in enumerate(["Peak", "4002.0", "4002.0", "12.0", "4001.0", "4003.0"]):
             window.peakData.setItem(0, column, QtWidgets.QTableWidgetItem(value))
 
-        window.publish_peak_ranges_to_project()
+        window.save_peak_ranges_to_project()
         saved = load_project_settings(project_dir / "config" / "project.yaml")
 
         window.clear_peak_data()
@@ -3160,13 +4439,12 @@ def test_function_default_edits_sync_when_switching_to_tools(qapp, tmp_path):
     try:
         window.project_settings_manager.set_project_path(project_dir)
         window.project_settings_manager.set(ps)
-        window._read_project_settings_to_ui(ps)
-        window._load_project_settings_to_parameter_widgets(ps)
+        window._set_project_draft(ps, committed=True)
         window._apply_project_runtime_settings(ps)
         window.workspace_stack.setCurrentWidget(window.project_page)
 
         widget = window.project_function_defaults_widget
-        window.project_tabs.setCurrentWidget(widget)
+        window.project_tabs.setCurrentWidget(window.project_analysis_page)
         peak_source_index = widget.temp_peak_source_combo.findData("manual")
         reference_index = widget.temp_reference_mode_combo.findData("individual")
         merge_index = widget.pie_merge_method_combo.findData("first_segment_dominant")
@@ -3201,21 +4479,20 @@ def test_function_default_edits_sync_when_switching_to_tools(qapp, tmp_path):
         widget.mf_photon_energy_edit.setValue(11.25)
         widget.mf_reference_temperature_edit.setValue(575)
 
-        # Switching within the project page should also collect edits so
-        # project-page tools such as Kr calculation do not read stale defaults.
-        window.project_tabs.setCurrentWidget(window.project_common_parameters_widget)
-        assert window.project_settings_manager.get().pie_energy_decimals == 4
-        assert window.project_settings_manager.get().kr_mz == 84
-
-        # Re-clicking the current Project tab should collect in-memory edits,
-        # not reload the older project.yaml over the UI values.
-        window.switch_workspace_page("project")
+        # Switching tabs updates only the shared draft, not the manager or disk.
+        window._on_project_tab_changed(1)
+        assert window._project_draft.pie_energy_decimals == 4
+        assert window.project_settings_manager.snapshot().pie_energy_decimals == 1
+        assert load_project_settings(
+            project_dir / "config" / "project.yaml"
+        ).pie_energy_decimals == 1
         assert widget.pie_energy_decimals_edit.value() == 4
 
+        assert window.save_and_apply_project_settings() is True
         window.switch_workspace_page("pie")
 
-        active = window.project_settings_manager.get()
-        assert active.temp_peak_source == "manual"
+        active = window.project_settings_manager.snapshot()
+        assert active.temp_peak_source == "auto"
         assert active.temp_reference_mode == "individual"
         assert active.temp_prefer_gaussian is False
         assert active.temp_integration_method == "baseline"
@@ -3296,6 +4573,90 @@ def test_import_finished_registers_data_source_and_refreshes_tools(qapp, tmp_pat
         window.deleteLater()
 
 
+def test_import_finished_does_not_write_after_project_is_closed(
+    qapp,
+    tmp_path,
+    monkeypatch,
+):
+    window = MainWindow()
+    try:
+        window.project_settings_manager.clear_project_path()
+        window._import_project_config_path = (
+            tmp_path / "closed-project" / "config" / "project.yaml"
+        )
+        monkeypatch.setattr(
+            window.project_settings_manager,
+            "snapshot",
+            lambda: pytest.fail("closed project must not produce an import snapshot"),
+        )
+        monkeypatch.setattr(
+            "bl03u_masstool.frontends.pyqt_app.spectrum.workspace_pages.import_peak_set",
+            lambda *args, **kwargs: pytest.fail(
+                "closed project must not create a peak set"
+            ),
+        )
+
+        window._on_import_finished(
+            {
+                "success": True,
+                "field_name": "manual_peak_file",
+                "destination": str(tmp_path / "imported-peaks.csv"),
+                "label": "手动卡峰文件",
+                "source_key": "manual_peak",
+                "mode": "copy",
+            }
+        )
+
+        assert "原项目已关闭或切换" in window.statusbar.currentMessage()
+    finally:
+        window.project_settings_manager.clear_project_path()
+        window.deleteLater()
+
+
+def test_import_finished_reports_project_registration_failure(
+    qapp,
+    tmp_path,
+    monkeypatch,
+):
+    project_dir = tmp_path / "Import_Save_Failure"
+    ps = ProjectSettings(project_name="Import failure", output_dir=str(project_dir))
+    save_project_settings(ps, project_dir / "config" / "project.yaml")
+    messages = []
+
+    window = MainWindow()
+    try:
+        window.project_settings_manager.set_project_path(project_dir)
+        window.project_settings_manager.set(ps)
+        monkeypatch.setattr(
+            window.project_settings_manager,
+            "replace_and_save",
+            lambda _settings: (_ for _ in ()).throw(OSError("disk full")),
+        )
+        monkeypatch.setattr(
+            QtWidgets.QMessageBox,
+            "critical",
+            lambda *args, **kwargs: messages.append(str(args[2])),
+        )
+
+        window._on_import_finished(
+            {
+                "success": True,
+                "field_name": "temperature_scan_folder",
+                "destination": str(project_dir / "raw_data" / "temperature_scan"),
+                "label": "温度扫描目录",
+                "source_key": "temperature_scan",
+                "mode": "copy",
+            }
+        )
+
+        assert messages
+        assert "disk full" in messages[0]
+        assert window.statusbar.currentMessage() == "导入结果未能登记到项目"
+    finally:
+        window.project_settings_manager.clear_project_path()
+        window.deleteLater()
+
+
 def test_import_finished_appends_pie_segment_without_overwriting_existing(qapp, tmp_path):
     project_dir = tmp_path / "Project_Multi_PIE"
     low = project_dir / "raw_data" / "pie_scan" / "low"
@@ -3334,24 +4695,32 @@ def test_import_finished_appends_pie_segment_without_overwriting_existing(qapp, 
         window.deleteLater()
 
 
-def test_project_settings_autosave_failure_is_visible(qapp, tmp_path, monkeypatch, caplog):
+def test_project_save_failure_preserves_committed_file_and_draft(qapp, tmp_path, monkeypatch):
+    project_dir = tmp_path / "project"
+    original = ProjectSettings(project_name="Committed", output_dir=str(project_dir))
+    save_project_settings(original, project_dir / "config" / "project.yaml")
     window = MainWindow()
     try:
-        window.project_settings_manager.set_project_path(tmp_path / "project.yaml")
+        window.project_settings_manager.set_project_path(project_dir)
+        window._set_project_draft(original, committed=True)
+        window.project_name_edit.setText("Draft survives")
         monkeypatch.setattr(
             window.project_settings_manager,
-            "save",
-            lambda: (_ for _ in ()).throw(OSError("disk full")),
+            "replace_and_save",
+            lambda _settings: (_ for _ in ()).throw(OSError("disk full")),
+        )
+        monkeypatch.setattr(
+            QtWidgets.QMessageBox,
+            "critical",
+            lambda *args, **kwargs: None,
         )
 
-        with caplog.at_level("ERROR"):
-            window._sync_project_page_edits_to_runtime(
-                save_project=True,
-                sync_tools=False,
-            )
-
-        assert "自动保存失败" in window.statusbar.currentMessage()
-        assert "Failed to save project settings" in caplog.text
+        assert window.save_and_apply_project_settings() is False
+        assert load_project_settings(
+            project_dir / "config" / "project.yaml"
+        ).project_name == "Committed"
+        assert window.project_name_edit.text() == "Draft survives"
+        assert window._project_draft.project_name == "Draft survives"
     finally:
         window.project_settings_manager.clear_project_path()
         window.deleteLater()
@@ -3435,7 +4804,7 @@ def test_project_manual_peak_button_imports_legacy_file(qapp, tmp_path, monkeypa
         window.deleteLater()
 
 
-def test_project_management_switches_between_approved_peak_sets(qapp, tmp_path):
+def test_project_management_exposes_only_current_peak_ranges(qapp, tmp_path):
     project_dir = tmp_path / "Project_Peak_Set_Switch"
     first = create_peak_set(
         project_dir,
@@ -3465,15 +4834,12 @@ def test_project_management_switches_between_approved_peak_sets(qapp, tmp_path):
         window.project_settings_manager.set_project_path(project_dir)
         window.project_settings_manager.set(ps)
         window._read_project_settings_to_ui(ps)
-        second_index = window.project_peak_set_combo.findData(second.peak_set_id)
-        assert second_index >= 0
 
-        window.project_peak_set_combo.setCurrentIndex(second_index)
-        window.activate_selected_project_peak_set()
-
-        saved = load_project_settings(project_dir / "config" / "project.yaml")
-        assert saved.active_peak_set_id == second.peak_set_id
-        assert Path(saved.manual_peak_file) == verify_peak_set(project_dir, second)
+        assert not hasattr(window, "project_peak_set_combo")
+        assert not hasattr(window, "project_peak_set_activate_button")
+        assert not hasattr(window, "activate_selected_project_peak_set")
+        assert window.project_manual_peak_edit.text() == first.peak_file
+        assert window.datasource_row_status_labels["manual_peak"].text() == "✓ 当前"
         assert verify_peak_set(project_dir, first).exists()
         assert verify_peak_set(project_dir, second).exists()
     finally:

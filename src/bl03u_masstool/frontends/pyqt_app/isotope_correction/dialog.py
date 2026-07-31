@@ -37,6 +37,10 @@ from bl03u_masstool.frontends.pyqt_app.workers import WorkerThread
 
 
 class IsotopeCorrectionDialog(QtWidgets.QWidget, DataFrameTableMixin):
+    PROJECT_RESULT_GROUPS = {
+        "temperature": "temperature:project",
+        "pie": "pie:project",
+    }
     """Formula-driven isotope contribution post-processing for curve results."""
 
     ENERGY_GROUP_DECIMALS = 2
@@ -53,6 +57,8 @@ class IsotopeCorrectionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         "normalized_area": "归一化面积（normalized_area）",
         "photon_normalized_area": "光强归一化面积",
         "raw_area": "原始积分面积",
+        "merged_intensity": "跨能段合并强度（推荐）",
+        "io_time_normalized_intensity": "IO及扫描时间归一强度",
         "normalized_intensity": "归一化强度（推荐）",
         "photon_normalized_intensity": "光强归一化强度",
         "intensity": "信号强度",
@@ -78,6 +84,7 @@ class IsotopeCorrectionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self._project_load_worker: WorkerThread | None = None
         self._project_load_request_id = 0
         self._project_datasets: dict[int, CurveDataset] = {}
+        self._peak_track_selection: dict[int, object] = {}
         self._build_ui()
         self._update_project_source_button()
         self._update_mode_hint()
@@ -148,11 +155,12 @@ class IsotopeCorrectionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.project_dataset_combo.currentIndexChanged.connect(
             self._on_project_dataset_changed
         )
+        self.project_dataset_combo.hide()
         self.refresh_source_button = QtWidgets.QPushButton("刷新", source_group)
         self.refresh_source_button.setObjectName("BrowseButton")
         self.refresh_source_button.setToolTip("重新查询项目 SQLite 和上游分析状态")
         self.refresh_source_button.clicked.connect(self.refresh_project_sources)
-        self.project_source_button = QtWidgets.QPushButton("加载所选数据集", source_group)
+        self.project_source_button = QtWidgets.QPushButton("加载项目结果", source_group)
         self.project_source_button.setObjectName("BrowseButton")
         self.project_source_button.clicked.connect(self.load_project_result)
         self.browse_source_button = QtWidgets.QPushButton("导入文件…", source_group)
@@ -186,16 +194,15 @@ class IsotopeCorrectionDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
         source_layout.addWidget(QtWidgets.QLabel("曲线"), 0, 0)
         source_layout.addWidget(self.source_type_combo, 0, 1)
-        source_layout.addWidget(QtWidgets.QLabel("数据集"), 0, 2)
-        source_layout.addWidget(self.project_dataset_combo, 0, 3, 1, 3)
+        source_layout.addWidget(QtWidgets.QLabel("项目结果"), 0, 2)
+        source_layout.addWidget(self.project_source_button, 0, 3, 1, 3)
         source_layout.addWidget(self.refresh_source_button, 0, 6)
-        source_layout.addWidget(self.project_source_button, 0, 7)
-        source_layout.addWidget(self.browse_source_button, 0, 8)
+        source_layout.addWidget(self.browse_source_button, 0, 7)
         source_layout.addWidget(QtWidgets.QLabel("信号"), 1, 0)
         source_layout.addWidget(self.signal_column_combo, 1, 1)
         source_layout.addWidget(self.energy_filter_label, 1, 2)
         source_layout.addWidget(self.energy_filter_combo, 1, 3)
-        source_layout.addWidget(self.data_status_label, 1, 4, 1, 5)
+        source_layout.addWidget(self.data_status_label, 1, 4, 1, 4)
         source_layout.setColumnStretch(3, 1)
         root.addWidget(source_group)
 
@@ -348,6 +355,10 @@ class IsotopeCorrectionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.result_tabs.addTab(self.pattern_table_widget, "同位素比例")
         self.source_table_widget = QtWidgets.QTableWidget(self.result_tabs)
         self.result_tabs.addTab(self.source_table_widget, "母峰来源")
+        self.diagnostic_table_widget = QtWidgets.QTableWidget(self.result_tabs)
+        self.result_tabs.addTab(self.diagnostic_table_widget, "数值诊断")
+        self.sensitivity_table_widget = QtWidgets.QTableWidget(self.result_tabs)
+        self.result_tabs.addTab(self.sensitivity_table_widget, "系数灵敏度")
         result_layout.addWidget(self.result_tabs, 1)
         controls_scroll.setWidget(controls_panel)
         self.page_splitter.addWidget(controls_scroll)
@@ -404,22 +415,20 @@ class IsotopeCorrectionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             else None
         )
         all_datasets = (
-            list_curve_datasets_read_only(
-                database_path,
-                curve_type=source_type,
-                include_stale=True,
-            )
+            [
+                dataset
+                for dataset in list_curve_datasets_read_only(
+                    database_path,
+                    curve_type=source_type,
+                    include_stale=True,
+                )
+                if dataset.dataset_group == self.PROJECT_RESULT_GROUPS[source_type]
+                and dataset.validity_status == "valid"
+            ]
             if database_path is not None and database_path.is_file()
             else []
         )
-        current = next(
-            (
-                dataset
-                for dataset in all_datasets
-                if dataset.is_current and dataset.validity_status == "valid"
-            ),
-            None,
-        )
+        current = all_datasets[0] if all_datasets else None
         return database_path, all_datasets, current
 
     def _populate_project_dataset_combo(
@@ -442,18 +451,9 @@ class IsotopeCorrectionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         previous = self.project_dataset_combo.blockSignals(True)
         self.project_dataset_combo.clear()
         for dataset in datasets:
-            if dataset.is_current and dataset.validity_status == "valid":
-                state = "当前 · 有效"
-            elif dataset.validity_status == "valid":
-                state = "有效历史"
-            elif dataset.validity_status == "archived":
-                state = "已归档"
-            else:
-                state = "已过期"
-            created = dataset.created_at.replace("T", " ")[:19]
             self.project_dataset_combo.addItem(
-                f"#{dataset.dataset_id} · {state} · {dataset.name} · "
-                f"{dataset.channel_count} 峰 / {dataset.point_count} 点 · {created}",
+                f"{dataset.name} · "
+                f"{dataset.channel_count} 峰 / {dataset.point_count} 点",
                 dataset.dataset_id,
             )
         if selected_id is not None:
@@ -488,14 +488,12 @@ class IsotopeCorrectionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.project_source_button.setEnabled(not loaded)
         self.project_source_button.setVisible(not loaded)
         self.project_source_button.setText(
-            f"当前使用 #{selected.dataset_id}{suffix}"
+            f"当前使用项目结果{suffix}"
             if loaded
-            else f"加载 #{selected.dataset_id}{suffix}"
+            else f"加载项目结果{suffix}"
         )
         details = [
-            f"dataset_id={selected.dataset_id}",
             f"状态={selected.validity_status}",
-            f"角色={selected.dataset_role}",
             f"精确质量通道={selected.channel_count}",
             f"曲线点={selected.point_count}",
         ]
@@ -528,28 +526,14 @@ class IsotopeCorrectionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             if self.input_df.empty:
                 self._set_status(
                     self.data_status_label,
-                    f"正式来源：项目 SQLite；当前数据集 #{current.dataset_id}，"
+                    "正式来源：项目 SQLite；"
                     f"{current.channel_count} 个精确质量通道，"
                     f"{current.point_count} 个曲线点。",
                     "success",
                 )
             return current
-        if all_datasets:
-            self._update_project_source_action()
-            selected = self._selected_project_dataset() or all_datasets[0]
-            if self.input_df.empty:
-                self._set_status(
-                    self.data_status_label,
-                    f"项目 SQLite 中有 {len(all_datasets)} 个历史数据集，"
-                    f"但没有已核验的当前数据集。所选 #{selected.dataset_id}："
-                    f"{selected.stale_reason or '状态为过期'}。"
-                    "可明确加载用于核查，不会把它设为项目当前。",
-                    "warning",
-                )
-            return None
-
         self.project_dataset_combo.clear()
-        self.project_dataset_combo.addItem("项目 SQLite 中没有该类型的数据集", None)
+        self.project_dataset_combo.addItem("项目 SQLite 中没有该类型的有效结果", None)
         self.project_dataset_combo.setEnabled(False)
         field_name = self.SOURCE_ARTIFACT_FIELDS[source_type]
         path = (
@@ -571,7 +555,7 @@ class IsotopeCorrectionDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 self._set_status(
                     self.data_status_label,
                     f"项目 SQLite：{path_text}；"
-                    f"没有{self.SOURCE_LABELS[source_type]}数据集。",
+                    f"没有有效的{self.SOURCE_LABELS[source_type]}。",
                     "warning",
                 )
         return None
@@ -616,11 +600,9 @@ class IsotopeCorrectionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self._project_load_request_id += 1
         request_id = self._project_load_request_id
         source_type = self._source_type()
-        source_label = (
-            f"{database_path} · SQLite 数据集 #{dataset.dataset_id} {dataset.name}"
-        )
+        source_label = f"{database_path} · 项目 SQLite · {dataset.name}"
         self.project_source_button.setEnabled(False)
-        self.project_source_button.setText(f"正在读取 SQLite #{dataset.dataset_id}…")
+        self.project_source_button.setText("正在读取项目结果…")
         self.source_type_combo.setEnabled(False)
         self.project_dataset_combo.setEnabled(False)
         self.refresh_source_button.setEnabled(False)
@@ -689,17 +671,9 @@ class IsotopeCorrectionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self._update_project_source_button()
             self.source_path_edit.setText(
                 f"项目 SQLite · {self.SOURCE_LABELS[source_type]} · "
-                f"数据集 #{dataset.dataset_id} · {dataset.name}"
+                f"{dataset.name}"
             )
             self.source_path_edit.setToolTip(source_label)
-            if dataset.validity_status != "valid":
-                self._set_status(
-                    self.data_status_label,
-                    f"已从项目 SQLite 加载数据集 #{dataset.dataset_id}，"
-                    "但该数据集已过期或归档，仅供核查；"
-                    "未将其设为项目当前。",
-                    "warning",
-                )
         except Exception as exc:
             self._fail_project_dataset_load(
                 str(exc),
@@ -737,21 +711,6 @@ class IsotopeCorrectionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             return
         selected = self._selected_project_dataset() or current
         if selected is not None:
-            if selected.validity_status != "valid":
-                answer = QtWidgets.QMessageBox.warning(
-                    self,
-                    "加载非当前数据集",
-                    f"数据集 #{selected.dataset_id} 当前状态为"
-                    f"“{selected.validity_status}”。\n"
-                    f"{selected.stale_reason or '其来源尚未通过当前项目参数核验。'}\n\n"
-                    "继续加载只用于核查和后处理，"
-                    "不会将其设为项目当前数据集。",
-                    QtWidgets.QMessageBox.StandardButton.Yes
-                    | QtWidgets.QMessageBox.StandardButton.Cancel,
-                    QtWidgets.QMessageBox.StandardButton.Cancel,
-                )
-                if answer != QtWidgets.QMessageBox.StandardButton.Yes:
-                    return
             self._start_project_dataset_load(selected, show_message=True)
             return
         field_name = self.SOURCE_ARTIFACT_FIELDS[source_type]
@@ -807,6 +766,7 @@ class IsotopeCorrectionDialog(QtWidgets.QWidget, DataFrameTableMixin):
                     break
         source_type = self._source_type()
         inferred = infer_curve_columns(data, source_type)
+        self._peak_track_selection = {}
         self.input_df = data.copy()
         self.axis_column = str(inferred["axis_column"])
         self.mass_column = str(inferred["mass_column"])
@@ -915,6 +875,7 @@ class IsotopeCorrectionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self.loaded_database_path = ""
         self._loaded_project_dataset_id = None
         self._loaded_project_source_type = ""
+        self._peak_track_selection = {}
         self.source_path_edit.clear()
         self.signal_column_combo.clear()
         self.signal_column_combo.setEnabled(False)
@@ -1064,7 +1025,8 @@ class IsotopeCorrectionDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 curve_type="pie",
                 include_stale=True,
             )
-            if dataset.is_current and dataset.validity_status == "valid"
+            if dataset.dataset_group == self.PROJECT_RESULT_GROUPS["pie"]
+            and dataset.validity_status == "valid"
         ]
         assignments = (
             list_species_assignments(
@@ -1187,14 +1149,19 @@ class IsotopeCorrectionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             QtWidgets.QMessageBox.warning(self, "提示", "质量范围的起点不能大于终点")
             return
         try:
+            selected_input = self._selected_input_data()
+            peak_track_selection = self._resolve_peak_track_collisions(
+                selected_input
+            )
             self.curve_matrix = prepare_curve_matrix(
-                self._selected_input_data(),
+                selected_input,
                 axis_column=self.axis_column,
                 mass_column=self.mass_column,
                 intensity_column=str(self.signal_column_combo.currentData()),
                 mz_min=self.mz_min_spin.value(),
                 mz_max=self.mz_max_spin.value(),
                 aggregation=str(self.aggregation_combo.currentData()),
+                peak_track_selection=peak_track_selection,
             )
             incomplete_columns = [
                 int(column)
@@ -1216,6 +1183,48 @@ class IsotopeCorrectionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             QtWidgets.QMessageBox.warning(self, "计算失败", str(exc))
             return
         self._show_results()
+
+    def _resolve_peak_track_collisions(
+        self,
+        data: pd.DataFrame,
+    ) -> dict[int, object]:
+        if "peak_track" not in data.columns or self.mass_column not in data.columns:
+            return {}
+        nominal = np.rint(
+            pd.to_numeric(data[self.mass_column], errors="coerce")
+        )
+        working = pd.DataFrame(
+            {
+                "nominal_mz": nominal,
+                "peak_track": data["peak_track"],
+            }
+        ).dropna()
+        selection = dict(self._peak_track_selection)
+        for mass, group in working.groupby("nominal_mz", sort=True):
+            tracks = list(dict.fromkeys(group["peak_track"].tolist()))
+            if len(tracks) <= 1:
+                continue
+            nominal_mz = int(mass)
+            if nominal_mz in selection and selection[nominal_mz] in tracks:
+                continue
+            labels = [str(value) for value in tracks]
+            chosen, accepted = QtWidgets.QInputDialog.getItem(
+                self,
+                "选择精确峰轨道",
+                f"m/z {nominal_mz} 存在 {len(tracks)} 条精确峰轨道，"
+                "同位素矩阵不能自动平均。请选择要使用的 peak_track：",
+                labels,
+                0,
+                False,
+            )
+            if not accepted:
+                raise ValueError(
+                    f"m/z {nominal_mz} 尚未选择具体 peak_track，计算已停止"
+                )
+            selected_index = labels.index(str(chosen))
+            selection[nominal_mz] = tracks[selected_index]
+        self._peak_track_selection = selection
+        return selection
 
     def _show_results(self) -> None:
         result = self.correction_result
@@ -1292,6 +1301,11 @@ class IsotopeCorrectionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         )
         self.set_dataframe(self.source_table_widget, source_display)
 
+        diagnostic_display = result.diagnostic_table.copy()
+        self.set_dataframe(self.diagnostic_table_widget, diagnostic_display)
+        sensitivity_display = result.sensitivity_table.copy()
+        self.set_dataframe(self.sensitivity_table_widget, sensitivity_display)
+
         rank_text = f"理论贡献矩阵秩 {result.pattern_rank}/{len(self.hypotheses)}"
         if np.isfinite(result.pattern_condition_number):
             rank_text += f"，条件数 {result.pattern_condition_number:.4g}"
@@ -1304,7 +1318,8 @@ class IsotopeCorrectionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             "success",
         )
         self.result_status_label.setToolTip(
-            f"{CORRECTION_MODES[result.mode]}；{rank_text}"
+            f"{CORRECTION_MODES[result.mode]}；{rank_text}\n"
+            f"{result.scientific_note}"
         )
         self.export_button.setEnabled(True)
         self.update_result_plot()
@@ -1365,6 +1380,8 @@ class IsotopeCorrectionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.curve_table_widget,
             self.pattern_table_widget,
             self.source_table_widget,
+            self.diagnostic_table_widget,
+            self.sensitivity_table_widget,
         ):
             table.clearContents()
             table.setRowCount(0)
@@ -1411,6 +1428,16 @@ class IsotopeCorrectionDialog(QtWidgets.QWidget, DataFrameTableMixin):
                     index=False,
                     encoding="utf-8-sig",
                 )
+                result.diagnostic_table.to_csv(
+                    output_path.with_name(f"{output_path.stem}_diagnostics.csv"),
+                    index=False,
+                    encoding="utf-8-sig",
+                )
+                result.sensitivity_table.to_csv(
+                    output_path.with_name(f"{output_path.stem}_sensitivity.csv"),
+                    index=False,
+                    encoding="utf-8-sig",
+                )
                 parameter_table.to_csv(
                     output_path.with_name(f"{output_path.stem}_parameters.csv"),
                     index=False,
@@ -1424,6 +1451,16 @@ class IsotopeCorrectionDialog(QtWidgets.QWidget, DataFrameTableMixin):
                     result.pattern_table.to_excel(writer, sheet_name="isotope_patterns", index=False)
                     result.source_table.to_excel(writer, sheet_name="source_curves", index=False)
                     result.component_table.to_excel(writer, sheet_name="components", index=False)
+                    result.diagnostic_table.to_excel(
+                        writer,
+                        sheet_name="numerical_diagnostics",
+                        index=False,
+                    )
+                    result.sensitivity_table.to_excel(
+                        writer,
+                        sheet_name="coefficient_sensitivity",
+                        index=False,
+                    )
                     parameter_table.to_excel(writer, sheet_name="parameters", index=False)
             if self.project_scope_active:
                 record_project_artifact(
@@ -1455,6 +1492,10 @@ class IsotopeCorrectionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             (
                 "理论贡献矩阵条件数",
                 "" if result is None else result.pattern_condition_number,
+            ),
+            (
+                "科学说明",
+                "" if result is None else result.scientific_note,
             ),
         ]
         return pd.DataFrame(rows, columns=["parameter", "value"])

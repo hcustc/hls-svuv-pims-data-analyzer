@@ -50,6 +50,7 @@ def channel_to_curve(channel: CurveChannel) -> dict[str, Any]:
         "rows": rows,
         "channel_id": int(channel.channel_id),
         "dataset_id": int(channel.dataset_id),
+        "peak_track": channel.peak_track,
         "has_nominal_collision": False,
     }
     if channel.curve_type == "temperature":
@@ -61,7 +62,12 @@ def channel_to_curve(channel: CurveChannel) -> dict[str, Any]:
                 curve[name] = rows[name].dropna().iloc[0]
     else:
         curve["energies"] = _float_values(rows, "energy")
-        curve["intensities"] = _float_values(rows, "normalized_intensity")
+        curve["intensities"] = _float_values(
+            rows,
+            "merged_intensity"
+            if "merged_intensity" in rows
+            else "normalized_intensity",
+        )
     return curve
 
 

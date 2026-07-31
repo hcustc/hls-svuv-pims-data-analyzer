@@ -16,6 +16,6 @@ scipy
 uvicorn
 
 [dev]
-httpx
+httpx2
 pyinstaller
 pytest

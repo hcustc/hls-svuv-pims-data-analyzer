@@ -504,7 +504,7 @@ class TestDirtyFlagManagement:
     def test_persist_interface_returns_success(
         self, pie_dialog, project_settings, sample_curves, sample_database
     ):
-        """Test persist_per_mz_config_state() returns (True, None) on success."""
+        """Test persist_pie_project_state() returns (True, None) on success."""
         pie_dialog.project_settings = project_settings
         pie_dialog.project_dir = str(project_root(project_settings))
         pie_dialog.curves = sample_curves
@@ -521,7 +521,7 @@ class TestDirtyFlagManagement:
             "locked_ids": [],
         }
 
-        success, error = pie_dialog.persist_per_mz_config_state()
+        success, error = pie_dialog.persist_pie_project_state()
         assert success is True
         assert error is None
         assert pie_dialog.pie_state_dirty is False
@@ -575,7 +575,7 @@ class TestDirtyFlagManagement:
     def test_persist_interface_returns_failure_on_error(
         self, pie_dialog, project_settings, sample_curves, sample_database
     ):
-        """Test persist_per_mz_config_state() returns error on failure."""
+        """Test persist_pie_project_state() returns error on failure."""
         # Use a path inside a regular file as project_dir – creating
         # subdirs under a file always fails on all platforms.
         with tempfile.NamedTemporaryFile(delete=False) as tf:
@@ -585,7 +585,7 @@ class TestDirtyFlagManagement:
             pie_dialog.curves = sample_curves
             pie_dialog.database = sample_database
 
-            success, error = pie_dialog.persist_per_mz_config_state()
+            success, error = pie_dialog.persist_pie_project_state()
             assert success is False
             assert error is not None
             # Dirty flag should remain on failure
@@ -762,7 +762,7 @@ class TestPreservingResultsOnPartialSave:
         }
 
         # Save again - should preserve results
-        pie_dialog2.persist_per_mz_config_state()
+        pie_dialog2.persist_pie_project_state()
 
         # Load and verify results still exist
         manager = PieStateManager(pie_dialog2.project_dir)
