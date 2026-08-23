@@ -15,8 +15,12 @@ python scripts/lock_from_venv.py
 
 ## CI
 
-- `.github/workflows/ci.yml` 在 push、pull request 和手动触发时安装 `requirements-dev.lock` 并运行 `python -m pytest`。
-- `.github/workflows/desktop-build.yml` 在打包前也先运行测试，避免只产出未验证的桌面构建。
+- `.github/workflows/ci.yml` 在 push、pull request、merge queue 和手动触发时运行两组检查：非 GUI 单元/集成测试及安装、编译、wheel、CLI 冒烟检查；Linux `offscreen` 环境下的 PyQt GUI 测试。
+- CI 使用锁定的 `requirements-dev.lock`，缓存 pip 下载，并按 workflow + ref 取消已过时的并发运行。
+- `.github/workflows/desktop-build.yml` 在 Windows 和 macOS 打包前运行全量测试。普通 `master` push 只验证构建；仅手动触发时保存 7 天构建产物，版本标签则发布 Release 资产，避免日常构建耗尽 artifact 配额。
+- `.github/workflows/codeql.yml` 对 Python 和 JavaScript 运行 CodeQL，并每周定时复查。
+- `.github/dependabot.yml` 每周汇总检查 GitHub Actions 依赖更新。
+- `.coderabbit.yaml` 保存面向 SR-PIMS 科学正确性、Project Evidence、跨调用面等价性和测试覆盖的 CodeRabbit 审查规则；该规则在仓库安装 CodeRabbit GitHub App 后生效。
 
 ## PyQt 拆分
 
