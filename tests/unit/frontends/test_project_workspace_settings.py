@@ -30,6 +30,11 @@ from bl03u_masstool.core.peak_sets import (
     list_peak_sets,
     verify_peak_set,
 )
+from bl03u_masstool.core.peak_range_assessment import (
+    PeakRangeAssessment,
+    PeakRangeFitStatus,
+)
+from bl03u_masstool.core.peak_ranges import PeakRange
 from bl03u_masstool.frontends.pyqt_app.common.widgets import AnalysisEmptyState
 from bl03u_masstool.frontends.pyqt_app.normalization.widget import FunctionDefaultsWidget
 from bl03u_masstool.frontends.pyqt_app.spectrum.workbench import MainWindow
@@ -3920,6 +3925,7 @@ def test_workbench_peak_commands_use_compact_action_menus(qapp):
 
         assert window.peakDataMenuButton.menu() is not None
         assert [action.text() for action in window.peakDataMenuButton.menu().actions()] == [
+            "预览外部卡峰范围…",
             "导出卡峰范围…",
             "清空峰值数据",
         ]
@@ -3946,6 +3952,388 @@ def test_workbench_peak_commands_use_compact_action_menus(qapp):
         assert not window.deleteSelectedPeakAction.isEnabled()
     finally:
         window.deleteLater()
+
+
+def test_workbench_peak_assessment_controls_do_not_compete_with_summary(qapp):
+    window = MainWindow()
+    try:
+        window.resize(1180, 700)
+        window.setup_plots(
+            np.array([100.0, 101.0, 102.0]),
+            np.array([1.0, 3.0, 1.0]),
+        )
+        window.peakRangeAssessmentLabel.setText(
+            "适配检查 · 共 299 个：适用 162，需复核 62，不匹配 73，无法评价 2"
+        )
+        window.peakRangeAssessmentPanel.show()
+        window.show()
+        window.main_splitter.setSizes([720, 460])
+        qapp.processEvents()
+
+        summary_rect = window.peakRangeAssessmentLabel.geometry()
+        display_top = window.peakRangeDisplayModeCombo.mapTo(
+            window.peakRangeAssessmentPanel,
+            QtCore.QPoint(0, 0),
+        ).y()
+        review_top = window.peakRangeReviewOnlyCheck.mapTo(
+            window.peakRangeAssessmentPanel,
+            QtCore.QPoint(0, 0),
+        ).y()
+
+        assert summary_rect.bottom() < min(display_top, review_top)
+    finally:
+        window.deleteLater()
+
+
+def test_workbench_side_panel_preserves_a_readable_minimum_width(qapp):
+    window = MainWindow()
+    try:
+        window.resize(1180, 700)
+        window.setup_plots(
+            np.array([100.0, 101.0, 102.0]),
+            np.array([1.0, 3.0, 1.0]),
+        )
+        window.show()
+        window.main_splitter.setSizes([2000, 1])
+        qapp.processEvents()
+
+        assert window.widget_3.width() >= 420
+    finally:
+        window.deleteLater()
+
+
+def test_workbench_peak_table_keeps_numeric_values_readable(qapp):
+    window = MainWindow()
+    try:
+        window.resize(1180, 700)
+        window.setup_plots(
+            np.array([100.0, 101.0, 102.0]),
+            np.array([1.0, 3.0, 1.0]),
+        )
+        values = [
+            "Unknown species",
+            "29983.50",
+            "347.88898",
+            "4.00",
+            "29983.00",
+            "29984.00",
+        ]
+        window.peakData.setRowCount(1)
+        for column, value in enumerate(values):
+            window.peakData.setItem(0, column, QtWidgets.QTableWidgetItem(value))
+        window.show()
+        window.main_splitter.setSizes([2000, 420])
+        qapp.processEvents()
+
+        metrics = window.peakData.fontMetrics()
+        for column in range(1, window.peakData.columnCount()):
+            minimum_text_width = metrics.horizontalAdvance(values[column]) + 6
+            assert window.peakData.columnWidth(column) >= minimum_text_width
+    finally:
+        window.deleteLater()
+
+
+def test_workbench_side_panel_groups_peak_commands_by_task(qapp):
+    window = MainWindow()
+    try:
+        window.setup_plots(
+            np.array([100.0, 101.0, 102.0]),
+            np.array([1.0, 3.0, 1.0]),
+        )
+        window.show()
+        qapp.processEvents()
+
+        assert window.peakWorkflowTitle.text() == "卡峰处理"
+        assert window.peakWorkflowTitle.isVisible()
+        assert window.peakNavigationTitle.text() == "峰操作"
+        assert window.peakNavigationTitle.isVisible()
+    finally:
+        window.deleteLater()
+
+
+def test_workbench_current_peak_summary_sits_above_spectrum_plot(qapp):
+    window = MainWindow()
+    try:
+        window.resize(1280, 720)
+        window.setup_plots(
+            np.array([100.0, 101.0, 102.0]),
+            np.array([1.0, 3.0, 1.0]),
+        )
+        window.show()
+        qapp.processEvents()
+
+        summary_rect = window.peakSummaryPanel.geometry()
+        plot_rect = window.graph_layout.geometry()
+
+        assert window.peakSummaryPanel.parentWidget() is window.widget_2
+        assert summary_rect.bottom() < plot_rect.top()
+        assert window.peakSummaryPanel.height() <= 44
+    finally:
+        window.deleteLater()
+
+
+def test_workbench_side_panel_keeps_actions_above_peak_table(qapp):
+    window = MainWindow()
+    try:
+        window.setup_plots(
+            np.array([100.0, 101.0, 102.0]),
+            np.array([1.0, 3.0, 1.0]),
+        )
+        window.peakRangeAssessmentPanel.show()
+        window.show()
+        qapp.processEvents()
+
+        centers = [
+            widget.geometry().center().y()
+            for widget in (
+                window.peakWorkflowPanel,
+                window.peakRangeAssessmentPanel,
+                window.peakNavigationSection,
+                window.peakProjectActionPanel,
+                window.peakResult,
+            )
+        ]
+
+        assert centers == sorted(centers)
+    finally:
+        window.deleteLater()
+
+
+def test_workbench_previews_external_peak_ranges_without_activating_project(
+    qapp,
+    tmp_path,
+    monkeypatch,
+):
+    peak_file = tmp_path / "candidate.csv"
+    peak_file.write_text(
+        "label,peak_index,mz,left_bound,right_bound\n"
+        "centered,100,100,90,110\n"
+        "shifted,135,140,132,148\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        QtWidgets.QFileDialog,
+        "getOpenFileName",
+        lambda *args, **kwargs: (str(peak_file), "Peak Files"),
+    )
+
+    window = MainWindow()
+    try:
+        saved_display_preference = QtCore.QSettings(
+            "BL03U", "MassSpecTool"
+        ).value("spectrum/peak_range_display_mode")
+        window.x_axis_mode = "tof"
+        window.lineEdit_4.setText("0")
+        window.lineEdit_5.setText("1")
+        window.lineEdit_6.setText("0")
+        x = np.arange(50.0, 171.0)
+        y = (
+            3.0
+            + 100.0 * np.exp(-0.5 * ((x - 100.0) / 3.0) ** 2)
+            + 60.0 * np.exp(-0.5 * ((x - 140.0) / 2.5) ** 2)
+        )
+        window.setup_plots(x, y)
+        before = window.project_settings_manager.snapshot()
+
+        window.preview_peak_ranges_from_file()
+        qapp.processEvents()
+
+        after = window.project_settings_manager.snapshot()
+        assert after.active_peak_set_id == before.active_peak_set_id
+        assert after.manual_peak_file == before.manual_peak_file
+        assert window._peak_range_preview_path == str(peak_file)
+        assert window.peakData.rowCount() == 2
+        assert window.peakData.item(0, 3).text() == "103.00"
+        assert "适用 1" in window.peakRangeAssessmentLabel.text()
+        assert "需复核 1" in window.peakRangeAssessmentLabel.text()
+        assert not window.peakRangeAssessmentPanel.isHidden()
+        assert len(window._peak_range_overlay_items) == 1
+        assert window._peak_range_marker_item is not None
+        assert len(window._peak_range_marker_item.points()) == 2
+        assert "适用" in window.peakData.item(0, 0).toolTip()
+        assert "偏离文件峰位" in window.peakData.item(1, 0).toolTip()
+        assert window._peak_table_dirty
+        assert window._peak_candidate_origin == "imported_preview"
+        assert window.peakRangeDisplayModeCombo.currentData() == "all"
+        assert (
+            QtCore.QSettings("BL03U", "MassSpecTool").value(
+                "spectrum/peak_range_display_mode"
+            )
+            == saved_display_preference
+        )
+
+        exported = window._peak_ranges_export_dataframe()
+        assert exported.loc[1, "peak_index"] == 135
+        assert exported.loc[1, "left_bound"] == 132
+
+        window.peakRangeReviewOnlyCheck.setChecked(True)
+        assert window.peakData.isRowHidden(0)
+        assert not window.peakData.isRowHidden(1)
+        assert window.peakData.currentRow() == 1
+        assert len(window._peak_range_overlay_items) == 1
+        assert window._peak_range_overlay_items[0]._table_row == 1
+        assert window._peak_range_marker_item is not None
+        assert len(window._peak_range_marker_item.points()) == 1
+    finally:
+        window.deleteLater()
+
+
+def test_editing_previewed_peak_clears_stale_assessment(qapp, tmp_path, monkeypatch):
+    peak_file = tmp_path / "candidate.csv"
+    peak_file.write_text(
+        "label,peak_index,mz,left_bound,right_bound\nP,100,100,90,110\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        QtWidgets.QFileDialog,
+        "getOpenFileName",
+        lambda *args, **kwargs: (str(peak_file), "Peak Files"),
+    )
+
+    window = MainWindow()
+    try:
+        window.x_axis_mode = "tof"
+        window.lineEdit_4.setText("0")
+        window.lineEdit_5.setText("1")
+        window.lineEdit_6.setText("0")
+        x = np.arange(50.0, 151.0)
+        y = 3.0 + 100.0 * np.exp(-0.5 * ((x - 100.0) / 3.0) ** 2)
+        window.setup_plots(x, y)
+        window.preview_peak_ranges_from_file()
+
+        window.peakData.item(0, 4).setText("91")
+        qapp.processEvents()
+
+        assert window._peak_range_assessments == []
+        assert window._preview_peak_ranges == []
+        assert window._peak_range_overlay_items == []
+        assert window.peakRangeAssessmentPanel.isHidden()
+        assert window.peakData.item(0, 0).toolTip() == ""
+    finally:
+        window.deleteLater()
+
+
+def test_peak_range_overview_does_not_render_every_assessment_as_full_height_band(qapp):
+    window = MainWindow()
+    try:
+        window.x_axis_mode = "tof"
+        x = np.arange(0.0, 4000.0)
+        y = 5.0 + np.sin(x / 25.0)
+        window.setup_plots(x, y)
+
+        peak_ranges = [
+            PeakRange(
+                mz=float(index),
+                peak_index=index,
+                left_bound=index - 3,
+                right_bound=index + 3,
+                label=f"P{row}",
+            )
+            for row, index in enumerate(range(10, 3000, 10))
+        ]
+        assessments = [
+            PeakRangeAssessment(
+                peak_range=peak_range,
+                status=PeakRangeFitStatus.FIT,
+                reasons=("匹配",),
+                actual_peak_x=float(peak_range.peak_index),
+                actual_mz=float(peak_range.mz),
+                peak_intensity=6.0,
+            )
+            for peak_range in peak_ranges
+        ]
+        window._load_peak_records_into_table(
+            [
+                {
+                    "label": peak_range.label,
+                    "peak_index": peak_range.peak_index,
+                    "mz": peak_range.mz,
+                    "intensity": 6.0,
+                    "left_bound": peak_range.left_bound,
+                    "right_bound": peak_range.right_bound,
+                }
+                for peak_range in peak_ranges
+            ]
+        )
+        window._preview_peak_ranges = peak_ranges
+        window._set_peak_range_display_mode("all", persist=False)
+        window._set_peak_range_assessments(assessments)
+        window._select_peak_row(0)
+        window.update_plot()
+
+        assert len(assessments) == 299
+        assert len(window._peak_range_overlay_items) <= 1
+        assert window._peak_range_marker_item is not None
+        assert len(window._peak_range_marker_item.points()) == 299
+    finally:
+        window.deleteLater()
+
+
+def test_peak_range_display_mode_defaults_to_selected_and_remembers_manual_choice(qapp):
+    settings = QtCore.QSettings("BL03U", "MassSpecTool")
+    key = "spectrum/peak_range_display_mode"
+    previous_value = settings.value(key)
+    settings.remove(key)
+    settings.sync()
+
+    first_window = MainWindow()
+    second_window = None
+    try:
+        assert first_window.peakRangeDisplayModeCombo.currentData() == "selected"
+        first_window.x_axis_mode = "tof"
+        x = np.arange(50.0, 151.0)
+        y = 3.0 + 100.0 * np.exp(-0.5 * ((x - 100.0) / 3.0) ** 2)
+        first_window.setup_plots(x, y)
+        peak_range = PeakRange(100.0, 100, 90, 110, "P")
+        assessment = PeakRangeAssessment(
+            peak_range=peak_range,
+            status=PeakRangeFitStatus.FIT,
+            reasons=("匹配",),
+            actual_peak_x=100.0,
+            actual_mz=100.0,
+            peak_intensity=103.0,
+        )
+        first_window._load_peak_records_into_table(
+            [
+                {
+                    "label": "P",
+                    "peak_index": 100,
+                    "mz": 100.0,
+                    "intensity": 103.0,
+                    "left_bound": 90,
+                    "right_bound": 110,
+                }
+            ]
+        )
+        first_window._preview_peak_ranges = [peak_range]
+        first_window._set_peak_range_assessments([assessment])
+        first_window._select_peak_row(0)
+        first_window.update_plot()
+
+        assert len(first_window._peak_range_overlay_items) == 1
+        assert first_window._peak_range_marker_item is None
+
+        all_index = first_window.peakRangeDisplayModeCombo.findData("all")
+        first_window.peakRangeDisplayModeCombo.setCurrentIndex(all_index)
+        assert first_window._peak_range_marker_item is not None
+
+        hidden_index = first_window.peakRangeDisplayModeCombo.findData("hidden")
+        first_window.peakRangeDisplayModeCombo.setCurrentIndex(hidden_index)
+        assert first_window._peak_range_overlay_items == []
+        assert first_window._peak_range_marker_item is None
+
+        settings.sync()
+        second_window = MainWindow()
+        assert second_window.peakRangeDisplayModeCombo.currentData() == "hidden"
+    finally:
+        first_window.deleteLater()
+        if second_window is not None:
+            second_window.deleteLater()
+        if previous_value is None:
+            settings.remove(key)
+        else:
+            settings.setValue(key, previous_value)
+        settings.sync()
 
 
 def test_workbench_delete_selected_peaks_removes_multiple_rows(qapp, monkeypatch):
@@ -4328,6 +4716,11 @@ def test_workbench_open_project_peak_ranges_restores_manifest_source(qapp, tmp_p
         assert window.peakData.item(0, 4).text() == "4001.00"
         assert Path(saved.manual_peak_file).with_suffix(".manifest.yaml").exists()
         assert window._peak_table_dirty is False
+        assert not window.peakRangeAssessmentPanel.isHidden()
+        expected_overlay_count = (
+            0 if window.peakRangeDisplayModeCombo.currentData() == "hidden" else 1
+        )
+        assert len(window._peak_range_overlay_items) == expected_overlay_count
     finally:
         window.project_settings_manager.clear_project_path()
         window.deleteLater()

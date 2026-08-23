@@ -10,7 +10,7 @@ import pandas as pd
 import pyqtgraph as pg
 import yaml
 from pyqtgraph import mkPen, LinearRegionItem, GraphicsLayoutWidget
-from PyQt6 import QtCore, QtWidgets
+from PyQt6 import QtCore, QtGui, QtWidgets
 from PyQt6.QtCore import QTimer
 from PyQt6.QtGui import QIcon, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
@@ -33,6 +33,11 @@ from bl03u_masstool.frontends.pyqt_app.ui_massspec import Ui_MainWindow
 from bl03u_masstool.frontends.pyqt_app.theme import get_plot_theme
 from bl03u_masstool.core.calibration import Calibration
 from bl03u_masstool.core.output_paths import ensure_output_dir
+from bl03u_masstool.core.peak_range_assessment import (
+    PeakRangeAssessment,
+    PeakRangeFitStatus,
+    assess_peak_ranges,
+)
 from bl03u_masstool.core.peak_ranges import load_peak_ranges
 from bl03u_masstool.core.peak_sets import (
     create_peak_set,
@@ -55,6 +60,10 @@ from bl03u_masstool.frontends.pyqt_app.workers import WorkerThread
 
 logger = logging.getLogger(__name__)
 
+SPECTRUM_SIDE_MIN_WIDTH = 420
+SPECTRUM_SIDE_PREFERRED_WIDTH = 480
+SPECTRUM_SIDE_MAX_WIDTH = 680
+
 
 class CalibrationLinearRegionItem(LinearRegionItem):
     """Spectrum selection region that exposes a calibration double-click."""
@@ -69,12 +78,29 @@ class CalibrationLinearRegionItem(LinearRegionItem):
         super().mouseDoubleClickEvent(event)
 
 
+class PeakRangeOverlayItem(LinearRegionItem):
+    """Non-editable imported range that can select its matching table row."""
+
+    rowClicked = QtCore.pyqtSignal(int)
+
+    def __init__(self, row: int, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._table_row = int(row)
+
+    def mouseClickEvent(self, event) -> None:
+        if event.button() == QtCore.Qt.MouseButton.LeftButton:
+            self.rowClicked.emit(self._table_row)
+            event.accept()
+            return
+        super().mouseClickEvent(event)
+
+
 class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
     def __init__(self):
         super(MainWindow, self).__init__()
         self.setupUi(self)
         self._spectrum_data_ready = False
-        self._spectrum_side_width = 400
+        self._spectrum_side_width = SPECTRUM_SIDE_PREFERRED_WIDTH
         self._install_spectrum_empty_state()
         self.x_axis_mode = "mz"
         self.current_plot_x = np.array([], dtype=float)
@@ -98,6 +124,11 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         self._peak_table_state_text = "当前卡峰范围尚未保存到项目"
         self._peak_candidate_origin = "workbench_manual"
         self._published_project_peak_file = ""
+        self._preview_peak_ranges = []
+        self._peak_range_preview_path = ""
+        self._peak_range_assessments: list[PeakRangeAssessment] = []
+        self._peak_range_overlay_items: list[PeakRangeOverlayItem] = []
+        self._peak_range_marker_item: pg.ScatterPlotItem | None = None
         self._temporary_spectrum_settings = None
         self._temporary_spectrum_context_key: str | None = None
         self._calibration_candidate: dict | None = None
@@ -190,9 +221,68 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         self.peakProjectStateLabel.setObjectName("ProjectHint")
         self.peakProjectStateLabel.setWordWrap(True)
         self.peakProjectStateLabel.setMinimumHeight(22)
+        self.peakRangeAssessmentPanel = QtWidgets.QWidget(self.widget_3)
+        self.peakRangeAssessmentPanel.setObjectName("PeakRangeAssessmentPanel")
+        assessment_layout = QVBoxLayout(self.peakRangeAssessmentPanel)
+        assessment_layout.setContentsMargins(8, 6, 8, 6)
+        assessment_layout.setSpacing(4)
+        self.peakRangeAssessmentLabel = QLabel("")
+        self.peakRangeAssessmentLabel.setObjectName("ProjectHint")
+        self.peakRangeAssessmentLabel.setWordWrap(True)
+        assessment_layout.addWidget(self.peakRangeAssessmentLabel)
+
+        self.peakRangeAssessmentControls = QtWidgets.QWidget(
+            self.peakRangeAssessmentPanel
+        )
+        assessment_controls_layout = QHBoxLayout(
+            self.peakRangeAssessmentControls
+        )
+        assessment_controls_layout.setContentsMargins(0, 0, 0, 0)
+        assessment_controls_layout.setSpacing(6)
+        self.peakRangeDisplayLabel = QLabel(
+            "谱图标记",
+            self.peakRangeAssessmentControls,
+        )
+        self.peakRangeDisplayLabel.setObjectName("ModeTitle")
+        self.peakRangeDisplayModeCombo = QtWidgets.QComboBox()
+        self.peakRangeDisplayModeCombo.addItem("隐藏", "hidden")
+        self.peakRangeDisplayModeCombo.addItem("仅当前范围", "selected")
+        self.peakRangeDisplayModeCombo.addItem("全部状态点", "all")
+        self.peakRangeDisplayModeCombo.setToolTip(
+            "控制谱图上的卡峰适配显示；适配计算和表格状态不受影响"
+        )
+        self.peakRangeDisplayModeCombo.setMinimumWidth(120)
+        self.peakRangeDisplayModeCombo.setMaximumWidth(160)
+        saved_display_mode = str(
+            self._qsettings.value(
+                "spectrum/peak_range_display_mode",
+                "selected",
+            )
+        )
+        saved_display_index = self.peakRangeDisplayModeCombo.findData(
+            saved_display_mode
+        )
+        self.peakRangeDisplayModeCombo.setCurrentIndex(
+            saved_display_index if saved_display_index >= 0 else 1
+        )
+        self.peakRangeDisplayModeCombo.currentIndexChanged.connect(
+            self._on_peak_range_display_mode_changed
+        )
+        self.peakRangeReviewOnlyCheck = QtWidgets.QCheckBox("仅看需复核")
+        self.peakRangeReviewOnlyCheck.setToolTip("隐藏判断为适用的卡峰范围")
+        self.peakRangeReviewOnlyCheck.toggled.connect(
+            self._apply_peak_range_review_filter
+        )
+        assessment_controls_layout.addWidget(self.peakRangeDisplayLabel)
+        assessment_controls_layout.addWidget(self.peakRangeDisplayModeCombo)
+        assessment_controls_layout.addStretch(1)
+        assessment_controls_layout.addWidget(self.peakRangeReviewOnlyCheck)
+        assessment_layout.addWidget(self.peakRangeAssessmentControls)
+        self.peakRangeAssessmentPanel.hide()
         self._add_peak_data_menu_controls()
         self._add_peak_project_controls()
         self._add_peak_navigation_controls()
+        self.verticalLayout.insertWidget(1, self.peakRangeAssessmentPanel)
         self._refresh_peak_table_project_state()
 
     def apply_config_defaults(self):
@@ -352,8 +442,8 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
             QtWidgets.QSizePolicy.Policy.Preferred,
             QtWidgets.QSizePolicy.Policy.Preferred,
         )
-        self.widget_3.setMinimumWidth(340)
-        self.widget_3.setMaximumWidth(560)
+        self.widget_3.setMinimumWidth(SPECTRUM_SIDE_MIN_WIDTH)
+        self.widget_3.setMaximumWidth(SPECTRUM_SIDE_MAX_WIDTH)
 
         for table in (self.peakData, self.region):
             table.setAlternatingRowColors(True)
@@ -365,6 +455,19 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         self.peakData.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
         self.peakData.setHorizontalHeaderLabels(
             ["物种", "TOF", "m/z", "强度", "左边界", "右边界"]
+        )
+        peak_header = self.peakData.horizontalHeader()
+        peak_header.setSectionResizeMode(
+            0,
+            QtWidgets.QHeaderView.ResizeMode.Stretch,
+        )
+        for column in range(1, self.peakData.columnCount()):
+            peak_header.setSectionResizeMode(
+                column,
+                QtWidgets.QHeaderView.ResizeMode.ResizeToContents,
+            )
+        self.peakData.setHorizontalScrollMode(
+            QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel
         )
 
         self.peakData.setAccessibleName("卡峰范围表")
@@ -462,10 +565,14 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
             button.hide()
 
         self.peakDataMenuButton = self._command_menu_button("数据操作", self.widget_3)
-        self.peakDataMenuButton.setToolTip("导出或清空当前卡峰数据")
+        self.peakDataMenuButton.setToolTip("预览、导出或清空当前卡峰数据")
         data_menu = QMenu(self.peakDataMenuButton)
+        self.previewPeakRangesAction = data_menu.addAction("预览外部卡峰范围…")
         self.exportPeakDataAction = data_menu.addAction("导出卡峰范围…")
         self.clearPeakDataAction = data_menu.addAction("清空峰值数据")
+        self.previewPeakRangesAction.triggered.connect(
+            self.preview_peak_ranges_from_file
+        )
         self.exportPeakDataAction.triggered.connect(self.savePeakdata.click)
         self.clearPeakDataAction.triggered.connect(self.clearPeaksButton.click)
         self.peakDataMenuButton.setMenu(data_menu)
@@ -476,7 +583,19 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         self.horizontalLayout_4.addWidget(self.peakDataMenuButton)
 
     def _add_peak_navigation_controls(self):
-        self.peakNavigationPanel = QtWidgets.QWidget(self.widget_3)
+        self.peakNavigationSection = QtWidgets.QWidget(self.widget_3)
+        self.peakNavigationSection.setObjectName("PeakNavigationSection")
+        navigation_section_layout = QVBoxLayout(self.peakNavigationSection)
+        navigation_section_layout.setContentsMargins(8, 6, 8, 6)
+        navigation_section_layout.setSpacing(4)
+        self.peakNavigationTitle = QLabel(
+            "峰操作",
+            self.peakNavigationSection,
+        )
+        self.peakNavigationTitle.setObjectName("ToolbarSectionTitle")
+        navigation_section_layout.addWidget(self.peakNavigationTitle)
+
+        self.peakNavigationPanel = QtWidgets.QWidget(self.peakNavigationSection)
         self.peakNavigationPanel.setObjectName("PeakNavigationPanel")
         navigation_layout = QHBoxLayout(self.peakNavigationPanel)
         navigation_layout.setContentsMargins(0, 0, 0, 0)
@@ -529,7 +648,8 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         navigation_layout.addWidget(self.nextPeakButton, 1)
         navigation_layout.addWidget(self.addPeak, 1)
         navigation_layout.addWidget(self.peakEditMenuButton, 1)
-        self.verticalLayout.insertWidget(2, self.peakNavigationPanel)
+        navigation_section_layout.addWidget(self.peakNavigationPanel)
+        self.verticalLayout.insertWidget(1, self.peakNavigationSection)
 
         self.previousPeakButton.clicked.connect(self.select_previous_peak)
         self.nextPeakButton.clicked.connect(self.select_next_peak)
@@ -543,14 +663,14 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         self.peakProjectActionPanel = QtWidgets.QWidget(self.widget_3)
         self.peakProjectActionPanel.setObjectName("PeakProjectActionPanel")
         project_action_layout = QHBoxLayout(self.peakProjectActionPanel)
-        project_action_layout.setContentsMargins(0, 0, 0, 0)
+        project_action_layout.setContentsMargins(8, 6, 8, 6)
         project_action_layout.setSpacing(4)
         self.saveProjectPeaksButton.setParent(self.peakProjectActionPanel)
 
         if hasattr(self, "peakProjectStateLabel"):
             project_action_layout.addWidget(self.peakProjectStateLabel, 1)
         project_action_layout.addWidget(self.saveProjectPeaksButton, 0)
-        self.verticalLayout.insertWidget(2, self.peakProjectActionPanel)
+        self.verticalLayout.insertWidget(1, self.peakProjectActionPanel)
 
     def _rebuild_top_controls(self):
         self.widget.setObjectName("ControlBar")
@@ -1198,7 +1318,7 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         splitter.addWidget(self.widget_3)
         splitter.setCollapsible(0, False)
         splitter.setCollapsible(1, True)
-        splitter.setSizes([880, 400])
+        splitter.setSizes([800, SPECTRUM_SIDE_PREFERRED_WIDTH])
         self.horizontalLayout_13.addWidget(splitter)
         self.main_splitter = splitter
         splitter_state = self._qsettings.value("window/splitter_state")
@@ -1209,45 +1329,59 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         )
 
     def _rebuild_side_panel(self):
-        self.widget_3.setMinimumWidth(340)
-        self.widget_3.setMaximumWidth(560)
+        self.widget_3.setMinimumWidth(SPECTRUM_SIDE_MIN_WIDTH)
+        self.widget_3.setMaximumWidth(SPECTRUM_SIDE_MAX_WIDTH)
         self._take_all_items(self.verticalLayout)
         self.verticalLayout.setContentsMargins(6, 6, 6, 6)
         self.verticalLayout.setSpacing(6)
 
-        summary = QtWidgets.QWidget(self.widget_3)
-        summary.setObjectName("PeakSummary")
-        summary.setMaximumHeight(58)
-        summary_layout = QtWidgets.QGridLayout(summary)
-        summary_layout.setContentsMargins(6, 4, 6, 4)
-        summary_layout.setHorizontalSpacing(6)
-        summary_layout.setVerticalSpacing(3)
+        self.peakSummaryPanel = QtWidgets.QWidget(self.widget_2)
+        self.peakSummaryPanel.setObjectName("PeakSummary")
+        self.peakSummaryPanel.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        self.peakSummaryPanel.setMinimumHeight(36)
+        self.peakSummaryPanel.setMaximumHeight(42)
+        summary_layout = QHBoxLayout(self.peakSummaryPanel)
+        summary_layout.setContentsMargins(8, 4, 8, 4)
+        summary_layout.setSpacing(6)
 
-        self.label_12.setText("峰位 TOF")
+        self.peakSummaryTitle = QLabel("当前峰", self.peakSummaryPanel)
+        self.peakSummaryTitle.setObjectName("ToolbarSectionTitle")
+        self.label_12.setText("TOF")
         self.label_16.setText("m/z")
-        self.label_13.setText("左边界")
-        self.label_15.setText("右边界")
+        self.label_13.setText("左界")
+        self.label_15.setText("右界")
         for label in (self.label_12, self.label_16, self.label_13, self.label_15):
             label.setObjectName("ReadoutLabel")
             label.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter)
         for value in (self.label_8, self.label_9, self.label_10, self.label_11):
             value.setObjectName("ReadoutValue")
             value.setMinimumHeight(23)
+            value.setMinimumWidth(80)
+            value.setMaximumWidth(140)
+            value.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Preferred,
+                QtWidgets.QSizePolicy.Policy.Fixed,
+            )
             value.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.label_10.setToolTip("当前卡峰范围左边界")
+        self.label_11.setToolTip("当前卡峰范围右边界")
 
-        summary_layout.addWidget(self.label_12, 0, 0)
-        summary_layout.addWidget(self.label_8, 0, 1)
-        summary_layout.addWidget(self.label_16, 0, 2)
-        summary_layout.addWidget(self.label_9, 0, 3)
-        summary_layout.addWidget(self.label_13, 1, 0)
-        summary_layout.addWidget(self.label_10, 1, 1)
-        summary_layout.addWidget(self.label_15, 1, 2)
-        summary_layout.addWidget(self.label_11, 1, 3)
-        summary_layout.setColumnStretch(1, 1)
-        summary_layout.setColumnStretch(3, 1)
+        summary_layout.addWidget(self.peakSummaryTitle)
+        for label, value in (
+            (self.label_12, self.label_8),
+            (self.label_16, self.label_9),
+            (self.label_13, self.label_10),
+            (self.label_15, self.label_11),
+        ):
+            summary_layout.addWidget(label)
+            summary_layout.addWidget(value)
+        summary_layout.addStretch(1)
 
         self.label_14.hide()
-        self.verticalLayout.addWidget(summary)
+        self.verticalLayout_8.insertWidget(0, self.peakSummaryPanel)
 
         self.horizontalLayout_4.setContentsMargins(0, 0, 0, 0)
         self.horizontalLayout_4.setSpacing(4)
@@ -1279,7 +1413,16 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
             QtWidgets.QSizePolicy.Policy.Fixed,
         )
         self.peakDetectionPreset.setFixedHeight(30)
-        self.verticalLayout.addLayout(self.horizontalLayout_4)
+        self.peakWorkflowPanel = QtWidgets.QWidget(self.widget_3)
+        self.peakWorkflowPanel.setObjectName("PeakWorkflowPanel")
+        workflow_layout = QVBoxLayout(self.peakWorkflowPanel)
+        workflow_layout.setContentsMargins(8, 6, 8, 6)
+        workflow_layout.setSpacing(4)
+        self.peakWorkflowTitle = QLabel("卡峰处理", self.peakWorkflowPanel)
+        self.peakWorkflowTitle.setObjectName("ToolbarSectionTitle")
+        workflow_layout.addWidget(self.peakWorkflowTitle)
+        workflow_layout.addLayout(self.horizontalLayout_4)
+        self.verticalLayout.addWidget(self.peakWorkflowPanel)
         self._add_peak_project_controls()
         self.verticalLayout_3.setContentsMargins(0, 0, 0, 0)
         self.verticalLayout_3.setSpacing(0)
@@ -1444,7 +1587,9 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
                 self.p2.setXRange(left, right, padding=0)
                 self.update_spectrum_y_range_for_visible_x((left, right))
 
-        if not self._calibration_close(old_calibration, new_calibration):
+        if self._preview_peak_ranges:
+            self._refresh_peak_range_assessment()
+        elif not self._calibration_close(old_calibration, new_calibration):
             self._recalibrate_peak_table_mz()
         self.update_plot()
         self.update_region_readout()
@@ -1546,6 +1691,9 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         empty_state = getattr(self, "_spectrum_empty_state", None)
         if empty_state is not None:
             empty_state.setVisible(not ready)
+        peak_summary = getattr(self, "peakSummaryPanel", None)
+        if peak_summary is not None:
+            peak_summary.setVisible(ready)
 
         side_panel = getattr(self, "widget_3", None)
         splitter = getattr(self, "main_splitter", None)
@@ -1562,7 +1710,10 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         side_panel.show()
         if splitter is not None:
             total = max(sum(splitter.sizes()), splitter.width(), 1)
-            side_width = max(340, min(int(self._spectrum_side_width), 560))
+            side_width = max(
+                SPECTRUM_SIDE_MIN_WIDTH,
+                min(int(self._spectrum_side_width), SPECTRUM_SIDE_MAX_WIDTH),
+            )
             splitter.setSizes([max(1, total - side_width), side_width])
 
     def clear_widgets(self):
@@ -1598,6 +1749,8 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         self.p2_axis = None
         self.selection_region = None
         self.spectrum_plot = None
+        self._peak_range_overlay_items = []
+        self._peak_range_marker_item = None
         self._set_spectrum_content_ready(False)
 
     def setup_plots(self, x_data, y_data, title="质谱图"):
@@ -1694,6 +1847,9 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         self._set_spectrum_empty_message()
         self._set_spectrum_content_ready(True)
         self.update_peak_navigation_state()
+        if self._preview_peak_ranges:
+            self._refresh_peak_range_assessment()
+            self.update_plot()
 
     def _apply_plot_limits(self, plot, y_min: float, y_max: float, x_range: float) -> None:
         if self.plot_x_min is None or self.plot_x_max is None:
@@ -1918,6 +2074,8 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
     def on_peak_selection_changed(self):
         self.focus_selected_peak()
         self.update_peak_navigation_state()
+        if self._peak_range_assessments:
+            self.update_plot()
 
     def on_peak_table_item_changed(self, item: QTableWidgetItem):
         if self._updating_peak_table:
@@ -1932,7 +2090,10 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         *,
         require_confirm: bool = True,
         candidate_origin: str | None = None,
+        preserve_assessment: bool = False,
     ) -> None:
+        if not preserve_assessment:
+            self._clear_peak_range_assessment_state()
         self._peak_table_dirty = True
         self._peak_table_dirty_requires_confirm = require_confirm
         self._peak_table_state_text = text
@@ -1942,6 +2103,7 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         self._refresh_peak_table_project_state()
 
     def _mark_peak_table_project_saved(self, path: str) -> None:
+        self._clear_peak_range_assessment_state()
         self._peak_table_dirty = False
         self._peak_table_dirty_requires_confirm = False
         self._published_project_peak_file = path
@@ -2847,6 +3009,260 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "错误", f"保存文件时发生错误：{str(e)}")
 
+    def preview_peak_ranges_from_file(self) -> None:
+        """Load external ranges as a workbench-only candidate and assess them."""
+        if self.current_plot_x.size == 0 or self.current_plot_y.size == 0:
+            QMessageBox.warning(
+                self,
+                "请先加载谱图",
+                "请先打开要检查的单谱或累计谱，再预览卡峰范围文件。",
+            )
+            return
+
+        if self._valid_peak_rows():
+            reply = QMessageBox.question(
+                self,
+                "预览外部卡峰范围",
+                "预览会替换工作台当前表格，但不会修改或激活项目卡峰范围。\n\n是否继续？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "预览外部卡峰范围",
+            self._dialog_start_dir(self._peak_range_preview_path),
+            "Peak Files (*.yaml *.yml *.csv *.xlsx *.xls);;所有文件 (*)",
+        )
+        if not path:
+            return
+
+        try:
+            peak_ranges = load_peak_ranges(
+                path,
+                calibration=self.current_calibration(),
+            )
+            if not peak_ranges:
+                raise ValueError("卡峰文件中没有有效记录。")
+            assessments = assess_peak_ranges(
+                peak_ranges,
+                self.current_plot_x,
+                self.current_plot_y,
+                calibration=self.current_calibration(),
+            )
+            records = [
+                {
+                    "label": item.label,
+                    "peak_index": item.peak_index,
+                    "mz": item.mz,
+                    "intensity": assessment.peak_intensity or 0.0,
+                    "left_bound": item.left_bound,
+                    "right_bound": item.right_bound,
+                }
+                for item, assessment in zip(peak_ranges, assessments)
+            ]
+            self._load_peak_records_into_table(records)
+            self._preview_peak_ranges = list(peak_ranges)
+            self._peak_range_preview_path = str(path)
+            self._set_peak_range_display_mode("all", persist=False)
+            self._set_peak_range_assessments(assessments)
+            self._mark_peak_table_dirty(
+                f"正在临时预览：{Path(path).name}；确认后可保存到项目",
+                require_confirm=True,
+                candidate_origin="imported_preview",
+                preserve_assessment=True,
+            )
+            self.update_plot()
+            self.update_peak_navigation_state()
+            if self._valid_peak_rows():
+                self._select_peak_row(self._valid_peak_rows()[0])
+            self.statusbar.showMessage(
+                f"已预览并检查 {len(peak_ranges)} 个卡峰范围；项目配置未修改",
+                6000,
+            )
+        except Exception as exc:
+            logger.exception("Failed to preview external peak ranges")
+            QMessageBox.critical(self, "预览卡峰范围失败", str(exc))
+
+    def _refresh_peak_range_assessment(self) -> None:
+        if not self._preview_peak_ranges:
+            return
+        if self.current_plot_x.size == 0 or self.current_plot_y.size == 0:
+            return
+        assessments = assess_peak_ranges(
+            self._preview_peak_ranges,
+            self.current_plot_x,
+            self.current_plot_y,
+            calibration=self.current_calibration(),
+        )
+        self._updating_peak_table = True
+        try:
+            for row, assessment in enumerate(assessments):
+                if row >= self.peakData.rowCount():
+                    break
+                intensity = assessment.peak_intensity or 0.0
+                self.peakData.setItem(row, 3, QTableWidgetItem(f"{intensity:.2f}"))
+        finally:
+            self._updating_peak_table = False
+        self._set_peak_range_assessments(assessments)
+
+    def _set_peak_range_assessments(
+        self,
+        assessments: list[PeakRangeAssessment],
+    ) -> None:
+        self._peak_range_assessments = list(assessments)
+        colors = {
+            PeakRangeFitStatus.FIT: QtGui.QColor(220, 252, 231),
+            PeakRangeFitStatus.REVIEW: QtGui.QColor(254, 249, 195),
+            PeakRangeFitStatus.MISMATCH: QtGui.QColor(254, 226, 226),
+            PeakRangeFitStatus.UNAVAILABLE: QtGui.QColor(226, 232, 240),
+        }
+        labels = {
+            PeakRangeFitStatus.FIT: "适用",
+            PeakRangeFitStatus.REVIEW: "需复核",
+            PeakRangeFitStatus.MISMATCH: "不匹配",
+            PeakRangeFitStatus.UNAVAILABLE: "无法评价",
+        }
+        self._updating_peak_table = True
+        try:
+            for row, assessment in enumerate(assessments):
+                if row >= self.peakData.rowCount():
+                    break
+                tooltip = f"{labels[assessment.status]}：" + "；".join(assessment.reasons)
+                for column in range(self.peakData.columnCount()):
+                    item = self.peakData.item(row, column)
+                    if item is None:
+                        continue
+                    item.setBackground(QtGui.QBrush(colors[assessment.status]))
+                    item.setToolTip(tooltip)
+                    item.setData(
+                        QtCore.Qt.ItemDataRole.UserRole,
+                        str(assessment.status),
+                    )
+        finally:
+            self._updating_peak_table = False
+
+        counts = {
+            status: sum(item.status is status for item in assessments)
+            for status in PeakRangeFitStatus
+        }
+        self.peakRangeAssessmentLabel.setText(
+            f"适配检查 · 共 {len(assessments)} 个："
+            f"适用 {counts[PeakRangeFitStatus.FIT]}，"
+            f"需复核 {counts[PeakRangeFitStatus.REVIEW]}，"
+            f"不匹配 {counts[PeakRangeFitStatus.MISMATCH]}，"
+            f"无法评价 {counts[PeakRangeFitStatus.UNAVAILABLE]}"
+        )
+        self.peakRangeAssessmentLabel.setToolTip(
+            "图中彩色圆点表示各峰的适配状态；当前选中峰显示完整卡峰范围。"
+            + (f"\n来源：{self._peak_range_preview_path}" if self._peak_range_preview_path else "")
+        )
+        self.peakRangeAssessmentPanel.show()
+        self._apply_peak_range_review_filter()
+
+    def _apply_peak_range_review_filter(self) -> None:
+        review_only = bool(
+            hasattr(self, "peakRangeReviewOnlyCheck")
+            and self.peakRangeReviewOnlyCheck.isChecked()
+        )
+        for row in range(self.peakData.rowCount()):
+            hide = (
+                review_only
+                and row < len(self._peak_range_assessments)
+                and self._peak_range_assessments[row].status is PeakRangeFitStatus.FIT
+            )
+            self.peakData.setRowHidden(row, hide)
+        current_row = self.peakData.currentRow()
+        if review_only and current_row >= 0 and self.peakData.isRowHidden(current_row):
+            for row, assessment in enumerate(self._peak_range_assessments):
+                if assessment.status is not PeakRangeFitStatus.FIT:
+                    self._select_peak_row(row)
+                    break
+        if self._peak_range_assessments and self.p2 is not None:
+            self.update_plot()
+
+    def _peak_range_display_mode(self) -> str:
+        combo = getattr(self, "peakRangeDisplayModeCombo", None)
+        if combo is None:
+            return "selected"
+        mode = str(combo.currentData() or "selected")
+        return mode if mode in {"hidden", "selected", "all"} else "selected"
+
+    def _set_peak_range_display_mode(
+        self,
+        mode: str,
+        *,
+        persist: bool,
+    ) -> None:
+        combo = getattr(self, "peakRangeDisplayModeCombo", None)
+        if combo is None:
+            return
+        index = combo.findData(mode)
+        if index < 0:
+            index = combo.findData("selected")
+        combo.blockSignals(True)
+        try:
+            combo.setCurrentIndex(index)
+        finally:
+            combo.blockSignals(False)
+        if persist:
+            self._qsettings.setValue(
+                "spectrum/peak_range_display_mode",
+                self._peak_range_display_mode(),
+            )
+        if self._peak_range_assessments and self.p2 is not None:
+            self.update_plot()
+
+    def _on_peak_range_display_mode_changed(self) -> None:
+        self._qsettings.setValue(
+            "spectrum/peak_range_display_mode",
+            self._peak_range_display_mode(),
+        )
+        if self._peak_range_assessments and self.p2 is not None:
+            self.update_plot()
+
+    def _clear_peak_range_assessment_state(self) -> None:
+        self._remove_peak_range_overlays()
+        self._preview_peak_ranges = []
+        self._peak_range_preview_path = ""
+        self._peak_range_assessments = []
+        if hasattr(self, "peakRangeReviewOnlyCheck"):
+            self.peakRangeReviewOnlyCheck.blockSignals(True)
+            self.peakRangeReviewOnlyCheck.setChecked(False)
+            self.peakRangeReviewOnlyCheck.blockSignals(False)
+        if hasattr(self, "peakRangeAssessmentPanel"):
+            self.peakRangeAssessmentPanel.hide()
+        self._updating_peak_table = True
+        try:
+            for row in range(self.peakData.rowCount()):
+                self.peakData.setRowHidden(row, False)
+                for column in range(self.peakData.columnCount()):
+                    item = self.peakData.item(row, column)
+                    if item is None:
+                        continue
+                    item.setBackground(QtGui.QBrush())
+                    item.setToolTip("")
+                    item.setData(QtCore.Qt.ItemDataRole.UserRole, None)
+        finally:
+            self._updating_peak_table = False
+
+    def _remove_peak_range_overlays(self) -> None:
+        if self.p2 is not None:
+            for item in self._peak_range_overlay_items:
+                try:
+                    self.p2.removeItem(item)
+                except Exception:
+                    pass
+            if self._peak_range_marker_item is not None:
+                try:
+                    self.p2.removeItem(self._peak_range_marker_item)
+                except Exception:
+                    pass
+        self._peak_range_overlay_items = []
+        self._peak_range_marker_item = None
+
     def _peak_ranges_export_dataframe(self) -> pd.DataFrame:
         rows = []
         for row in self._valid_peak_rows():
@@ -3085,6 +3501,13 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
                 )
             self._sync_project_manual_peak_file_to_ui(saved)
             self._mark_peak_table_project_saved(str(output_path))
+            self._preview_peak_ranges = load_peak_ranges(
+                output_path,
+                calibration=self.current_calibration(),
+            )
+            self._peak_range_preview_path = str(output_path)
+            self._refresh_peak_range_assessment()
+            self.update_plot()
             self.statusbar.showMessage(
                 f"已保存当前项目卡峰范围：{len(df)} 个峰",
                 5000,
@@ -3168,6 +3591,10 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
             self.update_plot()
             self.update_peak_navigation_state()
             self._mark_peak_table_project_saved(str(peak_file))
+            self._preview_peak_ranges = list(peak_ranges)
+            self._peak_range_preview_path = str(peak_file)
+            self._refresh_peak_range_assessment()
+            self.update_plot()
             if self._valid_peak_rows():
                 self._select_peak_row(self._valid_peak_rows()[0])
             if not source_loaded and self.current_plot_x.size == 0:
@@ -3282,6 +3709,7 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         return True, ""
 
     def _load_peak_records_into_table(self, records: list[dict]) -> None:
+        self._clear_peak_range_assessment_state()
         self._updating_peak_table = True
         try:
             self.peakData.setRowCount(0)
@@ -3694,13 +4122,21 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
         """更新图表显示"""
         if self.p2 is None:
             return
+        self._remove_peak_range_overlays()
         # 清除现有标注
         for item in self.p2.items[:]:
             if isinstance(item, pg.TextItem):
                 self.p2.removeItem(item)
-        
-        # 重新添加所有峰值标注
-        for row in range(self.peakData.rowCount()):
+
+        if self._peak_range_assessments:
+            self._add_peak_range_overlays()
+            current_row = self.peakData.currentRow()
+            label_rows = [current_row] if current_row >= 0 else []
+        else:
+            label_rows = range(self.peakData.rowCount())
+
+        # 预览时只标注当前峰，普通工作台继续显示所有峰值标注。
+        for row in label_rows:
             values = self._peak_row_values(row)
             if values is None:
                 continue
@@ -3708,6 +4144,123 @@ class MainWindow(WorkspacePagesMixin, Ui_MainWindow, QMainWindow):
             text_item = pg.TextItem(text=f'{mz:.2f}', color='red', anchor=(0.5, 1.5))
             text_item.setPos(float(self._tof_to_axis_x(time)), intensity)
             self.p2.addItem(text_item)
+
+    def _add_peak_range_overlays(self) -> None:
+        if self.p2 is None or self.plot_x_min is None or self.plot_x_max is None:
+            return
+        colors = {
+            PeakRangeFitStatus.FIT: (22, 163, 74),
+            PeakRangeFitStatus.REVIEW: (217, 119, 6),
+            PeakRangeFitStatus.MISMATCH: (220, 38, 38),
+            PeakRangeFitStatus.UNAVAILABLE: (100, 116, 139),
+        }
+        display_mode = self._peak_range_display_mode()
+        if display_mode == "hidden":
+            return
+        selected_row = self.peakData.currentRow()
+        if display_mode == "all":
+            spots = []
+            for row, assessment in enumerate(self._peak_range_assessments):
+                if self.peakData.isRowHidden(row):
+                    continue
+                peak_range = assessment.peak_range
+                marker_tof = assessment.actual_peak_x
+                if marker_tof is None or not np.isfinite(marker_tof):
+                    marker_tof = float(peak_range.peak_index)
+                try:
+                    marker_x = float(self._tof_to_axis_x(marker_tof))
+                except Exception:
+                    continue
+                if not float(self.plot_x_min) <= marker_x <= float(self.plot_x_max):
+                    continue
+                red, green, blue = colors[assessment.status]
+                selected = row == selected_row
+                marker_y = assessment.peak_intensity
+                if marker_y is None or not np.isfinite(marker_y):
+                    marker_y = self._spectrum_intensity_at_tof(marker_tof)
+                status_label = {
+                    PeakRangeFitStatus.FIT: "适用",
+                    PeakRangeFitStatus.REVIEW: "需复核",
+                    PeakRangeFitStatus.MISMATCH: "不匹配",
+                    PeakRangeFitStatus.UNAVAILABLE: "无法评价",
+                }[assessment.status]
+                spots.append(
+                    {
+                        "pos": (marker_x, float(marker_y)),
+                        "size": 10 if selected else 7,
+                        "symbol": "d" if selected else "o",
+                        "pen": pg.mkPen(color=(255, 255, 255, 230), width=0.8),
+                        "brush": pg.mkBrush((red, green, blue, 220)),
+                        "data": {
+                            "row": row,
+                            "tip": f"{peak_range.label} · {status_label}\n"
+                            + "；".join(assessment.reasons),
+                        },
+                    }
+                )
+
+            if spots:
+                marker_item = pg.ScatterPlotItem(
+                    spots=spots,
+                    pxMode=True,
+                    hoverable=True,
+                    hoverSize=11,
+                    tip=lambda _x, _y, data: data.get("tip", ""),
+                )
+                marker_item.setZValue(12)
+                marker_item.sigClicked.connect(self._on_peak_range_marker_clicked)
+                self.p2.addItem(marker_item, ignoreBounds=True)
+                self._peak_range_marker_item = marker_item
+
+        if not 0 <= selected_row < len(self._peak_range_assessments):
+            return
+        if self.peakData.isRowHidden(selected_row):
+            return
+        assessment = self._peak_range_assessments[selected_row]
+        peak_range = assessment.peak_range
+        try:
+            left, right = self._tof_range_to_axis_range(
+                float(peak_range.left_bound),
+                float(peak_range.right_bound),
+            )
+        except Exception:
+            return
+        left = max(float(self.plot_x_min), left)
+        right = min(float(self.plot_x_max), right)
+        if right <= left:
+            return
+        red, green, blue = colors[assessment.status]
+        item = PeakRangeOverlayItem(
+            selected_row,
+            values=[left, right],
+            movable=False,
+            brush=pg.mkBrush((red, green, blue, 48)),
+            pen=pg.mkPen(color=(red, green, blue, 240), width=2.2),
+            hoverBrush=pg.mkBrush((red, green, blue, 66)),
+            hoverPen=pg.mkPen(color=(red, green, blue, 255), width=2.4),
+        )
+        item.setZValue(8)
+        item.setToolTip("；".join(assessment.reasons))
+        item.rowClicked.connect(self._select_peak_row)
+        self.p2.addItem(item, ignoreBounds=True)
+        self._peak_range_overlay_items.append(item)
+
+    def _spectrum_intensity_at_tof(self, tof: float) -> float:
+        if self.current_plot_x.size == 0 or self.current_plot_y.size == 0:
+            return 0.0
+        index = int(np.searchsorted(self.current_plot_x, float(tof), side="left"))
+        index = max(0, min(index, self.current_plot_y.size - 1))
+        return float(self.current_plot_y[index])
+
+    def _on_peak_range_marker_clicked(self, _item, points, _event) -> None:
+        if not points:
+            return
+        data = points[0].data()
+        if not isinstance(data, dict):
+            return
+        row = data.get("row")
+        if isinstance(row, int):
+            self._select_peak_row(row)
 
     def clear_peak_data(self):
         """清除峰值数据表格中的所有数据"""

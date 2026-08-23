@@ -25,6 +25,7 @@ COLUMN_ALIASES = {
     "mz": {"mz", "m/z", "mass", "mass_number", "质量数", "质量数 (m/z)", "质量数(m/z)", "质荷比"},
     "peak_index": {
         "peak",
+        "peak_index",
         "index",
         "center",
         "center_idx",
