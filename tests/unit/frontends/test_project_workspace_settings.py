@@ -2566,7 +2566,7 @@ def test_temperature_project_cache_autoload_ignores_stale_project_result(qapp, t
 
         assert widget.result_df.empty
         assert widget.curves == {}
-        assert "New Project" in widget.summary_project_label.text()
+        assert "New Project" in widget.summary_project_label.fullText()
     finally:
         widget.deleteLater()
 

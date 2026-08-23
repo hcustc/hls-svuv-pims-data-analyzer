@@ -19,6 +19,10 @@ class ElidedLabel(QtWidgets.QLabel):
         self.setToolTip(self._full_text)
         self._update_elided_text()
 
+    def fullText(self) -> str:
+        """Return the semantic text before width-dependent elision."""
+        return self._full_text
+
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
         super().resizeEvent(event)
         self._update_elided_text()
