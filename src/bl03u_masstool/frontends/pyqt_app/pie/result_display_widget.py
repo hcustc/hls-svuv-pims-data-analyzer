@@ -14,9 +14,80 @@ ResultDisplayWidget - 结果详情展示面板
 - 根据结果状态自动启用/禁用导出按钮
 """
 
-from PyQt6 import QtCore, QtWidgets
+from PyQt6 import QtCore, QtGui, QtWidgets
 
 from bl03u_masstool.core.pie_analysis import species_ionization_energy_value
+
+
+class CopyableTableWidget(QtWidgets.QTableWidget):
+    """Read-only-friendly table with spreadsheet-compatible copying."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.ActionsContextMenu)
+        copy_selected_action = QtGui.QAction("复制所选", self)
+        copy_selected_action.setShortcut(
+            QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.Copy)
+        )
+        copy_selected_action.setShortcutContext(
+            QtCore.Qt.ShortcutContext.WidgetWithChildrenShortcut
+        )
+        copy_selected_action.triggered.connect(self.copy_selected_to_clipboard)
+        self.addAction(copy_selected_action)
+
+        copy_all_action = QtGui.QAction("复制全部", self)
+        copy_all_action.triggered.connect(self.copy_all_to_clipboard)
+        self.addAction(copy_all_action)
+
+    def copy_all_to_clipboard(self) -> None:
+        headers = [
+            self.horizontalHeaderItem(column).text()
+            if self.horizontalHeaderItem(column) is not None
+            else ""
+            for column in range(self.columnCount())
+        ]
+        lines = ["\t".join(headers)]
+        lines.extend(
+            "\t".join(
+                self.item(row, column).text()
+                if self.item(row, column) is not None
+                else ""
+                for column in range(self.columnCount())
+            )
+            for row in range(self.rowCount())
+        )
+        QtWidgets.QApplication.clipboard().setText("\n".join(lines))
+
+    def copy_selected_to_clipboard(self) -> None:
+        indexes = self.selectedIndexes()
+        if not indexes:
+            return
+        selected = {(index.row(), index.column()) for index in indexes}
+        rows = range(
+            min(row for row, _column in selected),
+            max(row for row, _column in selected) + 1,
+        )
+        columns = range(
+            min(column for _row, column in selected),
+            max(column for _row, column in selected) + 1,
+        )
+        text = "\n".join(
+            "\t".join(
+                self.item(row, column).text()
+                if (row, column) in selected and self.item(row, column) is not None
+                else ""
+                for column in columns
+            )
+            for row in rows
+        )
+        QtWidgets.QApplication.clipboard().setText(text)
+
+    def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:
+        if event.matches(QtGui.QKeySequence.StandardKey.Copy):
+            self.copy_selected_to_clipboard()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
 
 class ResultDisplayWidget(QtWidgets.QWidget):
@@ -82,14 +153,14 @@ class ResultDisplayWidget(QtWidgets.QWidget):
         self.result_tabs.setMinimumHeight(120)
 
         # ---- Tab 1: 曲线数据 ----
-        self.curve_table = QtWidgets.QTableWidget()
+        self.curve_table = CopyableTableWidget()
         self.curve_table.setWordWrap(False)
         self.curve_table.setAlternatingRowColors(True)
         self.curve_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.result_tabs.addTab(self.curve_table, "曲线数据")
 
         # ---- Tab 2: 物种贡献明细 ----
-        self.fit_table = QtWidgets.QTableWidget()
+        self.fit_table = CopyableTableWidget()
         self.fit_table.setWordWrap(False)
         self.fit_table.setAlternatingRowColors(True)
         self.fit_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)

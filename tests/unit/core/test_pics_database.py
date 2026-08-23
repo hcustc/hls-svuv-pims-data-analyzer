@@ -33,6 +33,7 @@ from bl03u_masstool.core.pie_analysis import (
     analyze_pie_folder,
     build_pie_curves,
     fit_species_combination_with_curve,
+    has_fittable_pics_curve,
     load_species_database,
     save_species_database_sqlite,
 )
@@ -170,6 +171,49 @@ def test_pics_fit_returns_fitted_curve():
     assert round(model["species"][0]["coefficient"], 6) == 2.0
     assert [round(value, 6) for value in model["fitted"]] == [0.0, 2.0, 4.0]
     assert round(model["r_squared"], 6) == 1.0
+
+
+def test_pics_fit_excludes_species_without_curve_support_in_scan_range():
+    species = [
+        {
+            "id": 1,
+            "mz": 112,
+            "species": "Reference species",
+            "ie": 9.5,
+            "energies": [9.0, 10.0, 11.0],
+            "cross_sections": [0.0, 1.0, 2.0],
+        },
+        {
+            "id": 463,
+            "mz": 112,
+            "species": "Monochlorobenzene",
+            "formula": "C6H5Cl",
+            "ie": 9.07,
+            "energies": [10.5, 13.6183751836558, 13.6183751836558],
+            "cross_sections": [33.0, 33.0, 22.2],
+        },
+    ]
+
+    model = fit_species_combination_with_curve(
+        species,
+        [9.0, 10.0, 11.0],
+        [0.0, 2.0, 4.0],
+    )
+
+    assert model["candidate_count"] == 1
+    assert [item["species"] for item in model["species"]] == ["Reference species"]
+    assert [round(value, 6) for value in model["fitted"]] == [0.0, 2.0, 4.0]
+    assert has_fittable_pics_curve(species[0]) is True
+    assert has_fittable_pics_curve(species[1], [9.0, 10.0, 11.0]) is False
+
+    ie_only_model = fit_species_combination_with_curve(
+        [species[1]],
+        [9.0, 10.0, 11.0],
+        [0.0, 2.0, 4.0],
+    )
+    assert ie_only_model["candidate_count"] == 0
+    assert ie_only_model["species"] == []
+    assert ie_only_model["fitted"] == []
 
 
 def test_pics_fit_supports_manual_and_locked_coefficients():
