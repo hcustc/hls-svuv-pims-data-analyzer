@@ -41,6 +41,20 @@ def test_elided_label_sets_tooltip_for_initial_text(qapp):
         label.deleteLater()
 
 
+def test_elided_label_exposes_full_text_when_rendered_text_is_elided(qapp):
+    full_text = "项目：A deliberately long project name"
+    label = ElidedLabel(full_text)
+    try:
+        label.resize(24, label.sizeHint().height())
+        label.show()
+        qapp.processEvents()
+
+        assert label.text() != full_text
+        assert label.fullText() == full_text
+    finally:
+        label.deleteLater()
+
+
 def test_dataframe_table_restores_widget_state_after_error(qapp):
     table = _FailingTable()
     table.blockSignals(False)

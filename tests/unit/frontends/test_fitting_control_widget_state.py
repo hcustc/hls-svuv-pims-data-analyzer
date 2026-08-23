@@ -251,7 +251,7 @@ def test_candidate_hover_and_compact_fit_summary(widget, qapp):
         }
     )
     qapp.processEvents()
-    assert widget.result_contribution_label.text() == (
+    assert widget.result_contribution_label.fullText() == (
         "贡献：1-Methylnaphthalene 60.0% · "
         "2-Methylnaphthalene 40.0%"
     )
