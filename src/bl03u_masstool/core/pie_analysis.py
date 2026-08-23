@@ -1544,6 +1544,46 @@ def species_ionization_energy_value(species: dict) -> object:
     return species.get("ionization_energy") if value is None else value
 
 
+def has_fittable_pics_curve(
+    species: dict,
+    experimental_energies=None,
+) -> bool:
+    """Return whether a species has enough PICS support for a fit range."""
+    try:
+        pic_energies = np.asarray(species.get("energies", []), dtype=float)
+        pic_sections = np.asarray(species.get("cross_sections", []), dtype=float)
+    except (TypeError, ValueError):
+        return False
+
+    point_count = min(pic_energies.size, pic_sections.size)
+    if point_count < 2:
+        return False
+
+    pic_energies = pic_energies[:point_count]
+    pic_sections = pic_sections[:point_count]
+    valid = np.isfinite(pic_energies) & np.isfinite(pic_sections)
+    pic_energies = pic_energies[valid]
+    pic_sections = pic_sections[valid]
+
+    if experimental_energies is not None:
+        fit_energies = np.asarray(experimental_energies, dtype=float)
+        fit_energies = fit_energies[np.isfinite(fit_energies)]
+        if fit_energies.size == 0:
+            return False
+        in_fit_range = (
+            (pic_energies >= float(np.min(fit_energies)))
+            & (pic_energies <= float(np.max(fit_energies)))
+        )
+        pic_energies = pic_energies[in_fit_range]
+        pic_sections = pic_sections[in_fit_range]
+
+    return bool(
+        pic_energies.size >= 2
+        and np.unique(pic_energies).size >= 2
+        and np.any(pic_sections > 0)
+    )
+
+
 def fit_species_combination_with_curve(
     species_list: list[dict],
     experimental_energies,
@@ -1563,6 +1603,11 @@ def fit_species_combination_with_curve(
     energies = energies[valid]
     intensities = intensities[valid]
     coefficient_mode = coefficient_mode if coefficient_mode in {"fit", "manual", "locked_fit"} else "fit"
+    fittable_species = [
+        species
+        for species in species_list
+        if has_fittable_pics_curve(species, energies)
+    ]
     empty_model = {
         "energies": energies.tolist(),
         "experimental": intensities.tolist(),
@@ -1571,17 +1616,17 @@ def fit_species_combination_with_curve(
         "r_squared": 0.0,
         "rmse": 0.0,
         "mae": 0.0,
-        "candidate_count": len(species_list),
+        "candidate_count": len(fittable_species),
         "coefficient_mode": coefficient_mode,
         "locked_species_ids": [],
         "species": [],
     }
-    if not species_list or energies.size == 0 or intensities.size == 0:
+    if not fittable_species or energies.size == 0 or intensities.size == 0:
         return empty_model
     active_species: list[dict] = []
     active_species_ids: list[int] = []
     design_columns: list[np.ndarray] = []
-    for species in species_list:
+    for species in fittable_species:
         pic_energies = np.asarray(species["energies"], dtype=float)
         pic_sections = np.asarray(species["cross_sections"], dtype=float)
         pic_count = min(pic_energies.size, pic_sections.size)

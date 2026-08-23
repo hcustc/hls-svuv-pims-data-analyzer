@@ -958,6 +958,8 @@ def test_single_pie_plot_can_focus_rise_and_show_candidate_ie_references(
                 "formula": "CH2O",
                 "ie": 10.88,
                 "is_enabled": True,
+                "energies": [10.7, 10.9],
+                "cross_sections": [0.1, 0.2],
             },
             {
                 "id": 2,
@@ -965,6 +967,8 @@ def test_single_pie_plot_can_focus_rise_and_show_candidate_ie_references(
                 "formula": "X",
                 "ie": 10.75,
                 "is_enabled": False,
+                "energies": [10.7, 10.9],
+                "cross_sections": [0.1, 0.2],
             },
             {
                 "id": 3,
@@ -972,6 +976,8 @@ def test_single_pie_plot_can_focus_rise_and_show_candidate_ie_references(
                 "formula": "Y",
                 "ie": 11.52,
                 "is_enabled": True,
+                "energies": [10.7, 10.9],
+                "cross_sections": [0.1, 0.2],
             },
         ]
     )
@@ -1000,6 +1006,66 @@ def test_single_pie_plot_can_focus_rise_and_show_candidate_ie_references(
         pie_dialog.plot_widget._cursor_y_values,
         intensities,
     )
+
+
+def test_ie_only_candidate_is_marked_but_not_submitted_for_fitting(
+    pie_dialog,
+    qapp,
+):
+    energies = np.array([9.0, 10.0, 10.5, 11.0])
+    pie_dialog.curves = {
+        112.01: {
+            "mz": 112.01,
+            "mz_rounded": 112,
+            "curve_key": 112.01,
+            "energies": energies,
+            "intensities": np.array([0.0, 1.0, 2.0, 3.0]),
+            "rows": pd.DataFrame(
+                {
+                    "energy": energies,
+                    "normalized_intensity": [0.0, 1.0, 2.0, 3.0],
+                    "raw_area": [0.0, 1.0, 2.0, 3.0],
+                    "photon_normalized_intensity": [0.0, 1.0, 2.0, 3.0],
+                    "integration_method": ["sum_counts"] * 4,
+                }
+            ),
+        }
+    }
+    pie_dialog.database = [
+        {
+            "id": 463,
+            "mz": 112,
+            "species": "Monochlorobenzene",
+            "formula": "C6H5Cl",
+            "ie": 9.07,
+            "ionization_energy": 9.07,
+            "energies": np.array([10.5, 13.6183751836558, 13.6183751836558]),
+            "cross_sections": np.array([33.0, 33.0, 22.2]),
+        }
+    ]
+
+    pie_dialog.populate_mz_list()
+    pie_dialog.mz_list.setCurrentRow(0)
+    qapp.processEvents()
+
+    enable_widget = pie_dialog.species_table.cellWidget(0, 0)
+    enable_checkbox = enable_widget.findChild(QtWidgets.QCheckBox)
+    assert not enable_checkbox.isEnabled()
+    assert not enable_checkbox.isChecked()
+    assert pie_dialog.species_table.item(0, 2).text() == "9.0700"
+    assert "仅 IE 1" in pie_dialog.fitting_control_widget.candidate_summary_label.text()
+
+    jobs = pie_dialog._build_selected_fit_jobs([112.01])
+    assert jobs[112.01]["selected_species"] == []
+    assert not pie_dialog.fit_button.isEnabled()
+
+    spec = pie_dialog.plot_widget._last_spec
+    assert spec is not None
+    assert [
+        (reference.label, reference.x)
+        for reference in spec.vertical_references
+    ] == [("IE · C6H5Cl 9.0700 eV", 9.07)]
+    assert all(series.role.value != "total_fit" for series in spec.series)
 
 
 def test_pie_diagnostic_plot_modes_render_shared_shape_and_snr_masked_ratio(
@@ -1209,9 +1275,18 @@ class TestPerM_zConfiguration:
 
         # Populate candidate table with mock species
         pie_dialog.fitting_control_widget.set_candidate_data([
-            {'id': 1, 'species': 'NO', 'mz': 46},
-            {'id': 2, 'species': 'N2O', 'mz': 46},
-            {'id': 3, 'species': 'CO2', 'mz': 46},
+            {
+                'id': 1, 'species': 'NO', 'mz': 46,
+                'energies': [10.0, 11.0], 'cross_sections': [0.0, 1.0],
+            },
+            {
+                'id': 2, 'species': 'N2O', 'mz': 46,
+                'energies': [10.0, 11.0], 'cross_sections': [0.0, 1.0],
+            },
+            {
+                'id': 3, 'species': 'CO2', 'mz': 46,
+                'energies': [10.0, 11.0], 'cross_sections': [0.0, 1.0],
+            },
         ])
         pie_dialog.candidate_table.setRowCount(3)
 
@@ -1240,8 +1315,14 @@ class TestPerM_zConfiguration:
         """Test that restored config restores candidate selection."""
         # Setup mock species
         pie_dialog.fitting_control_widget.set_candidate_data([
-            {'id': 1, 'species': 'NO', 'mz': 46},
-            {'id': 2, 'species': 'N2O', 'mz': 46},
+            {
+                'id': 1, 'species': 'NO', 'mz': 46,
+                'energies': [10.0, 11.0], 'cross_sections': [0.0, 1.0],
+            },
+            {
+                'id': 2, 'species': 'N2O', 'mz': 46,
+                'energies': [10.0, 11.0], 'cross_sections': [0.0, 1.0],
+            },
         ])
 
         # Create checkboxes in candidate table
@@ -1257,7 +1338,10 @@ class TestPerM_zConfiguration:
         # Manually set per_mz_config
         pie_dialog.per_mz_config[46] = {
             'selected_species': [
-                {'id': 1, 'species': 'NO', 'mz': 46},
+                {
+                    'id': 1, 'species': 'NO', 'mz': 46,
+                    'energies': [10.0, 11.0], 'cross_sections': [0.0, 1.0],
+                },
             ],
             'mode': 'auto',
             'coefficients': {},
@@ -1279,7 +1363,10 @@ class TestPerM_zConfiguration:
     def test_restore_mz_config_initializes_default_if_no_history(self, pie_dialog):
         """Test that restore initializes default config if no history."""
         pie_dialog.fitting_control_widget.set_candidate_data([
-            {'id': 1, 'species': 'NO', 'mz': 46},
+            {
+                'id': 1, 'species': 'NO', 'mz': 46,
+                'energies': [10.0, 11.0], 'cross_sections': [0.0, 1.0],
+            },
         ])
 
         pie_dialog.candidate_table.setRowCount(1)
@@ -1452,7 +1539,10 @@ class TestConfigurationOnMZSwitch:
         }
 
         pie_dialog.fitting_control_widget.set_candidate_data([
-            {'id': 1, 'species': 'NO', 'mz': 46},
+            {
+                'id': 1, 'species': 'NO', 'mz': 46,
+                'energies': [10.0, 11.0], 'cross_sections': [0.0, 1.0],
+            },
         ])
 
         # Manually set current_mz and candidate table

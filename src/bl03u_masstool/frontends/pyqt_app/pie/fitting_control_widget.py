@@ -31,7 +31,15 @@ from io import BytesIO
 import numpy as np
 from PyQt6 import QtCore, QtGui, QtWidgets
 
+from bl03u_masstool.core.pie_analysis import has_fittable_pics_curve
 from bl03u_masstool.frontends.pyqt_app.common.widgets import ElidedLabel, StateGlyph
+
+
+def _candidate_has_fittable_pics(species: dict) -> bool:
+    explicit = species.get("pics_fittable")
+    if explicit is not None:
+        return bool(explicit)
+    return has_fittable_pics_curve(species)
 
 
 @lru_cache(maxsize=256)
@@ -625,6 +633,7 @@ class FittingControlWidget(QtWidgets.QWidget):
             species_name = auto_item.get('species')
             ionization_energy = self._coerce_ie(auto_item)
             merged_item = dict(auto_item)
+            pics_fittable = _candidate_has_fittable_pics(auto_item)
             merged_item.update({
                 'id': auto_item.get('id', self._generate_new_id()),
                 'species': species_name,
@@ -636,8 +645,9 @@ class FittingControlWidget(QtWidgets.QWidget):
                     'ie_query_status', 'available' if ionization_energy is not None else 'not_queried'
                 ),
                 'source': 'automatic',
-                'is_locked': species_name in locked_species,  # 检查是否在锁定列表中
-                'is_enabled': True,
+                'is_locked': pics_fittable and species_name in locked_species,
+                'is_enabled': pics_fittable,
+                'pics_fittable': pics_fittable,
                 'coefficient': 0.0,
                 'cross_sections': auto_item.get('cross_sections', np.array([])),
                 'energies': auto_item.get('energies', np.array([])),
@@ -663,8 +673,9 @@ class FittingControlWidget(QtWidgets.QWidget):
                     'ie_source': '',
                     'ie_query_status': 'not_queried',
                     'source': 'manual',
-                    'is_locked': True,
-                    'is_enabled': True,
+                    'is_locked': False,
+                    'is_enabled': False,
+                    'pics_fittable': False,
                     'coefficient': 0.0,
                     'cross_sections': np.array([]),
                     'energies': np.array([]),
@@ -714,13 +725,22 @@ class FittingControlWidget(QtWidgets.QWidget):
 
     def _populate_table_row(self, row: int, species: dict):
         """填充表格的一行。"""
+        pics_fittable = _candidate_has_fittable_pics(species)
+        species['pics_fittable'] = pics_fittable
+        if not pics_fittable:
+            species['is_enabled'] = False
+            species['is_locked'] = False
+
         # Col 0: 启用 checkbox
         enable_widget = QtWidgets.QWidget()
         enable_layout = QtWidgets.QHBoxLayout(enable_widget)
         enable_layout.setContentsMargins(0, 0, 0, 0)
         enable_layout.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         enable_chk = QtWidgets.QCheckBox()
-        enable_chk.setChecked(species.get('is_enabled', True))
+        enable_chk.setChecked(pics_fittable and species.get('is_enabled', True))
+        enable_chk.setEnabled(pics_fittable)
+        if not pics_fittable:
+            enable_chk.setToolTip("仅有电离能参考，缺少有效 PICS 曲线，不能参与拟合")
         enable_chk.stateChanged.connect(lambda state, r=row: self._on_row_changed(r))
         enable_layout.addWidget(enable_chk)
         self.species_table.setCellWidget(row, 0, enable_widget)
@@ -779,6 +799,7 @@ class FittingControlWidget(QtWidgets.QWidget):
         # 向后兼容：读取新字段is_locked，如果不存在则尝试读取旧字段is_forced
         toggle_btn.setObjectName("LockCandidateButton")
         toggle_btn.setProperty("locked", is_locked)
+        toggle_btn.setEnabled(pics_fittable)
 
         species_layout.addWidget(toggle_btn)
 
@@ -789,6 +810,7 @@ class FittingControlWidget(QtWidgets.QWidget):
         source = species.get('source', '自动')
         locked = "是" if species.get('is_locked', False) else "否"
         smiles = str(species.get("smiles") or "").strip()
+        pics_status = "可参与拟合" if pics_fittable else "仅 IE 参考（无有效 PICS 曲线）"
         tooltip_text = (
             f"物种: {species_name}\n"
             f"分子式: {formula or '未提供'}\n"
@@ -798,6 +820,7 @@ class FittingControlWidget(QtWidgets.QWidget):
             f"IE来源: {ie_source}\n"
             + (f"IE备注: {ie_message}\n" if ie_message else "") +
             f"来源: {source}\n"
+            f"PICS: {pics_status}\n"
             f"锁定: {locked}"
         )
         toggle_btn.setToolTip(
@@ -920,8 +943,11 @@ class FittingControlWidget(QtWidgets.QWidget):
                 if enable_widget:
                     enable_chk = enable_widget.findChild(QtWidgets.QCheckBox)
                     if enable_chk:
-                        enable_chk.setChecked(checked)
-                        self._unified_species_data[row]['is_enabled'] = checked
+                        row_checked = checked and _candidate_has_fittable_pics(
+                            self._unified_species_data[row]
+                        )
+                        enable_chk.setChecked(row_checked)
+                        self._unified_species_data[row]['is_enabled'] = row_checked
         finally:
             self._updating = False
         self._emit_selection_state()
@@ -1019,11 +1045,17 @@ class FittingControlWidget(QtWidgets.QWidget):
 
     def _refresh_candidate_summary(self) -> None:
         candidate_count = len(self._unified_species_data)
+        fittable_count = sum(
+            _candidate_has_fittable_pics(species)
+            for species in self._unified_species_data
+        )
+        ie_only_count = candidate_count - fittable_count
         selected_ids = self._get_selected_candidate_ids() if candidate_count else []
         locked_count = sum(bool(species.get("is_locked")) for species in self._unified_species_data)
 
         self.candidate_summary_label.setText(
-            f"候选 {candidate_count} · 已选 {len(selected_ids)}"
+            f"候选 {candidate_count} · 可拟合 {fittable_count} · 已选 {len(selected_ids)}"
+            + (f" · 仅 IE {ie_only_count}" if ie_only_count else "")
             + (f" · 保留 {locked_count}" if locked_count else "")
         )
         self.fit_mode_label.setText("自动拟合")
@@ -1049,6 +1081,11 @@ class FittingControlWidget(QtWidgets.QWidget):
             return False, "请先选择一条 m/z 曲线"
         if not self._unified_species_data:
             return False, "当前 m/z 没有可用的 PICS 候选"
+        if not any(
+            _candidate_has_fittable_pics(species)
+            for species in self._unified_species_data
+        ):
+            return False, "当前候选仅有电离能参考，缺少可用于拟合的 PICS 曲线"
         if not self._get_selected_candidate_ids():
             return False, "请至少启用一个候选物种"
         return True, ""
@@ -1061,6 +1098,8 @@ class FittingControlWidget(QtWidgets.QWidget):
             enable_chk = enable_widget.findChild(QtWidgets.QCheckBox) if enable_widget else None
             if enable_chk and enable_chk.isChecked() and row < len(self._unified_species_data):
                 species = self._unified_species_data[row]
+                if not _candidate_has_fittable_pics(species):
+                    continue
                 species_id = int(species.get("id", row + 1))
                 selected_ids.append(species_id)
         return selected_ids

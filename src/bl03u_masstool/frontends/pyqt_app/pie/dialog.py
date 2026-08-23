@@ -58,6 +58,7 @@ from bl03u_masstool.core.pie_analysis import (
     build_pie_curves,
     build_pie_ratio_curve,
     discover_pie_segment_folders,
+    has_fittable_pics_curve,
     identify_species_for_mz_with_curve,
     inspect_pie_source_segments,
     load_species_database,
@@ -98,11 +99,21 @@ from bl03u_masstool.frontends.pyqt_app.common.plot_spec import (
 )
 from bl03u_masstool.frontends.pyqt_app.common.static_plot import StaticCurvePlot
 from bl03u_masstool.frontends.pyqt_app.pie.fitting_control_widget import FittingControlWidget
-from bl03u_masstool.frontends.pyqt_app.pie.result_display_widget import ResultDisplayWidget
+from bl03u_masstool.frontends.pyqt_app.pie.result_display_widget import (
+    CopyableTableWidget,
+    ResultDisplayWidget,
+)
 
 
 logger = logging.getLogger(__name__)
 PieCurveKey = int | float
+
+
+def _candidate_has_fittable_pics(species: dict) -> bool:
+    explicit = species.get("pics_fittable")
+    if explicit is not None:
+        return bool(explicit)
+    return has_fittable_pics_curve(species)
 
 
 def _run_exhaustive_fit(
@@ -965,7 +976,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         # 曲线数据 tab
         curve_tab = QtWidgets.QWidget()
         curve_layout = QtWidgets.QVBoxLayout(curve_tab)
-        curve_table_copy = QtWidgets.QTableWidget()
+        curve_table_copy = CopyableTableWidget()
         curve_table_copy.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         curve_table_copy.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
         # 复制曲线数据
@@ -985,7 +996,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         # 拟合明细 tab
         fit_tab = QtWidgets.QWidget()
         fit_layout = QtWidgets.QVBoxLayout(fit_tab)
-        fit_table_copy = QtWidgets.QTableWidget()
+        fit_table_copy = CopyableTableWidget()
         fit_table_copy.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         fit_table_copy.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
         # 复制拟合数据
@@ -1004,11 +1015,22 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
         layout.addWidget(tab)
 
-        # 关闭按钮
+        # 复制和关闭按钮
+        copy_selected_btn = QtWidgets.QPushButton("复制所选")
+        copy_all_btn = QtWidgets.QPushButton("复制全部")
         close_btn = QtWidgets.QPushButton("关闭")
         close_btn.setFixedWidth(80)
         close_btn.clicked.connect(popup.accept)
+        tables = (curve_table_copy, fit_table_copy)
+        copy_selected_btn.clicked.connect(
+            lambda: tables[tab.currentIndex()].copy_selected_to_clipboard()
+        )
+        copy_all_btn.clicked.connect(
+            lambda: tables[tab.currentIndex()].copy_all_to_clipboard()
+        )
         btn_row = QtWidgets.QHBoxLayout()
+        btn_row.addWidget(copy_selected_btn)
+        btn_row.addWidget(copy_all_btn)
         btn_row.addStretch()
         btn_row.addWidget(close_btn)
         layout.addLayout(btn_row)
@@ -1297,9 +1319,15 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         unified_data = self.fitting_control_widget._unified_species_data
         for species in unified_data:
             species_id = int(species.get("id", -1))
-            species["is_enabled"] = species_id in selected_species_ids
+            species["is_enabled"] = (
+                species_id in selected_species_ids
+                and _candidate_has_fittable_pics(species)
+            )
             species["coefficient"] = 0.0
-            species["is_locked"] = species_id in locked_ids_set
+            species["is_locked"] = (
+                species_id in locked_ids_set
+                and _candidate_has_fittable_pics(species)
+            )
 
         # 同步锁定列表
         self.fitting_control_widget._locked_species = [
@@ -1317,7 +1345,16 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         curve = self._curve_metadata_for_key(mz) or {}
         nominal_mz = self._curve_nominal_mz(curve, mz)
         display_mz = self._curve_mz_text(curve, mz)
-        filtered_db = self.get_filtered_database()
+        fit_curve = self.curves.get(mz) or {}
+        fit_energies = fit_curve.get("energies", [])
+        filtered_db = []
+        for species in self.get_filtered_database():
+            candidate = dict(species)
+            candidate["pics_fittable"] = has_fittable_pics_curve(
+                candidate,
+                fit_energies,
+            )
+            filtered_db.append(candidate)
         locked_species = self.fitting_control_widget.get_locked_species()
         self.fitting_control_widget.populate_unified_species_table(
             nominal_mz,
@@ -1627,7 +1664,11 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             # Col 0: 启用状态 checkbox
             enable_widget = self.species_table.cellWidget(row, 0)
             enable_chk = enable_widget.findChild(QtWidgets.QCheckBox) if enable_widget else None
-            if enable_chk and enable_chk.isChecked():
+            if (
+                enable_chk
+                and enable_chk.isChecked()
+                and _candidate_has_fittable_pics(species)
+            ):
                 selected_species.append(species)
 
                 species_id = int(species.get("id", row + 1))
@@ -1650,7 +1691,11 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             return
 
         panel_state = self._get_candidate_panel_state()
-        selected = panel_state["selected_species"]
+        selected = [
+            species
+            for species in panel_state["selected_species"]
+            if _candidate_has_fittable_pics(species)
+        ]
 
         if not selected:
             self._fit_preview_active = False
@@ -1681,9 +1726,6 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             pic_valid = np.isfinite(pic_energies) & np.isfinite(pic_sections)
             pic_energies = pic_energies[pic_valid]
             pic_sections = pic_sections[pic_valid]
-            if pic_energies.size < 2:
-                design_columns.append(np.zeros(energies.size))
-                continue
             order = np.argsort(pic_energies)
             basis = np.interp(energies, pic_energies[order], pic_sections[order], left=0.0, right=0.0)
             basis = np.nan_to_num(basis, nan=0.0, posinf=0.0, neginf=0.0)
@@ -1780,9 +1822,12 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self._fit_all_input_configs = {}
         for mz in mz_list:
             nominal_mz = self._nominal_mz_for_key(mz)
+            curve = self.curves.get(mz) or {}
+            fit_energies = curve.get("energies", [])
             candidates = [
                 item for item in database_snapshot
                 if int(item.get("mz", -1)) == nominal_mz
+                and has_fittable_pics_curve(item, fit_energies)
             ]
             self._fit_all_input_configs[mz] = {
                 "selected_species": candidates,
@@ -1968,7 +2013,11 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             # 获取该 m/z 保存的候选配置
             if mz in self.per_mz_config:
                 config = self.per_mz_config[mz]
-                selected_species = config.get("selected_species", [])
+                selected_species = [
+                    species
+                    for species in config.get("selected_species", [])
+                    if has_fittable_pics_curve(species, energies)
+                ]
                 locked_ids = config.get("locked_ids", [])
             else:
                 # 如果没有保存的配置，使用全局自动识别
@@ -1977,6 +2026,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 selected_species = [
                     item for item in filtered_db
                     if int(item.get("mz", -1)) == nominal_mz
+                    and has_fittable_pics_curve(item, energies)
                 ]
                 locked_ids = []
 
@@ -4372,6 +4422,8 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
     def _has_fit_candidates_for_mz(self, mz: PieCurveKey) -> bool:
         nominal_mz = self._nominal_mz_for_key(mz)
+        curve = self.curves.get(mz) or {}
+        fit_energies = curve.get("energies", [])
         if (
             mz == self.current_mz
             and self.fitting_control_widget._current_mz == nominal_mz
@@ -4379,9 +4431,13 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             ready, _reason = self.fitting_control_widget.get_fit_readiness()
             return ready
         if mz in self.per_mz_config:
-            return bool(self.per_mz_config[mz].get("selected_species"))
+            return any(
+                has_fittable_pics_curve(species, fit_energies)
+                for species in self.per_mz_config[mz].get("selected_species", [])
+            )
         return any(
             int(item.get("mz", -1)) == nominal_mz
+            and has_fittable_pics_curve(item, fit_energies)
             for item in self.get_filtered_database()
         )
 
@@ -5429,7 +5485,11 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
         for row, species in enumerate(
             self.fitting_control_widget.get_candidate_data()
         ):
-            if not bool(species.get("is_enabled", True)):
+            ie_only_reference = species.get("pics_fittable") is False
+            if (
+                not ie_only_reference
+                and not bool(species.get("is_enabled", True))
+            ):
                 continue
             ie_value = self._species_ie_value(species)
             if ie_value is None or not lower <= ie_value <= upper:
@@ -6116,16 +6176,22 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
                 channel_id = None
                 if not curve:
                     continue
+            fit_energies = curve.get("energies", []) if curve is not None else None
             config = self.per_mz_config.get(mz)
             if config is None:
                 nominal_mz = self._nominal_mz_for_key(mz)
                 selected = [
                     item for item in filtered_database
                     if int(item.get("mz", -1)) == nominal_mz
+                    and has_fittable_pics_curve(item, fit_energies)
                 ]
                 locked_ids: list[int] = []
             else:
-                selected = list(config.get("selected_species", []))
+                selected = [
+                    species
+                    for species in config.get("selected_species", [])
+                    if has_fittable_pics_curve(species, fit_energies)
+                ]
                 locked_ids = [int(value) for value in config.get("locked_ids", [])]
             jobs[mz] = {
                 "curve": curve,
@@ -6241,6 +6307,7 @@ class PIESpeciesFitDialog(QtWidgets.QWidget, DataFrameTableMixin):
             candidates = [
                 item for item in filtered
                 if int(item.get("mz", -1)) == nominal_mz
+                and has_fittable_pics_curve(item, curve.get("energies", []))
             ]
         if len(candidates) < 2:
             QtWidgets.QMessageBox.information(self, "提示", "至少需要2个候选物种才能进行组合穷举")
