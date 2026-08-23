@@ -549,6 +549,15 @@ QFrame#StatsBar {{
     border-radius: 6px;
 }}
 
+QWidget#PeakWorkflowPanel,
+QWidget#PeakRangeAssessmentPanel,
+QWidget#PeakNavigationSection,
+QWidget#PeakProjectActionPanel {{
+    background: {t.panel_subtle};
+    border: 1px solid {t.border_light};
+    border-radius: 6px;
+}}
+
 QFrame#StatsBar {{
     padding: 4px 10px;
 }}
