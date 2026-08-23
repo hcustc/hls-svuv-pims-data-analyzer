@@ -7,7 +7,7 @@
 - 每次提交前执行“必检项”。命令必须全部以退出码 `0` 结束。
 - 改动涉及 GUI、依赖、打包或科学计算时，再执行对应的“条件检查”。
 - 修复缺陷时必须增加能够在修复前失败、修复后通过的回归测试。
-- 不用“本机全量测试通过”替代 CI 等价命令；PR 的 Linux CI 当前明确执行 `python -m pytest -m "not gui"`。
+- 不用“本机全量测试通过”替代 CI 等价命令；PR 的 Linux CI 分别执行非 GUI/非真实数据测试和 `offscreen` GUI 测试。
 - 发现新的 CI 失败模式后，在本文“CI 失败记录”中补充根因和预防命令。
 
 ## 首次准备
@@ -31,8 +31,10 @@ uv pip check
 git status --short
 git diff --check
 git diff --cached --check
+uv pip check
 python -m compileall -q src tests main.py
-python -m pytest -m "not gui"
+python -m pytest -m "not gui and not real_data"
+QT_QPA_PLATFORM=offscreen python -m pytest -m gui
 ```
 
 逐项确认：
@@ -41,7 +43,9 @@ python -m pytest -m "not gui"
 - `git diff --check` 和 `git diff --cached --check` 均无空白错误。
 - 新增测试文件已被 Git 跟踪，不处于遗漏的 `??` 状态。
 - 删除或重命名的文件是有意操作，并已检查引用是否同步更新。
-- 非 GUI 测试通过；这是 `.github/workflows/ci.yml` 中 PR `Test` job 的本地等价测试命令。
+- 非 GUI/非真实数据测试通过；这是 `.github/workflows/ci.yml` 中 `Core tests and package smoke` job 的主要测试命令。
+- `offscreen` GUI 测试通过；这是 `GUI tests (offscreen)` job 的本地等价测试命令。在 Linux 上还需安装 workflow 所列的 Qt 运行库。
+- wheel 可构建且 `uv pip check` 无依赖冲突；CI 还会执行 `bl03u --help` 作为入口点冒烟检查。
 
 建议在提交前同时审阅改动范围：
 

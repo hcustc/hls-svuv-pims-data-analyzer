@@ -1,0 +1,50 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: zh-CN
+
+reviews:
+  profile: assertive
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  review_status: true
+  auto_review:
+    enabled: true
+    drafts: false
+    ignore_usernames:
+      - dependabot[bot]
+  path_filters:
+    - "!build/**"
+    - "!dist/**"
+    - "!output/**"
+    - "!requirements*.lock"
+    - "!uv.lock"
+    - "!tests/fixtures/bl03u_sample/**"
+  path_instructions:
+    - path: "src/bl03u_masstool/core/**"
+      instructions: |
+        重点审查科学正确性和可复现性。检查单位、数值容差、边界条件、缺失数据处理和随机状态；会改变科学含义的缺失信息必须失败关闭。自动结果只能是 Candidate 或 QC Signal，不能被描述为 Scientific Interpretation，也不能静默覆盖 Analysis Baseline 或 Analysis Version。
+    - path: "src/bl03u_masstool/api/**"
+      instructions: |
+        检查输入验证、路径和上传安全、错误边界以及 Project 范围。API 应调用共享科学核心，并与桌面端和 CLI 产生数值等价的结果及语义等价的 Project Evidence；不要在 API 层复制科学算法。
+    - path: "src/bl03u_masstool/frontends/**"
+      instructions: |
+        检查长任务是否保持界面可响应、可取消且失败后可恢复。Scientific Analyst 必须保留确认基线、物种选择、持久化数据库变更和科学解释的控制权；界面层不要实现与共享核心分叉的科学逻辑。
+    - path: "src/bl03u_masstool/**/database*.py"
+      instructions: |
+        检查 Raw Dataset 不可变性、事务边界、迁移的非破坏性、版本标识和来源信息。重算必须创建新的 Analysis Version，不得覆盖历史结果或仅因时间更新而把结果设为 Current Result。
+    - path: "tests/**"
+      instructions: |
+        检查回归测试是否覆盖失败路径、边界条件和科学容差，而不只验证非空输出。小型确定性 fixture 可以进入 Git；真实 SR-PIMS Data 必须保持可选并使用 real_data marker。直接导入 PyQt6 的测试必须安全收集并使用 gui marker。
+    - path: ".github/workflows/**"
+      instructions: |
+        检查最小权限、固定主版本的可信 Action、缓存键、超时、并发取消和 fork PR 安全。测试命令必须与 docs/pre_commit_checklist.md 保持一致，Release 写权限不能无故扩展到普通 CI。
+
+knowledge_base:
+  code_guidelines:
+    filePatterns:
+      - CONTEXT.md
+      - docs/adr/*.md
+      - docs/pre_commit_checklist.md
+
+chat:
+  auto_reply: true
