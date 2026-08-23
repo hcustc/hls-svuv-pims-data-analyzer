@@ -55,7 +55,6 @@ jobs:
     env:
       QT_QPA_PLATFORM: offscreen
       MPLBACKEND: Agg
-      MPLCONFIGDIR: ${{ runner.temp }}/matplotlib
 
     steps:
       - name: Checkout
@@ -84,4 +83,6 @@ jobs:
           python -m pip install --no-deps -e .
 
       - name: Run GUI tests
+        env:
+          MPLCONFIGDIR: ${{ runner.temp }}/matplotlib
         run: python -m pytest -m gui
