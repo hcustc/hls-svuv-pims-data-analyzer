@@ -273,14 +273,19 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
         activate_project_scope: bool = True,
     ) -> None:
         """Apply ProjectSettings defaults to MoleFractionDialog controls."""
+        previous_scope = self._project_scope_path(self.project_settings)
         self.project_settings = deepcopy(ps) if activate_project_scope else None
-        ps = self.project_settings or deepcopy(ps)
+        if previous_scope != self._project_scope_path(self.project_settings):
+            # A reused page must drop the previous Project's data before a new
+            # source is opened: an absent or unreadable source cannot replace it.
+            self._clear_project_analysis_state()
+        ps = self.project_settings or load_factory_project_settings()
         if activate_project_scope:
             self.calibration = ps.to_calibration()
             self.normalization_settings = ps.to_normalization_settings()
             self.settings = ps.to_mole_fraction_settings()
         else:
-            self.settings = load_factory_project_settings().to_mole_fraction_settings()
+            self.settings = ps.to_mole_fraction_settings()
         self._load_project_database_from_settings()
         # 卡峰范围由项目管理统一维护，在此自动加载
         self._load_peak_ranges_from_project()
@@ -353,8 +358,56 @@ class MoleFractionDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.lbl_pie_project_artifact.setText(
                 Path(ps.pie_identification_result_file).name if has_pie_result else "项目未登记PIE结果"
             )
-        self._restore_project_managed_data(ps)
+        if activate_project_scope:
+            self._restore_project_managed_data(ps)
         self._refresh_parent_selection_state()
+
+    @staticmethod
+    def _project_scope_path(settings: ProjectSettings | None) -> Path | None:
+        """Identify a Project by its directory, not its editable display name."""
+        if settings is None:
+            return None
+        return Path(settings.output_dir).expanduser().resolve()
+
+    def _clear_project_analysis_state(self) -> None:
+        """Discard previous-scope inputs and results without touching saved files."""
+        self.temperature_scan_data = {}
+        self.pie_species_data = []
+        self.available_energies = []
+        self.parent_mf_results = {}
+        self.parent_mf_by_energy = {}
+        self.parent_signal_by_energy = {}
+        self.parent_config_by_energy = {}
+        self.energy_parent_config = {}
+        self.product_mf_results = {}
+        self.isomeric_results = {}
+        self.all_species_mf = {}
+        self._temperature_scan_df = None
+        self._parent_mz_confirmed = False
+        # Two Projects can reference the same files. Their restore cache must
+        # still be independent after the in-memory input has been discarded.
+        self._project_data_restore_key = None
+
+        self.combo_energy_select.clear()
+        self.combo_energy_select.addItem("全部能量")
+        self.lbl_energy_count.setText("")
+        self.lbl_ts_folder.setText("未选择文件夹")
+        self.lbl_ts_folder.setStyleSheet("")
+        self.ts_data_table.setRowCount(0)
+        self.pie_species_table.setRowCount(0)
+        self.lbl_pie_status.setText("未加载")
+        self.parent_result_table.setRowCount(0)
+        self.auto_mf_table.setRowCount(0)
+        self.lbl_auto_status.setText("未计算")
+        self.lbl_auto_status.setStyleSheet("")
+        self.txt_warnings.clear()
+        self.combo_parent_species.setCurrentIndex(0)
+        self._update_parent_species_list()
+        self._refresh_results_view()
+        self.auto_mf_plot_widget.clear_plot(
+            title="暂无摩尔分数结果", xlabel="温度 (°C)", ylabel="摩尔分数",
+        )
+        self.status_label.setText("未加载分析数据")
 
     def _path_restore_signature(self, value: str | Path | None) -> tuple:
         path_text = str(value or "").strip()
