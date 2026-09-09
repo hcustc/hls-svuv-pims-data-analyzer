@@ -68,27 +68,66 @@ def group_energies_by_tolerance(energies: list[float], tolerance: float = 0.01) 
     return result
 
 
-def extract_temperature(metadata_lines: list[str], fallback: float) -> float:
+class TemperatureMetadataError(ValueError):
+    """A source spectrum lacks metadata required for temperature analysis."""
+
+
+def _extract_metadata_number(
+    metadata_lines: list[str],
+    key_pattern: str,
+    field: str,
+    unit_pattern: str,
+    *,
+    positive: bool = False,
+    fallback: float | None = None,
+) -> float:
+    """Read an explicit header scalar, never a number from unrelated text.
+
+    Unit suffixes are optional and do not rescale values. A caller-supplied
+    fallback is used only for an absent field, not to hide an invalid value.
+    """
+    number = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?"
+    requirement = "a finite positive value" if positive else "a finite value"
     for line in metadata_lines:
-        match = re.search(r"Temperature[:\s]*([\d.]+)", line, re.IGNORECASE)
-        if match:
-            return float(match.group(1))
-    for line in metadata_lines:
-        match = re.search(r"[-+]?\d+(?:\.\d+)?", line)
-        if match:
-            return float(match.group(0))
-    return fallback
+        header = re.fullmatch(
+            rf"\s*{key_pattern}(?:\s*[:=]\s*|\s+(?=[+\-.\d]))(.*)", line, re.IGNORECASE,
+        )
+        if header is None:
+            continue
+        scalar = re.fullmatch(
+            rf"\s*({number})\s*(?:{unit_pattern})?\s*", header.group(1), re.IGNORECASE,
+        )
+        if scalar is None:
+            raise ValueError(f"invalid {field} metadata: expected {requirement} with a supported unit")
+        value = float(scalar.group(1))
+        if not np.isfinite(value) or (positive and value <= 0):
+            raise ValueError(f"invalid {field} metadata: expected {requirement}")
+        return value
+    if fallback is not None:
+        value = float(fallback)
+        if np.isfinite(value) and (not positive or value > 0):
+            return value
+        raise ValueError(f"invalid {field} fallback: expected {requirement}")
+    raise ValueError(f"missing {field} metadata")
+
+
+def extract_temperature(metadata_lines: list[str], fallback: float | None = None) -> float:
+    """Read finite Temperature metadata in Celsius, or an explicit fallback.
+
+    Accept colon, equals, or whitespace separators and optional C/°C/℃/degC
+    suffixes. Negative and zero Celsius values are valid.
+    """
+    return _extract_metadata_number(
+        metadata_lines, "Temperature", "Temperature", r"°?\s*C|℃|degC", fallback=fallback,
+    )
 
 
 def extract_photon_energy(metadata_lines: list[str], fallback: float | None = None) -> float:
-    for line in metadata_lines:
-        if "energy" in line.lower():
-            match = re.search(r"[-+]?\d+(?:\.\d+)?", line)
-            if match:
-                return float(match.group(0))
-    if fallback is not None:
-        return float(fallback)
-    raise ValueError("cannot extract photon energy")
+    """Read positive Energy/Photon Energy metadata in eV or an explicit fallback."""
+    return _extract_metadata_number(
+        metadata_lines, r"(?:Photon\s*)?Energy", "Energy", "eV",
+        positive=True, fallback=fallback,
+    )
 
 
 def extract_io_current(metadata_lines: list[str], fallback: float = 1.0) -> float:
@@ -155,15 +194,40 @@ def analyze_temperature_folder(
     replicate_mode: str = "off",
     cache_curves: bool = False,
 ) -> pd.DataFrame:
+    """Analyze a scan only when every spectrum has the required metadata.
+
+    Raise TemperatureMetadataError with the file and field before integrating
+    any spectrum if an axis or requested normalization input is unavailable.
+    With photon normalization disabled, unavailable intensity is stored as NaN.
+    """
     files = _iter_temperature_files(folder, (".txt",))
+    source = light_source.lower()
+    if source not in {"io", "beam_current"}:
+        raise ValueError("light source must be 'io' or 'beam_current'")
+    intensity_key, intensity_field = (
+        ("IO", "IO") if source == "io" else (r"Beam\s*Current", "Beam Current")
+    )
     replicate_mode = "sum" if replicate_mode == "sum" else "mean" if replicate_mode == "mean" else "off"
     filename_replicates = find_filename_replicate_groups(files) if replicate_mode != "off" else {}
     spectra = []
-    for idx, path in enumerate(files):
+    for path in files:
         spectrum = read_spectrum(path, header_lines=10, trim_start=0)
-        temperature = extract_temperature(spectrum.metadata_lines, idx * 10.0)
-        photon_energy = extract_photon_energy(spectrum.metadata_lines, fallback=0.0)
-        io_current = extract_light_intensity(spectrum.metadata_lines, light_source)
+        try:
+            temperature = extract_temperature(spectrum.metadata_lines)
+            photon_energy = extract_photon_energy(spectrum.metadata_lines)
+            try:
+                io_current = _extract_metadata_number(
+                    spectrum.metadata_lines, intensity_key, intensity_field,
+                    r"[numµμ]?A", positive=True,
+                )
+            except ValueError:
+                if photon_normalize:
+                    raise
+                # A disabled correction does not require intensity, but its
+                # absence must not appear as a measured current of one.
+                io_current = float("nan")
+        except ValueError as exc:
+            raise TemperatureMetadataError(f"{path}: {exc}") from exc
         repeat_key = filename_replicate_key(path)
         uses_filename_grouping = repeat_key is not None and repeat_key in filename_replicates
         spectra.append((temperature, path, spectrum, io_current, photon_energy, uses_filename_grouping))
@@ -245,7 +309,7 @@ def analyze_temperature_folder(
             integration_method=configured_integration_method,
         )
         for peak, (raw_area, actual_integration_method) in zip(reference_peaks, integrated_peaks):
-            photon_area = raw_area / io_current if photon_normalize and io_current > 0 else raw_area
+            photon_area = raw_area / io_current if photon_normalize else raw_area
             rows.append(
                 {
                     "temperature": temperature,

@@ -32,7 +32,11 @@ from bl03u_masstool.core.pie_analysis import (
     identify_species_for_mz_with_curve,
     load_species_database,
 )
-from bl03u_masstool.core.temperature_scan import analyze_temperature_folder, build_temperature_curves
+from bl03u_masstool.core.temperature_scan import (
+    TemperatureMetadataError,
+    analyze_temperature_folder,
+    build_temperature_curves,
+)
 
 
 def _parse_mz_values(value: str | None) -> list[int] | None:
@@ -317,7 +321,10 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--fit-pics requires --database")
     if args.command == "optimize-peaks" and args.fit_pics and not args.database:
         parser.error("--fit-pics requires --database")
-    return int(args.func(args))
+    try:
+        return int(args.func(args))
+    except TemperatureMetadataError as exc:
+        parser.error(str(exc))
 
 
 if __name__ == "__main__":

@@ -173,3 +173,33 @@ def test_cli_temperature_writes_csv_and_curve_json(tmp_path):
     assert manifest["analysis_type"] == "temperature"
     assert evidence[curve_key]["curve"]["point_count"] == 2
     assert "有效温度点少于 3 个" in report
+
+
+@pytest.mark.parametrize("missing_field", ["Temperature", "Energy", "IO", "Beam Current"])
+def test_cli_temperature_rejects_missing_metadata_without_writing_artifacts(tmp_path, missing_field):
+    scan = tmp_path / "scan"
+    _write_spectrum(scan / "valid.txt", energy=12, temperature=400, io=10, scale=1)
+    invalid = scan / "invalid.txt"
+    _write_spectrum(invalid, energy=12, temperature=500, io=10, scale=2)
+    lines = invalid.read_text(encoding="utf-8").splitlines()
+    invalid.write_text("\n".join(
+        "Metadata" if line.startswith(f"{missing_field}:") else line for line in lines
+    ), encoding="utf-8")
+    peaks = tmp_path / "peaks.csv"
+    peaks.write_text("mz,peak,start,end\n22,22,21,23\n", encoding="utf-8")
+    outputs = [tmp_path / name for name in (
+        "result.csv", "curves.json", "manifest.json", "evidence.json", "report.md",
+    )]
+    result = _run_cli_allow_failure(
+        "temperature", str(scan), "--manual-peak-path", str(peaks),
+        "--light-source", "beam_current" if missing_field == "Beam Current" else "io",
+        "--output", str(outputs[0]), "--curves-json", str(outputs[1]),
+        "--manifest-json", str(outputs[2]), "--evidence-json", str(outputs[3]),
+        "--report-md", str(outputs[4]),
+    )
+
+    assert result.returncode == 2
+    assert "invalid.txt" in result.stderr
+    assert missing_field.lower() in result.stderr.lower()
+    assert "Traceback" not in result.stderr
+    assert not any(output.exists() for output in outputs)
