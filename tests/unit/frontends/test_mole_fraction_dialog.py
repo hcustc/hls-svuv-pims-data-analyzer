@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import os
 
 import numpy as np
@@ -178,6 +179,180 @@ def test_project_switch_replaces_mole_fraction_runtime_parameters(qapp):
         assert dialog.calibration == second.to_calibration()
         assert dialog.spin_parent_t0.value() == 550
         assert dialog.expansion_coefficients == {}
+    finally:
+        dialog.deleteLater()
+
+
+def _mole_fraction_project(tmp_path, name, *, signals=(100.0, 50.0), initial_mf=0.1):
+    project_dir = tmp_path / name
+    project_dir.mkdir()
+    temperature_result = project_dir / "temperature.csv"
+    temperature_result.write_text(
+        "temperature,mz,area,photon_energy,file\n"
+        f"650,28,{signals[0]},10,a.txt\n750,28,{signals[1]},10,b.txt\n",
+        encoding="utf-8",
+    )
+    pie_result = project_dir / "pie.csv"
+    pie_result.write_text(
+        "质量数,物种名称,电离能(eV),贡献比例(%),R²\n"
+        f"28,Parent {name},9.0,100,1.0\n",
+        encoding="utf-8",
+    )
+    return ProjectSettings(
+        project_name=name,
+        output_dir=str(project_dir),
+        temperature_scan_result_file=str(temperature_result),
+        pie_identification_result_file=str(pie_result),
+        mf_parent_mz=28,
+        mf_reference_temperature=650,
+        mf_photon_energy=10,
+        mf_parent_initial_mf=initial_mf,
+        expansion_factors={650.0: 1.0, 750.0: 1.0},
+    )
+
+
+@pytest.mark.parametrize("new_source", ["empty", "missing", "invalid"])
+def test_project_switch_cannot_calculate_or_export_previous_project_data(
+    qapp, tmp_path, monkeypatch, new_source,
+):
+    warnings = []
+    save_requests = []
+    monkeypatch.setattr(QtWidgets.QMessageBox, "information", lambda *args: None)
+    monkeypatch.setattr(QtWidgets.QMessageBox, "warning", lambda *args: warnings.append(args[2]))
+    monkeypatch.setattr(QtWidgets.QMessageBox, "critical", lambda *args: warnings.append(args[2]))
+    monkeypatch.setattr(
+        QtWidgets.QFileDialog, "getSaveFileName",
+        lambda *args: (save_requests.append(args) or "", ""),
+    )
+    first = _mole_fraction_project(tmp_path, "A")
+    second = ProjectSettings(output_dir=str(tmp_path / "B"), mf_parent_mz=28)
+    if new_source != "empty":
+        second.temperature_scan_result_file = str(tmp_path / "unavailable.csv")
+        second.pie_identification_result_file = str(tmp_path / "unavailable-pie.csv")
+    if new_source == "invalid":
+        (tmp_path / "unavailable.csv").write_text("not,a,spectrum\n", encoding="utf-8")
+        (tmp_path / "unavailable-pie.csv").write_text("not,a,fit\n", encoding="utf-8")
+
+    dialog = MoleFractionDialog(Calibration(), None)
+    try:
+        dialog.set_project_settings(first)
+        dialog.btn_confirm_parent_mz.click()
+        dialog.btn_calc_parent.click()
+        assert dialog.parent_result_table.rowCount() == 2
+        assert dialog.results_table.rowCount() >= 2
+        assert dialog.mf_plot_widget.figure.axes[0].lines
+        auto_calculate = next(
+            button for button in dialog.findChildren(QtWidgets.QPushButton)
+            if button.text() == "开始计算"
+        )
+        auto_calculate.click()
+        dialog.combo_auto_plot_scope.setCurrentIndex(
+            dialog.combo_auto_plot_scope.findData("all")
+        )
+        assert dialog.auto_mf_table.rowCount() >= 1
+        assert dialog.auto_mf_plot_widget.figure.axes[0].lines
+
+        dialog.set_project_settings(second)
+
+        assert dialog.ts_data_table.rowCount() == 0
+        assert dialog.pie_species_table.rowCount() == 0
+        assert dialog.combo_energy_select.count() == 1
+        assert dialog.energy_parent_table.rowCount() == 0
+        assert dialog.parent_result_table.rowCount() == 0
+        assert dialog.results_table.rowCount() == 0
+        assert dialog.mf_series_list.count() == 0
+        assert not dialog.mf_plot_widget.figure.axes[0].lines
+        assert dialog.auto_mf_table.rowCount() == 0
+        assert not dialog.auto_mf_plot_widget.figure.axes[0].lines
+        assert dialog.lbl_auto_status.text() == "未计算"
+        dialog.btn_confirm_parent_mz.click()
+        assert not dialog.btn_calc_parent.isEnabled()
+        dialog.btn_calc_parent.click()
+        export = next(button for button in dialog.findChildren(QtWidgets.QPushButton)
+                      if button.text() == "导出结果 (Excel/CSV)")
+        export.click()
+        assert "没有计算结果可导出" in warnings
+        assert save_requests == []
+    finally:
+        dialog.deleteLater()
+
+
+def test_leaving_project_does_not_restore_its_registered_inputs(qapp, tmp_path, monkeypatch):
+    monkeypatch.setattr(QtWidgets.QMessageBox, "information", lambda *args: None)
+    project = _mole_fraction_project(tmp_path, "A")
+    dialog = MoleFractionDialog(Calibration(), None)
+    try:
+        dialog.set_project_settings(project)
+        dialog.btn_confirm_parent_mz.click()
+        dialog.btn_calc_parent.click()
+        assert dialog.parent_result_table.rowCount() == 2
+
+        # The caller can still hold the former settings when it removes scope.
+        dialog.set_project_settings(project, activate_project_scope=False)
+
+        assert dialog.ts_data_table.rowCount() == 0
+        assert dialog.pie_species_table.rowCount() == 0
+        assert dialog.parent_result_table.rowCount() == 0
+        assert dialog.results_table.rowCount() == 0
+        assert not dialog.btn_load_project_ts_result.isEnabled()
+        assert not dialog.btn_load_project_pie_result.isEnabled()
+        assert not dialog.btn_calc_parent.isEnabled()
+    finally:
+        dialog.deleteLater()
+
+
+@pytest.mark.parametrize("shared_inputs", [False, True])
+def test_project_switch_reloads_inputs_and_computes_only_new_project_results(
+    qapp, tmp_path, monkeypatch, shared_inputs,
+):
+    monkeypatch.setattr(QtWidgets.QMessageBox, "information", lambda *args: None)
+    first = _mole_fraction_project(tmp_path, "A")
+    second = _mole_fraction_project(tmp_path, "B", signals=(20.0, 40.0), initial_mf=0.2)
+    if shared_inputs:
+        second.temperature_scan_result_file = first.temperature_scan_result_file
+        second.pie_identification_result_file = first.pie_identification_result_file
+    dialog = MoleFractionDialog(Calibration(), None)
+    try:
+        dialog.set_project_settings(first)
+        dialog.btn_confirm_parent_mz.click()
+        dialog.btn_calc_parent.click()
+        assert dialog.parent_result_table.item(1, 3).text() == "0.050000"
+
+        dialog.set_project_settings(second)
+
+        assert dialog.ts_data_table.rowCount() == 2
+        assert dialog.pie_species_table.rowCount() == 1
+        assert dialog.parent_result_table.rowCount() == 0
+        assert dialog.results_table.rowCount() == 0
+        dialog.btn_confirm_parent_mz.click()
+        dialog.btn_calc_parent.click()
+        values = [float(dialog.parent_result_table.item(row, 3).text()) for row in range(2)]
+        assert values == pytest.approx([0.2, 0.1] if shared_inputs else [0.2, 0.4])
+    finally:
+        dialog.deleteLater()
+
+
+def test_same_project_sync_preserves_loaded_inputs_and_results(qapp, tmp_path, monkeypatch):
+    monkeypatch.setattr(QtWidgets.QMessageBox, "information", lambda *args: None)
+    project = _mole_fraction_project(tmp_path, "A")
+    dialog = MoleFractionDialog(Calibration(), None)
+    try:
+        dialog.set_project_settings(project)
+        dialog.btn_confirm_parent_mz.click()
+        dialog.btn_calc_parent.click()
+        updated = deepcopy(project)
+        updated.project_name = "Renamed"
+        updated.pie_energy_decimals = 3
+        updated.output_dir = str(tmp_path / "alias" / ".." / "A")
+
+        dialog.set_project_settings(updated)
+
+        assert dialog.ts_data_table.rowCount() == 2
+        assert dialog.pie_species_table.rowCount() == 1
+        assert dialog.parent_result_table.rowCount() == 2
+        assert dialog.parent_result_table.item(1, 3).text() == "0.050000"
+        assert dialog.results_table.rowCount() >= 2
+        assert dialog.mf_plot_widget.figure.axes[0].lines
     finally:
         dialog.deleteLater()
 
@@ -397,26 +572,27 @@ def test_stale_legacy_parent_mz_128_is_cleared_when_data_lacks_128(qapp):
         dialog.deleteLater()
 
 
-def test_project_parent_mz_is_shown_as_unconfirmed_project_preset(qapp):
+def test_project_parent_mz_is_shown_as_unconfirmed_project_preset(qapp, tmp_path):
+    temperature_result = tmp_path / "temperature.csv"
+    temperature_result.write_text(
+        "temperature,mz,area,photon_energy,file\n"
+        "650,128,100,10,a.txt\n650,112,50,10,a.txt\n",
+        encoding="utf-8",
+    )
     dialog = MoleFractionDialog(Calibration(a=0.0, b=1.0, c=0.0), None)
     try:
-        dialog.temperature_scan_data = {
-            10.0: {
-                650.0: {
-                    "precomputed_signals": {128: 100.0, 112: 50.0},
-                    "peaks_info": [{"mz_rounded": 128}, {"mz_rounded": 112}],
-                }
-            }
-        }
-
-        dialog.set_project_settings(ProjectSettings(mf_parent_mz=128))
+        dialog.set_project_settings(ProjectSettings(
+            output_dir=str(tmp_path),
+            temperature_scan_result_file=str(temperature_result),
+            mf_parent_mz=128,
+        ))
 
         assert dialog.spin_parent_mz.value() == 128
         assert "项目预设 m/z 128" in dialog.lbl_parent_mz_status.text()
         assert "请确认" in dialog.lbl_parent_mz_status.text()
         assert dialog.btn_calc_parent.isEnabled() is False
 
-        dialog._confirm_parent_mz()
+        dialog.btn_confirm_parent_mz.click()
 
         assert dialog._parent_mz_confirmed is True
         assert "已确认 m/z 128" in dialog.lbl_parent_mz_status.text()
