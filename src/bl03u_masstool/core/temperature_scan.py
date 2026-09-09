@@ -72,6 +72,10 @@ class TemperatureMetadataError(ValueError):
     """A source spectrum lacks metadata required for temperature analysis."""
 
 
+class KrCorrectionError(ValueError):
+    """A Kr reference or expansion factor cannot support finite correction."""
+
+
 def _extract_metadata_number(
     metadata_lines: list[str],
     key_pattern: str,
@@ -199,6 +203,8 @@ def analyze_temperature_folder(
     Raise TemperatureMetadataError with the file and field before integrating
     any spectrum if an axis or requested normalization input is unavailable.
     With photon normalization disabled, unavailable intensity is stored as NaN.
+    KrCorrectionError rejects unusable Kr references, expansion factors, or
+    corrected values instead of returning a curve with fabricated zero signals.
     """
     files = _iter_temperature_files(folder, (".txt",))
     source = light_source.lower()
@@ -424,6 +430,35 @@ def _build_reference_spectrum(spectra: list[tuple], reference_mode: str) -> tupl
     )
 
 
+def _validate_kr_column(
+    rows: pd.DataFrame,
+    column: str,
+    *,
+    kr_mz: int,
+    label: str,
+    positive: bool = True,
+) -> None:
+    """Reject an unusable Kr value before aggregation or division hides it."""
+    values = pd.to_numeric(rows[column], errors="coerce").to_numpy(dtype=float)
+    invalid = ~np.isfinite(values)
+    if positive:
+        invalid |= values <= 0
+    positions = np.flatnonzero(invalid)
+    if not len(positions):
+        return
+    row = rows.iloc[int(positions[0])]
+    location = f"temperature {row['temperature']} C"
+    if "photon_energy" in row and pd.notna(row["photon_energy"]):
+        location += f", photon energy {row['photon_energy']} eV"
+    if "file" in row and pd.notna(row["file"]):
+        location += f", file {row['file']}"
+    requirement = "finite and positive" if positive else "finite"
+    raise KrCorrectionError(
+        f"Kr m/z {kr_mz}: invalid {label} at {location}: {row[column]}; "
+        f"expected a {requirement} value"
+    )
+
+
 def _apply_temperature_normalization(
     result: pd.DataFrame,
     *,
@@ -440,35 +475,40 @@ def _apply_temperature_normalization(
     if kr_correct:
         if expansion_factors:
             energies = result["photon_energy"] if "photon_energy" in result.columns else None
-            result["expansion_lambda"] = _map_expansion_factors(
-                result["temperature"],
-                expansion_factors,
-                energies=energies,
-            )
+            try:
+                result["expansion_lambda"] = _map_expansion_factors(
+                    result["temperature"],
+                    expansion_factors,
+                    energies=energies,
+                )
+            except (TypeError, ValueError) as exc:
+                raise KrCorrectionError(f"Kr m/z {kr_mz}: invalid expansion factor table: {exc}") from exc
         else:
             kr_rows = result[result["mz_rounded"].astype(int) == int(kr_mz)]
             if kr_rows.empty:
-                raise ValueError(f"Kr correction requested but m/z {kr_mz} is not present in peak ranges")
+                raise KrCorrectionError(f"Kr correction requested but m/z {kr_mz} is not present in peak ranges")
             kr_rows = _select_kr_reference_peak_rows(kr_rows, kr_mz=kr_mz)
+            # pandas sums skip NaN; validate each selected reference first so
+            # another replicate cannot conceal a missing or invalid signal.
+            _validate_kr_column(kr_rows, "photon_normalized_area", kr_mz=kr_mz, label="reference signal")
             kr_by_temperature = kr_rows.groupby("temperature")["photon_normalized_area"].sum().sort_index()
-            positive_kr = kr_by_temperature[kr_by_temperature > 0]
-            if positive_kr.empty:
-                raise ValueError("Kr correction requested but all Kr signals are zero")
-            t0 = float(positive_kr.index.min())
-            kr_ref = float(kr_by_temperature.loc[t0])
-            if kr_ref <= 0:
-                raise ValueError("Kr reference signal is zero; cannot compute expansion correction")
+            aggregated = kr_by_temperature.rename("kr_signal").reset_index()
+            _validate_kr_column(aggregated, "kr_signal", kr_mz=kr_mz, label="summed reference signal")
+            kr_ref = float(kr_by_temperature.iloc[0])
             lambda_by_temperature = kr_by_temperature / kr_ref
-            result["expansion_lambda"] = result["temperature"].map(lambda_by_temperature).fillna(1.0).astype(float)
-        lambda_values = result["expansion_lambda"].replace(0, np.nan)
-        normalized = normalized / lambda_values
+            result["expansion_lambda"] = result["temperature"].map(lambda_by_temperature).astype(float)
+        _validate_kr_column(result, "expansion_lambda", kr_mz=kr_mz, label="expansion factor")
+        normalized = normalized / result["expansion_lambda"]
     else:
         result["expansion_lambda"] = 1.0
 
     denominator = float(mass_discrimination)
     if denominator <= 0:
         raise ValueError("mass_discrimination must be positive")
-    result["normalized_area"] = (normalized / denominator).fillna(0.0)
+    # Missing or uncomputable signals are not measured zeros.
+    result["normalized_area"] = normalized / denominator
+    if kr_correct:
+        _validate_kr_column(result, "normalized_area", kr_mz=kr_mz, label="corrected signal", positive=False)
     result["area"] = result["normalized_area"]
     return result
 
@@ -556,7 +596,7 @@ def _map_expansion_factors(
 ) -> pd.Series:
     factors = _coerce_expansion_factor_map(expansion_factors)
     if not factors:
-        return pd.Series([1.0] * len(temperatures), index=temperatures.index, dtype=float)
+        return pd.Series(np.nan, index=temperatures.index, dtype=float)
 
     multi_energy_factors = {
         float(key): value
@@ -602,8 +642,8 @@ def _coerce_expansion_factor_map(expansion_factors: dict) -> dict:
         float_key = float(key)
         if isinstance(value, dict):
             nested = {float(temp): float(lam) for temp, lam in value.items()}
-            if nested:
-                coerced[float_key] = nested
+            # Keep an empty energy table visible to mapping and validation.
+            coerced[float_key] = nested
         else:
             coerced[float_key] = float(value)
     return coerced
@@ -611,7 +651,7 @@ def _coerce_expansion_factor_map(expansion_factors: dict) -> dict:
 
 def _nearest_temperature_factor(temperature: float, factors: dict[float, float]) -> float:
     if not factors:
-        return 1.0
+        return float("nan")
     factor_temperatures = np.array(sorted(float(key) for key in factors), dtype=float)
     factor_values = np.array([float(factors[temperature]) for temperature in factor_temperatures], dtype=float)
     nearest = int(np.argmin(np.abs(factor_temperatures - float(temperature))))
@@ -777,6 +817,14 @@ def compute_kr_expansion_factors(
 
     Args:
         use_highest_energy: 是否只返回最高能量组数据。默认 False，会按能量分别计算 λ(T)。
+
+    Raises:
+        TemperatureMetadataError: 光谱文件缺少必需的温度、光子能量或光强元数据，
+            或这些元数据无效。
+        KrCorrectionError: 没有可用于生成校准表的数据行，或所选能量组的 Kr 信号、
+            生成的膨胀系数不是有限正数。
+        ValueError: 未找到所选 Kr 通道、无法确定唯一的精确 Kr 峰，或分析参数、
+            光谱数值数据无效。
     """
     result = analyze_temperature_folder(
         folder,
@@ -806,17 +854,19 @@ def compute_kr_expansion_factors(
         raise ValueError(f"Kr m/z {kr_mz} was not found in the calibration folder")
     kr_rows = _select_kr_reference_peak_rows(kr_rows, kr_mz=kr_mz)
 
-    return _build_kr_expansion_factor_table(kr_rows, use_highest_energy=use_highest_energy)
+    return _build_kr_expansion_factor_table(kr_rows, use_highest_energy=use_highest_energy, kr_mz=kr_mz)
 
 
-def _build_kr_expansion_factor_table(kr_rows: pd.DataFrame, *, use_highest_energy: bool = False) -> pd.DataFrame:
+def _build_kr_expansion_factor_table(
+    kr_rows: pd.DataFrame, *, use_highest_energy: bool = False, kr_mz: int = 84,
+) -> pd.DataFrame:
     kr_rows = kr_rows.copy()
     kr_rows["temperature"] = pd.to_numeric(kr_rows["temperature"], errors="coerce")
     kr_rows["photon_normalized_area"] = pd.to_numeric(kr_rows["photon_normalized_area"], errors="coerce")
-    kr_rows = kr_rows.dropna(subset=["temperature", "photon_normalized_area"])
+    kr_rows = kr_rows.dropna(subset=["temperature"])
 
     if kr_rows.empty:
-        raise ValueError("all Kr calibration signals are zero")
+        raise KrCorrectionError(f"Kr m/z {kr_mz}: no calibration rows with numeric temperatures")
 
     if "photon_energy" in kr_rows.columns:
         energy_values = pd.to_numeric(kr_rows["photon_energy"], errors="coerce")
@@ -834,10 +884,11 @@ def _build_kr_expansion_factor_table(kr_rows: pd.DataFrame, *, use_highest_energ
         ]
         kr_rows = kr_rows.dropna(subset=["photon_energy"])
         if kr_rows.empty:
-            raise ValueError("all Kr calibration signals are zero")
+            raise KrCorrectionError(f"Kr m/z {kr_mz}: no calibration rows with positive photon energies")
         if use_highest_energy:
             kr_rows = kr_rows[kr_rows["photon_energy"] == float(max(energy_groups.keys()))]
 
+        _validate_kr_column(kr_rows, "photon_normalized_area", kr_mz=kr_mz, label="calibration reference signal")
         grouped = (
             kr_rows.groupby(["photon_energy", "temperature"], as_index=False)["photon_normalized_area"]
             .sum()
@@ -846,11 +897,14 @@ def _build_kr_expansion_factor_table(kr_rows: pd.DataFrame, *, use_highest_energ
         rows = []
         for energy, energy_group in grouped.groupby("photon_energy", sort=True):
             kr_by_temperature = energy_group.set_index("temperature")["photon_normalized_area"].sort_index()
-            rows.extend(_kr_expansion_rows_for_signal_series(kr_by_temperature, photon_energy=float(energy)))
+            rows.extend(_kr_expansion_rows_for_signal_series(
+                kr_by_temperature, photon_energy=float(energy), kr_mz=kr_mz,
+            ))
         return pd.DataFrame(rows)
 
+    _validate_kr_column(kr_rows, "photon_normalized_area", kr_mz=kr_mz, label="calibration reference signal")
     kr_by_temperature = kr_rows.groupby("temperature")["photon_normalized_area"].sum().sort_index()
-    return pd.DataFrame(_kr_expansion_rows_for_signal_series(kr_by_temperature))
+    return pd.DataFrame(_kr_expansion_rows_for_signal_series(kr_by_temperature, kr_mz=kr_mz))
 
 
 def _nearest_energy_group(energy: float, energy_groups: dict[float, list[float]]) -> float:
@@ -862,16 +916,19 @@ def _kr_expansion_rows_for_signal_series(
     kr_by_temperature: pd.Series,
     *,
     photon_energy: float | None = None,
+    kr_mz: int = 84,
 ) -> list[dict]:
     kr_by_temperature = kr_by_temperature.astype(float).sort_index()
-    positive_kr = kr_by_temperature[kr_by_temperature > 0]
-    if positive_kr.empty:
-        raise ValueError("all Kr calibration signals are zero")
-
-    reference_temperature = float(positive_kr.index.min())
+    signals = pd.DataFrame({
+        "temperature": kr_by_temperature.index,
+        "kr_signal": kr_by_temperature.to_numpy(),
+        "photon_energy": photon_energy,
+    })
+    _validate_kr_column(signals, "kr_signal", kr_mz=kr_mz, label="summed calibration signal")
+    reference_temperature = float(kr_by_temperature.index.min())
     reference_signal = float(kr_by_temperature.loc[reference_temperature])
-    if reference_signal <= 0:
-        raise ValueError("Kr reference signal is zero; cannot compute expansion correction")
+    signals["expansion_lambda"] = signals["kr_signal"] / reference_signal
+    _validate_kr_column(signals, "expansion_lambda", kr_mz=kr_mz, label="calibration expansion factor")
 
     rows = []
     for temperature, signal in kr_by_temperature.items():

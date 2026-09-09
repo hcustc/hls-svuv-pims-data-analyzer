@@ -33,6 +33,7 @@ from bl03u_masstool.core.pie_analysis import (
     load_species_database,
 )
 from bl03u_masstool.core.temperature_scan import (
+    KrCorrectionError,
     TemperatureMetadataError,
     analyze_temperature_folder,
     build_temperature_curves,
@@ -323,7 +324,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--fit-pics requires --database")
     try:
         return int(args.func(args))
-    except TemperatureMetadataError as exc:
+    except (TemperatureMetadataError, KrCorrectionError) as exc:
         parser.error(str(exc))
 
 
