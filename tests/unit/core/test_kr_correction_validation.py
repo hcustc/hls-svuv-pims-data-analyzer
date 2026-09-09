@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from bl03u_masstool.core.temperature_scan import (
+    KrCorrectionError,
     _apply_temperature_normalization,
     _build_kr_expansion_factor_table,
     analyze_temperature_folder,
@@ -126,6 +127,23 @@ def test_valid_kr_reference_preserves_measured_zero_target_signal():
              ["raw_area", "photon_normalized_area"]] = 0.0
     result = _correct(rows)
     assert result.loc[result["mz"] == 22, "area"].tolist() == [12.0, 0.0]
+
+
+@pytest.mark.parametrize(
+    "temperatures", [[], [None, np.nan], ["missing", "invalid"]],
+    ids=["empty", "missing-temperatures", "non-numeric-temperatures"],
+)
+def test_calibration_without_temperature_rows_reports_precondition(temperatures):
+    rows = pd.DataFrame({
+        "temperature": temperatures,
+        "photon_normalized_area": [10.0] * len(temperatures),
+    })
+    original = rows.copy(deep=True)
+
+    with pytest.raises(KrCorrectionError, match="Kr m/z 86: no calibration rows with numeric temperatures"):
+        _build_kr_expansion_factor_table(rows, kr_mz=86)
+
+    pd.testing.assert_frame_equal(rows, original)
 
 
 def test_highest_energy_calibration_validates_only_selected_reference_signals():

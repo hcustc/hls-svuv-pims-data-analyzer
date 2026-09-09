@@ -819,7 +819,12 @@ def compute_kr_expansion_factors(
         use_highest_energy: 是否只返回最高能量组数据。默认 False，会按能量分别计算 λ(T)。
 
     Raises:
-        KrCorrectionError: 所选能量组的 Kr 信号或生成的膨胀系数不是有限正数。
+        TemperatureMetadataError: 光谱文件缺少必需的温度、光子能量或光强元数据，
+            或这些元数据无效。
+        KrCorrectionError: 没有可用于生成校准表的数据行，或所选能量组的 Kr 信号、
+            生成的膨胀系数不是有限正数。
+        ValueError: 未找到所选 Kr 通道、无法确定唯一的精确 Kr 峰，或分析参数、
+            光谱数值数据无效。
     """
     result = analyze_temperature_folder(
         folder,
@@ -861,7 +866,7 @@ def _build_kr_expansion_factor_table(
     kr_rows = kr_rows.dropna(subset=["temperature"])
 
     if kr_rows.empty:
-        raise ValueError("all Kr calibration signals are zero")
+        raise KrCorrectionError(f"Kr m/z {kr_mz}: no calibration rows with numeric temperatures")
 
     if "photon_energy" in kr_rows.columns:
         energy_values = pd.to_numeric(kr_rows["photon_energy"], errors="coerce")
@@ -879,7 +884,7 @@ def _build_kr_expansion_factor_table(
         ]
         kr_rows = kr_rows.dropna(subset=["photon_energy"])
         if kr_rows.empty:
-            raise ValueError("all Kr calibration signals are zero")
+            raise KrCorrectionError(f"Kr m/z {kr_mz}: no calibration rows with positive photon energies")
         if use_highest_energy:
             kr_rows = kr_rows[kr_rows["photon_energy"] == float(max(energy_groups.keys()))]
 
