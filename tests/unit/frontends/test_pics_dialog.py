@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 import os
+import sqlite3
+import threading
+import time
+from copy import deepcopy
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -17,7 +22,8 @@ pytestmark = pytest.mark.gui
 
 from bl03u_masstool.core.calibration import Calibration
 from bl03u_masstool.core.pie_analysis import save_species_database_sqlite
-from bl03u_masstool.core.project_settings import ProjectSettings
+from bl03u_masstool.core.project_settings import ProjectSettings, ProjectSettingsManager, save_project_settings
+from bl03u_masstool.core.project_lifecycle import ensure_project_structure
 from bl03u_masstool.frontends.pyqt_app.core_tools.dialog import CoreToolsDialog
 from bl03u_masstool.frontends.pyqt_app.pics.dialog import PICSCalculatorDialog
 from bl03u_masstool.frontends.pyqt_app.pics.import_widget import PICSImportWidget
@@ -30,6 +36,182 @@ def qapp():
     if app is None:
         app = QtWidgets.QApplication([])
     return app
+
+
+def _pics_project(tmp_path, name):
+    root = tmp_path / name
+    scan = root / "scan"
+    scan.mkdir(parents=True)
+    database = root / "pics.sqlite"
+    save_species_database_sqlite(
+        [{"mz": 30, "species": "NO", "ie": 9.264,
+          "energies": np.array([10.0, 11.0]), "cross_sections": np.array([5.0, 6.0])}],
+        database,
+    )
+    for energy in (10.0, 11.0):
+        y = np.zeros(50)
+        y[15], y[29] = (200.0 if name == "B" else 100.0), 50.0
+        header = [f"Energy:{energy} eV", "Temperature:500 C", "IO:10 nA", "Time:1 s"]
+        (scan / f"{energy}.txt").write_text(
+            "\n".join(header + ["Comment:unused"] * 6 + list(map(str, y))), encoding="utf-8",
+        )
+    settings = ProjectSettings(
+        project_name=name, output_dir=str(root), pie_scan_folder=str(scan),
+        pics_database_path=str(database), cal_a=0, cal_b=1, cal_c=0,
+        pics_no_mf=0.1, pics_new_species_mf=0.1,
+    )
+    ensure_project_structure(settings)
+    save_project_settings(settings, root / "config" / "project.yaml")
+    return settings
+
+
+def _open_pics_project(window, settings, monkeypatch):
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getExistingDirectory", lambda *a, **kw: settings.output_dir)
+    monkeypatch.setattr(QtWidgets.QMessageBox, "exec", lambda *a: QtWidgets.QMessageBox.StandardButton.Discard)
+    window.open_project()
+    assert window.pics_page.project_settings.project_name == settings.project_name
+
+
+def _start_pics_load(dialog):
+    dialog.txt_new_name.setText("Methane")
+    dialog.txt_new_formula.setText("CH4")
+    dialog.spin_new_mz.setValue(16.0)
+    dialog.btn_load_data.click()
+    return dialog.data_worker
+
+
+def _finish_pics_load(qapp, worker, dialog):
+    assert worker.wait(5000)
+    deadline = time.monotonic() + 5
+    while not dialog.btn_load_data.isEnabled() and time.monotonic() < deadline:
+        qapp.processEvents()
+    assert dialog.signal_table.rowCount() == 2
+
+
+@pytest.mark.parametrize("transition", ["switch", "close"])
+def test_pics_project_transition_discards_data_and_blocks_export(qapp, tmp_path, monkeypatch, transition):
+    first, second = _pics_project(tmp_path, "A"), _pics_project(tmp_path, "B")
+    second.pie_scan_folder = ""
+    save_project_settings(second, tmp_path / "B" / "config" / "project.yaml")
+    window = MainWindow()
+    try:
+        _open_pics_project(window, first, monkeypatch)
+        page = window.pics_page
+        _finish_pics_load(qapp, _start_pics_load(page), page)
+        page.calc_btn.click()
+        assert len(page.pics_results) == 2
+        if transition == "switch":
+            _open_pics_project(window, second, monkeypatch)
+        else:
+            window.close_current_project()
+
+        assert page.signal_table.rowCount() == 0
+        assert page.result_table.rowCount() == 0
+        assert page.pics_results == {}
+        assert page.lbl_avg_pics.text() == "-"
+        assert not page.btn_export_database.isEnabled()
+        assert not page.btn_export_csv.isEnabled()
+        page._export_to_database()
+        with sqlite3.connect(second.pics_database_path) as conn:
+            assert conn.execute("SELECT name FROM species").fetchall() == [("NO",)]
+    finally:
+        ProjectSettingsManager().clear_project_path()
+        window.deleteLater()
+
+
+@pytest.mark.parametrize("outcome", ["result", "error"])
+@pytest.mark.parametrize("transition", ["switch", "close", "reopen"])
+def test_pics_project_switch_ignores_late_worker_callbacks(qapp, tmp_path, monkeypatch, outcome, transition):
+    first, second = _pics_project(tmp_path, "A"), _pics_project(tmp_path, "B")
+    entered, release = threading.Event(), threading.Event()
+    original_glob = Path.glob
+
+    def delayed_glob(path, pattern, *args, **kwargs):
+        if path == Path(first.pie_scan_folder) and pattern == "*.txt":
+            entered.set()
+            if not release.wait(10):
+                raise RuntimeError("test did not release the reader")
+            if outcome == "error":
+                raise RuntimeError("old project read failed")
+        return original_glob(path, pattern, *args, **kwargs)
+
+    window = MainWindow()
+    worker = None
+    try:
+        _open_pics_project(window, first, monkeypatch)
+        monkeypatch.setattr(Path, "glob", delayed_glob)
+        page = window.pics_page
+        worker = _start_pics_load(page)
+        assert entered.wait(5)
+        # Cancellation cannot retract an already queued signal. Exercise the
+        # receiver's scope guard even when the producer still delivers one.
+        monkeypatch.setattr(worker, "cancel", lambda: None)
+        _open_pics_project(window, second, monkeypatch)
+        if transition == "close":
+            window.close_current_project()
+        elif transition == "reopen":
+            _open_pics_project(window, first, monkeypatch)
+        else:
+            _finish_pics_load(qapp, _start_pics_load(page), page)
+            assert page.signal_table.item(0, 1).text() == "200.00"
+        expected_signals = [page.signal_table.item(row, 1).text() for row in range(page.signal_table.rowCount())]
+        status = page.status_label.text()
+        release.set()
+        assert worker.wait(5000)
+        qapp.processEvents()
+        assert [page.signal_table.item(row, 1).text() for row in range(page.signal_table.rowCount())] == expected_signals
+        assert page.pics_results == {}
+        assert page.status_label.text() == status
+        assert page.btn_load_data.isEnabled()
+    finally:
+        release.set()
+        if worker is not None:
+            worker.wait(5000)
+        ProjectSettingsManager().clear_project_path()
+        window.deleteLater()
+
+
+def test_pics_same_project_sync_preserves_loaded_analysis(qapp, tmp_path):
+    settings = _pics_project(tmp_path, "A")
+    page = PICSCalculatorDialog(Calibration(), None)
+    try:
+        page.set_project_settings(settings)
+        _finish_pics_load(qapp, _start_pics_load(page), page)
+        page.calc_btn.click()
+        expected = dict(page.pics_results)
+        renamed = deepcopy(settings)
+        renamed.project_name = "Renamed"
+        renamed.output_dir = str(tmp_path / "alias" / ".." / "A")
+        page.set_project_settings(renamed)
+        assert page.signal_table.rowCount() == 2
+        assert page.pics_results == expected
+        assert page.btn_export_csv.isEnabled()
+    finally:
+        page.deleteLater()
+
+
+@pytest.mark.parametrize("outside_energy", [9.5, 15.0])
+def test_pics_outside_reference_coverage_rejects_entire_calculation(qapp, tmp_path, outside_energy):
+    settings = _pics_project(tmp_path, "A")
+    page = PICSCalculatorDialog(Calibration(), None)
+    try:
+        page.set_project_settings(settings)
+        _finish_pics_load(qapp, _start_pics_load(page), page)
+        page.calc_btn.click()
+        assert len(page.pics_results) == 2
+        # Keep the first row valid: the second must not leave a partial result.
+        page.signal_table.item(1, 0).setText(str(outside_energy))
+        page.calc_btn.click()
+        assert page.status_label.property("status") == "error"
+        assert "NO" in page.status_label.text()
+        assert str(outside_energy) in page.status_label.text()
+        assert page.pics_results == {}
+        assert page.result_table.rowCount() == 0
+        assert page.lbl_avg_pics.text() == "-"
+        assert not page.btn_export_database.isEnabled()
+        assert not page.btn_export_csv.isEnabled()
+    finally:
+        page.deleteLater()
 
 
 def test_species_page_splits_reference_and_import_tools_into_inner_tabs(qapp):
