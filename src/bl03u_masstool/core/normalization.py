@@ -2,13 +2,14 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+import re
 from typing import Any
 
 import numpy as np
 import yaml
 
 from .config import project_path, writable_project_path
-from .spectrum_io import extract_first_number
+from .spectrum_io import FLOAT_RE, extract_first_number
 
 
 DEFAULT_NORMALIZATION_CONFIG = Path("config/normalization.yaml")
@@ -38,8 +39,13 @@ def extract_light_intensity(metadata_lines: list[str], source: str = "io", fallb
     for line in metadata_lines:
         compact = line.replace(" ", "").lower()
         if compact.startswith(prefixes):
-            value = extract_first_number(line)
-            if value is not None and value > 0:
+            # Only the field value may supply the number; malformed text such
+            # as "IO: unavailable (last reading 10)" is not a measurement.
+            separator = ":" if compact.startswith(prefixes[0]) else "="
+            raw_value = line.split(separator, 1)[1].strip()
+            match = re.fullmatch(rf"({FLOAT_RE.pattern})\s*(?:[fpnumµμ]?A)?", raw_value, re.IGNORECASE)
+            value = float(match.group(1)) if match else None
+            if value is not None and np.isfinite(value) and value > 0:
                 return value
     return fallback
 

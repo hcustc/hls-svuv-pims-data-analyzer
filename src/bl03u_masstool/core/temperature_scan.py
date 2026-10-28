@@ -450,6 +450,11 @@ def _apply_temperature_normalization(
             if kr_rows.empty:
                 raise ValueError(f"Kr correction requested but m/z {kr_mz} is not present in peak ranges")
             kr_rows = _select_kr_reference_peak_rows(kr_rows, kr_mz=kr_mz)
+            kr_values = kr_rows["photon_normalized_area"].astype(float)
+            invalid = ~np.isfinite(kr_values) | (kr_values <= 0)
+            if invalid.any():
+                points = kr_rows.loc[invalid, ["file", "temperature"]].to_dict("records")
+                raise ValueError(f"Kr correction requires positive finite reference signals: {points}")
             kr_by_temperature = kr_rows.groupby("temperature")["photon_normalized_area"].sum().sort_index()
             positive_kr = kr_by_temperature[kr_by_temperature > 0]
             if positive_kr.empty:
@@ -459,16 +464,23 @@ def _apply_temperature_normalization(
             if kr_ref <= 0:
                 raise ValueError("Kr reference signal is zero; cannot compute expansion correction")
             lambda_by_temperature = kr_by_temperature / kr_ref
-            result["expansion_lambda"] = result["temperature"].map(lambda_by_temperature).fillna(1.0).astype(float)
-        lambda_values = result["expansion_lambda"].replace(0, np.nan)
+            result["expansion_lambda"] = result["temperature"].map(lambda_by_temperature).astype(float)
+        lambda_values = result["expansion_lambda"]
+        invalid = ~np.isfinite(lambda_values) | (lambda_values <= 0)
+        if invalid.any():
+            temperatures = result.loc[invalid, "temperature"].unique().tolist()
+            raise ValueError(f"Kr correction requires positive finite expansion factors at temperatures: {temperatures}")
         normalized = normalized / lambda_values
     else:
         result["expansion_lambda"] = 1.0
 
     denominator = float(mass_discrimination)
-    if denominator <= 0:
-        raise ValueError("mass_discrimination must be positive")
-    result["normalized_area"] = (normalized / denominator).fillna(0.0)
+    if not np.isfinite(denominator) or denominator <= 0:
+        raise ValueError("mass_discrimination must be positive and finite")
+    # Undefined correction is not evidence of zero signal or consumption.
+    result["normalized_area"] = normalized / denominator
+    if not np.isfinite(result["normalized_area"]).all():
+        raise ValueError("temperature normalization produced non-finite signals; check input data and correction factors")
     result["area"] = result["normalized_area"]
     return result
 
@@ -556,7 +568,7 @@ def _map_expansion_factors(
 ) -> pd.Series:
     factors = _coerce_expansion_factor_map(expansion_factors)
     if not factors:
-        return pd.Series([1.0] * len(temperatures), index=temperatures.index, dtype=float)
+        raise ValueError("Kr expansion factors are empty")
 
     multi_energy_factors = {
         float(key): value
@@ -600,12 +612,23 @@ def _coerce_expansion_factor_map(expansion_factors: dict) -> dict:
     coerced: dict[float, float | dict[float, float]] = {}
     for key, value in (expansion_factors or {}).items():
         float_key = float(key)
+        if not np.isfinite(float_key):
+            raise ValueError("Kr expansion factor coordinates must be finite")
         if isinstance(value, dict):
             nested = {float(temp): float(lam) for temp, lam in value.items()}
-            if nested:
-                coerced[float_key] = nested
+            if not nested or float_key <= 0:
+                raise ValueError("Kr expansion curves require positive energies and nonempty temperature data")
+            if any(not np.isfinite(temp) or not np.isfinite(lam) or lam <= 0 for temp, lam in nested.items()):
+                raise ValueError("Kr expansion factors must be positive and finite at every temperature")
+            coerced[float_key] = nested
         else:
-            coerced[float_key] = float(value)
+            factor = float(value)
+            if not np.isfinite(factor) or factor <= 0:
+                raise ValueError("Kr expansion factors must be positive and finite at every temperature")
+            coerced[float_key] = factor
+    nested_count = sum(isinstance(value, dict) for value in coerced.values())
+    if nested_count not in (0, len(coerced)):
+        raise ValueError("Kr expansion factors cannot mix single-energy and multi-energy formats")
     return coerced
 
 

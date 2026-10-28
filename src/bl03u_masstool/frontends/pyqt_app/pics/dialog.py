@@ -31,6 +31,7 @@ from bl03u_masstool.core.pie_analysis import analyze_pie_folder, build_pie_curve
 from bl03u_masstool.core.pics_calculator import (
     calc_pics_single_energy,
     extract_peak_height_at_mz,
+    interpolate_reference_cross_section,
 )
 from bl03u_masstool.core.elements import get_all_elements_from_database, filter_species_by_elements, COMMON_ELEMENTS, parse_formula as parse_formula_elements, get_elements_from_formula
 from bl03u_masstool.core.normalization import NormalizationSettings, load_normalization_settings, save_normalization_settings
@@ -95,6 +96,7 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self._loaded_database_path = ""
         self.project_settings: ProjectSettings | None = None
         self.data_worker: WorkerThread | None = None
+        self._load_generation = 0
         self._load_database()
 
         self._init_ui()
@@ -106,9 +108,19 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
         *,
         activate_project_scope: bool = True,
     ) -> None:
-        """Apply ProjectSettings defaults to PICSCalculatorDialog controls."""
+        """Apply defaults while keeping loaded signals owned by one Project."""
+        previous_scope = self._project_scope_path(self.project_settings)
         self.project_settings = deepcopy(ps) if activate_project_scope else None
-        ps = self.project_settings or deepcopy(ps)
+        if previous_scope != self._project_scope_path(self.project_settings):
+            self._clear_loaded_analysis()
+            self.new_species_name = ""
+            self.new_species_formula = ""
+            self.new_species_mz = 0.0
+            self.txt_new_name.clear()
+            self.txt_new_formula.clear()
+            self.spin_new_mz.setValue(0)
+            self.double_new_ie.setValue(0)
+        ps = self.project_settings or load_factory_project_settings()
         if activate_project_scope:
             self.calibration = ps.to_calibration()
             self.normalization_settings = ps.to_normalization_settings()
@@ -143,6 +155,38 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.summary_data_label.setText(f"数据源: {data_path}")
         if hasattr(self, "no_cs_table"):
             self._load_no_cross_sections()
+
+    @staticmethod
+    def _project_scope_path(settings: ProjectSettings | None) -> Path | None:
+        """Project identity follows its directory, not its editable title."""
+        return None if settings is None else Path(settings.output_dir).expanduser().resolve()
+
+    def _clear_pics_results(self) -> None:
+        """Remove every presentation/export of a no-longer-valid calculation."""
+        self.pics_results = {}
+        self.result_table.setRowCount(0)
+        for label in (self.lbl_avg_pics, self.lbl_min_pics, self.lbl_max_pics):
+            label.setText("-")
+        self.btn_export_csv.setEnabled(False)
+        self.btn_export_database.setEnabled(False)
+
+    def _clear_loaded_analysis(self) -> None:
+        """Invalidate both running reads and signals already queued to the UI."""
+        self._load_generation += 1
+        if self.data_worker is not None and self.data_worker.isRunning():
+            self.data_worker.cancel()
+        # WorkerThread remains parented to this page until it finishes; the
+        # main window's shutdown handling can still find and wait for it.
+        self.data_worker = None
+        self.new_species_signal = {}
+        self.no_signal = {}
+        self.expansion_coefficients = {}
+        self.signal_table.setRowCount(0)
+        self._clear_pics_results()
+        self.btn_browse.setEnabled(True)
+        self.btn_load_data.setEnabled(True)
+        self.set_busy(False, "请加载当前数据源的 PIE 信号")
+        self._set_label_status(self.lbl_folder_status, "尚未加载 PIE 数据")
 
     def _open_project_settings(self):
         """跳转到项目管理页面。"""
@@ -586,6 +630,8 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self._set_status(str(exc), "error")
             return
 
+        self._clear_loaded_analysis()
+        generation = self._load_generation
         self.btn_browse.setDisabled(True)
         self.btn_load_data.setDisabled(True)
         self._set_label_status(self.lbl_folder_status, "正在读取光谱并提取信号…", "busy")
@@ -603,6 +649,8 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
             rows = []
             skipped = []
             for filepath in files:
+                if worker.isInterruptionRequested():
+                    raise InterruptedError("PICS signal loading cancelled")
                 try:
                     spectrum = read_spectrum(str(filepath), header_lines=10, trim_start=0)
                     if len(spectrum.y) == 0:
@@ -638,10 +686,15 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
             rows.sort(key=lambda row: row[0])
             return {"rows": rows, "file_count": len(files), "skipped": skipped}
 
-        self.data_worker = WorkerThread(_load, self)
-        self.data_worker.finished_with_result.connect(self._show_loaded_pie_data)
-        self.data_worker.failed.connect(self._show_pie_load_error)
-        self.data_worker.start()
+        worker = WorkerThread(_load, self)
+        self.data_worker = worker
+        worker.finished_with_result.connect(
+            lambda result: self._show_loaded_pie_data(result, generation=generation)
+        )
+        worker.failed.connect(
+            lambda message: self._show_pie_load_error(message, generation=generation)
+        )
+        worker.start()
 
     @staticmethod
     def _set_label_status(label: QtWidgets.QLabel, message: str, status: str = "") -> None:
@@ -650,7 +703,9 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
         label.style().unpolish(label)
         label.style().polish(label)
 
-    def _show_loaded_pie_data(self, result: object) -> None:
+    def _show_loaded_pie_data(self, result: object, *, generation: int | None = None) -> None:
+        if generation is not None and generation != self._load_generation:
+            return
         values = dict(result if isinstance(result, dict) else {})
         rows = list(values.get("rows", []))
         skipped = list(values.get("skipped", []))
@@ -678,7 +733,9 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
         self._set_status("PIE 信号已加载，请确认计算设置", "success")
         self.tabs.setCurrentIndex(2)
 
-    def _show_pie_load_error(self, message: str) -> None:
+    def _show_pie_load_error(self, message: str, *, generation: int | None = None) -> None:
+        if generation is not None and generation != self._load_generation:
+            return
         self.btn_browse.setEnabled(True)
         self.btn_load_data.setEnabled(True)
         self._set_label_status(self.lbl_folder_status, f"加载失败：{message}", "error")
@@ -801,29 +858,10 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
             )
 
     def _get_no_cross_section_at_energy(self, energy: float) -> float:
-        if not self.no_cross_sections:
-            return 5.0
-
-        if energy in self.no_cross_sections:
-            return self.no_cross_sections[energy]
-
-        energies = sorted(self.no_cross_sections.keys())
-        if not energies:
-            return 5.0
-
-        if energy <= energies[0]:
-            return self.no_cross_sections[energies[0]]
-        if energy >= energies[-1]:
-            return self.no_cross_sections[energies[-1]]
-
-        for i in range(len(energies) - 1):
-            if energies[i] <= energy <= energies[i + 1]:
-                frac = (energy - energies[i]) / (energies[i + 1] - energies[i])
-                return self.no_cross_sections[energies[i]] * (1 - frac) + self.no_cross_sections[energies[i + 1]] * frac
-
-        return 5.0
+        return interpolate_reference_cross_section(energy, self.no_cross_sections)
 
     def _calculate_pics(self):
+        self._clear_pics_results()
         if not self._update_parameters():
             return
         if self.signal_table.rowCount() == 0:
@@ -837,10 +875,6 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
             return
 
         self.set_busy(True, "正在计算 PICS…")
-        self.result_table.setRowCount(0)
-        self.pics_results = {}
-        self.btn_export_csv.setEnabled(False)
-        self.btn_export_database.setEnabled(False)
 
         species_mz = self.spin_new_mz.value()
         no_mz = self.spin_no_mz.value()
@@ -877,7 +911,14 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
                     corrected_species = species_signal / io_current
                     corrected_no = no_signal / io_current
 
-                sigma_no = self._get_no_cross_section_at_energy(energy)
+                try:
+                    sigma_no = self._get_no_cross_section_at_energy(energy)
+                except ValueError as exc:
+                    # Reject the whole batch: never export a silently truncated
+                    # set or retain results from the previous successful run.
+                    self.set_busy(False, "")
+                    self._set_status(str(exc), "error")
+                    return
 
                 pics = calc_pics_single_energy(
                     corrected_species,
@@ -894,15 +935,6 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
 
                 results.append((energy, temp, pics))
 
-                row_count = self.result_table.rowCount()
-                self.result_table.insertRow(row_count)
-                self.result_table.setItem(row_count, 0, QtWidgets.QTableWidgetItem(f"{energy:.2f}"))
-                self.result_table.setItem(row_count, 1, QtWidgets.QTableWidgetItem(f"{temp:.1f}"))
-                self.result_table.setItem(row_count, 2, QtWidgets.QTableWidgetItem(f"{pics:.4f}"))
-                self.result_table.setItem(row_count, 3, QtWidgets.QTableWidgetItem("-"))
-
-                self.pics_results[(energy, temp)] = pics
-
             except (ValueError, AttributeError, TypeError):
                 continue
 
@@ -910,6 +942,12 @@ class PICSCalculatorDialog(QtWidgets.QWidget, DataFrameTableMixin):
             self.set_busy(False, "没有可计算的数据点；请确认物种和 NO 信号均大于 0")
             self._set_status("没有可计算的数据点；请确认物种和 NO 信号均大于 0", "error")
             return
+
+        self.result_table.setRowCount(len(results))
+        for row, (energy, temp, pics) in enumerate(results):
+            for column, value in enumerate((f"{energy:.2f}", f"{temp:.1f}", f"{pics:.4f}", "-")):
+                self.result_table.setItem(row, column, QtWidgets.QTableWidgetItem(value))
+            self.pics_results[(energy, temp)] = pics
 
         pics_values = [r[2] for r in results]
 

@@ -10,7 +10,25 @@ from bl03u_masstool.core.pics_calculator import (
     calc_pics_single_energy,
     calc_pics_with_temperature,
     extract_peak_height_at_mz,
+    interpolate_reference_cross_section,
 )
+
+
+@pytest.mark.parametrize("energy,expected", [(10.0, 5.0), (10.25, 5.25), (11.0, 6.0)])
+def test_reference_cross_section_interpolates_only_inside_coverage(energy, expected):
+    assert interpolate_reference_cross_section(energy, {11.0: 6.0, 10.0: 5.0}) == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("energy", [9.9, 11.1, float("nan"), float("inf")])
+def test_reference_cross_section_rejects_extrapolation_and_invalid_energy(energy):
+    with pytest.raises(ValueError, match="NO"):
+        interpolate_reference_cross_section(energy, {10.0: 5.0, 11.0: 6.0})
+
+
+@pytest.mark.parametrize("reference", [{}, {10.0: -1.0}, {10.0: float("nan")}, {float("inf"): 5.0}])
+def test_reference_cross_section_rejects_missing_or_invalid_reference(reference):
+    with pytest.raises(ValueError, match="NO"):
+        interpolate_reference_cross_section(10.0, reference)
 
 
 def test_exact_mz_peak_height_does_not_mix_a_nominal_mass_collision():

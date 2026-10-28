@@ -50,6 +50,61 @@ from bl03u_masstool.core.temperature_scan import (
 )
 
 
+def _write_validation_scan(tmp_path, header, *, kr_signal=10.0, name="scan.txt"):
+    """Small real-format spectrum with a target and a Kr reference window."""
+    peaks = tmp_path / "peaks.csv"
+    peaks.write_text("mz,peak,start,end\n22,22,21,23\n84,32,31,33\n", encoding="utf-8")
+    y = np.zeros(50)
+    y[22], y[32] = 100.0, kr_signal
+    path = tmp_path / name
+    path.write_text(
+        "\n".join((header + ["Comment:unused"] * 10)[:10] + list(map(str, y))),
+        encoding="utf-8",
+    )
+    return peaks
+
+
+@pytest.mark.parametrize("source,field", [("io", "IO"), ("beam_current", "Beam Current")])
+@pytest.mark.parametrize("value", ["invalid 10", "1e", "1e999", "nan", "inf", "0", "-10"])
+def test_light_intensity_rejects_invalid_field_values(source, field, value):
+    assert np.isnan(extract_light_intensity([f"{field}:{value}"], source, fallback=float("nan")))
+
+
+@pytest.mark.parametrize("header,source,expected", [
+    ("IO:1e1 nA", "io", 10.0),
+    ("Beam Current=2e1mA", "beam_current", 20.0),
+])
+def test_light_intensity_accepts_explicit_numeric_values(header, source, expected):
+    assert extract_light_intensity([header], source) == expected
+
+
+@pytest.mark.parametrize("source", ["measured", "configured", "configured_multi_energy"])
+@pytest.mark.parametrize("invalid", [0.0, -1.0, float("nan"), float("inf")])
+def test_temperature_rejects_invalid_kr_correction_instead_of_zero_result(tmp_path, source, invalid):
+    for temperature, signal in [(400.0, 10.0), (500.0, invalid if source == "measured" else 10.0)]:
+        peaks = _write_validation_scan(
+            tmp_path, [f"Temperature:{temperature} C", "Energy:12 eV", "IO:1 nA"],
+            kr_signal=signal, name=f"{temperature}.txt",
+        )
+    factors = None if source == "measured" else {400.0: 1.0, 500.0: invalid}
+    if source == "configured_multi_energy":
+        factors = {12.0: factors}
+    with pytest.raises(ValueError, match="Kr"):
+        analyze_temperature_folder(tmp_path, manual_peak_path=peaks, photon_normalize=True,
+                                   integration_method="sum_counts", kr_correct=True, expansion_factors=factors)
+
+
+def test_temperature_valid_kr_correction_preserves_known_answer(tmp_path):
+    for temperature, signal in [(400.0, 10.0), (500.0, 20.0)]:
+        peaks = _write_validation_scan(
+            tmp_path, [f"Temperature:{temperature} C", "Energy:12 eV", "IO:1 nA"],
+            kr_signal=signal, name=f"{temperature}.txt",
+        )
+    result = analyze_temperature_folder(tmp_path, manual_peak_path=peaks, photon_normalize=True,
+                                        integration_method="sum_counts", kr_correct=True)
+    assert result.loc[result.mz == 22, "area"].tolist() == [100.0, 50.0]
+
+
 def test_kr_reference_uses_one_precise_peak_in_nominal_mass_collision():
     rows = pd.DataFrame(
         [
