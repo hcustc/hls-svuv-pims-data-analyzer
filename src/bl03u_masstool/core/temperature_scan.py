@@ -503,12 +503,14 @@ def _apply_temperature_normalization(
         result["expansion_lambda"] = 1.0
 
     denominator = float(mass_discrimination)
-    if denominator <= 0:
-        raise ValueError("mass_discrimination must be positive")
+    if not np.isfinite(denominator) or denominator <= 0:
+        raise ValueError("mass_discrimination must be positive and finite")
     # Missing or uncomputable signals are not measured zeros.
     result["normalized_area"] = normalized / denominator
     if kr_correct:
         _validate_kr_column(result, "normalized_area", kr_mz=kr_mz, label="corrected signal", positive=False)
+    elif not np.isfinite(result["normalized_area"]).all():
+        raise ValueError("temperature normalization produced non-finite signals; check input data and correction factors")
     result["area"] = result["normalized_area"]
     return result
 
@@ -596,7 +598,7 @@ def _map_expansion_factors(
 ) -> pd.Series:
     factors = _coerce_expansion_factor_map(expansion_factors)
     if not factors:
-        return pd.Series(np.nan, index=temperatures.index, dtype=float)
+        raise ValueError("Kr expansion factors are empty")
 
     multi_energy_factors = {
         float(key): value
@@ -640,12 +642,33 @@ def _coerce_expansion_factor_map(expansion_factors: dict) -> dict:
     coerced: dict[float, float | dict[float, float]] = {}
     for key, value in (expansion_factors or {}).items():
         float_key = float(key)
+        if not np.isfinite(float_key):
+            raise ValueError("Kr expansion factor coordinates must be finite")
         if isinstance(value, dict):
             nested = {float(temp): float(lam) for temp, lam in value.items()}
-            # Keep an empty energy table visible to mapping and validation.
+            if not nested or float_key <= 0:
+                raise ValueError(
+                    f"Kr expansion curve at photon energy {float_key} eV requires "
+                    "a positive energy and nonempty temperature data"
+                )
+            for temperature, factor in nested.items():
+                if not np.isfinite(temperature) or not np.isfinite(factor) or factor <= 0:
+                    raise ValueError(
+                        f"Kr expansion factor at temperature {temperature} C, photon energy {float_key} eV: "
+                        f"{factor}; expected a finite temperature and positive finite factor"
+                    )
             coerced[float_key] = nested
         else:
-            coerced[float_key] = float(value)
+            factor = float(value)
+            if not np.isfinite(factor) or factor <= 0:
+                raise ValueError(
+                    f"Kr expansion factor at temperature {float_key} C: {factor}; "
+                    "expected a positive finite factor"
+                )
+            coerced[float_key] = factor
+    nested_count = sum(isinstance(value, dict) for value in coerced.values())
+    if nested_count not in (0, len(coerced)):
+        raise ValueError("Kr expansion factors cannot mix single-energy and multi-energy formats")
     return coerced
 
 

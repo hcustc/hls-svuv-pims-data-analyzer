@@ -75,8 +75,63 @@ def test_kr_correction_rejects_empty_supplied_energy_table(other_energy):
     factors = {12.0: {}}
     if other_energy:
         factors[14.0] = {400.0: 1.0, 500.0: 2.0}
-    with pytest.raises(ValueError, match="400"):
+    with pytest.raises(KrCorrectionError, match="photon energy 12.*nonempty temperature data"):
         _correct(_signal_rows(), expansion_factors=factors)
+
+
+@pytest.mark.parametrize("kr_correct", [False, True])
+@pytest.mark.parametrize("denominator", [0.0, -1.0, np.nan, np.inf, -np.inf])
+def test_normalization_rejects_invalid_mass_discrimination(kr_correct, denominator):
+    rows = _signal_rows()
+    original = rows.copy(deep=True)
+
+    with pytest.raises(ValueError, match="mass_discrimination"):
+        _apply_temperature_normalization(
+            rows, kr_correct=kr_correct, kr_mz=84, mass_discrimination=denominator,
+        )
+
+    pd.testing.assert_frame_equal(rows, original)
+
+
+@pytest.mark.parametrize("value", [np.nan, np.inf, -np.inf])
+def test_normalization_rejects_nonfinite_target_even_without_kr_correction(value):
+    rows = _signal_rows()
+    rows.loc[rows["mz"] == 22, "photon_normalized_area"] = value
+    original = rows.copy(deep=True)
+
+    with pytest.raises(ValueError, match="temperature normalization produced non-finite signals"):
+        _apply_temperature_normalization(
+            rows, kr_correct=False, kr_mz=84, mass_discrimination=1.0,
+        )
+
+    pd.testing.assert_frame_equal(rows, original)
+
+
+@pytest.mark.parametrize("factors", [
+    {np.nan: 1.0},
+    {np.inf: 1.0},
+    {np.inf: {400.0: 1.0}},
+    {0.0: {400.0: 1.0}},
+    {-12.0: {400.0: 1.0}},
+    {12.0: {np.nan: 1.0}},
+    {12.0: {np.inf: 1.0}},
+    {400.0: 1.0, 12.0: {400.0: 1.0}},
+    {400.0: 1.0, 500.0: 2.0, 600.0: 0.0},
+    {12.0: {400.0: 1.0, 500.0: 2.0}, 14.0: {}},
+    {12.0: {400.0: 1.0, 500.0: 2.0}, 14.0: {400.0: -1.0}},
+], ids=[
+    "nan-temperature", "infinite-temperature", "infinite-energy", "zero-energy", "negative-energy",
+    "nested-nan-temperature", "nested-infinite-temperature", "mixed-table-formats",
+    "unused-invalid-factor", "unused-empty-energy", "unused-invalid-energy",
+])
+def test_kr_correction_validates_entire_supplied_table_before_mapping(factors):
+    rows = _signal_rows()
+    original = rows.copy(deep=True)
+
+    with pytest.raises(KrCorrectionError, match="Kr m/z 84: invalid expansion factor table"):
+        _correct(rows, expansion_factors=factors)
+
+    pd.testing.assert_frame_equal(rows, original)
 
 
 def test_kr_correction_does_not_hide_nan_reference_in_replicate_sum():

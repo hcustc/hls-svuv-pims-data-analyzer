@@ -1,8 +1,39 @@
 from __future__ import annotations
 
-import numpy as np
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+
+import numpy as np
+
+
 PICSResultKey = float | tuple[float, float]
+
+
+def interpolate_reference_cross_section(energy: float, cross_sections: Mapping[float, float]) -> float:
+    """Interpolate a reference PICS curve in eV within its declared coverage.
+
+    Endpoint values are valid only at their measured energies. Extending them
+    beyond the reference range would introduce an undeclared quantitative
+    assumption, so missing, invalid, and out-of-range references are rejected.
+    """
+    if not cross_sections:
+        raise ValueError("NO 参考截面为空，请导入覆盖计算能量的参考数据")
+    points = np.asarray(sorted((float(e), float(s)) for e, s in cross_sections.items()), dtype=float)
+    if (
+        not np.isfinite(points).all()
+        or np.any(points[:, 0] <= 0)
+        or np.any(points[:, 1] < 0)
+        or np.any(np.diff(points[:, 0]) <= 0)
+    ):
+        raise ValueError("NO 参考截面无效：能量须有限、正值且唯一，截面须有限且非负")
+    target = float(energy)
+    low, high = points[0, 0], points[-1, 0]
+    if not np.isfinite(target) or target < low or target > high:
+        raise ValueError(
+            f"光子能量 {target} eV 超出 NO 参考截面范围 [{low}, {high}] eV；"
+            "请补充覆盖该能量的参考数据后重新计算"
+        )
+    return float(np.interp(target, points[:, 0], points[:, 1]))
 
 
 @dataclass
