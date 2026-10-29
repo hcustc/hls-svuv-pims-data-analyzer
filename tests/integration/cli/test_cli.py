@@ -203,3 +203,30 @@ def test_cli_temperature_rejects_missing_metadata_without_writing_artifacts(tmp_
     assert missing_field.lower() in result.stderr.lower()
     assert "Traceback" not in result.stderr
     assert not any(output.exists() for output in outputs)
+
+
+def test_cli_temperature_rejects_zero_kr_without_exporting_results(tmp_path):
+    scan = tmp_path / "scan"
+    for temperature, kr in ((400, 10), (500, 0)):
+        path = scan / f"{temperature}.txt"
+        _write_spectrum(path, energy=12, temperature=temperature, io=1, scale=1)
+        lines = path.read_text(encoding="utf-8").splitlines() + ["0.0"] * 50
+        lines[10 + 84] = str(kr)
+        path.write_text("\n".join(lines), encoding="utf-8")
+    peaks = tmp_path / "peaks.csv"
+    peaks.write_text("mz,peak,start,end\n22,22,21,23\n84,84,83,85\n", encoding="utf-8")
+    output_dir = tmp_path / "exports"
+    result = _run_cli_allow_failure(
+        "temperature", str(scan), "--manual-peak-path", str(peaks),
+        "--integration-method", "sum_counts", "--kr-correct",
+        "--output", str(output_dir / "result.csv"),
+        "--curves-json", str(output_dir / "curves.json"),
+        "--manifest-json", str(output_dir / "manifest.json"),
+        "--evidence-json", str(output_dir / "evidence.json"),
+        "--report-md", str(output_dir / "report.md"),
+    )
+
+    assert result.returncode == 2
+    assert "500" in result.stderr and "84" in result.stderr
+    assert "Traceback" not in result.stderr
+    assert not output_dir.exists()
