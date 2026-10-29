@@ -7,7 +7,7 @@
 - 每次提交前执行“必检项”。命令必须全部以退出码 `0` 结束。
 - 改动涉及 GUI、依赖、打包或科学计算时，再执行对应的“条件检查”。
 - 修复缺陷时必须增加能够在修复前失败、修复后通过的回归测试。
-- 不用“本机全量测试通过”替代 CI 等价命令；PR 的 Linux CI 分别执行非 GUI/非真实数据测试和 `offscreen` GUI 测试。
+- 不用“本机全量测试通过”替代 CI 等价命令；PR 的 Linux CI 分别执行非 GUI/非真实数据测试和 `offscreen` GUI 测试，macOS 和 Windows 分别执行全量测试。
 - 发现新的 CI 失败模式后，在本文“CI 失败记录”中补充根因和预防命令。
 
 ## 首次准备
@@ -43,7 +43,7 @@ QT_QPA_PLATFORM=offscreen python -m pytest -m gui
 - `git diff --check` 和 `git diff --cached --check` 均无空白错误。
 - 新增测试文件已被 Git 跟踪，不处于遗漏的 `??` 状态。
 - 删除或重命名的文件是有意操作，并已检查引用是否同步更新。
-- 非 GUI/非真实数据测试通过；这是 `.github/workflows/ci.yml` 中 `Core tests and package smoke` job 的主要测试命令。
+- 非 GUI/非真实数据测试通过；这是 `.github/workflows/ci.yml` 中 `Linux core tests and package smoke` job 的主要测试命令。
 - `offscreen` GUI 测试通过；这是 `GUI tests (offscreen)` job 的本地等价测试命令。在 Linux 上还需安装 workflow 所列的 Qt 运行库。
 - wheel 可构建且 `uv pip check` 无依赖冲突；CI 还会执行 `bl03u --help` 作为入口点冒烟检查。
 
@@ -55,6 +55,24 @@ git diff --name-status
 git diff --cached --stat
 git diff --cached --name-status
 ```
+
+## PR 合并前的跨平台检查
+
+`.github/workflows/ci.yml` 在面向 `master` 的 PR、`master` 推送、合并队列和手动触发时运行：
+
+| 检查 | 内容 |
+|---|---|
+| `Linux core tests and package smoke` | 非 GUI/非真实数据测试、依赖与源码检查、wheel 构建及 CLI 冒烟检查 |
+| `GUI tests (offscreen)` | Linux 离屏 GUI 测试 |
+| `Tests (macOS)` | macOS 上安装锁定依赖、检查原生 Qt 导入并运行 `python -m pytest` |
+| `Tests (Windows)` | Windows 上安装锁定依赖、检查原生 Qt 导入并运行 `python -m pytest` |
+| `Core tests and package smoke` | 汇总以上测试结果，所有测试 job 成功才通过 |
+
+汇总 job 保留 `master` 分支规则中已有的必需检查名称。它使用 `always()` 执行，并显式拒绝失败、取消或跳过的依赖结果，防止依赖失败后汇总检查被跳过而放行合并。这遵循 [GitHub 对依赖型必需检查的说明](https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks)。`Tests (macOS)` 或 `Tests (Windows)` 失败时，即使 Linux 检查通过，也不能合并。
+
+macOS 和 Windows 测试同样使用 Python 3.12、`requirements-dev.lock`、`QT_QPA_PLATFORM=offscreen` 和 `MPLBACKEND=Agg`。可选私有真实数据集未提供时，对应测试仍按既有约定跳过。单个平台失败不会取消另一个平台的测试，以保留完整诊断结果。
+
+PR 工作流只有 `contents: read` 权限，不执行 PyInstaller、DMG/EXE 打包或发布。桌面打包继续由 `desktop-build.yml` 在 `master`、版本标签或手动触发时执行；PR 跨平台测试不能替代打包验证。
 
 ## 条件检查
 
@@ -158,5 +176,6 @@ pyinstaller --noconfirm --clean packaging/BL03U_MassSpectrumTool.spec
 | 日期 | Workflow / Job | 根因 | 本地复现与预防检查 |
 |---|---|---|---|
 | 2026-07-31 | [CI / Test，run 30620179410，job 91122644316](https://github.com/hcustc/hls-svuv-pims-data-analyzer/actions/runs/30620179410/job/91122644316) | Linux runner 缺少 `libEGL.so.1`；两个 GUI 测试在 marker 过滤前直接导入 `QtWidgets`，导致 pytest 收集失败 | 为两个文件补齐 GUI marker 和模块级 ImportError 跳过；新增静态契约测试，保证所有 PyQt 测试都具备安全收集保护 |
+| 2026-10-29 | [Desktop / Build macos-latest，run 40892340618，job 123512199323](https://github.com/hcustc/hls-svuv-pims-data-analyzer/actions/runs/40892340618/job/123512199323) | `test_formula_only_candidate_has_hover_fallback` 等待后仍读到空分子式；此前 PR 仅执行 Linux 测试，macOS 断言失败直到合并后才暴露。GUI 时序根因仍需单独验证 | 在 PR 增加 macOS、Windows 全量测试，并通过现有必需检查汇总强制执行；本次补齐门禁，不将该 GUI 测试标为跳过或声称已修复 |
 
 新增记录时不要只填写“测试失败”。必须写明首个根因、修复提交以及加入清单的具体预防命令。

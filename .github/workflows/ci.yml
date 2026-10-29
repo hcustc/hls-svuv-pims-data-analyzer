@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   core:
-    name: Core tests and package smoke
+    name: Linux core tests and package smoke
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -86,3 +86,67 @@ jobs:
         env:
           MPLCONFIGDIR: ${{ runner.temp }}/matplotlib
         run: python -m pytest -m gui
+
+  platform-tests:
+    name: Tests (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            platform: macOS
+          - os: windows-latest
+            platform: Windows
+    env:
+      QT_QPA_PLATFORM: offscreen
+      MPLBACKEND: Agg
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version-file: .python-version
+          cache: pip
+          cache-dependency-path: requirements-dev.lock
+
+      - name: Install locked dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.lock
+          python -m pip install --no-deps -e .
+
+      - name: Check installation and Python sources
+        run: |
+          python -m pip check
+          python -m compileall -q src tests main.py
+          python -c "from PyQt6 import QtCore, QtGui, QtWidgets"
+
+      - name: Run all tests
+        env:
+          MPLCONFIGDIR: ${{ runner.temp }}/matplotlib
+        run: python -m pytest
+
+  required-tests:
+    # Keep the existing required status context so branch rules also enforce
+    # macOS and Windows tests without a separate ruleset migration.
+    name: Core tests and package smoke
+    needs: [core, gui, platform-tests]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every test job to succeed
+        env:
+          CORE_RESULT: ${{ needs.core.result }}
+          GUI_RESULT: ${{ needs.gui.result }}
+          PLATFORM_RESULT: ${{ needs.platform-tests.result }}
+        run: |
+          if [[ "$CORE_RESULT" != "success" || "$GUI_RESULT" != "success" || "$PLATFORM_RESULT" != "success" ]]; then
+            echo "::error::All Linux, macOS, and Windows test jobs must succeed."
+            exit 1
+          fi
